@@ -9,7 +9,6 @@ Rules (maintainer, 2026-10-08)
 - Replace everything **within the selection** (nothing selected: the array is added next to the others).
 - A tilt above 1 degree: after the detection the user is asked whether to rotate the image (yes: rotate and
   detect again; the existing ROIs follow the rotation through the geometry sync).
-- Refused while an analysis runs (renumbering ROIs under a running analysis would corrupt it), like Undo.
 - **Auto rotate** (2026-10-20, maintainer request; button in the Image tools tab, Rotation group): the same
   detection as Detect, then the image is rotated by the measured tilt, however small (no 1 degree threshold, no
   question), and **no ROIs are placed or changed** (existing ROIs follow the rotation through the geometry sync).
@@ -116,7 +115,6 @@ class ArrayActions(QObject):
         has_dataset: Callable[[], bool],
         raw_plane_shape: Callable[[], tuple[int, int] | None] | None = None,
         resolve_reference: Callable[[], tuple[int, float] | None],
-        analysis_running: Callable[[], bool],
         dialog_parent: QWidget | None = None,
         edit_target: RoiEditTarget | None = None,
         ask: Callable[[str, str], bool] | None = None,
@@ -137,7 +135,6 @@ class ArrayActions(QObject):
         # (`DatasetModule.raw_plane_shape`), so nothing is loaded on the GUI thread.
         self._raw_plane_shape = raw_plane_shape
         self._resolve_reference = resolve_reference
-        self._analysis_running = analysis_running
         self._ask = ask or (lambda title, text: _ask(dialog_parent, title, text))
         self._tell = tell or (lambda title, text: _tell(dialog_parent, title, text))
         self._rotated_once = False
@@ -181,7 +178,7 @@ class ArrayActions(QObject):
             return
         self._auto_rotate = True
         self._begin(DETECT)
-        if not self._action.is_running():  # refused before starting (no dataset, analysis running, ...)
+        if not self._action.is_running():  # refused before starting (no dataset, no reference frame, ...)
             self._auto_rotate = False
 
     def _on_run(self, mode: str) -> None:
@@ -208,9 +205,6 @@ class ArrayActions(QObject):
         """Renumber the selected ROIs (all if none selected) like an array, top-left first. Only the numbers the
         chosen ROIs already hold are shuffled among them. Positions are the stored (reference frame) centres on
         the current cube."""
-        if self._analysis_running():
-            self._fail_message("An analysis is running. Wait for it to finish (or cancel it) before reordering the ROIs.")
-            return
         selected = {int(i) for i in self._selection.selected_roi_ids()}
         cube = int(self._selection.current_cube())
         rois = [roi for roi in self._toolbox.rois_at(cube) if not selected or roi.area_roi_id in selected]
@@ -230,9 +224,6 @@ class ArrayActions(QObject):
 
     def _begin(self, kind: str, *, grid: tuple[int, int, float, float] | None = None) -> None:
         if self._action.is_running():
-            return
-        if self._analysis_running():
-            self._fail_message("An analysis is running. Wait for it to finish (or cancel it) before changing the ROIs.")
             return
         if not self._has_dataset():
             self._fail_message("No dataset loaded.")
@@ -473,9 +464,6 @@ class ArrayActions(QObject):
                 self._geometry.set_rotation(float(self._geometry.settings().rotation_angle_deg) + tilt)
                 self._begin(DETECT)
                 return
-        if self._analysis_running():
-            self._fail_message("An analysis started meanwhile; the result was not applied.")
-            return
         try:
             self._apply(outcome)
         except (ValueError, KeyError) as error:

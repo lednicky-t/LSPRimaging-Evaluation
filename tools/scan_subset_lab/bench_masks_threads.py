@@ -16,14 +16,14 @@ dataset = st.load_one(zarr); modules, _ = st.build_modules(dataset, session)
 records = io.dataset_record_map(dataset)
 source = source_from_modules(dataset=modules.dataset, frame_roles=modules.frame_roles, roi_toolbox=modules.roi_toolbox, geometry=modules.geometry,
     background=modules.background, chromatic=modules.chromatic, mask=modules.mask, records=records)
-e = modules.analysis_engine; snap = snapshot_source(source)
+e = modules.reference_inputs; snap = snapshot_source(source)
 calls = []
 orig = scan_jobs.resolve_external_mask
 def rec(pixels, geometry, warp):
     calls.append((np.asarray(pixels), geometry, warp)); return orig(pixels, geometry, warp)
 scan_jobs.resolve_external_mask = rec
 t = time.perf_counter()
-build_scan_plan(snap, exclusion_mode=e._reference_exclusion_mode(), trimmed_fraction=e._trimmed_mean_fraction)
+build_scan_plan(snap, exclusion_mode=e.reference_exclusion_mode(), trimmed_fraction=e.trimmed_mean_fraction)
 print(f"full plan build (serial, recording): {time.perf_counter()-t:.2f} s; resolve_external_mask calls: {len(calls)}")
 scan_jobs.resolve_external_mask = orig
 print("geometry identity:", calls[0][1].rotation_angle_deg == 0.0, " warp None in", sum(c[2] is None for c in calls), "of", len(calls))

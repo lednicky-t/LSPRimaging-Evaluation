@@ -30,8 +30,8 @@ source = source_from_modules(
     dataset=modules.dataset, frame_roles=modules.frame_roles, roi_toolbox=modules.roi_toolbox, geometry=modules.geometry,
     background=modules.background, chromatic=modules.chromatic, mask=modules.mask, records=io.dataset_record_map(dataset),
 )
-e = modules.analysis_engine
-plan = build_scan_plan(source, cubes=list(modules.dataset.spectral_cubes())[:60], exclusion_mode=e._reference_exclusion_mode(), trimmed_fraction=e._trimmed_mean_fraction, resolve_masks=False)
+e = modules.reference_inputs
+plan = build_scan_plan(source, cubes=list(modules.dataset.spectral_cubes())[:60], exclusion_mode=e.reference_exclusion_mode(), trimmed_fraction=e.trimmed_mean_fraction, resolve_masks=False)
 jobs = plan.jobs
 rs, r = jobs[0].rois, 80
 affines = [f.affine for f in jobs[0].frames]

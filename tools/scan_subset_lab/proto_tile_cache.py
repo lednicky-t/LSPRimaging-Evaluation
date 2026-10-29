@@ -102,9 +102,9 @@ def main() -> int:
         dataset=modules.dataset, frame_roles=modules.frame_roles, roi_toolbox=modules.roi_toolbox, geometry=modules.geometry,
         background=modules.background, chromatic=modules.chromatic, mask=modules.mask, records=io.dataset_record_map(dataset),
     )
-    engine = modules.analysis_engine
-    mode = engine._reference_exclusion_mode()
-    plan = build_scan_plan(source, exclusion_mode=mode, trimmed_fraction=engine._trimmed_mean_fraction)
+    engine = modules.reference_inputs
+    mode = engine.reference_exclusion_mode()
+    plan = build_scan_plan(source, exclusion_mode=mode, trimmed_fraction=engine.trimmed_mean_fraction)
     jobs = plan.jobs
     rs, r = jobs[0].rois, args.roi_index
     n_cubes, n_wl = len(jobs), len(jobs[0].frames)

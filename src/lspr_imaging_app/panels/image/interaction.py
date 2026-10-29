@@ -90,7 +90,6 @@ class CanvasInteraction:
         roi_gestures: RoiGestures,
         roi_tab_active: Callable[[], bool],
         to_reference: Callable[[float, float], tuple[float, float]],
-        analysis_running: Callable[[], bool],
         notify: Callable[[str], None],
         eraser_armed: Callable[[], bool] | None = None,
         erase_at: Callable[[float, float], object] | None = None,
@@ -112,7 +111,6 @@ class CanvasInteraction:
         self._roi_gestures = roi_gestures
         self._roi_tab_active = roi_tab_active
         self._to_reference = to_reference
-        self._analysis_running = analysis_running
         self._notify = notify
         self._eraser_armed = eraser_armed or (lambda: False)  # the Mask tab is open and its Eraser is picked
         self._erase_at = erase_at
@@ -311,7 +309,6 @@ class CanvasInteraction:
             groups=[(group.group_id, group.name) for group in toolbox.groups()],
             any_selected_grouped=any(toolbox.group_for_roi(selected) is not None for selected in ids),
             can_add=self.in_selection(x, y),
-            can_delete=not self._analysis_running(),
             can_remove_cube_edit=any(
                 toolbox.roi_by_id(i).timeline and int(self._selection.current_cube()) in toolbox.roi_by_id(i).timeline.cubes() for i in ids
             ),
@@ -332,10 +329,7 @@ class CanvasInteraction:
         elif choice.action == UNGROUP:
             self._guarded("Ungroup", lambda: toolbox.remove_rois_from_groups(ids))
         elif choice.action == DELETE:
-            if self._analysis_running():  # deleting renumbers ROIs, which an analysis run cannot survive
-                self._notify("Wait for the analysis to finish before deleting ROIs.")
-            else:
-                self._guarded("Delete ROIs", lambda: toolbox.delete_rois(ids))
+            self._guarded("Delete ROIs", lambda: toolbox.delete_rois(ids))
         elif choice.action == REMOVE_CUBE_EDIT:
             self._guarded("Remove cube edit", lambda: toolbox.remove_cube_edit(ids, int(self._selection.current_cube())))
         elif choice.action == DESELECT:

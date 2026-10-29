@@ -50,8 +50,8 @@ source = source_from_modules(
     dataset=modules.dataset, frame_roles=modules.frame_roles, roi_toolbox=modules.roi_toolbox, geometry=modules.geometry,
     background=modules.background, chromatic=modules.chromatic, mask=modules.mask, records=io.dataset_record_map(dataset),
 )
-e = modules.analysis_engine
-mode, trimmed = e._reference_exclusion_mode(), e._trimmed_mean_fraction
+e = modules.reference_inputs
+mode, trimmed = e.reference_exclusion_mode(), e.trimmed_mean_fraction
 snap = profiled("snapshot_source (GUI thread in the app)", lambda: snapshot_source(source))
 plan = profiled("build_scan_plan(resolve_masks=False)", lambda: build_scan_plan(snap, exclusion_mode=mode, trimmed_fraction=trimmed, resolve_masks=False))
 profiled("cell_hashes(plan)", lambda: cell_hashes(plan))

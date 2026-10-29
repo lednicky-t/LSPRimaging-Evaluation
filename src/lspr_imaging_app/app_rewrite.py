@@ -29,7 +29,7 @@ from PyQt6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMenu, QMess
 from lspr_core.perf import get_runtime
 from lspr_ui import APP_ID_LSPRI_EVALUATION, app_icon, set_active_theme, set_windows_app_user_model_id
 
-from .analysis import AnalysisEngine, AnalysisSettingsModule
+from .analysis import AnalysisSettingsModule
 from .analysis.scan_jobs import ScanSource, source_from_modules
 from .analysis.live_state import AnalysisLiveModule
 from .analysis.roi_tuning_module import RoiTuningModule, TuningView
@@ -220,7 +220,6 @@ def _build_menu_bar(window: QMainWindow) -> tuple[QMenu, QMenu]:
 def _wire_edit_menu(
     edit_menu: QMenu,
     window: QMainWindow,
-    analysis_engine: AnalysisEngine,
     *,
     manager: UndoManager = undo_manager,
 ) -> tuple[QAction, QAction]:
@@ -233,10 +232,6 @@ def _wire_edit_menu(
       disabled when there is nothing to do (the key then reaches whatever
       has focus - a text field keeps its own Ctrl+Z, which Qt gives the
       focused editor first).
-    - **Refused while an analysis runs**: undoing a ROI delete or reorder
-      renumbers ROI ids, and the engine then waits for the running analysis
-      to stop (`AnalysisEngine.remap_roi_ids`) - on the GUI thread. The
-      status bar says why nothing happened.
     - Application-wide shortcut, so it also works from a floating (undocked)
       panel, which is a separate top-level window.
     - Selection is never undoable (`CLAUDE.md`), so Ctrl+Z after clicking a
@@ -254,16 +249,12 @@ def _wire_edit_menu(
     edit_menu.addAction(redo_action)
 
     def refresh() -> None:
-        running = analysis_engine.is_running()
-        undo_action.setEnabled(manager.can_undo and not running)
-        redo_action.setEnabled(manager.can_redo and not running)
+        undo_action.setEnabled(manager.can_undo)
+        redo_action.setEnabled(manager.can_redo)
         undo_action.setText(f"Undo {manager.undo_label}" if manager.undo_label else "Undo")
         redo_action.setText(f"Redo {manager.redo_label}" if manager.redo_label else "Redo")
 
     def run(verb: str) -> None:
-        if analysis_engine.is_running():
-            window.statusBar().showMessage(f"{verb} is not available while an analysis is running.", 5000)
-            return
         label = manager.undo_label if verb == "Undo" else manager.redo_label
         (manager.undo if verb == "Undo" else manager.redo)()
         if label:
@@ -364,85 +355,12 @@ def analysis_scan_source(m: _Modules) -> ScanSource:
     )
 
 
-def _build_analysis_engine(
-    dataset: DatasetModule,
-    geometry: GeometryModule,
-    mask: MaskModule,
-    chromatic: ChromaticModule,
-    background: BackgroundModule,
-    roi_toolbox: RoiToolbox,
-    analysis_settings: AnalysisSettingsModule | None = None,
-    frame_roles: FrameRolesModule | None = None,
-) -> AnalysisEngine:
-    """Gather the engine's narrow per-module reads into the callables it
-    takes at construction (2026-09-23 - previously ``AnalysisEngine()`` with
-    no arguments at all, i.e. every action method raised).
-
-    The engine takes callables rather than module references on purpose:
-    it is the one component that needs to read from *every* other module,
-    and holding six module references would make it the god object this
-    rewrite exists to avoid (see
-    ``docs/rewrite_feature_inventory_2026-09.md``). Naming each read
-    explicitly here keeps the full list of what analysis depends on visible
-    in one place - and keeps the engine unit-testable with plain fakes, no
-    Qt modules required.
-
-    No storage root is passed: the store lives beside the dataset, which
-    isn't loaded yet at this point. ``build_main_window`` connects
-    ``dataset_loaded`` to ``set_storage_root``.
-    """
-    return AnalysisEngine(
-        load_plane=dataset.load_plane,
-        # Per-cube, never DatasetModule.wavelengths() - that is the union
-        # across every cube, and a cube short one wavelength (an aborted
-        # acquisition) would make the engine ask for a plane that isn't
-        # there.
-        cube_indices=dataset.spectral_cubes,
-        wavelengths_for_cube=dataset.wavelengths_for_cube,
-        rois=roi_toolbox.rois,
-        rois_at=roi_toolbox.rois_at,
-        has_timeline=roi_toolbox.has_timeline,
-        geometry_settings=geometry.settings,
-        background_settings=background.settings,
-        chromatic_affine=lambda cube_index, wavelength_nm: chromatic.affine_for((cube_index, wavelength_nm)),
-        chromatic_affine_between=chromatic.affine_between,
-        # Handed through as authored, unwarped - compute_cell does the
-        # re-registration, in processed space (see tasks.py's
-        # _mask_for_compute).
-        resolve_mask=lambda cube_index, wavelength_nm: mask.resolve_mask_source((cube_index, wavelength_nm)),
-        reduction_method=lambda: roi_toolbox.detection_settings().reduction_method,
-        default_reference_diameters=lambda: (
-            roi_toolbox.detection_settings().reference_inner_diameter_px,
-            roi_toolbox.detection_settings().reference_outer_diameter_px,
-        ),
-        # The whole object, for apply_preprocessing's `mask_settings` - what
-        # makes `flatten_background_exclude_mask` actually exclude the ignore
-        # mask from the background estimate (2026-09-23; see analysis/tasks.py).
-        detection_settings=roi_toolbox.detection_settings,
-        # Which frames may be spectral points (not dark, not ignored). Without
-        # a roles module the engine keeps its own 0 nm-only default.
-        **({} if frame_roles is None else {"is_spectral": frame_roles.is_spectral}),
-        # The query layer's fit/metric half. Optional, unlike the reads
-        # above: without a settings module the engine answers `get_metric`
-        # using MetricSettings' defaults rather than raising, because these
-        # can never make a stored cell wrong - only derive it differently.
-        **(
-            {}
-            if analysis_settings is None
-            else {"metric_settings": analysis_settings.metric_settings}
-        ),
-    )
-
-
-def _connect_roi_renumbering(
-    roi_toolbox: RoiToolbox, selection: SelectionModule, analysis_engine: AnalysisEngine
-) -> None:
+def _connect_roi_renumbering(roi_toolbox: RoiToolbox, selection: SelectionModule) -> None:
     """Everything that holds a ROI id follows ``RoiToolbox.roi_ids_renumbered``
-    (a delete closing the gap, a fresh detection). Neither module holds a
+    (a delete closing the gap, a fresh detection). The selection holds no
     toolbox reference of its own, so this is the one place that connects
     them. Kept as a function so a test can wire exactly what the app wires."""
     roi_toolbox.roi_ids_renumbered.connect(selection.remap_roi_ids)
-    roi_toolbox.roi_ids_renumbered.connect(analysis_engine.remap_roi_ids)
 
 
 def capture_session(
@@ -460,8 +378,7 @@ def capture_session(
     """Read every module's current state into a plain, Qt-free
     :class:`SessionState` (2026-09-23).
 
-    Lives here for the same reason ``_build_analysis_engine`` does: this is
-    the one place that knows about every module, and keeping the knowledge
+    Lives here because this is the one place that knows about every module, and keeping the knowledge
     here leaves ``storage/session.py`` a pure data layer that a test can
     drive with dataclasses and no Qt at all.
 
@@ -544,10 +461,8 @@ def _frame_naming(dataset: DatasetModule) -> FrameNamingScheme:
     session must agree on or a mask PNG's filename won't be found again
     (`storage/session.py`'s `save_session`).
 
-    Same derivation as ``AnalysisEngine._naming``. Two copies rather than
-    one shared helper because the two sit on opposite sides of the module
-    boundary and neither owns the dataset - worth collapsing into
-    ``DatasetModule`` itself if a third caller ever appears."""
+    Kept here rather than in ``DatasetModule`` because the dataset does not
+    know about sessions."""
     cube_indices = list(dataset.spectral_cubes())
     wavelengths: list[float] = []
     for cube_index in cube_indices:
@@ -591,8 +506,7 @@ def _build_session_autosave(
     """Build the debounce, and wire every module's own change signal to
     ``schedule()`` it (2026-09-23).
 
-    Same shape and reasoning as ``_build_analysis_engine`` above - this is
-    the one place that knows about every module, so the knowledge of *what
+    This is the one place that knows about every module, so the knowledge of *what
     counts as a change* lives here rather than inside
     ``storage/session_autosave.py``, which stays a pure debounce.
 
@@ -646,7 +560,6 @@ def _build_session_autosave(
 def _wire_session_coordinator(
     coordinator: SessionCoordinator,
     autosave: SessionAutosave,
-    analysis_engine: AnalysisEngine,
     geometry: GeometryModule,
     mask: MaskModule,
     chromatic: ChromaticModule,
@@ -669,9 +582,7 @@ def _wire_session_coordinator(
     `DatasetModule.dataset_loaded` directly - a session switch has to run
     the exact same restore with no new dataset load involved, so the two
     triggers need to share one implementation rather than duplicate it.
-    Also now repoints `AnalysisEngine.set_storage_root()` (previously wired
-    directly to `dataset_loaded` in `build_main_window`), so the engine and
-    the session always agree on which folder is active."""
+    """
 
     if session_load is None:
         session_load = SessionLoadTask()
@@ -708,9 +619,7 @@ def _wire_session_coordinator(
         # not the new one).
         autosave.set_root(None)
         if root is None:
-            analysis_engine.set_storage_root(None)
             return
-        analysis_engine.set_storage_root(root)
         # The flush above is written in the background (2026-10-17). Reading `root` back before a write *to that same
         # root* has landed (reloading the session just edited) would restore the previous save; for any other root this
         # returns at once.
@@ -779,7 +688,6 @@ class _Modules:
     area_selection: AreaSelectionModule
     analysis_settings: AnalysisSettingsModule
     session_coordinator: SessionCoordinator
-    analysis_engine: AnalysisEngine
     session_autosave: SessionAutosave
     chromatic_auto: ChromaticAutoDetect
     mask_pointers: MaskPointersModule
@@ -841,9 +749,6 @@ def _build_modules() -> _Modules:
     geometry.geometry_changed.connect(lambda _change: area_selection.clear())
     analysis_settings = AnalysisSettingsModule()
     session_coordinator = SessionCoordinator()
-    analysis_engine = _build_analysis_engine(
-        dataset, geometry, mask, chromatic, background, roi_toolbox, analysis_settings, frame_roles
-    )
 
     # SelectionModule holds no RoiToolbox reference of its own (CLAUDE.md,
     # "no module reaches into another's internals") - this is the one place
@@ -851,10 +756,10 @@ def _build_modules() -> _Modules:
     # remap_roi_ids(), so a delete-driven ROI renumber never leaves a stale
     # selected id behind (see roi/toolbox.py's module docstring, "Cross-
     # module consequence", and selection/module.py).
-    _connect_roi_renumbering(roi_toolbox, selection, analysis_engine)
+    _connect_roi_renumbering(roi_toolbox, selection)
 
-    # Which session-scoped folder the analysis store and the session
-    # autosave both point at is `SessionCoordinator`'s job, not a plain
+    # Which session-scoped folder the session autosave points at is
+    # `SessionCoordinator`'s job, not a plain
     # `ds.home` read here (2026-09-26 - see CLAUDE.md's "Sessions" section
     # and `storage/session_index.py`). `home`, not `folder`: it is the
     # folder derived data is allowed to be written into, so a session never
@@ -866,21 +771,12 @@ def _build_modules() -> _Modules:
     )
     session_load = SessionLoadTask()
     _wire_session_coordinator(
-        session_coordinator, session_autosave, analysis_engine,
+        session_coordinator, session_autosave,
         geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings, frame_roles,
         mask_pointers, session_load, experiment_plan,
     )
     dataset.dataset_loaded.connect(lambda ds: session_coordinator.bind_dataset(ds.home))
     dataset.dataset_cleared.connect(session_coordinator.unbind)
-
-    # AnalysisScope.SELECTED_ROIS means "whatever is selected right now".
-    # Setting it never triggers computation (sketch §7) - it only decides
-    # what the *next* explicitly-requested run covers.
-    # sorted(): roi_selection_changed carries a set, whose iteration order is
-    # not meaningful - the engine's scope tuple should be stable run to run.
-    selection.roi_selection_changed.connect(
-        lambda roi_ids: analysis_engine.set_selected_rois(tuple(sorted(roi_ids)))
-    )
 
     # An OME-Zarr export can take the session with it, moved into the exported pixels' coordinates (2026-10-22,
     # `storage/session_carry.py`). The Export tab calls `prepare` when the user starts an export; a finished export
@@ -926,7 +822,7 @@ def _build_modules() -> _Modules:
         chromatic=chromatic, background=background, roi_toolbox=roi_toolbox,
         roi_geometry_sync=roi_geometry_sync, selection=selection, reference_frame=reference_frame,
         highlight_range=highlight_range, area_selection=area_selection, analysis_settings=analysis_settings,
-        session_coordinator=session_coordinator, analysis_engine=analysis_engine,
+        session_coordinator=session_coordinator,
         session_autosave=session_autosave, chromatic_auto=ChromaticAutoDetect(chromatic),
         mask_pointers=mask_pointers, transient_scan=TransientScanTask(mask_pointers), analysis_scan=analysis_scan, scan_results=scan_results, roi_tuning=roi_tuning, analysis_live=analysis_live, session_carry=session_carry,
         session_load=session_load,
@@ -1010,7 +906,6 @@ def _build_image_panel(m: _Modules, ui_state: UiStateStore, theme_obj) -> ImageP
         transient_scan=m.transient_scan,
         session_carry=m.session_carry,
         cube_display=m.cube_display,
-        analysis_running=m.analysis_engine.is_running,
         frame_roles=m.frame_roles,
         initial_chromatic_view=(read(ui_state, CHROMATIC_SHOW_LANDMARKS), read(ui_state, CHROMATIC_ALL_WAVELENGTHS)),
         initial_chromatic_values=ChromaticUiValues(
@@ -1763,8 +1658,7 @@ def build_main_window(
 
     **`initial_settings`/`on_settings_changed` (2026-09-26)** - the app-level
     settings layer (`storage/app_settings.py`): last dataset, theme, window
-    geometry, layout presets. Injected the same way `AnalysisEngine`/
-    `SessionAutosave` take callables instead of reading global state
+    geometry, layout presets. Injected the same way `SessionAutosave` takes callables instead of reading global state
     directly - `main()` is the only real caller that passes a loaded
     `AppSettings` and a callback that actually writes to disk; every
     existing test that calls `build_main_window()` with no arguments keeps
@@ -1824,7 +1718,7 @@ def build_main_window(
     except ValueError:  # nothing saved yet
         pass
     m.mask_scope.scope_changed.connect(lambda scope: ui_state.set(MASK_SCOPE.key, scope.value))
-    roi_table_panel = RoiTablePanel(m.roi_toolbox, m.selection, m.geometry, m.analysis_engine, edit_target=image_panel.edit_target,
+    roi_table_panel = RoiTablePanel(m.roi_toolbox, m.selection, m.geometry, edit_target=image_panel.edit_target,
         display_style=image_panel.roi_display,
     )
     roi_table_panel.restore_ui_state(ui_state)
@@ -1859,7 +1753,7 @@ def build_main_window(
     _wire_analysis_scan(m, image_panel.analysis_tab, ui_state, startup)
     _wire_roi_tuning(m, image_panel.tuning_tab, ui_state, show_view=image_panel.set_tuning_view)
     _wire_session_carry_prompt(window, m)
-    _wire_edit_menu(edit_menu, window, m.analysis_engine)
+    _wire_edit_menu(edit_menu, window)
     stages.done("menus and status bar")
     panel_docks = _build_dock_layout(
         window, workflow, image_panel, histogram_panel, roi_table_panel, spectra_panel, sensorgram_panel

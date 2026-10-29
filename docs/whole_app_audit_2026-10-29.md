@@ -116,7 +116,7 @@ Ruff clean; 261 test files import only existing modules and names; all docs, sou
 |---|---|---|
 | D1 | Delete the 7 orphan modules (A1; `landmark_autotrack.py` needs the one test line adjusted first) | **Done 2026-10-29** (section 7). |
 | D2 | Delete the 4 dead functions in `dataset/io.py` (A2, 247 lines) | **Done 2026-10-29** (section 7). |
-| D3 | The old engine path (A3, ~1,900 lines + its tests) | **At the cut-over**, not before: it is still constructed and two tests cover it. |
+| D3 | The old engine path (A3, ~1,900 lines + its tests) | **Done 2026-10-29** (cut-over phase 2e: engine, store and planner removed; `compute_cell` kept as the reference; `docs/old_generation_cutover_plan_2026-10-29.md`, section 10). |
 | D4 | The cut-over of the old generation (A4) | **Done 2026-10-29 except phases 2e / 2f**: see section 10 of `old_generation_cutover_plan_2026-10-29.md`. The export no longer blocked it once the maintainer confirmed that nothing uses the old app. |
 | D5 | Shrink app CLAUDE.md from 44 KB to about 15 KB | **Done 2026-10-29** (section 7), but the result is 32 KB, not 15 KB: the moved section was 25 KB of 46 KB, and the other 21 KB are rule sections. Going lower would mean trimming rules line by line. |
 | D6 | `apps/LSPRi/eva/requirements.txt` | Delete it (the root file already installs the app from `pyproject.toml`), or sync it. I prefer deleting. |

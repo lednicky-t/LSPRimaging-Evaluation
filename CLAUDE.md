@@ -9,7 +9,7 @@ This file is the authoritative LSPRi rule set. Root rules still apply, except wh
 - `docs/whole_app_audit_2026-10-29.md`: the latest whole-app audit: dead code, what only the old generation still uses (the cut-over inventory), documentation drift, and the decisions still open. Start here for clean-up and cut-over questions.
 - `docs/whole_app_audit_2026-10-07.md`: the earlier audit (where the rewrite stood, section 2b; known issues). Supersedes the 2026-09-30 status doc below, which is out of date. Its dead-file list (D5) is partly done: `mask_settings.py` and `mask_highlight_actions.py` are gone.
 - `docs/README.md`: index of all docs by topic.
-- `docs/old_generation_cutover_plan_2026-10-29.md`: how the old app was replaced by the rewrite (done 2026-10-29: phases 1b and 2a-2d); phase 2e (the old analysis engine) and 2f (dead functions in shared modules) are still open.
+- `docs/old_generation_cutover_plan_2026-10-29.md`: how the old app was replaced by the rewrite (done 2026-10-29: phases 1b and 2a-2e, the old analysis engine included); phase 2f (dead functions in shared modules) is still open.
 - `docs/rewrite_status_by_feature_2026-10-29.md`: the full per-feature record that used to be the "Where the rewrite stands" section of this file (25 KB, moved verbatim). Search it by feature name; never read it whole.
 - `docs/rewrite_status_and_plan_2026-09-30.md`: the original stage-by-stage plan (history; its "what is built" claims are stale).
 - `docs/spectra_analysis_methods.md`: the maths from the stored scan to the metric (formula, fit window, fit, maximum / centroid), where each is in the code, and what the tests showed. Read it before changing any of those.
@@ -29,7 +29,7 @@ One line per feature. The full per-feature record (what was built and when, meas
 - **Analysis redesign** (`docs/analysis_redesign_plan_2026-10-19.md` sections 15-17 are current, audit `docs/analysis_step1_audit_2026-10-23.md`): step 1 turns pixels into mean / STD / counts per ROI, cube, wavelength and side (`analysis/frame_reduce.py`, `scan.py`, `scan_jobs.py`, `scan_arrays.py`, `scan_fingerprint.py`, `scan_store.py` = `sessions/<id>/analysis/scan.h5`, `scan_task.py`); started from the Analysis tab (Scan, Fast scan, Mode pick-up Normal / Performance). Display: `scan_results.py`, the Spectra panel (`panels/spectra/`, `docs/spectra_analysis_methods.md`) and the Sensorgram panel (`panels/sensorgram/`, fits in a helper process: `analysis/trace_fit.py`, `trace_pool.py`). Fit methods include the template shift (`analysis/template_shift.py`, `docs/shift_estimators_comparison_2026-10-25.md`); polynomial order menu with verdict dots (`analysis/order_quality.py`, `docs/poly_order_quality_study_2026-10-25.md`). Scan speed work: `docs/roi_subset_scan_bottlenecks_2026-10-28.md`, `docs/roi_nudge_partial_scan_proposal_2026-10-26.md`.
 - **Experiment steps and plan bar** (`plan/`, Sensorgram "Experimental plan" tab; read `docs/experimental_plan_bar_design_2026-10-26.md` first): select / drag / retype / colour steps, add / remove / unify, baseline `B1` and signal `S1` roles; step statistics (`analysis/step_stats.py`, `plan/stats_table.py`, `docs/step_statistics_backbone_2026-10-26.md`); all the plan code of the panel lives in `panels/sensorgram/step_overlays.py`; record of the "ranges" decision: `docs/plan_steps_as_ranges_2026-10-29.md`.
 - **ROI position tuning** (Tuning ribbon tab, `analysis/roi_tuning*.py`, `panels/image/tuning_tab.py`, `tuning_overlay.py`; plan `docs/roi_position_tuning_plan_2026-10-28.md`, results `docs/roi_position_tuning_2026-10-28.md`): lattice of shifted ROI centres scored on two plan steps; Accept moves the ROIs and copies the numbers into `scan.h5`. Built 2026-10-29, unseen by eye.
-- **Old analysis path, built but driven by no UI** (checked 2026-10-29): `AnalysisEngine.run_analysis` with `analysis/tasks.py`, `store.py` and `planner.py` (~1.75k lines; `worker.py` is NOT part of it, other panels use it). The scan redesign replaced it; removing it is cut-over phase 2e and needs a decision: the engine is wired into the Edit menu, the ROI table and the array / group / mask-row actions (an `analysis_running` callable), and `tasks.compute_cell` is the reference the scan is checked against (`docs/old_generation_cutover_plan_2026-10-29.md`, section 10). Also built but unused by the scan: fractional pixel weighting (`rasterize_fractional`, the weighted reductions in `analysis/reduction.py`; the scan's `frame_reduce.py` uses the binary raster), and `RoiToolbox.detect_rois` (takes ready-made detection results; only tests call it - ROIs come from the ROI tab, by hand or through its Array section: detect / refine / place). `analysis/statistics.py` is live in the Sensorgram.
+- **Old analysis engine: removed 2026-10-29** (cut-over phase 2e; `AnalysisEngine`, `analysis/store.py` = `data.h5`, `planner.py`, ~1.75k lines; no UI ever started a run, the scan replaced it). Kept as the independent **reference implementation** the scan is checked against: `analysis/tasks.compute_cell`, `provenance.py`, `reduction.py` (nothing in `src/` imports `tasks.py` now; tests and tools do). The input gathering of the engine moved to `tools/reference_inputs.py` (`st.build_modules(...).reference_inputs`, used by `scan_golden_check.py` and the stage / lab tools). Record: `docs/old_generation_cutover_plan_2026-10-29.md`, section 10. Also built but unused by the scan: fractional pixel weighting (`rasterize_fractional`, the weighted reductions in `analysis/reduction.py`; the scan's `frame_reduce.py` uses the binary raster), and `RoiToolbox.detect_rois` (takes ready-made detection results; only tests call it - ROIs come from the ROI tab, by hand or through its Array section: detect / refine / place). `analysis/statistics.py` is live in the Sensorgram.
 - **Not built yet**: the Workflow panel's *Outputs* section (it shows "Outputs - not built yet."); cube / ROI scope for Run and the background toggle in the Analysis section; the command line (named in the record, not specified); the pump-plan overlay; a faster Gaussian-fit sensorgram. The ROI tuning *Tune toggle / pixel cache / preview* is designed but **shelved by the maintainer**: do not build it without a new go-ahead (`docs/single_roi_tuning_design_2026-10-28.md`). The Spectra and Sensorgram panels are built.
 - **Tests**: run one pytest process per test file (all files in one process stalls); offscreen Qt on Windows has no fonts, so a test that measures text width calls `tests/_qt_fonts.py` `load_system_fonts()`.
 
@@ -92,7 +92,7 @@ These come from real incidents. Violating any of them will likely reproduce a bu
 - `dataset/`: dataset load and convert; acquisition metadata.
 - `image_tools/{geometry,mask,chromatic,background}/`: independent modules. Only Chromatic's `affine_for()` and `warp_mask()` are called from outside.
 - `roi/`: the ROI Toolbox, one backend with several front doors (Workflow sub-tabs, Image panel, ROI/Group table) that call the same command API. Follow `docs/roi_system_roadmap.md`; don't re-derive an ROI model.
-- `analysis/`: store, recompute planner, background workers, reduction math (`reduction.py`). Computes only on an explicit `run_analysis(scope)`.
+- `analysis/`: the scan (`scan*.py`, `frame_reduce.py`), the display queries (`query.py`, `scan_view.py`, `statistics.py`), background workers (`worker.py`), reduction math (`reduction.py`) and the reference `tasks.compute_cell`. Computes only on an explicit Scan / Fast scan.
 - `selection/`: the one intentionally shared state (current cube, wavelength, ROI). Not a license to add more.
 - `panels/`: display only. Read query interfaces; turn gestures into command calls; own no domain state.
 
@@ -101,7 +101,7 @@ These come from real incidents. Violating any of them will likely reproduce a bu
 ## Communication
 
 - Each module is a `QObject` with typed `pyqtSignal`s. No string-keyed event bus.
-- Every change is one of two types. `CosmeticChange`: redraw only (color, label, grouping, display mode); never triggers recompute. `ComputationalChange`: the value may now be wrong (geometry, mask, chromatic, background, reduction method); the recompute planner reacts to it.
+- Every change is one of two types. `CosmeticChange`: redraw only (color, label, grouping, display mode); never triggers recompute. `ComputationalChange`: the value may now be wrong (geometry, mask, chromatic, background, reduction method); the scan's cell hashes make the stored numbers stale (it never recomputes by itself).
 - Public mutating methods use the shared `@instrumented` helper (timing and DEBUG logging to the session log).
 - **Heavy work reports progress and can be cancelled.** Anything that may take more than ~1 s on realistic data (reading cubes, detection, tracking, fitting, analysis, export) must:
   - be a pure function (no Qt) taking `progress: Callable[[float, str], None] | None` (overall fraction 0..1 plus a short message) and `cancelled: Callable[[], bool] | None`; check cancellation at every progress call and stop with a `Cancelled` exception;
@@ -132,12 +132,12 @@ Every user-changeable control is remembered across restarts unless the maintaine
 
 ## Analysis rules
 
-*These bullets describe the old engine path (`AnalysisEngine`, one `analysis/data.h5` with per-cell provenance). The scan redesign (the "Analysis redesign" line above) replaced it; the scan's own rules are under "Rules that come from these features". They stay until the cut-over removes the engine. The principle holds for the scan too: nothing computes on selection or navigation, and a changed input makes a result stale, never silently wrong.*
+*Principles that came from the removed engine (cut-over phase 2e, 2026-10-29); the scan's own rules are under "Rules that come from these features". They hold for the scan too: nothing computes on selection or navigation, and a changed input makes a result stale, never silently wrong.*
 
-- `run_analysis` runs **only** on explicit user action (scope: all ROIs, or the current selection). Selecting ROIs or changing panels must never trigger computation; display reports "not yet analyzed".
+- A scan runs **only** on explicit user action (Scan, Fast scan, ROI tuning Accept). Selecting ROIs or changing panels must never trigger computation; display reports "not yet analyzed".
 - The recompute rule is deliberately simple: any change to a cell's inputs recomputes that cell. No materiality or pixel-selection comparison.
 - Formula, Fit method, and Metric settings are **never** stored or put in provenance. They are recomputed live from RAM.
-- One ongoing HDF5 file per session; each cell (ROI by cube) has its own provenance record.
+- One `scan.h5` per session (`analysis/scan_store.py`), plain uncompressed chunks; the cell hash decides what is stale.
 - **Fractional pixel weighting (sketch section 6a) is partly built.** The raster (`roi/rasterize.py`, `rasterize_fractional`) and weighted reductions (`analysis/reduction.py`) exist and match unweighted results when weights are equal. **Not wired yet:** `analysis/tasks.py` `compute_cell` still calls the binary `rasterize_sample`/`rasterize_reference`.
 
 ## Undo/redo
@@ -146,13 +146,13 @@ Every user-changeable control is remembered across restarts unless the maintaine
 - Each mutating command pushes one `undo.FunctionCommand` (label plus `undo()`/`redo()` closures over its own module's state). Not a deep clone of module state.
 - `begin_batch(label)` / `end_batch()` merge a burst (one mouse drag) into one entry.
 - **Selection is never undoable.**
-- **Reachable from the UI** (2026-10-07): Edit -> Undo / Redo, Ctrl+Z and Ctrl+Y / Ctrl+Shift+Z, application-wide (`app_rewrite.py` `_wire_edit_menu`). Refused while an analysis runs (undoing a ROI delete or reorder renumbers ids and the engine would wait for the run on the GUI thread); `UndoManager` does nothing while a gesture batch is open.
+- **Reachable from the UI** (2026-10-07): Edit -> Undo / Redo, Ctrl+Z and Ctrl+Y / Ctrl+Shift+Z, application-wide (`app_rewrite.py` `_wire_edit_menu`). `UndoManager` does nothing while a gesture batch is open.
 - Wired: `RoiToolbox`, `GeometryModule`, `ChromaticModule`, `BackgroundModule`.
 - **`MaskModule` is wired only for the Mask rows' commands** (delete / make individual / make persistent a mask, maintainer OK 2026-10-16) **and the Auto mask batch** (`set_mask_changes`: all the masks made from the scan's pointers are one undo step, maintainer OK 2026-10-17): painting, loading and clearing masks are still not undoable, so each of these commands carries a version token and its undo is skipped, with a message, if the mask changed after it (`image_tools/mask/module.py` docstring). Masks are stored compressed (`MaskChange`, a few KB each; `.mask` is read-only), which is what makes a batch of hundreds cheap to undo. Check in before wiring anything more.
 
 ## Sessions
 
-A **dataset** is raw images plus acquisition metadata, never written to. A **session** is one independently reproducible working copy of everything derived from it (ROI table, masks, settings, `analysis/data.h5`). `storage/session_coordinator.py` knows the active session; `app_rewrite.py` wires it to the modules. Full history: the design record's Sessions section.
+A **dataset** is raw images plus acquisition metadata, never written to. A **session** is one independently reproducible working copy of everything derived from it (ROI table, masks, settings, `analysis/scan.h5`). `storage/session_coordinator.py` knows the active session; `app_rewrite.py` wires it to the modules. Full history: the design record's Sessions section.
 
 **Autosave never writes on the GUI thread** (2026-10-17, maintainer rule: saving has no business there). Two steps: the GUI thread reads the modules and `prepare_session` copies them into plain data (several module queries return *live* mutable objects, so this must not move to the worker); one plain `threading.Thread` runs `SessionWriter.write` (PNGs + JSON; it remembers masks already on disk, so an unchanged save is ~20 ms). `flush()` waits until the data is on disk; `set_root()` does not, so code that reads a session folder back calls `autosave.wait_until_written(root)` first. A new field in the session must go through `prepare_session`, never be read from a live module by the writer. Record: `docs/session_autosave_blocking_analysis_2026-10-17.md`.
 
@@ -160,8 +160,7 @@ A **dataset** is raw images plus acquisition metadata, never written to. A **ses
 
 ## Testing rules
 
-- Pure-computation files must import and test with **zero Qt, GUI, or dataset dependency**: `analysis/tasks.py`, `analysis/provenance.py`, `analysis/planner.py`, `analysis/reduction.py`, `roi/rasterize.py`, `roi/detection.py`. A test of one of these that needs a `QApplication` means something is wired wrong.
-- `plan_recompute()` needs a deterministic unit test per locality rule (ROI-local geometry, neighbor-exclusion adjacency, mask-local, chromatic or background global, reduction-method global, cosmetic or range changes that touch nothing).
+- Pure-computation files must import and test with **zero Qt, GUI, or dataset dependency**: `analysis/tasks.py`, `analysis/provenance.py`, `analysis/reduction.py`, `roi/rasterize.py`, `roi/detection.py`. A test of one of these that needs a `QApplication` means something is wired wrong.
 - A weighted reduction must match its unweighted counterpart exactly when all weights are equal.
 - Root numerical-tolerance and simulated-hardware rules apply.
 
@@ -175,7 +174,7 @@ A **dataset** is raw images plus acquisition metadata, never written to. A **ses
 
 - Don't add back the materiality or pixel-selection recompute optimization. If it becomes a measured problem, bring a proposal with a before/after measurement.
 - Don't switch the analysis store back to per-settings-version files.
-- Don't run analysis on ROI selection, panel navigation, or anything other than an explicit `run_analysis`.
+- Don't run analysis on ROI selection, panel navigation, or anything other than an explicit Scan.
 - Don't put ROI or group business logic in a panel or view. Panels call the Toolbox command API and hold no copy of ROI or group state.
 - Don't use `QThreadPool` for anything touching the dataset/zarr layer, even indirectly.
 - Don't design shared infrastructure for a future acquisition app.

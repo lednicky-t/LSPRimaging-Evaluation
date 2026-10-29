@@ -81,7 +81,6 @@ import itertools
 import math
 import time
 import logging
-from collections.abc import Callable
 from dataclasses import replace
 
 import numpy as np
@@ -400,7 +399,6 @@ class ImagePanel(QWidget):
         initial_highlight_overlay: OverlayStyle | None = None,
         initial_ribbon_category: str | None = None,
         initial_show_background: bool = False,
-        analysis_running: Callable[[], bool] | None = None,
         roi_scope: RoiScopeModule | None = None,
         roi_display: RoiDisplayStyle | None = None,
         frame_roles: FrameRolesModule | None = None,
@@ -409,8 +407,6 @@ class ImagePanel(QWidget):
         self._session_carry = session_carry  # handed to the Export tab, which asks it to take the session along
         self._frame_roles = frame_roles
         self._show_background = bool(initial_show_background)
-        # Whether an analysis run is in flight (the ROI menu's Delete waits for it); tests omit it.
-        self._analysis_running = analysis_running or (lambda: False)
         self._last_data_range: tuple[float, float] | None = None  # display levels reused for the background view
         # (fixed, black point, white point): the View tab's Display range. Automatic per frame unless `fixed`;
         # the range itself starts at the whole 16-bit scale (what the pin switches on).
@@ -917,7 +913,6 @@ class ImagePanel(QWidget):
             roi_gestures=roi_gestures,
             roi_tab_active=lambda: self._tool_ribbon.current_category() == ROI_TAB,
             to_reference=self._display_to_reference,
-            analysis_running=self._analysis_running,
             notify=self._on_tool_status,
             eraser_armed=self._eraser_armed,
             erase_at=lambda x, y: self._mask_tab.grain_eraser.erase_at(x, y),
@@ -963,7 +958,7 @@ class ImagePanel(QWidget):
         self._roi_tab = RoiTab(
             self._roi_overlay, self._roi_scope, self._geometry, self._background, self._chromatic, self._dataset,
             self._roi_toolbox, self._selection, self._array_action, self._edit_target,
-            self._resolve_reference_frame, self._analysis_running, self,
+            self._resolve_reference_frame, self,
         )
         self._roi_tab.overlay_changed.connect(self._on_roi_overlay_changed)
         self._roi_tab.labels_toggled.connect(self._on_roi_labels_toggled)

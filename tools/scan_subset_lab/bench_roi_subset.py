@@ -74,9 +74,9 @@ def main() -> int:
         dataset=modules.dataset, frame_roles=modules.frame_roles, roi_toolbox=modules.roi_toolbox, geometry=modules.geometry,
         background=modules.background, chromatic=modules.chromatic, mask=modules.mask, records=records,
     )
-    engine = modules.analysis_engine
+    engine = modules.reference_inputs
     t = time.perf_counter()
-    plan = build_scan_plan(source, exclusion_mode=engine._reference_exclusion_mode(), trimmed_fraction=engine._trimmed_mean_fraction)
+    plan = build_scan_plan(source, exclusion_mode=engine.reference_exclusion_mode(), trimmed_fraction=engine.trimmed_mean_fraction)
     print(f"plan: {len(plan.jobs)} cubes, {plan.n_frames} frames, {len(plan.roi_ids)} ROIs, built in {time.perf_counter() - t:.1f} s")
     s = plan.settings
     print(f"background on: {s.background.flatten_background_enabled}; geometry identity: ", end="")

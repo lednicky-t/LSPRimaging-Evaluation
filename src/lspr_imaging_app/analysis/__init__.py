@@ -1,35 +1,28 @@
-"""Analysis Engine (sketch §5, §6, §7 "Analysis Engine", §10).
+"""The analysis package.
 
-Owns the per-cell-provenance store and the recompute planner. Only ever
-computes anything in response to an explicit ``run_analysis(scope)`` call -
-never automatically (CLAUDE.md, "What NOT to do without checking in again
-first"; sketch §7, "Confirmed 2026-09-20"). Also owns turning masked pixel
-values into scalar results (`reduction.py`, moved here from `roi/` on
-2026-09-21 - see that file's docstring).
+The scan (analysis step 1, ``scan*.py``, ``frame_reduce.py``, ``scan_store.py`` = ``scan.h5``) turns pixels into numbers per ROI, cube,
+wavelength and side; the Spectra and Sensorgram panels show them. Layers 2-3 of ``docs/analysis_pipeline_layers.md`` (formula spectrum,
+fit, metric) live in ``query.py`` and Pillar II in ``statistics.py`` - both pure and Qt-free; ``settings_module.py`` owns the settings
+that drive them. ``reduction.py`` turns masked pixel values into scalar results.
 
-Layers 2-3 of `docs/analysis_pipeline_layers.md` (formula spectrum, fit,
-metric) live in `query.py` and Pillar II in `statistics.py` - both pure and
-Qt-free; `settings_module.py` owns the settings that drive them.
+``tasks.compute_cell`` (with ``provenance.py``) is the independent, slower **reference implementation** the scan is checked against
+(``tools/scan_golden_check.py``, the tests). The old ``AnalysisEngine`` that drove it (``data.h5``, recompute planner) was removed on
+2026-10-29: no UI ever started a run (``docs/old_generation_cutover_plan_2026-10-29.md``, phase 2e).
 
-Imported lazily (2026-10-19): the two Qt classes below load only when asked for, so the pure files of this package
-(``frame_reduce``, ``reduction``, ``query``, ...) import without Qt, as CLAUDE.md's testing rule requires, and an analysis
-worker process starts without loading Qt.
+Imported lazily (2026-10-19): the Qt class below loads only when asked for, so the pure files of this package (``frame_reduce``,
+``reduction``, ``query``, ...) import without Qt, as CLAUDE.md's testing rule requires, and an analysis worker process starts
+without loading Qt.
 """
 
 from typing import TYPE_CHECKING
 
-__all__ = ["AnalysisEngine", "AnalysisSettingsModule"]
+__all__ = ["AnalysisSettingsModule"]
 
 if TYPE_CHECKING:
-    from .engine import AnalysisEngine
     from .settings_module import AnalysisSettingsModule
 
 
 def __getattr__(name: str):
-    if name == "AnalysisEngine":
-        from .engine import AnalysisEngine
-
-        return AnalysisEngine
     if name == "AnalysisSettingsModule":
         from .settings_module import AnalysisSettingsModule
 

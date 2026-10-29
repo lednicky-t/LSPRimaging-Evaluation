@@ -38,10 +38,9 @@ precisely so those modules *can* subscribe and remap their own state
 without this module reaching into theirs (CLAUDE.md's "no module reads or
 writes another module's internals" rule). **`SelectionModule` now
 subscribes** (`selection/module.py`'s `remap_roi_ids()`, wired in
-`app_rewrite.build_main_window()`) - built 2026-09-20. **`AnalysisEngine`
-subscribes too** (`remap_roi_ids()`, 2026-10-06): stored results are keyed by
-roi_id, so they must follow their ROI to its new number or the survivor
-would show the deleted ROI's spectrum. The signal's map covers every ROI that
+`app_rewrite.build_main_window()`) - built 2026-09-20. (The former
+`AnalysisEngine` subscribed too, because its stored results were keyed by
+roi_id; it was removed on 2026-10-29.) The signal's map covers every ROI that
 survives; an id absent from it is dropped (empty map = a fresh detection, no
 old ROI survives).
 
@@ -294,7 +293,7 @@ class RoiToolbox(QObject):
         """The shared ROI detection/reduction settings - a defensive copy,
         same guarantee `GeometryModule.settings()` makes.
 
-        **Ownership decided 2026-09-23, while wiring `AnalysisEngine`**:
+        **Ownership decided 2026-09-23, while wiring the former `AnalysisEngine`**:
         nothing owned `AreaRoiDetectionSettings` anywhere in the rewrite -
         every module took it as a function *parameter* (`roi/detection.py`,
         `image_tools/background/estimate.py`, `image_tools/preprocess.py`,
@@ -1228,10 +1227,7 @@ class RoiToolbox(QObject):
     #
     # A ROI's id is its place in the list, so reordering is a permutation of
     # the ids. Nothing is recomputed: the ROIs themselves are unchanged, and
-    # stored analysis results follow them through `roi_ids_renumbered` (see
-    # `AnalysisEngine.remap_roi_ids`). **Callers should not reorder while an
-    # analysis run is in flight** (`AnalysisEngine.is_running()`); the engine
-    # cancels the run if they do.
+    # whatever holds a ROI id follows them through `roi_ids_renumbered`.
 
     def _renumber(self, id_map: dict[int, int], label: str) -> None:
         """Apply ``id_map`` (``{old_id: new_id}``, a permutation covering

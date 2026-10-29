@@ -19,8 +19,8 @@ modules, _ = st.build_modules(dataset, session)
 records = io.dataset_record_map(dataset)
 source = source_from_modules(dataset=modules.dataset, frame_roles=modules.frame_roles, roi_toolbox=modules.roi_toolbox, geometry=modules.geometry,
     background=modules.background, chromatic=modules.chromatic, mask=modules.mask, records=records)
-e = modules.analysis_engine
-plan = build_scan_plan(source, exclusion_mode=e._reference_exclusion_mode(), trimmed_fraction=e._trimmed_mean_fraction)
+e = modules.reference_inputs
+plan = build_scan_plan(source, exclusion_mode=e.reference_exclusion_mode(), trimmed_fraction=e.trimmed_mean_fraction)
 n = len(plan.jobs)
 picks = [int(i) for i in np.linspace(n * 0.1, n * 0.9, 12).astype(int)]
 layouts_distinct = {j.rois.key for j in plan.jobs}

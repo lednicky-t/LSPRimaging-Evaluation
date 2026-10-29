@@ -82,9 +82,9 @@ def main() -> int:
         dataset=modules.dataset, frame_roles=modules.frame_roles, roi_toolbox=modules.roi_toolbox, geometry=modules.geometry,
         background=modules.background, chromatic=modules.chromatic, mask=modules.mask, records=records,
     )
-    engine = modules.analysis_engine
-    mode = engine._reference_exclusion_mode()
-    trimmed = engine._trimmed_mean_fraction
+    engine = modules.reference_inputs
+    mode = engine.reference_exclusion_mode()
+    trimmed = engine.trimmed_mean_fraction
 
     st.header("1. plan for ALL cubes")
     started = time.perf_counter()
@@ -108,8 +108,8 @@ def main() -> int:
     results = {r.cube_pos: r for r in scan_cubes(plan.jobs, plan.settings, processes=1)}
 
     det = modules.roi_toolbox.detection_settings()
-    inner, outer = engine._default_reference_diameters()
-    naming = engine._naming()
+    inner, outer = engine.default_reference_diameters()
+    naming = engine.naming()
     timeline = bool(modules.roi_toolbox.has_timeline())
     compared = identical_counts = flagged = 0
     worst = 0.0
@@ -119,7 +119,7 @@ def main() -> int:
         for cube_pos, cube in enumerate(plan.cube_indices):
             rois_here = tuple(modules.roi_toolbox.rois_at(cube) if timeline else modules.roi_toolbox.rois())
             rows = np.linspace(0, len(rois_here) - 1, min(args.rois, len(rois_here))).astype(int)
-            inputs = engine._gather_wavelength_inputs(cube)
+            inputs = engine.gather_wavelength_inputs(cube)
             exclusion_cache: dict = {}
             result = results[cube_pos]
             positions = plan.axis_positions[cube_pos]
@@ -129,7 +129,7 @@ def main() -> int:
                     default_reference_inner_diameter_px=inner, default_reference_outer_diameter_px=outer,
                     masks_dir=scratch / "masks", chromatic_dir=scratch / "chromatic", settings_dir=scratch / "settings",
                     naming=naming, all_rois=rois_here, detection_settings=det, reference_exclusion_mode=mode,
-                    sample_exclusion_cache=exclusion_cache, coverage_thresholds=engine._coverage_thresholds(),
+                    sample_exclusion_cache=exclusion_cache, coverage_thresholds=engine.coverage_thresholds(),
                 )
                 if cell is None:
                     problems.append(f"cube {cube} ROI row {row}: compute_cell returned nothing")

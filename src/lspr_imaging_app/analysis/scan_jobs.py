@@ -3,10 +3,10 @@
 Design record: ``docs/analysis_redesign_plan_2026-10-19.md`` (sections 11-15). The scan itself is ``scan.py``; this file only
 *resolves inputs*. It is the one place where "which ROI layout, which chromatic affine and which ignore mask belong to frame
 (cube, wavelength)" is decided, so a wrong answer here would put a wrong number into every stored cell. The same decisions are
-made by ``AnalysisEngine._gather_wavelength_inputs`` and ``tasks.compute_cell`` (the golden reference); ``tools/scan_golden_check.py``
-compares the two on real data.
+made by ``tools/reference_inputs.py`` (the input gathering of the former ``AnalysisEngine``) and ``tasks.compute_cell`` (the golden
+reference); ``tools/scan_golden_check.py`` compares the two on real data.
 
-Like ``AnalysisEngine`` this takes **callables, not module references**, so the full list of what a scan reads from the app is
+This takes **callables, not module references**, so the full list of what a scan reads from the app is
 visible in :class:`ScanSource`, and the builder is testable with plain fakes. No Qt import (workers and the shell use it).
 
 Call it on the thread that owns the modules (the GUI thread): several module queries hand out live objects. The result is plain
@@ -64,7 +64,7 @@ class MaskRef:
 
 @dataclass(frozen=True)
 class ScanSource:
-    """Everything a scan reads from the app. Each field is one narrow read (same shapes as ``AnalysisEngine``'s constructor)."""
+    """Everything a scan reads from the app. Each field is one narrow read (plain callables, never module references)."""
 
     cube_indices: Callable[[], Sequence[int]]  # spectral cubes, in dataset order
     wavelengths_for_cube: Callable[[int], Sequence[float]]  # per cube, never the union (a cube may be short one wavelength)
@@ -242,7 +242,7 @@ def build_scan_plan(
                 authored_frame = (int(ref.authored_frame[0]), float(ref.authored_frame[1]))
                 warp = None
                 if authored_frame != frame:
-                    # Only when the mask was authored at another frame; same rule as AnalysisEngine._gather_wavelength_inputs.
+                    # Only when the mask was authored at another frame; same rule as tools/reference_inputs.py.
                     warp = np.asarray(source.chromatic_affine_between(authored_frame, frame), dtype=np.float64)
                 key = (authored_frame, ref.scope, None if warp is None else warp.tobytes())
                 digest_key = (authored_frame, ref.scope)
@@ -323,7 +323,7 @@ def source_from_modules(
     mask,
     records: dict,
 ) -> ScanSource:
-    """The :class:`ScanSource` of the live app modules (the same reads ``app_rewrite._build_analysis_engine`` hands the old engine).
+    """The :class:`ScanSource` of the live app modules (the same reads ``tools/reference_inputs.py`` makes for the golden reference).
 
     ``records`` is ``dataset.io.dataset_record_map(image_dataset)``: (cube, wavelength) -> record with a ``path``. Takes the modules by
     keyword so the call site names what it passes; nothing here keeps a module beyond the lifetime of the returned callables."""

@@ -3,8 +3,7 @@
 `GroupControls` (buttons) -> this -> `RoiToolbox.group_rois` / `create_group` / `group_rois_each` (one undo
 step each). The panel owns no group state. Group by rows / columns uses the selected ROIs, or all if none are
 selected, and the same row finding as Reorder IDs (`roi/ordering.grid_lines`); each group takes the next
-unused base colour of the palette (`roi/palette.py`). Grouping by rows / columns is refused while an analysis
-runs, like the other commands that restructure the ROI list.
+unused base colour of the palette (`roi/palette.py`).
 """
 
 from __future__ import annotations
@@ -29,7 +28,6 @@ class GroupActions(QObject):
         *,
         toolbox: RoiToolbox,
         selection: SelectionModule,
-        analysis_running: Callable[[], bool],
         dialog_parent: QWidget | None = None,
         ask_name: Callable[[str, str], str | None] | None = None,
         tell: Callable[[str, str], None] | None = None,
@@ -38,7 +36,6 @@ class GroupActions(QObject):
         super().__init__(parent)
         self._toolbox = toolbox
         self._selection = selection
-        self._analysis_running = analysis_running
         self._ask_name = ask_name or (lambda title, default: self._dialog_name(dialog_parent, title, default))
         self._tell = tell or (lambda title, text: QMessageBox.warning(dialog_parent, title, text))
         self._controls = controls
@@ -96,9 +93,6 @@ class GroupActions(QObject):
         self.status.emit(f"Groups: created {name!r}" + (f" with {len(ids)} ROIs." if ids else " (empty)."))
 
     def _on_by_lines(self, *, column_major: bool) -> None:
-        if self._analysis_running():
-            self._refuse("An analysis is running. Wait for it to finish (or cancel it) before grouping the ROIs.")
-            return
         selected = {int(i) for i in self._selection.selected_roi_ids()}
         cube = int(self._selection.current_cube())
         rois = [roi for roi in self._toolbox.rois_at(cube) if not selected or roi.area_roi_id in selected]

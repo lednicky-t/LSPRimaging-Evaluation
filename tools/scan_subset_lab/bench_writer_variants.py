@@ -48,8 +48,8 @@ def main() -> int:
         dataset=modules.dataset, frame_roles=modules.frame_roles, roi_toolbox=modules.roi_toolbox, geometry=modules.geometry,
         background=modules.background, chromatic=modules.chromatic, mask=modules.mask, records=io.dataset_record_map(dataset),
     )
-    engine = modules.analysis_engine
-    plan = build_scan_plan(source, exclusion_mode=engine._reference_exclusion_mode(), trimmed_fraction=engine._trimmed_mean_fraction, resolve_masks=False)
+    engine = modules.reference_inputs
+    plan = build_scan_plan(source, exclusion_mode=engine.reference_exclusion_mode(), trimmed_fraction=engine.trimmed_mean_fraction, resolve_masks=False)
     scratch = Path(tempfile.mkdtemp(prefix="lspr_writer_"))
     try:
         shutil.copy2(args.session / "analysis" / "scan.h5", scratch / "real_copy.h5")

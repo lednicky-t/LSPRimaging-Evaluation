@@ -203,8 +203,8 @@ def main() -> int:
         dataset=modules.dataset, frame_roles=modules.frame_roles, roi_toolbox=modules.roi_toolbox, geometry=modules.geometry,
         background=modules.background, chromatic=modules.chromatic, mask=modules.mask, records=io.dataset_record_map(dataset),
     )
-    engine = modules.analysis_engine
-    mode, trimmed = engine._reference_exclusion_mode(), engine._trimmed_mean_fraction
+    engine = modules.reference_inputs
+    mode, trimmed = engine.reference_exclusion_mode(), engine.trimmed_mean_fraction
     metric = modules.analysis_settings.metric_settings()
     statistics = replace(modules.analysis_settings.statistics_settings(), baseline_enabled=False)  # baseline: no effect on delta / noise (module docstring)
     regions = rt.TuningRegions(parse_range(args.baseline), parse_range(args.signal))

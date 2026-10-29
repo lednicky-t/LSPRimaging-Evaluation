@@ -37,7 +37,6 @@ def show_roi_context_menu(
     groups: Sequence[tuple[str, str]],
     any_selected_grouped: bool,
     can_add: bool,
-    can_delete: bool,
     can_remove_cube_edit: bool = False,
     clicked_group: tuple[str, int] | None = None,
     clicked_group_fully_selected: bool = False,
@@ -70,7 +69,7 @@ def show_roi_context_menu(
     remove_edit.setEnabled(can_remove_cube_edit)
     menu.addSeparator()
     delete = menu.addAction(f"Delete {selected_count} ROI{plural}" if selected_count else "Delete selected ROIs")
-    delete.setEnabled(selected_count > 0 and can_delete)
+    delete.setEnabled(selected_count > 0)
     deselect = menu.addAction("Deselect")
     deselect.setEnabled(selected_count > 0)
 

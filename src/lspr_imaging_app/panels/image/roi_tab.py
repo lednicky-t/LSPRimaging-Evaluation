@@ -76,7 +76,6 @@ class RoiTab(QWidget):
         array_action: ArrayAction,
         edit_target: RoiEditTarget,
         resolve_reference: Callable[[], tuple[int, float] | None],
-        analysis_running: Callable[[], bool],
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -130,7 +129,6 @@ class RoiTab(QWidget):
             has_dataset=lambda: bool(dataset.spectral_cubes()),
             raw_plane_shape=dataset.raw_plane_shape,
             resolve_reference=resolve_reference,
-            analysis_running=analysis_running,
             dialog_parent=self,
             edit_target=edit_target,
             parent=self,
@@ -143,7 +141,6 @@ class RoiTab(QWidget):
             self._group_controls,
             toolbox=roi_toolbox,
             selection=selection,
-            analysis_running=analysis_running,
             dialog_parent=self,
             parent=self,
         )

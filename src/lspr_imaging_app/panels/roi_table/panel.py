@@ -31,9 +31,6 @@ toolbox command, so Ctrl+Z undoes it like any other) and it drives the shared
   delete. Delete removes the selected ROIs; a selected group header counts as
   all its ROIs. Ungroup dissolves a group and keeps its ROIs.
 
-**Reordering and deleting renumber ROIs**, which a running analysis cannot
-follow, so they are refused until it finishes (`AnalysisEngine.is_running`).
-
 Bad input (a size below the minimum, a ring with inner >= outer, an empty
 group name) is refused by the toolbox before anything changes, and shown here
 in the footer; it is never silently corrected.
@@ -61,7 +58,6 @@ from PyQt6.QtWidgets import (
 
 from lspr_ui import get_active_theme, load_tabler_icon
 
-from ...analysis.engine import AnalysisEngine
 from ...image_tools import GeometryModule
 from ...roi import RoiToolbox
 from ...roi.display_style import RoiDisplayStyle
@@ -141,7 +137,6 @@ class RoiTablePanel(QWidget):
         roi_toolbox: RoiToolbox,
         selection: SelectionModule,
         geometry: GeometryModule,
-        analysis_engine: AnalysisEngine,
         parent: QWidget | None = None,
         edit_target: RoiEditTarget | None = None,
         display_style: RoiDisplayStyle | None = None,
@@ -155,7 +150,6 @@ class RoiTablePanel(QWidget):
         self._edit_target = edit_target
         self._selection = selection
         self._geometry = geometry
-        self._engine = analysis_engine
         self._collapsed: set[str] = set()
         self._group_only = False  # every group stays collapsed; `_collapsed` (what the user left open) is kept for the way back
         self._syncing = False  # the view and SelectionModule are being brought into line
@@ -656,12 +650,6 @@ class RoiTablePanel(QWidget):
             return False
         return True
 
-    def _renumbering_allowed(self) -> bool:
-        if self._engine.is_running():
-            self._show_notice("Wait for the analysis to finish before reordering or deleting ROIs.", error=True)
-            return False
-        return True
-
     # -- toolbar state ----------------------------------------------------------------------
 
     def _update_toolbar_state(self) -> None:
@@ -904,8 +892,6 @@ class RoiTablePanel(QWidget):
         self._guarded("Shift", lambda: self._toolbox.translate_rois(ids, from_display(dx, unit), from_display(dy, unit), **self._edit_kwargs()))
 
     def _reorder(self, target_for: Callable[[tuple[int, ...], list[int]], int]) -> None:
-        if not self._renumbering_allowed():
-            return
         if self._model.sort_state() != (COLUMN_ID, False):
             self._show_notice("Sort by # (ascending) to reorder ROIs.", error=True)
             return
@@ -934,8 +920,7 @@ class RoiTablePanel(QWidget):
         """Delete the selected ROIs; a selected group header counts as all its ROIs."""
         ids = self._selected_ids()
         if ids:
-            if self._renumbering_allowed():
-                self._guarded("Delete", lambda: self._toolbox.delete_rois(tuple(ids)))
+            self._guarded("Delete", lambda: self._toolbox.delete_rois(tuple(ids)))
             return
         self._delete_groups(self._selected_group_ids())  # only empty groups selected: nothing but the groups to remove
 
@@ -961,8 +946,6 @@ class RoiTablePanel(QWidget):
                 return
         else:
             scope = self._scope_for_drop(target)
-        if not self._renumbering_allowed():
-            return
         if self._model.sort_state() != (COLUMN_ID, False):
             self._show_notice("Sort by # (ascending) to reorder ROIs by dragging.", error=True)
             return
@@ -1125,7 +1108,7 @@ class RoiTablePanel(QWidget):
     def _delete_selected_groups_with_rois(self, group_ids: list[str]) -> Callable[[], None]:
         def run() -> None:
             ids = sorted(row.roi_id for row in self._model.rows() if row.group_id in group_ids)
-            if ids and self._renumbering_allowed():
+            if ids:
                 self._guarded("Delete", lambda: self._toolbox.delete_rois(tuple(ids)))
             elif not ids:
                 self._delete_groups(group_ids)

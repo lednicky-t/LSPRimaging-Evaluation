@@ -48,6 +48,7 @@ from lspr_imaging_app.image_tools.background import estimate as bg_estimate  # n
 from lspr_imaging_app.analysis.reduction import reduce_sample_and_reference  # noqa: E402
 from lspr_imaging_app.roi import rasterize as rz  # noqa: E402
 from lspr_imaging_app.storage.session import load_session  # noqa: E402
+from reference_inputs import ReferenceInputs  # noqa: E402
 
 RESULTS: dict = {}
 _QT_APP = None
@@ -83,6 +84,18 @@ def load_one(folder: Path):
     return result
 
 
+class ToolModules:
+    """The app's modules plus ``reference_inputs`` (what ``compute_cell`` needs; ``tools/reference_inputs.py``). Every other
+    attribute is the app's own module of that name."""
+
+    def __init__(self, modules) -> None:
+        self._modules = modules
+        self.reference_inputs = ReferenceInputs(modules)
+
+    def __getattr__(self, name: str):
+        return getattr(self._modules, name)
+
+
 def build_modules(dataset, session_root: Path):
     modules = app_rewrite._build_modules()
     # These tools only read: the modules carry the app's autosave, which would write any edit a tool makes (the golden check moves ROIs
@@ -107,7 +120,7 @@ def build_modules(dataset, session_root: Path):
         raise SystemExit(f"Restoring the session changed ROI positions or count ({len(moved)} moved): timings would not be comparable.")
     if modules.roi_toolbox.has_timeline():
         print("NOTE: this session has a ROI geometry timeline; this tool times the no-timeline path only.")
-    return modules, state
+    return ToolModules(modules), state
 
 
 def spectral_wavelengths(modules, cube: int) -> list[float]:
@@ -193,7 +206,7 @@ def time_zarr_scoped(dataset, cubes: list[int], modules, rois, geometry) -> dict
 
 
 def frame_inputs(modules, cube: int, wl: float):
-    """What the analysis needs besides the pixels, resolved the way `AnalysisEngine._gather_wavelength_inputs` does."""
+    """What the analysis needs besides the pixels, resolved the way `ReferenceInputs.gather_wavelength_inputs` does."""
     resolved, t_mask = timed(modules.mask.resolve_mask_source, (cube, wl))
     affine, t_affine = timed(modules.chromatic.affine_for, (cube, wl))
     warp = None
@@ -332,7 +345,7 @@ def time_roi_stage(modules, frames: list) -> dict:
     det = modules.roi_toolbox.detection_settings()
     inner, outer = det.reference_inner_diameter_px, det.reference_outer_diameter_px
     rois = list(modules.roi_toolbox.rois())
-    trimmed = modules.analysis_engine._trimmed_mean_fraction
+    trimmed = modules.reference_inputs.trimmed_mean_fraction
     reduction = det.reduction_method
     centers = np.array([[r.center_x, r.center_y] for r in rois], dtype=np.float64)
     sample_radii = np.array([r.sample_diameter_px / 2.0 for r in rois], dtype=np.float64)
@@ -385,11 +398,11 @@ class _CellLog(logging.Handler):
 
 
 def time_end_to_end(modules, cubes: list[int], scratch: Path) -> dict:
-    engine = modules.analysis_engine
+    engine = modules.reference_inputs
     det = modules.roi_toolbox.detection_settings()
     rois = tuple(modules.roi_toolbox.rois())
-    naming = engine._naming()
-    inner, outer = engine._default_reference_diameters()
+    naming = engine.naming()
+    inner, outer = engine.default_reference_diameters()
     chosen = [rois[int(i)] for i in np.linspace(0, len(rois) - 1, 6)]
     handler = _CellLog()
     task_logger = logging.getLogger("lspr_imaging_app.analysis.tasks")
@@ -403,17 +416,17 @@ def time_end_to_end(modules, cubes: list[int], scratch: Path) -> dict:
             exclusion_cache: dict = {}
             for index, roi in enumerate(chosen):
                 # The engine calls this once per cell. The first call of a cube reads the planes (cached afterwards).
-                inputs, t_gather = timed(engine._gather_wavelength_inputs, cube)
+                inputs, t_gather = timed(engine.gather_wavelength_inputs, cube)
                 (gathers_cold if index == 0 else gathers_warm).append(t_gather)
                 started = time.perf_counter()
                 compute_cell(
                     roi, cube, inputs,
-                    reduction_method=det.reduction_method, trimmed_mean_fraction=engine._trimmed_mean_fraction,
+                    reduction_method=det.reduction_method, trimmed_mean_fraction=engine.trimmed_mean_fraction,
                     default_reference_inner_diameter_px=inner, default_reference_outer_diameter_px=outer,
                     masks_dir=scratch / "masks", chromatic_dir=scratch / "chromatic", settings_dir=scratch / "settings",
                     naming=naming, all_rois=rois, detection_settings=det,
-                    reference_exclusion_mode=engine._reference_exclusion_mode(),
-                    sample_exclusion_cache=exclusion_cache, coverage_thresholds=engine._coverage_thresholds(),
+                    reference_exclusion_mode=engine.reference_exclusion_mode(),
+                    sample_exclusion_cache=exclusion_cache, coverage_thresholds=engine.coverage_thresholds(),
                 )
                 took = ms(time.perf_counter() - started)
                 (first_cells if index == 0 else later_cells).append(took)
@@ -454,13 +467,13 @@ def time_provenance_scaling(modules, scratch: Path) -> dict:
 
     from lspr_imaging_app.analysis import provenance as pv
 
-    engine = modules.analysis_engine
+    engine = modules.reference_inputs
     rois = tuple(modules.roi_toolbox.rois())
     det = modules.roi_toolbox.detection_settings()
     geometry, background = modules.geometry.settings(), modules.background.settings()
     sample_exclusion = pv.sample_exclusion_digest(rois)
     background_exclusion = pv.background_exclusion_digest(rois, background, det)
-    thresholds = engine._coverage_thresholds().as_dict()
+    thresholds = engine.coverage_thresholds().as_dict()
     per_cube = max(len(spectral_wavelengths(modules, next(iter(modules.dataset.spectral_cubes())))), 1)
 
     def snapshot(index: int) -> "pv.SettingsSnapshot":

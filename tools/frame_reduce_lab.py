@@ -57,10 +57,10 @@ class Context:
         self.geometry = modules.geometry.settings()
         self.background = modules.background.settings()
         self.det = modules.roi_toolbox.detection_settings()
-        self.engine = modules.analysis_engine
-        self.inner, self.outer = self.engine._default_reference_diameters()
-        self.trimmed = self.engine._trimmed_mean_fraction
-        self.mode = self.engine._reference_exclusion_mode()
+        self.engine = modules.reference_inputs
+        self.inner, self.outer = self.engine.default_reference_diameters()
+        self.trimmed = self.engine.trimmed_mean_fraction
+        self.mode = self.engine.reference_exclusion_mode()
         self.timeline = bool(modules.roi_toolbox.has_timeline())
         self._cube_cache: dict[int, tuple] = {}
         self._exclusion_by_key: dict[str, np.ndarray] = {}

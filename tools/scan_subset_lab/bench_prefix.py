@@ -18,8 +18,8 @@ dataset = st.load_one(zarr); modules, _ = st.build_modules(dataset, session)
 records = io.dataset_record_map(dataset)
 source = source_from_modules(dataset=modules.dataset, frame_roles=modules.frame_roles, roi_toolbox=modules.roi_toolbox, geometry=modules.geometry,
     background=modules.background, chromatic=modules.chromatic, mask=modules.mask, records=records)
-e = modules.analysis_engine
-mode, trimmed = e._reference_exclusion_mode(), e._trimmed_mean_fraction
+e = modules.reference_inputs
+mode, trimmed = e.reference_exclusion_mode(), e.trimmed_mean_fraction
 copy = scratch / "prefix_copy.h5"; shutil.copy2(session / "analysis" / "scan.h5", copy)
 def T(label, fn):
     t = time.perf_counter(); r = fn(); print(f"  {label:<46} {time.perf_counter()-t:6.2f} s"); return r
