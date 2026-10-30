@@ -259,6 +259,17 @@ def _wire_edit_menu(
     undo_action.triggered.connect(lambda: run("Undo"))
     redo_action.triggered.connect(lambda: run("Redo"))
     manager.changed.connect(refresh)
+
+    def forget_window() -> None:
+        # The manager is shared by the whole app and `refresh` is a closure over this window's two actions, so Qt cannot drop the connection
+        # when the window goes. Left connected, every later change raised "wrapped C/C++ object of type QAction has been deleted" (one
+        # such listener per window ever built; in a long test run that was tens of thousands of tracebacks, 2026-10-30).
+        try:
+            manager.changed.disconnect(refresh)
+        except (TypeError, RuntimeError):  # already disconnected
+            pass
+
+    window.destroyed.connect(forget_window)
     edit_menu.aboutToShow.connect(refresh)  # a running analysis changes no undo state, so the menu re-checks on opening
     refresh()
     return undo_action, redo_action
