@@ -31,18 +31,15 @@ both.
 
 from __future__ import annotations
 
-from PyQt6.QtGui import QGuiApplication, QKeySequence
+from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import QMainWindow, QMenu
 
+from ..shortcuts import PANEL_TOGGLE_IDS, bind_action
 from .dock_container import PanelContainer
 
-# Order + shortcuts: Ctrl+1..6 follow the order of the docks dict
-# (Workflow / Image / Histogram / ROI / Groups / Spectra / Sensorgram, built
-# in app_rewrite._build_dock_layout). Until 2026-10-19 Ctrl+1..5 matched the
-# stable app's (gui/main_window_icons.py) and ROI / Groups was Ctrl+6; the
-# maintainer moved ROI / Groups up under Histogram, so Spectra and
-# Sensorgram are now Ctrl+5 / Ctrl+6.
-_PANEL_SHORTCUTS: tuple[str, ...] = ("Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5", "Ctrl+6")
+# The keys (Ctrl+1..6) are in `shortcuts.py`, one per dock title (`PANEL_TOGGLE_IDS`); the order of the docks dict does not matter.
+# Until 2026-10-19 Ctrl+1..5 matched the stable app's and ROI / Groups was Ctrl+6; the maintainer moved ROI / Groups up under
+# Histogram, so Spectra and Sensorgram are now Ctrl+5 / Ctrl+6.
 
 
 def wire_panel_visibility_menu(view_menu: QMenu, docks: dict[str, PanelContainer]) -> None:
@@ -50,10 +47,9 @@ def wire_panel_visibility_menu(view_menu: QMenu, docks: dict[str, PanelContainer
     2026-10-19, no "Panels" submenu): Show all / Hide all, a separator, one
     checkable toggle per dock, then a closing separator so the next group
     (Panel Presets) is visually apart. Call this first so the panels sit at
-    the top. *docks* must be given in the order its panels should appear in
-    the menu / receive Ctrl+1.. shortcuts (six entries expected - one per
-    ``_PANEL_SHORTCUTS`` slot; a shorter dict just leaves the remaining
-    shortcuts unused, not an error)."""
+    the top. *docks* is given in the order its panels should appear in the
+    menu; each dock's key (Ctrl+1..6) comes from `shortcuts.PANEL_TOGGLE_IDS`
+    by its title, so a dock without an entry there just has no key."""
     show_all_action = view_menu.addAction("Show all panels")
     show_all_action.setToolTip("Show every workspace panel.")
     show_all_action.triggered.connect(lambda: _set_all_visible(docks, True))
@@ -63,9 +59,10 @@ def wire_panel_visibility_menu(view_menu: QMenu, docks: dict[str, PanelContainer
     hide_all_action.triggered.connect(lambda: _set_all_visible(docks, False))
 
     view_menu.addSeparator()
-    for (_name, dock), shortcut in zip(docks.items(), _PANEL_SHORTCUTS):
+    for name, dock in docks.items():
         action = dock.toggleViewAction()
-        action.setShortcut(QKeySequence(shortcut))
+        if name in PANEL_TOGGLE_IDS:  # a dock without an entry in `shortcuts.py` simply has no key
+            bind_action(action, PANEL_TOGGLE_IDS[name])
         view_menu.addAction(action)
     view_menu.addSeparator()
 

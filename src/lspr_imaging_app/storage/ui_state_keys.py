@@ -210,6 +210,8 @@ ROI_TABLE_VIEW_MODE = "roi_table/view_mode"  # "simple" | "geometry"
 ROI_TABLE_SORT = "roi_table/sort"  # [column, descending]; a column of the view mode it was saved in
 ROI_TABLE_COLLAPSED = "roi_table/collapsed"  # sorted group ids
 ROI_TABLE_GROUP_ONLY = "roi_table/group_only"  # bool: the Groups-only view (every group stays collapsed)
+SHORTCUTS_DIALOG_SIZE = "shortcuts_dialog/size"  # [width, height] of Help -> Keyboard shortcuts
+SHORTCUTS_DIALOG_COLLAPSED = "shortcuts_dialog/collapsed"  # sorted section names the user collapsed there
 ROI_TABLE_COLUMN_WIDTHS = "roi_table/column_widths"  # one width per column (10; a list of the old 7 is still read)
 
 IMAGE_VIEW_RANGE = "image/view_range"

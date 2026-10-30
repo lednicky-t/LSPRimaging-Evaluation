@@ -13,6 +13,8 @@ from PyQt6.QtWidgets import QLineEdit, QWidget
 
 from lspr_ui import GuiTheme, get_active_theme
 
+from ...shortcuts import key_matches
+
 _MIN_WIDTH_PX = 180
 _PAD_PX = 8  # beyond the text height
 
@@ -57,7 +59,7 @@ class StepTextEditor(QLineEdit):
             self._close(commit=False)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802 - Qt naming
-        if event.key() == Qt.Key.Key_Escape:
+        if key_matches(event.key(), Qt.KeyboardModifier.NoModifier, "plan_text.cancel"):  # Esc, whatever else is held
             self._close(commit=False)
             event.accept()
             return

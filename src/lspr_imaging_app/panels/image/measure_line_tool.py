@@ -62,6 +62,7 @@ from PyQt6.QtCore import QObject, Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 
 from ...image_tools import GeometryModule
+from ...shortcuts import key_matches
 
 _TOOL_COLOR = "#38bdf8"  # same blue as CropTool's own _TOOL_COLOR - maintainer's preferred tool color
 # (2026-09-29: was green, matching the stable app's icon literal - the maintainer asked for this
@@ -209,7 +210,7 @@ class MeasureLineTool(QObject):
         """Esc only - no arrow-key nudge (there is nothing to nudge)."""
         if not self._active:
             return False
-        if key == Qt.Key.Key_Escape:
+        if key_matches(key, Qt.KeyboardModifier.NoModifier, "tools.cancel"):
             return self.cancel()
         return False
 

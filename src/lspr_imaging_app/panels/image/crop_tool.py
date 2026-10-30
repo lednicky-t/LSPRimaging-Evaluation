@@ -59,6 +59,7 @@ import pyqtgraph as pg
 
 from ...image_tools import GeometryModule
 from ...image_tools.geometry.model import GeometryComputationalChange
+from ...shortcuts import key_matches
 from ...undo import undo_manager
 
 _TOOL_COLOR = "#38bdf8"  # the crop button's own active blue (transforms_settings.py)
@@ -237,7 +238,7 @@ class CropTool(QObject):
         `RotateLineTool.handle_key`'s shape so `panel.py`'s `eventFilter`
         can treat both tools the same way; no modifiers to check yet, so
         no `modifiers` parameter. Returns whether the key was consumed."""
-        if key != Qt.Key.Key_Escape:
+        if not key_matches(key, Qt.KeyboardModifier.NoModifier, "tools.cancel"):
             return False
         return self.cancel()
 

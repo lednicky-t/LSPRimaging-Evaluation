@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QByteArray, QTimer, QUrl
-from PyQt6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence
+from PyQt6.QtGui import QAction, QActionGroup, QDesktopServices
 from PyQt6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMenu, QMessageBox, QStatusBar, QWidget
 
 from lspr_core.perf import get_runtime
@@ -75,6 +75,7 @@ from .panels.image.overlay_style import OverlayStyle
 from .panels.layout_presets import LayoutPresetManager, wire_view_menu
 from .panels.panel_visibility import ensure_floating_panels_on_screen, wire_panel_visibility_menu
 from .panels.preferences_dialog import Preferences, PreferencesDialog
+from .panels.shortcuts_dialog import ShortcutsDialog
 from .perf_setup import apply_saved_preferences as apply_saved_perf_preferences
 from .perf_setup import saved_count as perf_saved_count
 from .perf_setup import install_runtime as install_perf_runtime
@@ -136,6 +137,7 @@ from .storage.session_load_task import TASK_ID as SESSION_LOAD_TASK_ID, LoadedSe
 from .storage.session_autosave import SessionAutosave
 from .storage.session_coordinator import SessionCoordinator
 from .storage.session_carry_task import TASK_ID as SESSION_CARRY_TASK_ID, CarriedResult, SessionCarry
+from .shortcuts import bind_action
 from .undo import UndoManager, undo_manager
 from .version import APP_NAME, version_string
 
@@ -223,8 +225,7 @@ def _wire_edit_menu(
     *,
     manager: UndoManager = undo_manager,
 ) -> tuple[QAction, QAction]:
-    """Edit -> Undo / Redo, Ctrl+Z and Ctrl+Y / Ctrl+Shift+Z (whichever the
-    platform defines for Redo, plus Ctrl+Shift+Z). Every command already
+    """Edit -> Undo / Redo (keys: `shortcuts.py`, Ctrl+Z and Ctrl+Y / Ctrl+Shift+Z). Every command already
     pushes onto the shared `undo_manager`; this is the first thing that can
     pop it.
 
@@ -238,13 +239,8 @@ def _wire_edit_menu(
       ROI undoes the last real edit, not the click."""
     undo_action = QAction("Undo", window)
     redo_action = QAction("Redo", window)
-    redo_keys = QKeySequence.keyBindings(QKeySequence.StandardKey.Redo)
-    if QKeySequence("Ctrl+Shift+Z") not in redo_keys:
-        redo_keys.append(QKeySequence("Ctrl+Shift+Z"))
-    undo_action.setShortcuts(QKeySequence.keyBindings(QKeySequence.StandardKey.Undo))
-    redo_action.setShortcuts(redo_keys)
-    for action in (undo_action, redo_action):
-        action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+    bind_action(undo_action, "edit.undo", context=Qt.ShortcutContext.ApplicationShortcut)
+    bind_action(redo_action, "edit.redo", context=Qt.ShortcutContext.ApplicationShortcut)
     edit_menu.addAction(undo_action)
     edit_menu.addAction(redo_action)
 
@@ -1614,6 +1610,34 @@ def _log_ring() -> tuple[RingBufferHandler, LogSystem | None]:
     return _fallback_log_ring, None
 
 
+def _wire_shortcuts_dialog(window: QMainWindow, ui_state: UiStateStore) -> QAction | None:
+    """Help -> Keyboard shortcuts (F1; 2026-10-30, `docs/keyboard_shortcut_registry_design_2026-10-30.md`). One non-modal dialog, kept
+    and reused: F1 (or the menu entry) while it is open closes it, otherwise it opens with an empty search. Call it before
+    `_wire_log_console` so it is the first entry of the Help menu."""
+    help_menu = next((action.menu() for action in window.menuBar().actions() if action.text() == "&Help"), None)
+    if help_menu is None:
+        return None
+    holder: dict[str, ShortcutsDialog] = {}
+    action = help_menu.addAction("Keyboard shortcuts")
+    action.setToolTip("Every keyboard shortcut and mouse gesture of the app.")
+    bind_action(action, "help.shortcuts", context=Qt.ShortcutContext.ApplicationShortcut)
+
+    def toggle() -> None:
+        dialog = holder.get("dialog")
+        if dialog is None:
+            dialog = holder["dialog"] = ShortcutsDialog(ui_state, window)
+        if dialog.isVisible():
+            dialog.close()
+            return
+        dialog.reset_search()
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    action.triggered.connect(toggle)
+    return action
+
+
 def _wire_log_console(window: QMainWindow, ui_state: UiStateStore, image_panel: ImagePanel | None = None) -> PanelContainer:
     """Help -> Log Console (Ctrl+Shift+L) and Help -> Open Log Folder (2026-10-14,
     docs/logging_design_2026-10-14.md). The Log panel is a normal dock, created floating
@@ -1634,8 +1658,7 @@ def _wire_log_console(window: QMainWindow, ui_state: UiStateStore, image_panel: 
     if help_menu is not None:
         toggle = dock.toggleViewAction()
         toggle.setText("Log Console")
-        toggle.setShortcut(QKeySequence("Ctrl+Shift+L"))
-        toggle.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        bind_action(toggle, "help.log_console", context=Qt.ShortcutContext.ApplicationShortcut)
         toggle.setToolTip("Show the application log: messages, timings and errors.")
         help_menu.addAction(toggle)
         folder_action = help_menu.addAction("Open Log Folder")
@@ -1759,6 +1782,7 @@ def build_main_window(
         window, workflow, image_panel, histogram_panel, roi_table_panel, spectra_panel, sensorgram_panel
     )
     stages.done("dock layout")
+    _wire_shortcuts_dialog(window, ui_state)
     log_dock = _wire_log_console(window, ui_state, image_panel)
     stages.done("Log console")
     # A display panel does no work while its dock is hidden (closed, behind a tab, window minimised) and
@@ -1847,8 +1871,7 @@ def _wire_preferences(
     - A second press of Ctrl+, while the dialog is open just brings it forward."""
     edit_menu.addSeparator()
     action = edit_menu.addAction("Preferences...")
-    action.setShortcut(QKeySequence("Ctrl+,"))
-    action.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+    bind_action(action, "edit.preferences", context=Qt.ShortcutContext.ApplicationShortcut)
 
     def current() -> Preferences:
         return Preferences(

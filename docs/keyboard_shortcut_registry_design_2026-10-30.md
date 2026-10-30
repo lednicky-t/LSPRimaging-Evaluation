@@ -1,6 +1,6 @@
 # Keyboard shortcut registry: one place for every key, and the list the user reads
 
-Status: **proposal, 2026-10-30, no code yet** (waits for the maintainer's go; the screen description below is the one `.claude/rules/gui.md` asks for).
+Status: **built 2026-10-30** (maintainer: "go", with the recommended answers to the four decisions in section 7). Section 8 lists where the build differs from this proposal.
 
 ## 1. What the maintainer asked for
 
@@ -96,3 +96,14 @@ Size: about 150 lines for the table and functions, 150 for the dialog, 40 change
 2. **F1 for the dialog?** Recommended: F1 plus the Help menu entry (the old app used F1).
 3. **Migrate all 8 places in one go?** Recommended: yes (a half-migrated table would be the old drift again).
 4. **Rebinding by the user?** Recommended: not now.
+
+## 8. What was built, and where it differs from the proposal
+
+Files: `src/lspr_imaging_app/shortcuts.py` (the table and its functions), `panels/shortcuts_dialog.py` (the dialog), `app_rewrite._wire_shortcuts_dialog` (Help -> Keyboard shortcuts, F1: a second press closes it). The 8 places of section 3 were migrated; tests: `tests/unit/test_lspri_shortcuts.py` (conflicts, the source and the table agree, exact matching), `tests/integration/test_lspri_shortcuts_dialog.py` (the dialog, and the real menus' keys).
+
+Differences:
+- **Undo / Redo / Copy / Paste keys are written out, not read from Qt's `StandardKey`.** A `StandardKey` lookup needs a running application (it crashed the table's own import in a unit test), and the table must work without one. On Windows they are Ctrl+Z or Alt+Backspace, Ctrl+Y or Alt+Shift+Backspace or Ctrl+Shift+Z, Ctrl+C or Ctrl+Ins, Ctrl+V or Shift+Ins: the same keys as before. Dropped: the dedicated Undo / Redo / Copy / Paste *hardware* keys Qt also lists.
+- **Matching is exact, so a few unusual combinations no longer do what they did**, because a key that works must be a key that is listed: Shift / Ctrl / Alt + Delete or Backspace in the ROI table no longer deletes; Alt+Shift+Up / Down no longer moves a ROI row; Ctrl+Up / Down in an edited cell no longer steps the number (plain and Shift do); in the Rotate tool an arrow with Alt held still nudges by 0.1 degree, Shift still wins over Ctrl. Esc still cancels a tool and closes the step editor whatever else is held (those handlers never looked at the modifiers).
+- **The mouse list covers the image view and the sliders only** (verified against the handlers on 2026-10-30). Gestures elsewhere (the Histogram plot's right-click menu and axis double-click, a dock's title bar, the ROI table's mouse use, the plan bar) are not listed yet: each adds its line to `shortcuts.py` when it is next touched.
+- **Dialog size** is 760 x 540 (the long action texts need the width); the position is not remembered, only the size and the collapsed sections.
+- **Binding id** of the step editor's Esc is `plan_text.cancel` (a `sensorgram.` prefix collided with the Sensorgram's log-event names in the test that scans the source for ids).

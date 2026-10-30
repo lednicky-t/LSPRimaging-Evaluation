@@ -36,9 +36,10 @@ from __future__ import annotations
 import logging
 
 from PyQt6.QtCore import QByteArray
-from PyQt6.QtGui import QActionGroup, QKeySequence
+from PyQt6.QtGui import QActionGroup
 from PyQt6.QtWidgets import QMainWindow, QMenu
 
+from ..shortcuts import PRESET_IDS, bind_action
 from .dock_container import PanelContainer
 from .workflow import WorkflowStage
 
@@ -199,10 +200,11 @@ def wire_view_menu(
     group = QActionGroup(window)
     group.setExclusive(True)
     actions: dict[str, "object"] = {}
-    for index, name in enumerate(PRESET_NAMES, start=1):
+    for name in PRESET_NAMES:
         action = presets_menu.addAction(name)
         action.setCheckable(True)
-        action.setShortcut(QKeySequence(f"Ctrl+Shift+{index}"))
+        if name in PRESET_IDS:
+            bind_action(action, PRESET_IDS[name])
         action.triggered.connect(lambda checked, n=name: manager.apply(n) if checked else None)
         group.addAction(action)
         actions[name] = action

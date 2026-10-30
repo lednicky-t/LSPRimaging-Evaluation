@@ -48,12 +48,13 @@ from PyQt6.QtGui import QColor
 
 from ...image_tools import GeometryModule
 from ...image_tools.geometry.alignment import line_tilt_deg, rotation_correction_deg
+from ...shortcuts import key_matches
 from ...undo import undo_manager
 
 _TOOL_COLOR = "#fbbf24"  # same amber as the rotate button's active state
 _CLICK_ANGLE_DECIMALS = 2  # two-click result: 0.01 deg
 _STEP_ANGLE_DECIMALS = 6  # arrow steps: float-noise cleanup only
-_ARROW_KEYS = {
+_ARROW_SIGNS = {  # the direction of each arrow; which keys nudge, and with which modifier, is `shortcuts.py` ("tools.rotate_nudge*")
     Qt.Key.Key_Left: -1.0,
     Qt.Key.Key_Down: -1.0,
     Qt.Key.Key_Right: 1.0,
@@ -161,16 +162,20 @@ class RotateLineTool(QObject):
         """Arrow-key steps and Esc. Returns True if the key was consumed."""
         if not self._active:
             return False
-        if key == Qt.Key.Key_Escape:
+        if key_matches(key, Qt.KeyboardModifier.NoModifier, "tools.cancel"):  # Esc cancels whatever else is held
             return self.cancel()
-        sign = _ARROW_KEYS.get(key)
+        sign = _ARROW_SIGNS.get(key)
         if sign is None:
             return False
-        step = 0.1
+        # Shift wins over Ctrl (as before); any other modifier counts as none.
         if modifiers & Qt.KeyboardModifier.ShiftModifier:
-            step = 5.0
+            held, binding_id, step = Qt.KeyboardModifier.ShiftModifier, "tools.rotate_nudge_coarse", 5.0
         elif modifiers & Qt.KeyboardModifier.ControlModifier:
-            step = 1.0
+            held, binding_id, step = Qt.KeyboardModifier.ControlModifier, "tools.rotate_nudge_medium", 1.0
+        else:
+            held, binding_id, step = Qt.KeyboardModifier.NoModifier, "tools.rotate_nudge", 0.1
+        if not key_matches(key, held, binding_id):
+            return False
         self._rotate_by(sign * step, prefix="Rotated", decimals=_STEP_ANGLE_DECIMALS)
         return True
 

@@ -116,7 +116,7 @@ Layout, ribbons, preferences, and what runs on the GUI thread.
 - [`ribbon_alignment_and_field_style_2026-10-19.md`](ribbon_alignment_and_field_style_2026-10-19.md): Ribbon alignment and field style (2026-10-19)
 - [`scrolling_ribbons_plan_2026-10-24.md`](scrolling_ribbons_plan_2026-10-24.md): Panels narrower than their control rows: scrolling ribbons (analysis, 2026-10-24)
 - [`preferences_dialog_2026-10-19.md`](preferences_dialog_2026-10-19.md): Edit -> Preferences (2026-10-19)
-- [`keyboard_shortcut_registry_design_2026-10-30.md`](keyboard_shortcut_registry_design_2026-10-30.md): Keyboard shortcut registry: one table that binds the keys and builds the list (2026-10-30) *(proposal, no code: waits for the maintainer's go)*
+- [`keyboard_shortcut_registry_design_2026-10-30.md`](keyboard_shortcut_registry_design_2026-10-30.md): Keyboard shortcut registry: one table that binds the keys and builds the list (2026-10-30) *(built 2026-10-30)*
 - [`startup_gui_thread_audit_2026-10-24.md`](startup_gui_thread_audit_2026-10-24.md): Startup: what runs on the GUI thread (2026-10-24)
 - [`startup_time_2026-10-24.md`](startup_time_2026-10-24.md): Startup time, 2026-10-24: 44.7 s -> 7.1 s, and what is left
 

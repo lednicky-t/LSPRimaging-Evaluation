@@ -11,11 +11,12 @@ from __future__ import annotations
 import math
 
 from PyQt6.QtCore import QModelIndex, QRect, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QFontMetrics, QIcon, QKeyEvent, QKeySequence, QMouseEvent, QPainter, QWheelEvent
+from PyQt6.QtGui import QColor, QFont, QFontMetrics, QIcon, QKeyEvent, QMouseEvent, QPainter, QWheelEvent
 from PyQt6.QtWidgets import QAbstractItemView, QHeaderView, QStyle, QStyleOptionHeader, QTreeView, QWidget
 
 from lspr_ui import get_active_theme
 
+from ...shortcuts import matches
 from .delegate import CHEVRON_ZONE, CHIP_SIZE, GROUP_INDENT, STRIP_WIDTH
 from .model import DEPTH_ROLE, KIND_ROLE
 from .rows import (
@@ -250,23 +251,23 @@ class RoiTreeView(QTreeView):
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # type: ignore[override]
         if self.state() != QAbstractItemView.State.EditingState:
-            if event.matches(QKeySequence.StandardKey.Copy):
+            if matches(event, "roi_table.copy"):
                 self.copy_requested.emit()
                 event.accept()
                 return
-            if event.matches(QKeySequence.StandardKey.Paste):
+            if matches(event, "roi_table.paste"):
                 self.paste_requested.emit()
                 event.accept()
                 return
-            if event.key() == Qt.Key.Key_D and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+            if matches(event, "roi_table.fill_down"):
                 self.fill_down_requested.emit()
                 event.accept()
                 return
-            if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            if matches(event, "roi_table.delete"):
                 self.delete_requested.emit()
                 event.accept()
                 return
-            if event.modifiers() & Qt.KeyboardModifier.AltModifier and event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down):
+            if matches(event, "roi_table.move"):
                 self.move_requested.emit(-1 if event.key() == Qt.Key.Key_Up else 1)
                 event.accept()
                 return

@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import QLineEdit, QStyle, QStyledItemDelegate, QStyleOption
 
 from lspr_ui import get_active_theme
 
+from ...shortcuts import matches
 from .model import (
     ALL_SELECTED_ROLE,
     COLOR_ROLE,
@@ -70,8 +71,8 @@ class _StepLineEdit(QLineEdit):
         self._unit = unit  # None: this cell does not step
 
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
-        if self._unit is not None and event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down):
-            large = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        large = matches(event, "roi_table.cell_step_large")
+        if self._unit is not None and (large or matches(event, "roi_table.cell_step")):
             stepped = step_text(self.text(), 1 if event.key() == Qt.Key.Key_Up else -1, large, self._unit)
             if stepped is not None:
                 self.setText(stepped)
