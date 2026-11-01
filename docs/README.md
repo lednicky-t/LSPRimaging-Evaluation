@@ -8,6 +8,7 @@ Titles below are read from the files. Date in a file name = when it was written 
 
 Rules, structure, and the records every other doc builds on.
 
+- [`import_layering_2026-11-02.md`](import_layering_2026-11-02.md): LSPRi Evaluation: import layering (the floors packages may import from, the 16 known exceptions as a to-do list, how to read a failure)
 - [`maintainability_audit_2026-11-01.md`](maintainability_audit_2026-11-01.md): LSPRi Evaluation: maintainability audit after the cut-over (size, coupling, doc rot, lint, what to do first)
 - [`whole_app_audit_2026-10-29.md`](whole_app_audit_2026-10-29.md): LSPRi Evaluation: whole-app audit (clean-up, maintenance, documentation), 2026-10-29 *(latest audit: start here for clean-up and cut-over questions)*
 - [`old_generation_cutover_plan_2026-10-29.md`](old_generation_cutover_plan_2026-10-29.md): Cut-over plan: replacing the old LSPRi Evaluation app with the rewrite (2026-10-29) *(done 2026-10-29 except phase 3, the module renames: entry points, old code, old engine, dead functions)*
