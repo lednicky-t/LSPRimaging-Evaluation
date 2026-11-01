@@ -3171,7 +3171,7 @@ class ImagePanel(QWidget):
         self._tool_info.setIcon(load_tabler_icon("info-circle", color=theme.text_muted, size=render_size))
         self._tool_info.setToolTip(self._info_text(tool))
 
-    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt naming
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         if watched is self._view and event.type() == QEvent.Type.KeyPress:
             if self._interaction.handle_key(event.key(), event.modifiers()):
                 event.accept()
@@ -3451,7 +3451,7 @@ class ImagePanel(QWidget):
 
     # -- teardown -----------------------------------------------------------
 
-    def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+    def closeEvent(self, event) -> None:
         """Covers the case where this panel *is* shown as its own window
         (a detached/floating panel). The application-level `aboutToQuit`
         hook in `__init__` covers the normal in-a-tab case, which this

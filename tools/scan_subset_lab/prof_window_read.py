@@ -1,4 +1,4 @@
-# ruff: noqa: E701, E702, E401, E402  (lab script: dense one-line style, imports follow the sys.path set-up)
+# ruff: noqa: E402  (lab script: dense one-line style, imports follow the sys.path set-up)
 """Where do the ~1.2 ms of reading a 4-chunk window from one plane go? (cProfile of read_plane_pixels over many planes, hot files)
 
     python prof_window_read.py <zarr> <session folder>
@@ -14,14 +14,14 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import bench_roi_subset as b  # noqa: E402
+import bench_roi_subset as b
 _APP_ON_PATH = b.TOOLS  # importing it puts the app's sources on sys.path (and uses the name, for pyflakes)
-import analysis_stage_timing as st  # noqa: E402
-import numpy as np  # noqa: E402
+import analysis_stage_timing as st
+import numpy as np
 
-from lspr_imaging_app.analysis.scan_jobs import build_scan_plan, source_from_modules  # noqa: E402
-from lspr_imaging_app.dataset import io  # noqa: E402
-from proto_tile_cache import window_for  # noqa: E402
+from lspr_imaging_app.analysis.scan_jobs import build_scan_plan, source_from_modules
+from lspr_imaging_app.dataset import io
+from proto_tile_cache import window_for
 
 zarr, session = Path(sys.argv[1]), Path(sys.argv[2])
 dataset = st.load_one(zarr)

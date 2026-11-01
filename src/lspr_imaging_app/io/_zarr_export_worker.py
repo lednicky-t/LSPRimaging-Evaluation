@@ -29,7 +29,7 @@ def _worker_init() -> None:
     try:
         import numcodecs.blosc as _b
         _b.set_nthreads(1)
-    except Exception:
+    except Exception:  # noqa: BLE001 - Blosc thread count is only a tuning, not required
         pass
 
 

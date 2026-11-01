@@ -256,12 +256,12 @@ class LogPanel(QWidget):
 
     # -- live updates -----------------------------------------------------------------------
 
-    def showEvent(self, event) -> None:  # noqa: N802 - Qt naming
+    def showEvent(self, event) -> None:
         super().showEvent(event)
         self._poll()
         self._timer.start()
 
-    def hideEvent(self, event) -> None:  # noqa: N802 - Qt naming
+    def hideEvent(self, event) -> None:
         self._timer.stop()
         super().hideEvent(event)
 

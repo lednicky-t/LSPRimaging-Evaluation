@@ -680,7 +680,7 @@ class SpectraPanel(QWidget):
                 chosen = [roi_ids[i] for i in sorted(set(np.linspace(0, len(roi_ids) - 1, min(len(roi_ids), MAX_ROIS)).round().astype(int)))]
                 inputs = [data for data in (trace_input(stored, roi_id) for roi_id in chosen) if data is not None]
                 results: object = evaluate_order_quality(inputs, formula_key, metric)
-        except BaseException as exc:  # noqa: BLE001 - nothing may escape a thread silently
+        except BaseException as exc:  # nothing may escape a thread silently
             logger.exception("Judging the polynomial orders failed")
             results = exc
         self._quality_ready.emit(generation, results)
@@ -717,7 +717,7 @@ class SpectraPanel(QWidget):
         try:
             with timed(logger, "spectra.compute", rois=len(job.request.roi_ids), cube=job.request.cube):
                 results: object = compute_spectra(job.stored, job.request)
-        except BaseException as exc:  # noqa: BLE001 - nothing may escape a thread silently
+        except BaseException as exc:  # nothing may escape a thread silently
             logger.exception("Computing the spectra failed")
             results = exc
         self._spectra_ready.emit(job, results)

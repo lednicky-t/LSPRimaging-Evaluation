@@ -179,7 +179,7 @@ class GroupLabelItem(pg.GraphicsObject):
     def _refresh_visibility(self) -> None:
         self.setVisible(bool(self._entries) and self._settings.visible)
 
-    def boundingRect(self) -> QRectF:  # noqa: N802 - Qt naming
+    def boundingRect(self) -> QRectF:
         return QRectF(self._vb.boundingRect())
 
     @staticmethod

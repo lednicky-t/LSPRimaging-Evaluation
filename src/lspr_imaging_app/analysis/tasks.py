@@ -21,7 +21,7 @@ internally - not a port of the function itself, and deliberately without
 its batch-level optimizations (shared ROI-mask caching across a whole
 multi-ROI run, chunk-aware zarr reads, prefetch concurrency). Those
 optimizations belong in a *different* layer - batching/caching around
-repeated `compute_cell` calls, in `worker.py`/`engine.py` or a future
+repeated `compute_cell` calls, in `worker.py`, the former `engine.py` or a future
 optimization pass - once there's a real dataset to measure against
 (CLAUDE.md's Performance Work rules: verify with real data, don't guess).
 
@@ -35,7 +35,7 @@ the store." Baking `formula_value` (`processing/analysis.py` on
 because a display-math choice changed the SHAPE of what's on disk - not
 what the sketch designed. `compute_cell` stops at the reduced
 sample/reference pair; formula math is a query-time concern for whatever
-reads `get_spectrum`/`get_metric` later (not built yet - `engine.py`).
+reads `get_spectrum`/`get_metric` later (now `query.py`).
 
 **Pixel access is the expensive part, but the actual formula
 `sample_pixels = processed[sample_mask]` etc. below is not "just NumPy
@@ -542,7 +542,7 @@ def compute_cell(
             # the background under ROI Y. Self-gating (returns None unless
             # flattening and an exclusion toggle are both on), so no
             # condition is needed here - and it must stay identical to
-            # engine.py's planning-side call, or every cell would look
+            # the planning-side call (`tools/reference_inputs.py`, formerly engine.py), or every cell would look
             # stale against its own stored fingerprint.
             background_exclusion=background_exclusion_digest(
                 all_rois, wl_input.background_settings, detection_settings

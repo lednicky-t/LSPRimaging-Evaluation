@@ -62,8 +62,8 @@ from ...image_tools.mask_export_task import MaskExportTask
 from ..mask_edit_common import action_button
 
 if TYPE_CHECKING:
-    # Deferred - see mask_highlight_actions.py's own identical note for why
-    # a plain top-level import here would close a real import cycle.
+    # Deferred (type checking only): a plain top-level import here would
+    # close a real import cycle.
     from .panel import ImagePanel
 
 _CLEAR_COLOR = "#f8fafc"  # GuiTheme.text_primary - 2026-10-02 maintainer request: white, since it's a real, active action

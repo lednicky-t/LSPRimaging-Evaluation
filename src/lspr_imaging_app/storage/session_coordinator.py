@@ -10,8 +10,8 @@ dataset itself - which images exist - not about which derived-data folder
 a session lives in).
 
 This class knows nothing about the scientific modules a session restore
-touches (geometry, ROIs, masks, ...) - same reason ``AnalysisEngine`` and
-``SessionAutosave`` take callables instead of holding module references:
+touches (geometry, ROIs, masks, ...) - same reason ``SessionAutosave`` (and the former
+``AnalysisEngine``) take callables instead of holding module references:
 ``app_rewrite.py`` stays the one place that knows about every module,
 subscribing to :attr:`active_session_changed` to actually run a restore
 (see ``_wire_session_coordinator``). This class only ever touches

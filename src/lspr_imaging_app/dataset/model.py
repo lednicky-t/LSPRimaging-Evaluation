@@ -178,7 +178,7 @@ class ImageDataset:
         """The wavelengths *this one cube* actually has records for, sorted.
 
         **New on the `rewrite` branch (2026-09-23), not part of `domain/
-        models.py`'s verbatim port** - added while wiring `AnalysisEngine`
+        models.py`'s verbatim port** - added while wiring the former `AnalysisEngine`
         to real modules. `wavelengths_nm` above is dataset-*global* (the
         union across every cube); using it per-cube would silently pretend
         a cube has a wavelength it never recorded, and the analysis engine

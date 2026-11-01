@@ -146,7 +146,7 @@ class StartupTracker(QObject):
             try:
                 if not step.done():
                     return step
-            except Exception as exc:  # noqa: BLE001 - a broken question must end the run visibly, not leave a spinner
+            except Exception as exc:  # a broken question must end the run visibly, not leave a spinner
                 logger.exception("Startup step %r could not be checked", step.name)
                 return exc
         return None

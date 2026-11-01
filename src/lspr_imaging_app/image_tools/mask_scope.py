@@ -4,7 +4,7 @@ only).
 
 One tiny shared object, mirroring ``active_tool.py``'s ``ActiveToolModule``
 exactly - so the Workflow panel's Mask section
-(``panels/workflow/mask_highlight_actions.py``) and the Image panel's own
+(``panels/workflow/mask_highlight_actions.py``, since removed) and the Image panel's own
 "Mask" ribbon tab (``panels/image/mask_scope_toggle.py``) show and drive the
 same live selection without knowing about each other, the same "one shared
 state machine for two visually-separate toolbars" shape ``ActiveToolModule``

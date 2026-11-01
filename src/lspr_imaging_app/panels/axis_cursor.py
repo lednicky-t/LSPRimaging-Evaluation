@@ -68,24 +68,24 @@ class _Handle(pg.GraphicsObject):
         scene_x = view_box.mapViewToScene(QPointF(self._x, 0.0)).x()
         self.setPos(parent.mapFromScene(QPointF(scene_x, 0.0)).x(), 0.0)
 
-    def boundingRect(self) -> QRectF:  # noqa: N802 - Qt naming
+    def boundingRect(self) -> QRectF:
         reach = _RADIUS + _PEN_WIDTH + _GRAB
         return QRectF(-reach, -reach, 2.0 * reach, 2.0 * reach)
 
-    def paint(self, painter, _option, _widget=None) -> None:  # noqa: ANN001 - Qt signature
+    def paint(self, painter, _option, _widget=None) -> None:  # Qt signature
         painter.setRenderHint(painter.RenderHint.Antialiasing)
         painter.setPen(QPen(self._color, _PEN_WIDTH))
         painter.setBrush(QColor(get_active_theme().window_bg))
         painter.drawEllipse(QPointF(0.0, 0.0), _RADIUS, _RADIUS)
 
-    def mouseDragEvent(self, ev) -> None:  # noqa: N802 - pyqtgraph naming
+    def mouseDragEvent(self, ev) -> None:
         if ev.button() != Qt.MouseButton.LeftButton or self._view_box is None:
             ev.ignore()
             return
         ev.accept()  # the view box must not pan while the circle is dragged
         self.dragged.emit(float(self._view_box.mapSceneToView(ev.scenePos()).x()))
 
-    def mouseClickEvent(self, ev) -> None:  # noqa: N802 - pyqtgraph naming
+    def mouseClickEvent(self, ev) -> None:
         if ev.button() == Qt.MouseButton.LeftButton:
             ev.accept()  # a click on the circle is not a click on the plot behind it
 

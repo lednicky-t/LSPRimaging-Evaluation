@@ -170,7 +170,7 @@ class DatasetSummarySection(QWidget):
             try:
                 height, width = load_image_shape(str(records[0].path))
                 resolution_text = f"{width} x {height} px"
-            except Exception:
+            except Exception:  # noqa: BLE001 - the summary shows "Unknown" instead
                 resolution_text = "Unknown"
 
         is_ome_zarr = dataset_is_ome_zarr(dataset)

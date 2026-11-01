@@ -97,3 +97,30 @@ version = {attr = "lspr_imaging_app.version.APP_VERSION"}
 [tool.ruff]
 target-version = "py312"
 src = ["src"]
+
+[tool.ruff.lint]
+# A deliberate rule list (2026-11-01, docs/maintainability_audit_2026-11-01.md). Without a "select" ruff runs
+# only its defaults (E4, E7, E9, F); the project's `# noqa` comments had been written for rules that were never on.
+#   B       flake8-bugbear: patterns that are usually bugs (variable captured by a closure in a loop, unused loop variable, ...)
+#   BLE     "blind except": every `except Exception` must say why in `# noqa: BLE001 - reason` (CLAUDE.md: no silent failures);
+#           ruff does not flag one that logs with exc_info or re-raises
+#   SIM115  a file opened without `with` must say why
+#   RUF100  a `# noqa` that suppresses nothing (keeps every suppression honest)
+select = ["E4", "E7", "E9", "F", "B", "BLE", "SIM115", "RUF100"]
+ignore = [
+    # zip() without strict=: strict=True would make unequal lengths raise, which is a behaviour change in numeric code
+    # that has to be decided per call (48 calls); revisit when one of them bites.
+    "B905",
+]
+
+[tool.ruff.lint.flake8-bugbear]
+# Immutable values, fine as default arguments (B008): QModelIndex() in the Qt model overrides, and the frozen FeatureSettings.
+extend-immutable-calls = [
+    "PyQt6.QtCore.QModelIndex",
+    "lspr_imaging_app.image_tools.mask.roi_features.FeatureSettings",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Lab scripts (not shipped): loops whose variable is unused or captured by a closure that runs at once (B007, B023),
+# and result files opened without `with` (SIM115).
+"tools/**/*.py" = ["B007", "B023", "SIM115"]

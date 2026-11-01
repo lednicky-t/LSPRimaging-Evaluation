@@ -1,4 +1,4 @@
-# ruff: noqa: E701, E702, E401, E402  (lab script: dense one-line style, imports follow the sys.path set-up)
+# ruff: noqa: E402  (lab script: dense one-line style, imports follow the sys.path set-up)
 """End to end through the real ScanTask in Performance mode: move one (or a few) ROIs by 1 px, press "Fast scan", time it, and check the result.
 
 Works on a COPY of the session's scan.h5 (never the real one) and never saves the session (autosave is suspended by `build_modules`).
@@ -20,18 +20,18 @@ from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import bench_roi_subset as b  # noqa: E402
+import bench_roi_subset as b
 _APP_ON_PATH = b.TOOLS  # importing it puts the app's sources on sys.path (and uses the name, for pyflakes)
-import analysis_stage_timing as st  # noqa: E402
-import numpy as np  # noqa: E402
-from PyQt6.QtWidgets import QApplication  # noqa: E402
+import analysis_stage_timing as st
+import numpy as np
+from PyQt6.QtWidgets import QApplication
 
-from lspr_imaging_app.analysis import scan_jobs  # noqa: E402
-from lspr_imaging_app.analysis.scan import scan_cubes  # noqa: E402
-from lspr_imaging_app.analysis.scan_store import read_scan  # noqa: E402
-from lspr_imaging_app.analysis.scan_task import ScanTask  # noqa: E402
-from lspr_imaging_app.dataset import io  # noqa: E402
-from lspr_imaging_app.image_tools.geometry import transform  # noqa: E402
+from lspr_imaging_app.analysis import scan_jobs
+from lspr_imaging_app.analysis.scan import scan_cubes
+from lspr_imaging_app.analysis.scan_store import read_scan
+from lspr_imaging_app.analysis.scan_task import ScanTask
+from lspr_imaging_app.dataset import io
+from lspr_imaging_app.image_tools.geometry import transform
 
 _app = QApplication.instance() or QApplication([])
 

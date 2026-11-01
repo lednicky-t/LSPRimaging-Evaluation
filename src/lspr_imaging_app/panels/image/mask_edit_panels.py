@@ -28,9 +28,9 @@ show the edits".
   the radius in the ribbon; the eye button at the left switches the preview.
 - **Threshold / Local contrast**: the two tuning spinboxes each panel shows
   are real and push to `MaskModule.set_tool_settings` (the same fields
-  `workflow/mask_settings.py`'s `MaskSettingsSection` already owns - both
-  forms read/write the same `MaskSettings`, so editing either one updates the
-  other). **Wired 2026-10-29**: Add/Subtract merge the pixels the tool selects
+  the former Workflow-panel `MaskSettingsSection` owned, removed 2026-10-29
+  with `workflow/mask_settings.py`, when two forms edited the one
+  `MaskSettings`). **Wired 2026-10-29**: Add/Subtract merge the pixels the tool selects
   (`panels/mask_candidate_editor.py`), and the same pixels are previewed on the
   image while the tool is picked (eye button). Both need the *raw* image plus
   `scipy` Gaussian filtering (0.2-4 s), so the candidate is made on a worker
@@ -108,8 +108,8 @@ from ..ribbon_fields import style_ribbon_number_field
 from .edit_preview_toggle import EditPreviewToggle
 
 if TYPE_CHECKING:
-    # Deferred - see mask_highlight_actions.py's own identical note for why
-    # a plain top-level import here would close a real import cycle.
+    # Deferred (type checking only): a plain top-level import here would
+    # close a real import cycle.
     from .panel import ImagePanel
 
 _MORPHOLOGY_COLOR = "#f8fafc"  # GuiTheme.text_primary - 2026-10-02 maintainer request: white, since these are real, active actions
@@ -140,8 +140,8 @@ def _push_tool_settings(mask: MaskModule, **overrides: object) -> None:
     """`MaskModule.set_tool_settings` takes every tunable at once (its own
     "first real owner, combined-Apply shape" docstring) - this reads the
     current settings and overrides just the caller's fields, the same
-    "current + override" shape `workflow/mask_settings.py`'s own
-    `_push_settings` uses, factored out since four panels in this file each
+    "current + override" shape the removed `workflow/mask_settings.py`'s
+    `_push_settings` used, factored out since four panels in this file each
     only touch a subset."""
     current: MaskSettings = mask.settings()
     fields: dict[str, object] = {
@@ -432,7 +432,7 @@ class _HoverWatcher(QObject):
         self._on_enter = on_enter
         self._on_leave = on_leave
 
-    def eventFilter(self, watched: QObject | None, event: QEvent | None) -> bool:  # noqa: N802 - Qt's name
+    def eventFilter(self, watched: QObject | None, event: QEvent | None) -> bool:  # Qt's name
         if watched is not None and event is not None:
             if event.type() == QEvent.Type.Enter:
                 self._on_enter(watched)

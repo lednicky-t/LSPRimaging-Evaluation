@@ -148,7 +148,7 @@ class _WriteWorker:
             error: BaseException | None = None
             try:
                 self._write(root, prepared)
-            except Exception as exc:  # reported on the GUI thread; the worker must survive it
+            except Exception as exc:  # noqa: BLE001 - reported on the GUI thread; the worker must survive it
                 error = exc
             try:
                 self._on_done(root, error)
@@ -163,7 +163,7 @@ class SessionAutosave(QObject):
     `AUTOSAVE_DEBOUNCE_MS` of activity, and runs that write off the GUI thread.
 
     Takes `capture`/`naming` as callables rather than module references, the
-    same convention `AnalysisEngine` and `ImageRenderer` follow: this class
+    same convention `ImageRenderer` follows (the former `AnalysisEngine` did too): this class
     then holds no module state of its own and a test can drive it with two
     plain functions. Both are called on the GUI thread only.
 
@@ -286,7 +286,7 @@ class SessionAutosave(QObject):
             with timed(logger, "session.capture", root=root.name) as t:
                 prepared = prepare_session(self._capture(), self._naming())
                 t.set(masks=len(prepared.mask_changes))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - reported through `_report_failure`; `_dirty` stays set so the next edit retries
             # A failed capture must not take the application down, and must not be
             # silent either. `_dirty` stays set, so the next edit or the quit flush tries again.
             self._report_failure(root, exc)

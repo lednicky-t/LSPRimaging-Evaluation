@@ -542,7 +542,7 @@ class ScanStore:
                 lo, hi = batch[a][1], batch[b - 1][1] + 1
                 recipe = state["recipe_id"][lo:hi]
                 final = np.stack([hashes[row] for _, row, _, _ in batch[a:b]])
-                for k, (cube_pos, row, idx, new_hashes) in enumerate(batch[a:b]):
+                for k, (_cube_pos, _row, idx, new_hashes) in enumerate(batch[a:b]):
                     if idx is None:
                         recipe[k] = self._recipe_id
                         final[k] = new_hashes

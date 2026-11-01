@@ -67,7 +67,7 @@ def save_acquisition_metadata_sidecar(path: Path, metadata: ImagingAcquisitionMe
 
 def acquisition_metadata_from_payload(payload: dict) -> ImagingAcquisitionMetadata:
     """Inverse of `build_acquisition_metadata_payload` - shared by the sidecar
-    JSON reader below and by `io/dataset.py`'s OME-Zarr `.zattrs` reader
+    JSON reader below and by `dataset/io.py`'s OME-Zarr `.zattrs` reader
     (`load_ome_zarr_dataset`), since both store the same payload shape."""
     if not isinstance(payload, dict) or "metadata" not in payload:
         raise ValueError("Invalid acquisition metadata format.")

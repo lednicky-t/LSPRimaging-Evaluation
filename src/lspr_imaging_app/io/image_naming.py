@@ -1,5 +1,5 @@
 """Shared image-filename convention: `WL<wavelength>Frame<spectral_cube_index>`
-(e.g. `imLCTFatWL500Frame3.tif`). Used by both `io/dataset.py` (parsing real
+(e.g. `imLCTFatWL500Frame3.tif`). Used by both `dataset/io.py` (parsing real
 TIFF filenames) and `io/legacy_metadata.py` (parsing the same names out of
 `measureing_times.csv`'s `Image` column) - split into its own module so
 neither has to import the other for it.

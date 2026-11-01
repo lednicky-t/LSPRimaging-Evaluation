@@ -139,14 +139,14 @@ class SampleCirclesItem(pg.GraphicsObject):
             brush = self._brushes[color] = QBrush(qcolor)
         return brush
 
-    def boundingRect(self) -> QRectF:  # noqa: N802 - Qt naming
+    def boundingRect(self) -> QRectF:
         if self._rect.isNull() and self._polygon is None:
             return QRectF()
         # A cosmetic stroke is not part of the data rectangle: pad by a few screen pixels.
         pad_x, pad_y = 3.0 * self.pixelWidth(), 3.0 * self.pixelHeight()
         return self._rect.adjusted(-pad_x, -pad_y, pad_x, pad_y)
 
-    def viewTransformChanged(self) -> None:  # noqa: N802 - pyqtgraph naming
+    def viewTransformChanged(self) -> None:
         self.prepareGeometryChange()  # the pixel padding depends on the zoom
         super().viewTransformChanged()
 

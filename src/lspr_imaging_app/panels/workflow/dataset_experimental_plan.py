@@ -4,7 +4,7 @@ illumination settings, per-image timing, operator notes, pump-plan/comment
 log) attached to the loaded dataset.
 
 **Real import/export this time**, unlike the read-only first pass
-(`dataset_metadata.py`, now superseded): a file-path field + Import/Export
+(`dataset_metadata.py`, since removed): a file-path field + Import/Export
 icon buttons in one row, matching the maintainer's spec. Ported from the
 stable app's `MetadataController` (`gui/metadata_controller.py`):
 `import_metadata_files` (`io/metadata_import.py` - a pure, Qt-free

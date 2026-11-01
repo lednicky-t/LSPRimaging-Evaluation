@@ -182,7 +182,7 @@ class ScanResultsModule(QObject):
         except ScanFileError as exc:
             self._loaded.emit(generation, None, str(exc))
             return
-        except BaseException as exc:  # noqa: BLE001 - nothing may escape a thread silently
+        except BaseException as exc:  # nothing may escape a thread silently
             logger.exception("Reading the scan file failed")
             self._loaded.emit(generation, None, f"Could not read {path.name}: {exc}")
             return
@@ -250,7 +250,7 @@ class ScanResultsModule(QObject):
         except ValueError as exc:  # e.g. no ROIs: the whole file is out of date for the current setup
             self._checked.emit(generation, None, str(exc))
             return
-        except BaseException as exc:  # noqa: BLE001
+        except BaseException as exc:
             logger.exception("Checking the scan file failed")
             self._checked.emit(generation, None, f"Could not check the scan: {exc}")
             return

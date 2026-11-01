@@ -9,12 +9,12 @@ safe exception is a single-thread ``QThreadPool`` for HDF5-only writes that
 need strict ordering (sketch §4).
 
 **Built 2026-09-22, deliberately minimal** - not a full port of the old
-app's ``FunctionWorker`` (``gui/worker.py``), which is a much larger
+app's ``FunctionWorker`` (``gui/worker.py`` in the old app, git tag ``legacy-final``), which is a much larger
 QRunnable with progress/partial-result Qt signal plumbing built in. This
 class is just the threading primitive: run one callable on a fresh
 ``threading.Thread``, expose a stable, cooperatively-checked cancel flag.
 Progress/result reporting is the caller's job - the task callable itself
-(built by ``AnalysisEngine``) can safely call `.emit()` on a Qt signal
+(built by the caller; formerly ``AnalysisEngine``) can safely call `.emit()` on a Qt signal
 directly from this background thread, since Qt queues a cross-thread
 `.emit()` onto the receiver's own thread automatically (the same guarantee
 ``FunctionWorker``'s own docstring documents) - no extra machinery needed
@@ -40,8 +40,9 @@ logger = logging.getLogger(__name__)
 class AnalysisWorker:
     """Runs one task on a plain ``threading.Thread``, never a
     ``QThreadPool``. Only one task may be in flight at a time - matches
-    ``AnalysisEngine`` owning a single ``AnalysisWorker`` instance and
-    ``run_analysis`` being the only entry point that triggers computation
+    the former ``AnalysisEngine``, which owned a single ``AnalysisWorker``
+    instance with ``run_analysis`` as the only entry point that triggered
+    computation
     (sketch §7)."""
 
     def __init__(self) -> None:
@@ -91,7 +92,7 @@ class AnalysisWorker:
         excepthook this exists to avoid."""
         try:
             task()
-        except BaseException as exc:  # noqa: BLE001 - nothing above this frame can catch it
+        except BaseException as exc:  # nothing above this frame can catch it
             self.last_error = exc
             logger.exception("Analysis task failed")
 

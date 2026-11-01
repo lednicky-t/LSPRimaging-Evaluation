@@ -14,7 +14,7 @@ data, safe to give to any thread or process, and a later edit in the app cannot 
 
 What is deliberately handled here, not in the scan:
 
-* the dark frame and other non-spectral frames are left out (``is_spectral``), as in ``_gather_wavelength_inputs``;
+* the dark frame and other non-spectral frames are left out (``is_spectral``), as in the former ``AnalysisEngine._gather_wavelength_inputs`` (now ``tools/reference_inputs.py``);
 * the wavelength axis is the **union** over cubes (compared after rounding to 0.01 nm). Cubes with different wavelength sets are not
   expected; if it happens a missing frame stays empty in the result and a warning says how many cubes differ. Two frames of one cube
   that fall on the same rounded wavelength are an error, never silently merged;

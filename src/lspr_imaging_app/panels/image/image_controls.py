@@ -113,7 +113,7 @@ class ImageViewBox(pg.ViewBox):
         this class needing to know which tool, if any, is on."""
         self._left_drag_handler = handler
 
-    def wheelEvent(self, ev, axis=None):  # noqa: N802 - Qt/pyqtgraph naming
+    def wheelEvent(self, ev, axis=None):
         if not ev.modifiers() & Qt.KeyboardModifier.ControlModifier:
             super().wheelEvent(ev, axis)
             return
@@ -124,7 +124,7 @@ class ImageViewBox(pg.ViewBox):
         finally:
             self.state["wheelScaleFactor"] = normal
 
-    def mouseDragEvent(self, ev, axis=None):  # noqa: N802 - Qt/pyqtgraph naming
+    def mouseDragEvent(self, ev, axis=None):
         if ev.button() == Qt.MouseButton.LeftButton and self._left_drag_handler is not None:
             if self._left_drag_handler(ev):
                 ev.accept()

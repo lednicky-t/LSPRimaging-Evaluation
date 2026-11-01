@@ -1,8 +1,8 @@
 """Dataset module (docs/rewrite_architecture_sketch_2026-09.md §7, §10).
 
 Owns ``ImageDataset``, acquisition metadata, format load/convert. Per the
-feature inventory this layer is already clean in the current app
-(``io/dataset.py``) - ported largely as-is into ``io.py``.
+feature inventory this layer was already clean in the old app
+(``io/dataset.py``, git tag ``legacy-final``) - ported largely as-is into ``io.py``.
 
 **Correction to sketch §10 (2026-09-20)**: the sketch proposed splitting
 this into ``io_tiff.py``/``io_ome_zarr.py``. The real file doesn't support

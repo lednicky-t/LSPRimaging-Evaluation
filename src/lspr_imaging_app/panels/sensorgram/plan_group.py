@@ -90,17 +90,17 @@ class _HeightBox(QSpinBox):
         self.setValue(5)
         self.setKeyboardTracking(False)  # a value is taken on Enter or when the field is left
 
-    def textFromValue(self, value: int) -> str:  # noqa: N802 - Qt naming
+    def textFromValue(self, value: int) -> str:
         return "Full" if value >= HEIGHT_FULL else f"{value} %"
 
-    def valueFromText(self, text: str) -> int:  # noqa: N802 - Qt naming
+    def valueFromText(self, text: str) -> int:
         word = text.strip().lower()
         if word.startswith("f"):
             return HEIGHT_FULL
         digits = "".join(ch for ch in word if ch.isdigit())
         return min(max(int(digits), 1), HEIGHT_FULL) if digits else self.value()
 
-    def validate(self, text: str, pos: int):  # noqa: A003 - Qt naming
+    def validate(self, text: str, pos: int):
         word = text.strip().lower()
         if not word or "full".startswith(word) or word.rstrip("% ").isdigit():
             return QValidator.State.Acceptable, text, pos

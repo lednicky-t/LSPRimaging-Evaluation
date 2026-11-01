@@ -82,10 +82,10 @@ class OrderPicker(PickMenu):
     def value(self) -> int:
         return int(self.currentData())  # type: ignore[arg-type]
 
-    def setValue(self, value: int) -> None:  # noqa: N802 - Qt naming, as QSpinBox
+    def setValue(self, value: int) -> None:
         self.setCurrentIndex(min(max(int(value), 1), MAX_ORDER) - 1)
 
-    def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802 - Qt naming
+    def wheelEvent(self, event: QWheelEvent) -> None:
         """The wheel steps the order: up = higher. A touch pad's small deltas add up to one step per notch."""
         if not self.isEnabled():
             event.ignore()

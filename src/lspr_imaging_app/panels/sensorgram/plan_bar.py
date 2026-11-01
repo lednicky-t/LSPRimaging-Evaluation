@@ -147,7 +147,7 @@ class PlanBarItem(DeviceSpaceItem):
 
     # -- geometry in data coordinates ---------------------------------------------------------------------------------------
 
-    def boundingRect(self) -> QRectF:  # noqa: N802 - Qt naming
+    def boundingRect(self) -> QRectF:
         return self.view_rect() if self.is_shown() else QRectF()
 
     def _pixel_width(self) -> float:
@@ -255,7 +255,7 @@ class PlanBarItem(DeviceSpaceItem):
 
     # -- pointer gestures -----------------------------------------------------------------------------------------------------
 
-    def mouseDragEvent(self, ev) -> None:  # noqa: N802 - pyqtgraph naming
+    def mouseDragEvent(self, ev) -> None:
         """Left-drag on a boundary moves it. Anything else is declined, so the plot's own drags (the baseline selector, the cube handle) are untouched."""
         if ev.button() != Qt.MouseButton.LeftButton or not self.is_shown():
             ev.ignore()
@@ -278,7 +278,7 @@ class PlanBarItem(DeviceSpaceItem):
             self._drag_together = False
             self.edge_drag_finished.emit()
 
-    def mouseClickEvent(self, ev) -> None:  # noqa: N802 - pyqtgraph naming
+    def mouseClickEvent(self, ev) -> None:
         step = self.step_at_local(ev.pos()) if self.is_shown() else None
         if step is None:
             ev.ignore()
@@ -355,7 +355,7 @@ class PlanBarItem(DeviceSpaceItem):
             )
         return drawn
 
-    def paint(self, painter: QPainter, option, widget=None) -> None:  # noqa: N802 - Qt naming
+    def paint(self, painter: QPainter, option, widget=None) -> None:
         if not self.is_shown():
             return
         view = self.view_rect()

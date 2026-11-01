@@ -50,7 +50,7 @@ class ElidingLabel(QLabel):
         if text:
             self.setText(text)
 
-    def setText(self, text: str) -> None:  # noqa: N802 - overriding Qt's own camelCase API
+    def setText(self, text: str) -> None:  # overriding Qt's own camelCase API
         self.setToolTip(text)
         elided = self.fontMetrics().elidedText(text, Qt.TextElideMode.ElideMiddle, _MAX_TEXT_WIDTH_PX)
         super().setText(elided)

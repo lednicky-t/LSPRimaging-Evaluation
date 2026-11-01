@@ -68,5 +68,5 @@ def apply_windows_titlebar_color(window, theme) -> None:
         # Windows builds older than 11 22H2 - not this app's problem to
         # solve, the OS default title bar is a perfectly fine fallback.
         logger.debug("Could not set native title bar color (needs Windows 11 22H2+)", exc_info=True)
-    except Exception:
+    except Exception:  # noqa: BLE001 - cosmetic; the OS default title bar is a fine fallback (logged at debug)
         logger.debug("Could not set native title bar color", exc_info=True)

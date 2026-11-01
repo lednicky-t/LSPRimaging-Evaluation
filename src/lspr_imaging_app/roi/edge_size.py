@@ -3,7 +3,7 @@
 Why: a spot's edge is feathered by the optics, so "the diameter" depends on where on the
 edge you stop. The ROI should contain only pixels that look like the inside of the spot,
 so the edge pixels (25 / 50 / 75 % of the way from spot to background) stay outside it.
-Several definitions are implemented side by side so the lab (`tools/array_lab.py`) can
+Several definitions are implemented side by side so the lab (`tools/array_lab.py`, removed in cut-over phase 2c) could
 compare them on synthetic spots of known size and on real data; the winner stays and the
 others are deleted (maintainer, 2026-10-08).
 

@@ -95,7 +95,7 @@ def _finite_runs(*arrays: np.ndarray) -> list[tuple[int, int]]:
 class _MiddlePanViewBox(pg.ViewBox):
     """pyqtgraph pans with the left button by default; here only the middle button pans (the left one is left free for clicking a cube)."""
 
-    def mouseDragEvent(self, ev, axis=None):  # noqa: N802 - pyqtgraph naming
+    def mouseDragEvent(self, ev, axis=None):
         if ev.button() == Qt.MouseButton.LeftButton:
             ev.ignore()
             return
@@ -103,7 +103,7 @@ class _MiddlePanViewBox(pg.ViewBox):
 
     claim_right_click = None  # set by the plot: a function (scene position) -> bool, True where the plan bar wants the right-click
 
-    def mouseClickEvent(self, ev):  # noqa: N802 - pyqtgraph naming
+    def mouseClickEvent(self, ev):
         """pyqtgraph hands a right-click to the ViewBox before any item and the ViewBox accepts it (its own menu). Over a step of the plan bar the click is declined
         here, so that the bar (and its menu) gets it."""
         if ev.button() == Qt.MouseButton.RightButton and self.claim_right_click is not None and self.claim_right_click(ev.scenePos()):

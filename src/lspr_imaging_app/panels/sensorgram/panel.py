@@ -715,7 +715,7 @@ class SensorgramPanel(QWidget):
                     runner=None if self._trace_pool is None else self._trace_pool.run,
                 )
             self._result_ready.emit(job, series, new, None)
-        except BaseException as exc:  # noqa: BLE001 - nothing may escape a thread silently
+        except BaseException as exc:  # nothing may escape a thread silently
             logger.exception("Computing the sensorgram failed")
             self._result_ready.emit(job, None, {}, exc)
 

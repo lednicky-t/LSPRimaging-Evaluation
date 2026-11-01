@@ -329,7 +329,7 @@ class HistogramPanel(QWidget):
             started = time.perf_counter()
             try:
                 counts = compute.redraw_counts(job.image, job.region, job.ignore_mask, job.edges)
-            except Exception:  # noqa: BLE001 - a failed redraw leaves the plot as it was
+            except Exception:  # a failed redraw leaves the plot as it was
                 logger.exception("Histogram computation failed")
                 counts = None
             emit_timing(
@@ -561,7 +561,7 @@ class HistogramPanel(QWidget):
             return
         self._apply_roi_curves(context, masks)
 
-    def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+    def closeEvent(self, event) -> None:
         self._roi_masks.stop()
         self._selected_masks.stop()
         self._stop_worker()

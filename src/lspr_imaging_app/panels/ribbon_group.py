@@ -50,7 +50,7 @@ class RibbonSeparator(QFrame):
         """``(top, bottom)`` of the drawn line in this widget's coordinates."""
         return self._top_offset, self._top_offset + BUTTON_SIZE
 
-    def paintEvent(self, event) -> None:  # type: ignore[override]  # noqa: N802 - Qt naming
+    def paintEvent(self, event) -> None:  # type: ignore[override]
         top, bottom = self.line_span()
         painter = QPainter(self)
         painter.setPen(QPen(self.palette().color(QPalette.ColorRole.WindowText), 1))

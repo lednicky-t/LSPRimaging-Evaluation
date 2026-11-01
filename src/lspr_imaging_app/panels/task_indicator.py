@@ -116,7 +116,7 @@ class SpinnerWidget(QWidget):
         self._head = (self._head + 1) % self._SPOKES
         self.update()
 
-    def paintEvent(self, _event) -> None:  # noqa: N802 - Qt override
+    def paintEvent(self, _event) -> None:  # Qt override
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         color = QColor(get_active_theme().accent_blue)

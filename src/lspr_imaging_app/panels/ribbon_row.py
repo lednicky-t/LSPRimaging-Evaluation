@@ -60,7 +60,7 @@ class RibbonRow(QWidget):
     def add_stretch(self) -> None:
         self._layout.addStretch(1)
 
-    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 - Qt naming
+    def mouseDoubleClickEvent(self, event) -> None:
         """Fields and check boxes take their own clicks; one that reaches the row itself landed on empty space."""
         if event.button() == Qt.MouseButton.LeftButton:
             self.roll_up_requested.emit()

@@ -58,7 +58,7 @@ class StepTextEditor(QLineEdit):
         if self._open:
             self._close(commit=False)
 
-    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802 - Qt naming
+    def keyPressEvent(self, event: QKeyEvent) -> None:
         if key_matches(event.key(), Qt.KeyboardModifier.NoModifier, "plan_text.cancel"):  # Esc, whatever else is held
             self._close(commit=False)
             event.accept()

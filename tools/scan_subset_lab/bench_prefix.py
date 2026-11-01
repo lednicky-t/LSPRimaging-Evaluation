@@ -1,9 +1,9 @@
-# ruff: noqa: E701, E702, E401, E402  (lab script: dense one-line style, imports follow the sys.path set-up)
+# ruff: noqa: E702, E401, E402  (lab script: dense one-line style, imports follow the sys.path set-up)
 """The serial part of a Fast scan before any worker gets work (scan_task._compute): plan without masks, hashes, store.prepare, stale matrix, plan with masks, subsets."""
 import cProfile, io as _io, pstats, shutil, sys, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
-import bench_roi_subset as b  # noqa: E402
+import bench_roi_subset as b
 _APP_ON_PATH = b.TOOLS  # importing it puts the app's sources on sys.path (and uses the name, for pyflakes)
 import numpy as np
 import analysis_stage_timing as st

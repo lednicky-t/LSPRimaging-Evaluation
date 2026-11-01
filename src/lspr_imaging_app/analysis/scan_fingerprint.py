@@ -230,7 +230,7 @@ def cell_hashes(plan: ScanPlan, *, local_masks: bool = True) -> np.ndarray:
             else:
                 cube.update(mask_key)  # the whole mask, as before
         parts: dict[int, list[bytes]] = {}
-        for column, frame, mask_key, packed_column in masked:
+        for _column, frame, mask_key, packed_column in masked:
             if frame.ignore is not None:
                 mask_of = lambda array=frame.ignore: np.asarray(array, dtype=bool)  # noqa: E731
             else:

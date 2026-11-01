@@ -97,11 +97,11 @@ class _Layer(pg.GraphicsObject):
         self._screen_space = screen_space
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemClipsChildrenToShape, True)
 
-    def boundingRect(self) -> QRectF:  # noqa: N802 - Qt naming
+    def boundingRect(self) -> QRectF:
         # Screen space: the whole view box (the label items paint anywhere in it). Data space: the visible part of the data.
         return QRectF(self._vb.boundingRect()) if self._screen_space else QRectF(self._vb.viewRect())
 
-    def viewTransformChanged(self) -> None:  # noqa: N802 - pyqtgraph naming
+    def viewTransformChanged(self) -> None:
         self.prepareGeometryChange()  # the visible rectangle moved with the view
         super().viewTransformChanged()
 
@@ -156,7 +156,7 @@ class LayerCacheEffect(QGraphicsEffect):
         self._entries.clear()
         self._full = False
 
-    def draw(self, painter) -> None:  # noqa: N802 - Qt naming
+    def draw(self, painter) -> None:
         state = self.state
         if state is None:
             self.drawSource(painter)

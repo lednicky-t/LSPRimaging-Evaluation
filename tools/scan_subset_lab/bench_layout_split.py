@@ -1,11 +1,11 @@
-# ruff: noqa: E701, E702, E401, E402  (lab script: dense one-line style, imports follow the sys.path set-up)
+# ruff: noqa: E702, E401, E402  (lab script: dense one-line style, imports follow the sys.path set-up)
 """Same worker, two passes: pass 1 builds the layouts, pass 2 has them cached -> the split of a refresh into layout cost and per-frame cost."""
 import sys, time
 from dataclasses import replace
 from pathlib import Path
 sys.argv = [sys.argv[0]] + sys.argv[1:]
 sys.path.insert(0, str(Path(__file__).parent))
-import bench_roi_subset as b  # noqa: E402
+import bench_roi_subset as b
 _APP_ON_PATH = b.TOOLS  # importing it puts the app's sources on sys.path (and uses the name, for pyflakes)
 import numpy as np
 from lspr_imaging_app.analysis.scan import _Worker

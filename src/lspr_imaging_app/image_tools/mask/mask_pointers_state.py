@@ -73,7 +73,7 @@ def _decode_contour(payload: object) -> ContourMask | None:
         packed = np.frombuffer(base64.b64decode(str(payload["data"]).encode("ascii")), dtype=np.uint8)
         bits = np.unpackbits(packed, count=height * width).astype(bool).reshape((height, width))
         return ContourMask(x0=int(payload["x0"]), y0=int(payload["y0"]), mask=bits)
-    except Exception:
+    except Exception:  # noqa: BLE001 - one undecodable contour must not lose the others (warned)
         logger.warning("Ignoring an undecodable contour in the saved scan events", exc_info=True)
         return None
 

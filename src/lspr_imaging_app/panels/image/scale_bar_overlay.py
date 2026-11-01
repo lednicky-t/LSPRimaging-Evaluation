@@ -149,7 +149,7 @@ class ScaleBarItem(pg.GraphicsObject):
         )
         return h, chip
 
-    def boundingRect(self) -> QRectF:  # noqa: N802 - Qt naming
+    def boundingRect(self) -> QRectF:
         rect = self._vb.boundingRect()
         return QRectF(rect)
 

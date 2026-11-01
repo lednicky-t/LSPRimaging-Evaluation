@@ -127,7 +127,7 @@ class RoiLabelItem(pg.GraphicsObject):
     def labels(self) -> list[tuple[float, float, float, str]]:
         return list(self._entries)
 
-    def boundingRect(self) -> QRectF:  # noqa: N802 - Qt naming
+    def boundingRect(self) -> QRectF:
         return QRectF(self._vb.boundingRect())
 
     def paint(self, painter: QPainter, *_args: object) -> None:

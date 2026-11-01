@@ -1,4 +1,4 @@
-# ruff: noqa: E701, E702, E401, E402  (lab script: dense one-line style, imports follow the sys.path set-up)
+# ruff: noqa: E402  (lab script: dense one-line style, imports follow the sys.path set-up)
 """PROTOTYPE (2026-10-28): a pixel cache ("tile") around ONE ROI for every frame, and a trial (moved ROI / other diameters) computed from it.
 
 Question it answers: if the pixels around the ROI under tuning are read once and kept, how long does one trial over all cubes take, how big is the
@@ -18,16 +18,16 @@ from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import bench_roi_subset as b  # noqa: E402
+import bench_roi_subset as b
 _APP_ON_PATH = b.TOOLS  # importing it puts the app's sources on sys.path (and uses the name, for pyflakes)
-import analysis_stage_timing as st  # noqa: E402
-import numpy as np  # noqa: E402
+import analysis_stage_timing as st
+import numpy as np
 
-from lspr_imaging_app.analysis import frame_reduce as fr  # noqa: E402
-from lspr_imaging_app.analysis.scan import scan_cubes  # noqa: E402
-from lspr_imaging_app.analysis.scan_jobs import build_scan_plan, source_from_modules  # noqa: E402
-from lspr_imaging_app.dataset import io  # noqa: E402
-from lspr_imaging_app.image_tools.chromatic.affine import apply_affine_to_points  # noqa: E402
+from lspr_imaging_app.analysis import frame_reduce as fr
+from lspr_imaging_app.analysis.scan import scan_cubes
+from lspr_imaging_app.analysis.scan_jobs import build_scan_plan, source_from_modules
+from lspr_imaging_app.dataset import io
+from lspr_imaging_app.image_tools.chromatic.affine import apply_affine_to_points
 
 
 def window_for(rs, r, affines, shape, margin):

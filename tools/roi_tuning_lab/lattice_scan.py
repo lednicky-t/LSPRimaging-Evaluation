@@ -1,4 +1,4 @@
-# ruff: noqa: E701, E702, E401, E402  (lab script: dense one-line style, imports follow the sys.path set-up)
+# ruff: noqa: E402  (lab script: dense one-line style, imports follow the sys.path set-up)
 """ROI position tuning, step B (2026-10-28): one statistical number per range for every ROI and lattice position, on a real OME-Zarr export. Read-only.
 
     python lattice_scan.py <zarr> <session folder> [--rois 5,40,80 | --n-rois 20 | --all] [--size 5] [--pitch 1]
@@ -30,16 +30,16 @@ from pathlib import Path
 TOOLS = Path(__file__).resolve().parents[1]  # apps/LSPRi/eva/tools (analysis_stage_timing lives there)
 sys.path.insert(0, str(TOOLS))
 
-import analysis_stage_timing as st  # noqa: E402  (puts the app sources on sys.path, offscreen Qt)
-import numpy as np  # noqa: E402
-from PyQt6.QtWidgets import QApplication  # noqa: E402
+import analysis_stage_timing as st  # puts the app sources on sys.path, offscreen Qt
+import numpy as np
+from PyQt6.QtWidgets import QApplication
 
-from lspr_imaging_app.analysis import roi_tuning as rt  # noqa: E402
-from lspr_imaging_app.analysis import scan_jobs  # noqa: E402
-from lspr_imaging_app.analysis.scan import scan_cubes  # noqa: E402
-from lspr_imaging_app.analysis.scan_store import read_scan  # noqa: E402
-from lspr_imaging_app.analysis.trace_fit import TraceInput, traces_from_inputs  # noqa: E402
-from lspr_imaging_app.dataset import io  # noqa: E402
+from lspr_imaging_app.analysis import roi_tuning as rt
+from lspr_imaging_app.analysis import scan_jobs
+from lspr_imaging_app.analysis.scan import scan_cubes
+from lspr_imaging_app.analysis.scan_store import read_scan
+from lspr_imaging_app.analysis.trace_fit import TraceInput, traces_from_inputs
+from lspr_imaging_app.dataset import io
 
 _app = QApplication.instance() or QApplication([])
 SAMPLE, REFERENCE = 0, 1

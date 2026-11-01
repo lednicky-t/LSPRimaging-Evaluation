@@ -116,7 +116,7 @@ class SliderRibbon(QWidget):
         layout.addStretch(1)
         self.refresh_theme()
 
-    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 - Qt naming
+    def mouseDoubleClickEvent(self, event) -> None:
         """Buttons take their own clicks; a double-click that reaches the ribbon
         itself (or a caption) landed on empty space."""
         if event.button() == Qt.MouseButton.LeftButton:

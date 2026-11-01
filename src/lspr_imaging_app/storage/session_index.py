@@ -179,7 +179,7 @@ def create_session(home: Path, label: str | None = None) -> SessionRecord:
 
     "Blank" costs nothing to arrange here: nothing pre-populates the new
     session's folder, so `session.load_session` on it later returns `None`
-    (ordinary fresh-dataset case) and `AnalysisEngine` starts with zero
+    (ordinary fresh-dataset case) and the former `AnalysisEngine` started with zero
     stored cells - the existing "missing file/folder means defaults"
     contracts already do the rest."""
     home = Path(home)

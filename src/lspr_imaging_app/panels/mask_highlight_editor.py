@@ -34,8 +34,8 @@ from ..selection import HighlightRangeModule
 from .mask_edit_common import resolve_mask_edit_base
 
 if TYPE_CHECKING:
-    # Deferred - see mask_highlight_actions.py's own identical note for why
-    # a plain top-level import here would close a real import cycle.
+    # Deferred (type checking only): a plain top-level import here would
+    # close a real import cycle.
     from .image.panel import ImagePanel
 
 
@@ -63,8 +63,7 @@ class HistogramHighlightMaskEditor:
         self._mask_scope = mask_scope
         self._image_panel = image_panel
         # Same "read from the one panel that already has it" convention as
-        # the Histogram panel - see mask_highlight_actions.py's original
-        # docstring for why `ImagePanel._current_wavelength()`'s snapped
+        # the Histogram panel: `ImagePanel._current_wavelength()`'s snapped
         # value, not a fresh `SelectionModule` read, is the correct frame.
         self._last_image: np.ndarray | None = None
         self._last_frame: tuple[int, float] | None = None

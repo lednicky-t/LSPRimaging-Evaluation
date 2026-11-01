@@ -160,7 +160,7 @@ class SlideshowSpeedButton(QToolButton):
     def _cycle(self) -> None:
         self._choose((self._index() + 1) % len(SPEEDS))
 
-    def wheelEvent(self, event) -> None:  # type: ignore[override]  # noqa: N802 - Qt naming
+    def wheelEvent(self, event) -> None:  # type: ignore[override]
         self._wheel_remainder += event.angleDelta().y()
         notches = int(self._wheel_remainder / _WHEEL_NOTCH)  # towards zero: 119 units is not a notch yet
         if notches:

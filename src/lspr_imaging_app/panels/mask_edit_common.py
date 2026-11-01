@@ -1,7 +1,7 @@
 """Shared support for mask-edit widgets that otherwise have no common base
-class - `panels/workflow/mask_highlight_actions.py`, `panels/image/
-mask_edit_panels.py`, and `panels/image/mask_file_actions.py` all import
-from here, so this lives directly under `panels/`, not nested in any one
+class - `panels/image/mask_edit_panels.py` and `panels/image/mask_file_actions.py`
+(and, until it was removed on 2026-10-29, `panels/workflow/
+mask_highlight_actions.py`) import from here, so this lives directly under `panels/`, not nested in any one
 of `workflow/`/`image/`.
 
 **Base-mask resolution** (`resolve_mask_edit_base`): any mask-edit tool that

@@ -143,7 +143,7 @@ def scan_transients(
                 plane_shape.append((height, width))
             binned = bin_frame(plane, det.bin_factor)
             return binned, (width / binned.shape[1], height / binned.shape[0])
-        except Exception:
+        except Exception:  # noqa: BLE001 - an unreadable frame is skipped and reported (warned, kept in `failed`)
             logger.warning("Scan: could not read cube %s, %s nm - skipped", frame[0], frame[1], exc_info=True)
             failed.append(frame)
             return None
@@ -151,7 +151,7 @@ def scan_transients(
     def read_full(frame: Frame) -> np.ndarray | None:
         try:
             return np.asarray(load_plane(frame[0], frame[1]), dtype=np.float32)
-        except Exception:
+        except Exception:  # noqa: BLE001 - an unreadable frame is skipped and reported (warned, kept in `failed`)
             logger.warning("Scan: could not read cube %s, %s nm - skipped", frame[0], frame[1], exc_info=True)
             failed.append(frame)
             return None

@@ -370,7 +370,7 @@ class HistogramPlot(QWidget):
         self._plot_item.autoBtn.hide()
         self._plot_item.sigRangeChangedManually.emit(view_box.mouseEnabled())
 
-    def _on_y_axis_double_clicked(self, event) -> None:  # noqa: N802 - Qt naming
+    def _on_y_axis_double_clicked(self, event) -> None:
         event.accept()
         self.y_axis_double_clicked.emit()
 
@@ -586,7 +586,7 @@ class HistogramPlot(QWidget):
 
     # -- floating overlay positioning -----------------------------------------
 
-    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802 - Qt naming
+    def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
         self._reposition_settings_button()
         self._reposition_cursor_overlay()

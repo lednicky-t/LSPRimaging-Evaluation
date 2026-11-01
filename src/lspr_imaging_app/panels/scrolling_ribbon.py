@@ -42,14 +42,14 @@ class _Area(QScrollArea):
         self.setStyleSheet("QScrollArea { background: transparent; border: none; }")
         self.viewport().setAutoFillBackground(False)
 
-    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt naming
+    def minimumSizeHint(self) -> QSize:
         return QSize(_MIN_VIEW_WIDTH, 0)
 
-    def sizeHint(self) -> QSize:  # noqa: N802 - Qt naming
+    def sizeHint(self) -> QSize:
         widget = self.widget()
         return widget.sizeHint() if widget is not None else super().sizeHint()
 
-    def wheelEvent(self, event) -> None:  # type: ignore[override]  # noqa: N802 - Qt naming
+    def wheelEvent(self, event) -> None:  # type: ignore[override]
         bar = self.horizontalScrollBar()
         if bar.maximum() <= 0:
             event.ignore()
@@ -128,18 +128,18 @@ class ScrollingRibbon(QWidget):
 
     # -- sizes -----------------------------------------------------------------------------
 
-    def sizeHint(self) -> QSize:  # noqa: N802 - Qt naming
+    def sizeHint(self) -> QSize:
         return self.content.sizeHint()
 
-    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt naming
+    def minimumSizeHint(self) -> QSize:
         # Two arrows and a sliver of the row; the height is the row's (the policy is fixed up and down).
         return QSize(2 * ARROW_WIDTH + _MIN_VIEW_WIDTH, self.content.sizeHint().height())
 
-    def resizeEvent(self, event) -> None:  # type: ignore[override]  # noqa: N802 - Qt naming
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         self._update_overflow()
 
-    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt naming
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         if watched is self.content and event.type() in (QEvent.Type.LayoutRequest, QEvent.Type.Show):
             self.updateGeometry()  # the row's height may have changed
             self._update_overflow()

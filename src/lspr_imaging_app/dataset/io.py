@@ -21,14 +21,14 @@ try:
     from tifffile import imread as _tifffile_imread
     from tifffile import imwrite as _tifffile_imwrite
     from tifffile import TiffFile as _tifffile_TiffFile
-except Exception:  # pragma: no cover - optional acceleration path
+except Exception:  # pragma: no cover - optional acceleration path  # noqa: BLE001
     _tifffile_imread = None
     _tifffile_imwrite = None
     _tifffile_TiffFile = None
 
 try:
-    import zarrs as _zarrs  # noqa: F401  (only needed to register its codec pipeline)
-except Exception:  # pragma: no cover - optional acceleration path
+    import zarrs as _zarrs  # only needed to register its codec pipeline
+except Exception:  # pragma: no cover - optional acceleration path  # noqa: BLE001
     _zarrs = None
 
 from lspr_core import ImagingAcquisitionMetadata
@@ -128,7 +128,7 @@ def _configure_zarr_codec_pipeline(zarr) -> None:
     STATUS_STACK_BUFFER_OVERRUN); a plain `threading.Thread` running the
     identical zarr-reading workload, under the same stress, never crashed,
     with any codec pipeline. This app's background dispatch
-    (`gui/worker.py`'s `FunctionWorker`) no longer uses `QThreadPool` for
+    (originally the old app's `gui/worker.py` `FunctionWorker`; now `analysis/worker.py`) no longer uses `QThreadPool` for
     anything that touches the dataset - re-verified with the isolated
     repro's exact stress pattern against the real, patched `FunctionWorker`
     class, `zarrs` enabled, clean across multiple runs. Falls back to the
@@ -140,7 +140,7 @@ def _configure_zarr_codec_pipeline(zarr) -> None:
         return
     try:
         zarr.config.set({"codec_pipeline.path": "zarrs.ZarrsCodecPipeline"})
-    except Exception:
+    except Exception:  # noqa: BLE001 - zarrs is an optional speed-up; zarr's default pipeline stays (logged at debug)
         _LOGGER.debug("Could not enable zarrs codec pipeline; using zarr's default.", exc_info=True)
     _ZARR_CODEC_PIPELINE_CONFIGURED = True
 
@@ -528,7 +528,7 @@ def dataset_load_plane_roi(
         array = _ome_zarr_array_cached(str(ome_root))
         try:
             fi, wi, *_ = (int(part) for part in path.stem.split("."))
-        except Exception:
+        except Exception:  # noqa: BLE001 - an unparsable file name just means the full-load path
             pass  # fall through to full load + crop
         else:
             shape = getattr(array, "shape", None)
@@ -643,7 +643,7 @@ def _ome_zarr_fast_read_metadata(root_str: str) -> dict | None:
             "image_height": int(height),
             "image_width": int(width),
         }
-    except Exception:
+    except Exception:  # noqa: BLE001 - falls back to the standard reader (logged below)
         # Falls back to the standard reader, but not invisibly: a recurring
         # failure here is a silent loss of the fast path.
         _LOGGER.debug("OME-Zarr fast-read metadata unavailable; using the standard reader.", exc_info=True)
@@ -699,7 +699,7 @@ def ome_zarr_chunk_shape(dataset: ImageDataset | None) -> tuple[int, int] | None
     try:
         chunks = _ome_zarr_array_cached(root_str).chunks
         return int(chunks[-2]), int(chunks[-1])
-    except Exception:
+    except Exception:  # noqa: BLE001 - the chunk shape is only a hint (logged at debug)
         _LOGGER.debug("OME-Zarr chunk shape unavailable.", exc_info=True)
         return None
 
@@ -798,7 +798,7 @@ def _fast_read_zarr_plane(meta: dict, spectral_cube_pos: int, wavelength_pos: in
                             raw = codec.decode(raw)
                         tile = np.frombuffer(raw, dtype=dtype).reshape(ich, icw)
                         plane[cy * ich:(cy + 1) * ich, cx * icw:(cx + 1) * icw] = tile
-    except Exception:
+    except Exception:  # noqa: BLE001 - any failure of the fast read falls back to the standard reader (logged at debug)
         _LOGGER.debug("OME-Zarr fast plane read failed; using the standard reader.", exc_info=True)
         return None
 
@@ -1343,7 +1343,7 @@ def read_existing_ome_zarr_summary(destination: Path) -> OmeZarrExportSummary | 
             pixel_size_um=(float(pixel_size["x"]), float(pixel_size["y"])) if pixel_size else None,
             source_folder=lspr_attrs.get("source_folder"),
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - not an LSPR OME-Zarr export: no metadata, not an error (logged at debug)
         # Expected whenever the destination isn't a recognized LSPR OME-Zarr export
         # (e.g. an unrelated folder, or a partially-written one) — not an error.
         logging.getLogger("lspr_imaging_app.io").debug(
@@ -2090,7 +2090,7 @@ def _load_image_array_cached(path_str: str) -> np.ndarray:
     )
     try:
         array.setflags(write=False)
-    except Exception:
+    except Exception:  # noqa: BLE001 - the read-only flag is best effort
         pass
     return array
 
@@ -2146,7 +2146,7 @@ _fast_tiff_disabled = os.environ.get("LSPR_TIFF_DECODER", "").strip().lower() ==
 
 try:
     import imagecodecs as _imagecodecs
-except Exception:  # pragma: no cover - optional acceleration path
+except Exception:  # pragma: no cover - optional acceleration path  # noqa: BLE001
     _imagecodecs = None
 if _imagecodecs is None or not getattr(getattr(_imagecodecs, "TIFF", None), "available", False):
     _imagecodecs = None
@@ -2204,7 +2204,7 @@ def _load_image_array_uncached(path_str: str) -> np.ndarray:
     if path.suffix.lower() in {".tif", ".tiff"} and _tifffile_imread is not None:
         try:
             # maxworkers=1, not os.cpu_count(): this is the per-wavelength read
-            # called from inside analysis_tasks.py's own ThreadPoolExecutor
+            # called from inside worker threads (originally the old app's analysis_tasks.py ThreadPoolExecutor)
             # (one call per concurrent worker, several workers at once) as much
             # as from single-image interactive loads - giving each individual
             # file its own decode pool on top of the outer one means every
@@ -2281,10 +2281,10 @@ def load_image_shape(path_str: str) -> tuple[int, int]:
                     shape = getattr(series, "shape", None)
                     if isinstance(shape, tuple) and len(shape) >= 2:
                         return int(shape[-2]), int(shape[-1])
-        except Exception:
+        except Exception:  # noqa: BLE001 - tifffile cannot read it: try Pillow below
             pass
     try:
         with Image.open(path_str) as image:
             return int(image.height), int(image.width)
-    except Exception:
+    except Exception:  # noqa: BLE001 - Pillow cannot read it either: decode the whole image for its shape
         return tuple(int(v) for v in load_image_array(path_str).shape[:2])

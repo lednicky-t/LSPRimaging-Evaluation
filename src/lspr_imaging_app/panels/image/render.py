@@ -151,7 +151,7 @@ class ImageRenderer(QObject):
     separate reader threads.
 
     Takes ``load_plane`` as a callable rather than a ``DatasetModule``
-    reference, the same convention ``AnalysisEngine`` uses - it keeps this
+    reference, the same convention the former ``AnalysisEngine`` used - it keeps this
     class testable with a plain function and makes the one thing it reads
     from another module explicit.
 
@@ -428,7 +428,7 @@ class ImageRenderer(QObject):
                 fast_rotation=request.fast_rotation,
                 **caches,
             )
-        except Exception as exc:  # noqa: BLE001 - a render must never kill the thread
+        except Exception as exc:  # a render must never kill the thread
             logger.exception("Image render failed for cube=%s wl=%s", request.cube_index, request.wavelength_nm)
             return RenderResult(request=request, image=None, error=str(exc))
 
@@ -440,7 +440,7 @@ class ImageRenderer(QObject):
         if not request.show_background:  # the background estimate is drawn with the data's levels instead
             try:
                 display = prepare_frame_display(processed, request.display_levels, fast=request.fast_rotation)
-            except Exception:  # noqa: BLE001 - the panel then prepares the frame itself, as before
+            except Exception:  # the panel then prepares the frame itself, as before
                 logger.exception("Preparing the display picture failed for cube=%s wl=%s", request.cube_index, request.wavelength_nm)
         display_seconds = time.perf_counter() - display_started
         emit_timing(

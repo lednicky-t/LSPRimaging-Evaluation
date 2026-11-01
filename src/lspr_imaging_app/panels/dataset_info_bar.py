@@ -45,7 +45,7 @@ class _PathLabel(QLabel):
         self._full_text = text
         self._elide()
 
-    def resizeEvent(self, event: QResizeEvent | None) -> None:  # noqa: N802 - Qt override
+    def resizeEvent(self, event: QResizeEvent | None) -> None:  # Qt override
         super().resizeEvent(event)
         self._elide()
 
@@ -156,7 +156,7 @@ class _MenuBarFiller(QObject):
         self._bar = bar
         menu_bar.installEventFilter(self)
 
-    def eventFilter(self, watched: QObject | None, event: QEvent | None) -> bool:  # noqa: N802 - Qt override
+    def eventFilter(self, watched: QObject | None, event: QEvent | None) -> bool:  # Qt override
         if watched is self._menu_bar and event is not None and event.type() in (QEvent.Type.Resize, QEvent.Type.Show):
             self.place()
         return False

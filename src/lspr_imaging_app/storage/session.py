@@ -212,7 +212,7 @@ def _decode_bool_mask(payload: object) -> np.ndarray | None:
         packed = base64.b64decode(data_raw.encode("ascii"))
         unpacked = np.unpackbits(np.frombuffer(packed, dtype=np.uint8), count=height * width)
         return unpacked.astype(bool, copy=False).reshape((height, width))
-    except Exception:
+    except Exception:  # noqa: BLE001 - a corrupt mask costs that one ROI its mask, not the whole session (warned)
         # A corrupt or truncated mask should cost that one ROI its mask
         # geometry, not prevent the whole session from opening.
         logger.warning("Ignoring an undecodable ROI mask in the session file", exc_info=True)

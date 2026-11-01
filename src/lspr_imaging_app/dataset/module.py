@@ -28,7 +28,7 @@ other way" rule instead of quietly working around it.
 
 **Real correction (2026-09-22): "sufficient" turned out to mean "enough to
 reach the loading functions," not "enough to actually load pixels."**
-Found while wiring `AnalysisEngine` to real data: none of the four query
+Found while wiring the former `AnalysisEngine` to real data: none of the four query
 methods return actual pixel data, and every `dataset/io.py` loading
 function needs the full `ImageDataset` as a parameter - which this module
 still correctly never hands out. Added a fifth method, `load_plane()`,
@@ -38,7 +38,7 @@ other module reads dataset state any other way" rule is unchanged, this
 is one more narrow read, not a loosening of it.
 
 **Second correction, same cause (2026-09-23)**: `wavelengths()` is
-dataset-*global*, and `AnalysisEngine` needs per-cube wavelengths - driving
+dataset-*global*, and the former `AnalysisEngine` needed per-cube wavelengths (the scan plan still does) - driving
 a per-cube loop off the global union would ask for planes a cube may not
 have. Added `wavelengths_for_cube()` as a sixth query rather than letting
 the engine iterate the global list and swallow the resulting `KeyError`s.
@@ -174,7 +174,7 @@ class DatasetModule(QObject):
         # Separate from `_worker` (load) rather than shared - a load and an
         # export are independent operations with no reason to serialize
         # against each other's `AnalysisWorker.submit`'s "only one task at a
-        # time" contract, matching `AnalysisEngine`'s own two-worker pattern
+        # time" contract, matching the former `AnalysisEngine`'s own two-worker pattern
         # (`_worker`/`_derived_worker`) for the same reason.
         self._export_worker = AnalysisWorker()
 
@@ -247,7 +247,7 @@ class DatasetModule(QObject):
                 started = time.perf_counter()
                 try:
                     stats: tuple[int, float | None] | None = dataset_file_stats(target)
-                except Exception:  # noqa: BLE001 - nothing may escape a thread silently; a size is only displayed
+                except Exception:  # nothing may escape a thread silently; a size is only displayed
                     logger.exception("Counting the dataset's files failed")
                     stats = (0, None)
                 log_event(logger, "dataset.file_stats", logging.INFO, ms=round((time.perf_counter() - started) * 1000))
@@ -310,7 +310,7 @@ class DatasetModule(QObject):
         `wavelengths()`.
 
         **Use this, not `wavelengths()`, for anything that then loads a
-        plane** (added 2026-09-23 while wiring `AnalysisEngine`).
+        plane** (added 2026-09-23 while wiring the former `AnalysisEngine`).
         `wavelengths()` is the union across every cube, so feeding it to a
         per-cube loop would ask for a (cube, wavelength) pair that may not
         exist - `load_plane` would raise `KeyError` for a cube that is
@@ -335,13 +335,13 @@ class DatasetModule(QObject):
         across wavelength) must exclude `0.0` explicitly, via
         `dataset.model.is_dark_frame_wavelength`** - it is real data, just
         not spectral data, and nothing in this query surface filters it out
-        automatically. `AnalysisEngine` (`analysis/engine.py`) is the real
-        enforcement point today - `_gather_wavelength_inputs`/
-        `_gather_current_inputs`/`_naming` all exclude it before building
-        `compute_cell` inputs, settings-snapshot fingerprints, and the
-        per-dataset filename scheme, so a dark frame never becomes a point
-        in a stored spectrum, fit, or metric (fixed 2026-09-30 - see the
-        build log for the gap this closed)."""
+        automatically. Each caller does it: the scan plan takes an
+        `is_spectral` filter (frame roles, `selection/frame_roles_module.py`),
+        and reference scoring, the chromatic tab and the array actions call
+        `is_dark_frame_wavelength` themselves, so a dark frame never becomes
+        a point in a stored spectrum, fit, or metric. (Until cut-over phase 2e
+        the former `AnalysisEngine` was the enforcement point; fixed
+        2026-09-30 - see the build log for the gap this closed.)"""
         if self._dataset is None:
             return ()
         return tuple(self._dataset.wavelengths_for_cube(int(cube_index)))
@@ -628,7 +628,7 @@ class DatasetModule(QObject):
                     export_stats=stats,
                     **kwargs,
                 )
-            except Exception as exc:  # noqa: BLE001 - reported via signal, not re-raised
+            except Exception as exc:  # reported via signal, not re-raised
                 if cancel_event.is_set():
                     self.task_finished.emit(EXPORT_TASK_ID, "cancelled", "")
                 else:

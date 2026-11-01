@@ -174,7 +174,7 @@ class MaskModule(QObject):
         individual override exists at `frame` exactly).
 
         The scope is returned rather than left for the caller to
-        re-derive (added 2026-09-23, while wiring `AnalysisEngine`): the
+        re-derive (added 2026-09-23, while wiring the former `AnalysisEngine`): the
         analysis store records *which* timeline a mask came from in its
         provenance filename, and the only other way to learn that would be
         for the caller to inspect this module's private
@@ -279,7 +279,7 @@ class MaskModule(QObject):
                 frames = tuple((before if before is not None else after).frame for _scope, _key, before, after in edits)
                 self.mask_changed.emit(MaskComputationalChange(reason="mask_batch", frame=None, scope=None, frames=frames))
                 return
-            for scope, key, before, after in edits:
+            for scope, _key, before, after in edits:
                 frame = (before if before is not None else after).frame
                 self.mask_changed.emit(MaskComputationalChange(reason="mask_change", frame=frame, scope=scope))
 

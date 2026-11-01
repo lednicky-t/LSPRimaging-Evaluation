@@ -4,7 +4,7 @@ import sys, time
 from dataclasses import replace
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
-import bench_roi_subset as b  # noqa: E402
+import bench_roi_subset as b
 _APP_ON_PATH = b.TOOLS  # importing it puts the app's sources on sys.path (and uses the name, for pyflakes)
 import analysis_stage_timing as st
 from lspr_imaging_app.analysis.scan import scan_cubes

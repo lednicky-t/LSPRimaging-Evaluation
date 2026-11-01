@@ -346,7 +346,7 @@ class DataAxisSlider(QSlider):
         window.set_count(len(self._tick_values))
         self.update()
 
-    def sliderChange(self, change) -> None:  # noqa: N802 - Qt naming
+    def sliderChange(self, change) -> None:
         super().sliderChange(change)
         window = getattr(self, "_window", None)  # Qt can call this while the base class is still being constructed
         if window is not None and change == QAbstractSlider.SliderChange.SliderValueChange:  # also when signals are blocked
@@ -396,7 +396,7 @@ class DataAxisSlider(QSlider):
         self._ignored_tick_color = color
         self.update()
 
-    def contextMenuEvent(self, event: QContextMenuEvent) -> None:  # noqa: N802 - Qt naming
+    def contextMenuEvent(self, event: QContextMenuEvent) -> None:
         """Right-click menu: jump the handle to the reference frame's tick (disabled when none is marked)."""
         menu = QMenu(self)
         go_to = menu.addAction("Go to reference")

@@ -127,7 +127,7 @@ class MaskCandidates(QObject):
             error = ""
             try:
                 result = np.asarray(compute(), dtype=bool)
-            except Exception as exc:  # noqa: BLE001 - nothing may escape a thread silently
+            except Exception as exc:  # nothing may escape a thread silently
                 logger.exception("Computing the mask candidate %r failed", key[0] if isinstance(key, tuple) else key)
                 error = f"{type(exc).__name__}: {exc}"
             seconds = time.perf_counter() - started
@@ -167,7 +167,7 @@ class MaskCandidates(QObject):
         for callback in callbacks:
             try:
                 callback(delivered)
-            except Exception:  # noqa: BLE001 - one bad listener must not keep the others (or the waiting preview) from running
+            except Exception:  # one bad listener must not keep the others (or the waiting preview) from running
                 logger.exception("A mask-candidate listener failed")
         if was_preview and self._pending is not None:
             pending_key, compute, on_ready, cache = self._pending

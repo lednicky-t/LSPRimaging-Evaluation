@@ -1,4 +1,4 @@
-# ruff: noqa: E701, E702, E401, E402  (lab script: dense one-line style, imports follow the sys.path set-up)
+# ruff: noqa: E402  (lab script: dense one-line style, imports follow the sys.path set-up)
 """Time the scan kernel for a subset of ROIs on a real OME-Zarr export (read-only; one process; the real scan_cubes path).
 
     python bench_roi_subset.py --zarr <export> --session <session folder> --cubes 12 --ks 1,4,16,160 [--profile]
@@ -18,13 +18,13 @@ from pathlib import Path
 TOOLS = Path(__file__).resolve().parents[1]  # apps/LSPRi/eva/tools (analysis_stage_timing lives there)
 sys.path.insert(0, str(TOOLS))
 
-import analysis_stage_timing as st  # noqa: E402  (puts the app sources on sys.path, offscreen Qt)
-import numpy as np  # noqa: E402
-from PyQt6.QtWidgets import QApplication  # noqa: E402
+import analysis_stage_timing as st  # puts the app sources on sys.path, offscreen Qt
+import numpy as np
+from PyQt6.QtWidgets import QApplication
 
-from lspr_imaging_app.analysis.scan import scan_cubes  # noqa: E402
-from lspr_imaging_app.analysis.scan_jobs import build_scan_plan, source_from_modules  # noqa: E402
-from lspr_imaging_app.dataset import io  # noqa: E402
+from lspr_imaging_app.analysis.scan import scan_cubes
+from lspr_imaging_app.analysis.scan_jobs import build_scan_plan, source_from_modules
+from lspr_imaging_app.dataset import io
 
 _app = QApplication.instance() or QApplication([])
 

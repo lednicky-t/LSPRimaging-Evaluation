@@ -142,7 +142,7 @@ class _ElidedLabel(QLabel):
         self._tooltip = tooltip
         self._elide()
 
-    def resizeEvent(self, event) -> None:  # type: ignore[override]  # noqa: N802 - Qt naming
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         self._elide()
 
@@ -226,10 +226,10 @@ class _ColumnsHost(QWidget):
         super().__init__(parent)
         self._on_resize = on_resize
 
-    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt naming
+    def minimumSizeHint(self) -> QSize:
         return QSize(0, super().minimumSizeHint().height())
 
-    def resizeEvent(self, event) -> None:  # type: ignore[override]  # noqa: N802 - Qt naming
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         self._on_resize()
 
@@ -250,12 +250,12 @@ class _TitleWord(QLabel):
     clicked = pyqtSignal()
     double_clicked = pyqtSignal()
 
-    def mousePressEvent(self, event) -> None:  # type: ignore[override]  # noqa: N802 - Qt naming
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit()
         event.accept()
 
-    def mouseDoubleClickEvent(self, event) -> None:  # type: ignore[override]  # noqa: N802 - Qt naming
+    def mouseDoubleClickEvent(self, event) -> None:  # type: ignore[override]
         if event.button() == Qt.MouseButton.LeftButton:
             self.double_clicked.emit()
         event.accept()

@@ -3,13 +3,13 @@ icon-only ``QButtonGroup``, reading and driving the shared ``MaskScopeModule``
 (``image_tools/mask_scope.py`` - see that module's docstring for why this
 needed to become shared state rather than private widget state). Used in two
 places - the Workflow panel's Mask section
-(``panels/workflow/mask_highlight_actions.py``) and the Image panel's own
+(``panels/workflow/mask_highlight_actions.py``, since removed) and the Image panel's own
 "Mask" ribbon tab (``panel.py``'s ``_build_ui``) - both showing and driving
 the one live selection, never owning it themselves.
 
 Icon choice ("stack-3"/"focus-2") and tooltips ported unchanged from
-``mask_highlight_actions.py``'s original private buttons, which this class
-replaces.
+``mask_highlight_actions.py``'s original private buttons (since removed), which
+this class replaces.
 """
 
 from __future__ import annotations

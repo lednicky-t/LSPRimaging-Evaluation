@@ -1,4 +1,4 @@
-# ruff: noqa: E701, E702, E401, E402  (lab script: dense one-line style, imports follow the sys.path set-up)
+# ruff: noqa: E402  (lab script: dense one-line style, imports follow the sys.path set-up)
 """Scan-file writer: does a one-ROI refresh make the file grow, and what do other compression settings cost?
 
 Builds a NEW scan file per variant (in a temp folder) from the numbers of the real scan.h5, writes everything once, then refreshes ONE ROI of all
@@ -17,16 +17,16 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import bench_roi_subset as b  # noqa: E402
+import bench_roi_subset as b
 _APP_ON_PATH = b.TOOLS  # importing it puts the app's sources on sys.path (and uses the name, for pyflakes)
-import analysis_stage_timing as st  # noqa: E402
-import h5py  # noqa: E402
-import numpy as np  # noqa: E402
+import analysis_stage_timing as st
+import h5py
+import numpy as np
 
-from lspr_imaging_app.analysis.scan_arrays import new_arrays  # noqa: E402
-from lspr_imaging_app.analysis.scan_jobs import build_scan_plan, source_from_modules  # noqa: E402
-from lspr_imaging_app.analysis.scan_store import ScanStore, read_scan  # noqa: E402
-from lspr_imaging_app.dataset import io  # noqa: E402
+from lspr_imaging_app.analysis.scan_arrays import new_arrays
+from lspr_imaging_app.analysis.scan_jobs import build_scan_plan, source_from_modules
+from lspr_imaging_app.analysis.scan_store import ScanStore, read_scan
+from lspr_imaging_app.dataset import io
 
 VARIANTS = {
     "gzip 4 + shuffle (today)": {},

@@ -108,7 +108,7 @@ class StepStatsItem(DeviceSpaceItem):
 
     # -- geometry ---------------------------------------------------------------------------------------------------------
 
-    def boundingRect(self) -> QRectF:  # noqa: N802 - Qt naming
+    def boundingRect(self) -> QRectF:
         return self.view_rect() if self.is_shown() else QRectF()
 
     def _row_centers(self, to_device: QTransform, area: QRectF, text_height: float, count: int) -> tuple[list[float], float]:
@@ -187,7 +187,7 @@ class StepStatsItem(DeviceSpaceItem):
 
     # -- painting (device pixels) ---------------------------------------------------------------------------------------------
 
-    def paint(self, painter: QPainter, option, widget=None) -> None:  # noqa: N802 - Qt naming
+    def paint(self, painter: QPainter, option, widget=None) -> None:
         if not self.is_shown():
             return
         view = self.view_rect()

@@ -3,7 +3,7 @@
 Replaces the old pair `processing/roi_array_geometry.estimate_array_geometry` (global
 min-max normalisation, square pitch only, axis-aligned only, row / column counts from 1-D
 clustering) + `roi/detection._fit_grid_array` (integer pitch, per-pixel Python loop; 47 s on
-a 1300 x 900 image with 170 spots, `tools/array_lab.py`, 2026-10-08).
+a 1300 x 900 image with 170 spots, `tools/array_lab.py` (removed in cut-over phase 2c), 2026-10-08).
 
 Space: pixel coordinates of the image passed in (pixel centres at integers). The caller
 passes the **reference-wavelength image of the current cube** in processed space (rotated /

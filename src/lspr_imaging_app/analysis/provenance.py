@@ -8,7 +8,9 @@ here takes plain, already-resolved values (settings dataclasses, arrays,
 plain dicts), never a live QObject module reference. Gathering those values
 *from* the real modules (`GeometryModule.settings()`,
 `MaskModule.resolve_mask_source()`, `ChromaticModule.affine_for()`, ...) is
-`engine.py`/`worker.py`'s job, not this file's.
+the caller's job, not this file's (today `scan_jobs.py` for the scan and
+`tools/reference_inputs.py` for the reference path; before cut-over phase 2e
+the former `AnalysisEngine` did it).
 
 **Six provenance inputs, not five** - widened from the sketch's original
 list 2026-09-22 (see the design doc): `GeometryModule`'s crop/rotate/flip
@@ -22,7 +24,6 @@ import json
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
 
 import numpy as np
 
@@ -124,7 +125,7 @@ MASK_SCOPE_TAGS: dict[str, str] = {"persistent": "persi", "individual": "indiv"}
 fixed-width filename tag.
 
 Two vocabularies exist on purpose, and this is the single place they meet
-(added 2026-09-23, while wiring `AnalysisEngine`). `MaskModule` says
+(added 2026-09-23, while wiring the former `AnalysisEngine`). `MaskModule` says
 `"persistent"`/`"individual"` because that is what the timeline actually
 means; filenames say `persi`/`indiv` because both are 5 characters, which
 keeps a directory listing aligned (see the provenance design doc). Doing
@@ -222,7 +223,7 @@ def resolve_mask_snapshot_ref(
     whether it is new (i.e. not yet on disk).
 
     **Exists to fix a real bug, found 2026-09-23 by running a real analysis
-    with an ignore mask set.** Planning (`AnalysisEngine._gather_current_
+    with an ignore mask set.** Planning (the former `AnalysisEngine._gather_current_
     inputs`) may not write mask files - the design doc's "written lazily,
     only when actually analyzed" rule - so it used to substitute
     `version=0` as a placeholder identity. But that placeholder goes
@@ -597,7 +598,7 @@ def roi_geometry_fingerprint_fields(roi: AreaRoi) -> dict:
     support_*, array_id, per_wavelength) that doesn't affect where pixels
     are read from, matching the sketch's cosmetic-vs-computational split
     applied to a ROI's own fields, not just to other modules' settings.
-    Shared by `compute_fingerprint`'s callers (`tasks.py`, `engine.py`) so
+    Shared by `compute_fingerprint`'s callers (`tasks.py`; the former `engine.py` too) so
     there's exactly one definition of what counts as "this ROI's geometry"
     for provenance purposes."""
     return {
@@ -665,61 +666,3 @@ def compute_fingerprint(
         reduction_method=reduction_method,
         per_wavelength_settings=resolved,
     )
-
-
-class ProvenanceStore(Protocol):
-    """The read-only interface :func:`~lspr_imaging_app.analysis.
-    planner.plan_recompute` needs for its ``stored`` argument -
-    ``fingerprint_for(roi_id, cube_index) -> ProvenanceRecord | None``.
-    A `typing.Protocol` (2026-10-07; it was a plain class with a raising
-    method, which made the type checker reject the real store): enforced by
-    type checkers only, nothing at runtime - `plan_recompute` works with any
-    duck-typed object that has the method, verified by its own tests using a
-    hand-written fake with no inheritance from this class.
-
-    **Superseded by a different design (2026-09-22), not "blocked" -
-    no separate `data.h5`-reading implementation of this class was ever
-    built or is planned.** `data.h5` exists now (`store.py`), but the
-    design that got built avoids ever reading it per-query at all: HDF5
-    doesn't support safe concurrent cross-thread read/write, so
-    `AnalysisEngine` instead bulk-loads everything into
-    `InMemoryProvenanceStore` once at construction (`store.read_all_cells`)
-    and answers every query from memory afterward - see `store.py`'s
-    module docstring for the full reasoning. `InMemoryProvenanceStore` is
-    the real, permanent implementation of this interface, not a temporary
-    stand-in.
-    """
-
-    def fingerprint_for(self, roi_id: int, cube_index: int) -> ProvenanceRecord | None: ...
-
-
-class InMemoryProvenanceStore:
-    """The real, permanent implementation of the `ProvenanceStore`
-    interface - not a temporary stand-in (an earlier version of this
-    docstring called it one, before `data.h5`/`store.py` existed and the
-    write-through-plus-bulk-rehydration design was settled; see
-    `ProvenanceStore`'s own docstring). Backed by a plain in-memory dict,
-    populated either by `record()` (called by `AnalysisEngine` after a real
-    `compute_cell` call) or by bulk-loading `data.h5`'s contents at
-    construction (`store.read_all_cells`) - either way, nothing in this
-    class touches a file itself.
-    """
-
-    def __init__(self) -> None:
-        self._fingerprints: dict[tuple[int, int], ProvenanceRecord] = {}
-
-    def fingerprint_for(self, roi_id: int, cube_index: int) -> ProvenanceRecord | None:
-        return self._fingerprints.get((roi_id, cube_index))
-
-    def record(self, roi_id: int, cube_index: int, fingerprint: ProvenanceRecord) -> None:
-        self._fingerprints[(roi_id, cube_index)] = fingerprint
-
-    def remap_roi_ids(self, id_map: dict[int, int]) -> None:
-        """Re-file every fingerprint under its ROI's new id; an id absent
-        from ``id_map`` no longer exists and is dropped. Mirrors
-        `store.remap_cell_roi_ids` for the file."""
-        self._fingerprints = {
-            (id_map[roi_id], cube_index): fingerprint
-            for (roi_id, cube_index), fingerprint in self._fingerprints.items()
-            if roi_id in id_map
-        }

@@ -1,4 +1,4 @@
-# ruff: noqa: E701, E702, E401, E402  (lab script: dense one-line style, imports follow the sys.path set-up)
+# ruff: noqa: E402  (lab script: dense one-line style, imports follow the sys.path set-up)
 """Convert a COPY of the real gzip scan.h5 to the uncompressed layout through `ScanStore.prepare` and compare it with the original.
 
     python check_convert_real_file.py <zarr> <session folder>
@@ -13,14 +13,14 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import bench_roi_subset as b  # noqa: E402
+import bench_roi_subset as b
 _APP_ON_PATH = b.TOOLS  # importing it puts the app's sources on sys.path (and uses the name, for pyflakes)
-import analysis_stage_timing as st  # noqa: E402
-import numpy as np  # noqa: E402
+import analysis_stage_timing as st
+import numpy as np
 
-from lspr_imaging_app.analysis.scan_jobs import build_scan_plan, source_from_modules  # noqa: E402
-from lspr_imaging_app.analysis.scan_store import ScanStore, read_scan  # noqa: E402
-from lspr_imaging_app.dataset import io  # noqa: E402
+from lspr_imaging_app.analysis.scan_jobs import build_scan_plan, source_from_modules
+from lspr_imaging_app.analysis.scan_store import ScanStore, read_scan
+from lspr_imaging_app.dataset import io
 
 zarr, session = Path(sys.argv[1]), Path(sys.argv[2])
 dataset = st.load_one(zarr)

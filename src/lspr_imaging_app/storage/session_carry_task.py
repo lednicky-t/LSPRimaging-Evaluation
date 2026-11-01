@@ -177,7 +177,7 @@ class SessionCarry(QObject):
             self._roll_back(destination, session_dir, index_before)
             self._finish("cancelled", "")
             return
-        except Exception as exc:  # noqa: BLE001 - reported through the signals, not re-raised on a worker thread
+        except Exception as exc:  # reported through the signals, not re-raised on a worker thread
             logger.error("Carrying the session into %s failed", destination, exc_info=exc)
             self._roll_back(destination, session_dir, index_before)
             self._finish("failed", str(exc))

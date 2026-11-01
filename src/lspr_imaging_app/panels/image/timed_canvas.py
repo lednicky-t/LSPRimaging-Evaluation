@@ -20,7 +20,7 @@ class TimedLayoutWidget(pg.GraphicsLayoutWidget):
 
     paint_listener: Callable[[float], None] | None = None
 
-    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
+    def paintEvent(self, event) -> None:
         started = time.perf_counter()
         super().paintEvent(event)
         elapsed = time.perf_counter() - started
@@ -50,23 +50,23 @@ class TimedImageItem(pg.ImageItem):
         pg.ImageItem.setImage(self, image, autoLevels=False, levels=levels)
         self._prepared_qimage = pg.functions.ndarray_to_qimage(picture, QImage.Format.Format_RGBA8888)
 
-    def setImage(self, *args, **kwargs) -> None:  # noqa: N802 - Qt naming
+    def setImage(self, *args, **kwargs) -> None:
         self._prepared_qimage = None
         super().setImage(*args, **kwargs)
 
-    def setLevels(self, *args, **kwargs) -> None:  # noqa: N802
+    def setLevels(self, *args, **kwargs) -> None:
         self._prepared_qimage = None
         super().setLevels(*args, **kwargs)
 
-    def setLookupTable(self, *args, **kwargs) -> None:  # noqa: N802
+    def setLookupTable(self, *args, **kwargs) -> None:
         self._prepared_qimage = None
         super().setLookupTable(*args, **kwargs)
 
-    def setOpts(self, *args, **kwargs) -> None:  # noqa: N802
+    def setOpts(self, *args, **kwargs) -> None:
         self._prepared_qimage = None
         super().setOpts(*args, **kwargs)
 
-    def setAutoDownsample(self, *args, **kwargs) -> None:  # noqa: N802
+    def setAutoDownsample(self, *args, **kwargs) -> None:
         self._prepared_qimage = None
         super().setAutoDownsample(*args, **kwargs)
 

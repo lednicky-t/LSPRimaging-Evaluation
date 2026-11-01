@@ -188,7 +188,7 @@ class ShortcutsDialog(QDialog):
             return int(saved[0]), int(saved[1])
         return DEFAULT_SIZE
 
-    def hideEvent(self, event: QHideEvent) -> None:  # noqa: N802 - Qt naming
+    def hideEvent(self, event: QHideEvent) -> None:
         if self._store is not None:
             self._store.set(SHORTCUTS_DIALOG_SIZE, [self.width(), self.height()])
         super().hideEvent(event)

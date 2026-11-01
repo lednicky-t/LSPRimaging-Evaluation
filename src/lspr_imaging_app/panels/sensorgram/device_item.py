@@ -23,8 +23,8 @@ class DeviceSpaceItem(pg.GraphicsObject):
         widget = self.getViewWidget()
         return None if widget is None else self.deviceTransform(widget.viewportTransform())
 
-    def viewTransformChanged(self) -> None:  # noqa: N802 - pyqtgraph naming
+    def viewTransformChanged(self) -> None:
         self.prepareGeometryChange()  # the bounding rectangle is the visible region
         self.update()
 
-    viewRangeChanged = viewTransformChanged  # noqa: N815 - both hooks mean the same here
+    viewRangeChanged = viewTransformChanged  # both hooks mean the same here
