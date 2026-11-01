@@ -47,8 +47,9 @@ LSPRi Evaluation was rebuilt from scratch on the `rewrite` branch (2026-09 to
 git tag `legacy-final`. What the app
 can do today, the rules for working on it, and the open decisions are in
 [`CLAUDE.md`](CLAUDE.md); every design record and measurement is indexed in
-[`docs/README.md`](docs/README.md). The latest whole-app audit is
-[`docs/whole_app_audit_2026-10-29.md`](docs/whole_app_audit_2026-10-29.md).
+[`docs/README.md`](docs/README.md). The latest audit is
+[`docs/maintainability_audit_2026-11-01.md`](docs/maintainability_audit_2026-11-01.md).
+What changed for a user, release by release, is in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Data layout
 
@@ -77,7 +78,7 @@ file per pytest process: all files in one process stalls.
 `docs/roi_editor_branch_plan.md`, `roi_implementation_direction.md`, and
 `roi_table_direction.md` document an earlier ROI redesign proposal;
 the ROI model that actually shipped is `AreaRoi`/`AreaRoiGroup` in
-`domain/models.py`, not the naming those docs propose — treat them as
+`roi/model.py`, not the naming those docs propose — treat them as
 historical context, not a current plan.
 
 ## Citing this software

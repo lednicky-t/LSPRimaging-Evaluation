@@ -1,15 +1,39 @@
 # Changelog
 
-This project follows a simple release log so format and workflow changes stay visible.
+This project follows a simple release log so format and workflow changes stay visible. It says what changed **for a user**; the reasons, design choices and measured numbers are in the dated records listed in `docs/README.md` (the per-feature record is `docs/rewrite_status_by_feature_2026-10-29.md`).
 
 ## Unreleased
 
-### Planned
+### Added
 
-- ROI-pair domain model and shape specifications
-- Versioned ROI JSON schema
-- ROI editor split into circular and custom-shape paths
-- Backward-compatible import/export migration path
+- Help -> Keyboard shortcuts: one table now both binds every shortcut and builds the list, so the list cannot drift from the keys that really work (2026-10-30; `docs/keyboard_shortcut_registry_design_2026-10-30.md`). Key matching is now exact: a few unusual modifier combinations that used to trigger a command no longer do (listed in the design doc, section 8).
+
+### Fixed
+
+- Edit -> Undo/Redo no longer tries to refresh itself after its window has been closed (2026-10-30).
+
+## 0.3.0 (2026-10-29): the rewrite replaces the original app
+
+LSPRi Evaluation was rebuilt from scratch (September to October 2026) and replaced the original app. It starts the same way (`lspri-evaluation`, or the Suite launcher). The original app is kept as git tag `legacy-final`; nothing else used it.
+
+### What the app does now
+
+- **Dataset**: TIFF stacks and OME-Zarr datasets; a TIFF stack can be exported to a sharded OME-Zarr (the export carries ROIs, masks, chromatic correction and mask pointers into the new coordinates); an experimental plan can be imported from a CSV file.
+- **Docked panels**: Image, Histogram, ROI table, Spectra, Sensorgram, Workflow and Log; the layout and every control you change are remembered between runs; Edit -> Undo/Redo; Edit -> Preferences (including how many CPU cores heavy jobs may use).
+- **Image tools**: crop, rotate (Lanczos interpolation), flip and pixel-size calibration; chromatic correction with automatic landmarks; background removal (divide-only); mask editing (threshold, local contrast, morphology, eraser, ROI-feature detection, transient scan with Auto mask) with a preview of the pixels a tool would change.
+- **ROIs**: circle arrays are detected automatically (spot-size scan, lattice fit), grouped and edited in a ROI table; Auto crop to the ROI lattice.
+- **Analysis**: a scan turns the pixels into numbers per ROI, cube and wavelength (stored in `scan.h5`); Spectra shows them with polynomial peak fits (several fit-window modes) and Sensorgram shows them over time with plan-step statistics, a baseline band and mask marks.
+- **Sessions**: your work is saved automatically per dataset and restored when you open it again.
+
+### Removed or not carried over
+
+- The original app's results file (schema 7, "measurement file") is retired; a new export format is deliberately deferred until all functions are in.
+- The original app's UI-scale setting, workflow notes and shortcuts dialog (the shortcuts list now exists again as Help -> Keyboard shortcuts, see above).
+- The old analysis engine (it was never started by any button).
+
+## 0.2.0 and earlier: the original app (git tag `legacy-final`)
+
+The entries below describe the original app and are kept as written. Their old "Planned" list (ROI-pair model, versioned ROI JSON schema) was never built that way.
 
 ## 0.2.0
 
