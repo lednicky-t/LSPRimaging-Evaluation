@@ -16,7 +16,7 @@ same cosmetic/computational split the rest of this rewrite already draws
 (e.g. `GeometryCosmeticChange` vs `GeometryComputationalChange`) - nothing
 here calls into `MaskModule` at all. `ImagePanel` is this widget's only
 listener; it owns the visible/color/alpha state itself and does the actual
-drawing (`panel.py`'s `_update_mask_overlay`), matching that panel's own
+drawing (`tint_overlays.py`'s `TintOverlays.update_mask`), matching that panel's own
 "owns no state that another module owns" rule - this state belongs to no
 other module, so the panel is its rightful owner.
 

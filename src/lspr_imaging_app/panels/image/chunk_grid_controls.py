@@ -1,7 +1,7 @@
 """The View tab's toggle for the loaded dataset's own chunk grid (2026-10-22).
 
-An OME-Zarr stores its pixels in chunks; this draws the lines between them over the image (blue, `ImagePanel`
-`_update_source_grid`). A TIFF stack has no chunks, so there the whole group is hidden (`availability_changed`). Off it
+An OME-Zarr stores its pixels in chunks; this draws the lines between them over the image (blue, `DecorationOverlays`
+`update_source_grid`, decoration_overlays.py). A TIFF stack has no chunks, so there the whole group is hidden (`availability_changed`). Off it
 is grey like the other View toggles, on it is blue. The state lives on `DatasetModule` (`set_source_chunk_grid_visible`), like the Export tab's grid preview, which is
 independent of this one (both can show at once, to compare). The Export tab's grid is the *planned* export chunking,
 this one is the chunking of what is loaded now.

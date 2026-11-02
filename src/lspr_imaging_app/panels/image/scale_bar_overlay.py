@@ -80,7 +80,7 @@ def contrast_color(color: QColor) -> QColor:
 class ScaleBarItem(pg.GraphicsObject):
     """See the module docstring. Create with the plot's `ViewBox`; call
     `update_view(...)` whenever the view range, size, units or visibility
-    change (`ImagePanel._draw_scale_bar`)."""
+    change (`DecorationOverlays.draw_scale_bar`)."""
 
     _MARGIN = 16.0  # px from the view's bottom-right corner
     _BAR_WIDTH = 3.0

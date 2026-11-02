@@ -14,7 +14,7 @@ show the edits".
   free logic `mask_highlight_actions.MaskHighlightActions` uses - see that
   module's own docstring), so this is a real second front door onto the
   same backend, not a copy. Its "live preview" is the already-built
-  Histogram highlight overlay (`panel.py`'s `_update_highlight_overlay`) -
+  Histogram highlight overlay (`tint_overlays.py`'s `TintOverlays.update_highlight`) -
   no new overlay needed, since that overlay already shows exactly what
   Add/Subtract would act on, live, as of the earlier 2026-10-02 session.
 - **Morphology**: fully wired - `MorphologyEditPanel`'s four operation

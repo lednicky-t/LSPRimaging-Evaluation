@@ -35,7 +35,7 @@ something this panel should invent an answer for:
 - Mask painting/preview overlays (`MaskModule`'s async candidate machinery
   isn't built either - see its module docstring). **The histogram
   intensity-highlight overlay is built** - 2026-10-02, mirrors the
-  mask-overlay tint's own shape (`_update_highlight_overlay`,
+  mask-overlay tint's own shape (`TintOverlays.update_highlight`,
   `histogram_highlight_overlay_controls.py`), reading
   `HighlightRangeModule.current_range()` against the already-displayed
   pixel array instead of a resolved mask.
@@ -114,8 +114,7 @@ from ...image_tools import (
 )
 from ...analysis.roi_tuning_module import TuningView
 from ...image_tools.chromatic.affine import apply_affine_to_points
-from ...image_tools.geometry.model import CropDefinition, GeometrySettings
-from ...image_tools.geometry.transform import raw_to_processed_affine_xy
+from ...image_tools.geometry.model import CropDefinition
 from ...diagnostics.thread_times import thread_cpu_times
 from ...image_tools.preprocess import area_selection_to_raw, resolve_external_mask
 from ...roi import RoiToolbox
@@ -133,7 +132,6 @@ from ...selection.frame_roles_module import ROLE_DARK, ROLE_IGNORED, ROLE_REFERE
 from ..cursor_overlay import CursorOverlay
 from ..ribbon_drawer import RibbonDrawer
 from ..subtitle_column import SubtitleColumn
-from .landmark_overlay import draw_landmarks
 from .slider_ticks import cube_slider_major_ticks, wavelength_slider_major_ticks
 from .transforms_settings import TransformsSection
 from ...image_tools.chromatic_auto_task import ChromaticAutoDetect
@@ -165,6 +163,8 @@ from .measure_line_tool import MeasureLineTool
 from .overlay_cache import environment_budget_mb
 from .overlay_style import OverlayStyle
 from .overlay_tint import OverlayTint
+from .tint_overlays import TintOverlays
+from .decoration_overlays import DecorationOverlays
 from .prefetch import prefetch_order
 from .render import ImageRenderer, RenderRequest, RenderResult
 from .roi_gestures import RoiGestures, SelectedApertures
@@ -448,8 +448,6 @@ class ImagePanel(QWidget):
         )
         self._initial_chromatic_values = initial_chromatic_values
         self._initial_chromatic_view = initial_chromatic_view
-        self._landmark_overlay_visible = bool(initial_chromatic_view[0])
-        self._landmark_all_wavelengths = bool(initial_chromatic_view[1])  # False = current wavelength only
         self._background = background
         self._roi_toolbox = roi_toolbox
         self._selection = selection
@@ -460,12 +458,8 @@ class ImagePanel(QWidget):
 
         # Mask-overlay display state (cosmetic only - see
         # mask_overlay_controls.py's module docstring for why this lives
-        # here and not on MaskModule). `_mask_overlay_state` caches the last
-        # resolved (authored_mask, geometry, warp_affine, hidden) tuple so a
-        # pure visibility/color/alpha change can redraw the tint without
-        # re-resolving the mask or touching the async pixel-render pipeline.
+        # here and not on MaskModule); what is cached and drawn is in `TintOverlays` (tint_overlays.py).
         self._mask_tint = OverlayTint(QColor(get_active_theme().mask_color), 0.5, initial_mask_overlay)
-        self._mask_overlay_state: tuple[np.ndarray | None, GeometrySettings | None, np.ndarray | None, bool] | None = None
 
         # Histogram highlight-overlay display state (cosmetic only - see
         # histogram_highlight_overlay_controls.py's module docstring for why
@@ -479,6 +473,16 @@ class ImagePanel(QWidget):
             QColor(get_active_theme().highlight_color), 0.42, initial_highlight_overlay
         )
         self._current_display_image: np.ndarray | None = None
+        # What is tinted over the image and when (tint_overlays.py); the three functions are what it reads from this panel.
+        self._tints = TintOverlays(
+            self._mask_tint,
+            self._highlight_tint,
+            highlight_range,
+            display_image=lambda: self._current_display_image,
+            data_range=lambda: self._last_data_range,
+            show_background=lambda: self._show_background,
+            style_changed=self.overlay_style_changed.emit,
+        )
         # Mirrors the last `frame_status_changed` emission (same "cached
         # alongside the signal" shape as `_tool_status` above) - lets a test
         # (or any other direct caller) read the current frame-status text
@@ -496,14 +500,6 @@ class ImagePanel(QWidget):
         self._calm_histogram = False
         self._roi_revision = 0  # bumped by every ROI-toolbox change; part of the ROI overlay's "unchanged" test
         self._roi_draw_key: tuple | None = None
-        # What the landmark overlay currently shows (see `_draw_landmarks`):
-        # drawing it costs 45-160 ms in all-wavelengths mode, so it is redrawn
-        # only when this key changes. `_landmark_version` is bumped by anything
-        # that changes the landmarks themselves (chromatic model, dataset).
-        self._landmark_version = 0
-        self._landmark_drawn_key: tuple | None = None
-        # (resolved mask object, colour, alpha) last painted into the mask tint.
-        self._mask_painted: tuple[np.ndarray, int, float] | None = None
         self._drag_roi_id: int | None = None
         # (height, width) of the last successfully rendered plane - the
         # chunk-grid preview needs real pixel dimensions and only this
@@ -773,7 +769,7 @@ class ImagePanel(QWidget):
         # on the image) positions, dots = *fitted* positions (what the correction
         # model says), lines connect them, each in its wavelength's own colour
         # (`wavelength_color.py`). Symbol sizes are screen pixels; styling is
-        # set per draw (`_draw_landmarks`).
+        # set per draw (`DecorationOverlays.draw_landmarks`).
         self._landmark_line_item = pg.PlotDataItem(connect="finite")
         self._plot.addItem(self._landmark_line_item)
         self._landmark_observed_item = pg.ScatterPlotItem(pxMode=True)
@@ -781,15 +777,38 @@ class ImagePanel(QWidget):
         self._plot.addItem(self._landmark_observed_item)
         self._plot.addItem(self._landmark_fitted_item)
         # Scale bar (2026-10-06): a screen-space child of the ViewBox, see
-        # `scale_bar_overlay.py`; laid out by `_draw_scale_bar`.
+        # `scale_bar_overlay.py`; laid out by `DecorationOverlays.draw_scale_bar`.
         self._scale_bar_item = ScaleBarItem(self._plot.vb)
-        self._plot.vb.sigRangeChanged.connect(self._draw_scale_bar)
-        self._plot.vb.sigResized.connect(self._draw_scale_bar)
         # ROI labels (the ROIs tab's toggle): the same kind of item, see `roi_label_overlay.py`.
         self._roi_overlay.attach_labels()
         self._roi_overlay.layers.set_refresher(self._refresh_overlay_items)
         # Drawn only while a preview tool is active (see `_draw_overlays`).
         self._crop_outline_curve = self._add_curve(_CROP_OUTLINE_COLOR, width=1.5, dashed=True)
+        # The scale bar, landmarks, crop outline and chunk grids above are drawn by one object (decoration_overlays.py); the items stay
+        # created here, in this order, because it decides what paints over what.
+        self._decorations = DecorationOverlays(
+            self._dataset,
+            self._geometry,
+            self._chromatic,
+            view=self._view,
+            chunk_grid_curve=self._chunk_grid_curve,
+            source_grid_curve=self._source_grid_curve,
+            crop_outline_curve=self._crop_outline_curve,
+            landmark_line_item=self._landmark_line_item,
+            landmark_observed_item=self._landmark_observed_item,
+            landmark_fitted_item=self._landmark_fitted_item,
+            scale_bar_item=self._scale_bar_item,
+            preview_tool_active=lambda: self._active_tool.active() in _PREVIEW_TOOLS,
+            last_image_shape=lambda: self._last_image_shape,
+            current_cube=self._current_cube,
+            current_wavelength=self._current_wavelength,
+            schedule_redraw=self._schedule_redraw,
+            view_changed=self.chromatic_view_changed.emit,
+            landmarks_visible=self._initial_chromatic_view[0],
+            landmarks_all_wavelengths=self._initial_chromatic_view[1],
+        )
+        self._plot.vb.sigRangeChanged.connect(self._decorations.draw_scale_bar)
+        self._plot.vb.sigResized.connect(self._decorations.draw_scale_bar)
 
         self._rotate_tool = RotateLineTool(self._plot, self._geometry, parent=self)
         self._rotate_tool.status_changed.connect(self._on_tool_status)
@@ -948,9 +967,9 @@ class ImagePanel(QWidget):
             events=self._mask_pointers, scan=self._transient_scan, auto=self._mask_auto, export=self._mask_export,
             features=self._roi_features, status=self._on_tool_status, visible_cubes=self._visible_cube_range,
         )
-        self._mask_tab.overlay_visibility_changed.connect(self._on_mask_overlay_visibility_changed)
-        self._mask_tab.overlay_color_changed.connect(self._on_mask_overlay_color_changed)
-        self._mask_tab.overlay_alpha_changed.connect(self._on_mask_overlay_alpha_changed)
+        self._mask_tab.overlay_visibility_changed.connect(self._tints.on_mask_visibility_changed)
+        self._mask_tab.overlay_color_changed.connect(self._tints.on_mask_color_changed)
+        self._mask_tab.overlay_alpha_changed.connect(self._tints.on_mask_alpha_changed)
         self._edit_preview_layer.set_preview(self._mask_tab.edit_preview)
         return self._mask_tab
 
@@ -992,12 +1011,12 @@ class ImagePanel(QWidget):
             self._chromatic_tab, self._background_tab, self._roi_tab, self._scale_bar_item.color(),
             self._dataset, self,
         )
-        self._view_tab.highlight_visibility_changed.connect(self._on_highlight_overlay_visibility_changed)
-        self._view_tab.highlight_color_changed.connect(self._on_highlight_overlay_color_changed)
-        self._view_tab.highlight_alpha_changed.connect(self._on_highlight_overlay_alpha_changed)
-        self._view_tab.mask_visibility_changed.connect(self._on_mask_overlay_visibility_changed)
-        self._view_tab.mask_color_changed.connect(self._on_mask_overlay_color_changed)
-        self._view_tab.mask_alpha_changed.connect(self._on_mask_overlay_alpha_changed)
+        self._view_tab.highlight_visibility_changed.connect(self._tints.on_highlight_visibility_changed)
+        self._view_tab.highlight_color_changed.connect(self._tints.on_highlight_color_changed)
+        self._view_tab.highlight_alpha_changed.connect(self._tints.on_highlight_alpha_changed)
+        self._view_tab.mask_visibility_changed.connect(self._tints.on_mask_visibility_changed)
+        self._view_tab.mask_color_changed.connect(self._tints.on_mask_color_changed)
+        self._view_tab.mask_alpha_changed.connect(self._tints.on_mask_alpha_changed)
         self._view_tab.roi_overlay_changed.connect(self._on_roi_overlay_changed)
         self._view_tab.scale_bar_color_changed.connect(self._on_scale_bar_color_changed)
         self._view_tab.display_range_changed.connect(self._on_display_range_edited)
@@ -1017,8 +1036,8 @@ class ImagePanel(QWidget):
             initial_all_wavelengths=self._initial_chromatic_view[1],
             is_spectral=None if self._frame_roles is None else self._frame_roles.is_spectral,
         )
-        self._chromatic_tab.show_landmarks_changed.connect(self._on_show_landmarks_changed)
-        self._chromatic_tab.landmark_scope_changed.connect(self._on_landmark_scope_changed)
+        self._chromatic_tab.show_landmarks_changed.connect(self._decorations.on_show_landmarks_changed)
+        self._chromatic_tab.landmark_scope_changed.connect(self._decorations.on_landmark_scope_changed)
         self._chromatic_tab.settings_applied.connect(self.chromatic_settings_applied)
         self._background_tab = BackgroundTab(
             self._background, show_background=self._show_background, parent=self
@@ -1350,18 +1369,18 @@ class ImagePanel(QWidget):
         # Direct update, not `_schedule_redraw` - the preview only needs the
         # already-cached last render shape, so redrawing it shouldn't wait on
         # (or trigger) a full coalesced image re-render.
-        self._dataset.chunk_grid_preview_changed.connect(self._update_chunk_grid)
-        self._dataset.source_chunk_grid_changed.connect(self._update_source_grid)
+        self._dataset.chunk_grid_preview_changed.connect(self._decorations.update_chunk_grid)
+        self._dataset.source_chunk_grid_changed.connect(self._decorations.update_source_grid)
 
         self._active_tool.active_tool_changed.connect(self._on_active_tool_changed)
 
-        self._geometry.geometry_changed.connect(self._invalidate_landmark_overlay)
+        self._geometry.geometry_changed.connect(self._decorations.invalidate_landmarks)
         self._geometry.geometry_changed.connect(self._schedule_redraw)
         self._geometry.cosmetic_changed.connect(self._schedule_redraw)
         self._mask.mask_changed.connect(self._schedule_redraw)
         self._mask.cosmetic_changed.connect(self._schedule_redraw)
         self._background.background_model_changed.connect(self._schedule_redraw)
-        self._chromatic.chromatic_model_changed.connect(self._invalidate_landmark_overlay)
+        self._chromatic.chromatic_model_changed.connect(self._decorations.invalidate_landmarks)
         self._chromatic.chromatic_model_changed.connect(self._schedule_redraw)
         self._chromatic.chromatic_model_changed.connect(self._update_chromatic_tab_state)
         self._update_chromatic_tab_state()
@@ -1408,8 +1427,8 @@ class ImagePanel(QWidget):
         # The highlight overlay tints the already-displayed pixel array
         # (`_current_display_image`, set in `_on_rendered`) - a range change
         # never needs a new render, so this goes straight to
-        # `_update_highlight_overlay`, not `_schedule_redraw`.
-        self._highlight_range.range_changed.connect(self._on_highlight_range_changed)
+        # `TintOverlays.update_highlight`, not `_schedule_redraw`.
+        self._highlight_range.range_changed.connect(self._tints.on_highlight_range_changed)
 
     # -- theming --------------------------------------------------------------
 
@@ -1520,9 +1539,6 @@ class ImagePanel(QWidget):
 
     # -- dataset lifecycle --------------------------------------------------
 
-    def _invalidate_landmark_overlay(self, *_args: object) -> None:
-        self._landmark_version += 1
-
     def _stop_dataset_bound_tasks(self) -> None:
         """A scan reads frames of the dataset and Auto mask makes masks for its frames: when the dataset is loaded or cleared under
         them they stop, and nothing they had is kept (the scan reads through the dataset module as it is at each read, so it would
@@ -1535,7 +1551,7 @@ class ImagePanel(QWidget):
         self._stop_dataset_bound_tasks()
         self._frame_widest = None
         self._renderer.clear_prefetch()
-        self._invalidate_landmark_overlay()
+        self._decorations.invalidate_landmarks()
         self._refresh_navigation_ranges()
         self._refresh_frame_tools()
         self._schedule_redraw()
@@ -1549,14 +1565,11 @@ class ImagePanel(QWidget):
         self._frame_widest = None
         self._refresh_frame_tools()
         self._renderer.clear_prefetch()
-        self._invalidate_landmark_overlay()
-        self._mask_painted = None
+        self._decorations.invalidate_landmarks()
         self._image_item.clear()
         self._no_data_item.hide()
         self._no_data_shown = None
-        self._mask_tint.item.hide()
-        self._mask_overlay_state = None
-        self._highlight_tint.item.hide()
+        self._tints.clear()
         self._current_display_image = None
         self._roi_overlay.clear()
         self._chunk_grid_curve.clear()
@@ -2033,7 +2046,7 @@ class ImagePanel(QWidget):
         cubes = self._dataset.spectral_cubes()
         if not cubes:
             self._draw_overlays()
-            self._update_mask_overlay(None, None, None, hidden=True)
+            self._tints.update_mask(None, None, None, hidden=True)
             self._current_display_image = None
             self._highlight_tint.item.hide()
             self._edit_preview_layer.refresh()
@@ -2104,7 +2117,7 @@ class ImagePanel(QWidget):
         # coordinate space than `authored_mask`/`warp_affine` were resolved
         # for, so it hides then, the same "wrong coordinate space" reasoning
         # `_draw_overlays` already applies to the ROI overlay.
-        self._update_mask_overlay(authored_mask, geometry, warp_affine, hidden=preview_active)
+        self._tints.update_mask(authored_mask, geometry, warp_affine, hidden=preview_active)
         self._edit_preview_layer.refresh()  # a geometry change moves where the previewed raw pixels land
         self._playback_stats.note_detail("mask", time.perf_counter() - mask_started)
 
@@ -2113,7 +2126,7 @@ class ImagePanel(QWidget):
         overlays each second of it was drawn with (testing9: the stats alone could not tell). Read once per
         second with the Play stats window; cheap."""
         settings = self._slideshow.settings()
-        mask_state = self._mask_overlay_state
+        mask_state = self._tints.mask_state
         return {
             "c_target_fps": round(1.0 / max(self._slideshow.interval_seconds(), 1e-6), 1),
             "c_speed": settings.speed,
@@ -2122,7 +2135,7 @@ class ImagePanel(QWidget):
             "c_reference": bool(self._roi_overlay.reference.visible),
             "c_labels": bool(self._roi_overlay.labels_visible),
             "c_group_labels": bool(self._roi_overlay.group_labels.visible),
-            "c_landmarks": bool(self._landmark_overlay_visible),
+            "c_landmarks": bool(self._decorations.landmarks_visible),
             "c_mask": bool(self._mask_tint.visible and mask_state is not None and mask_state[0] is not None),
             "c_highlight": bool(self._highlight_tint.item.isVisible()),
             "c_background": bool(self._background.settings().flatten_background_enabled),
@@ -2257,7 +2270,7 @@ class ImagePanel(QWidget):
             self._playback_stats.note_detail("nodata", time.perf_counter() - stage)
             self._current_display_image = image
             stage = time.perf_counter()
-            self._update_highlight_overlay()
+            self._tints.update_highlight()
             self._playback_stats.note_detail("highlight", time.perf_counter() - stage)
         if not self._view_range_restored:
             # Once only, ever, on this panel's first successful render - a
@@ -2294,8 +2307,8 @@ class ImagePanel(QWidget):
         # active-tool change).
         self._crop_tool.set_frame_size(result.image.shape[1], result.image.shape[0])
         stage = time.perf_counter()
-        self._update_chunk_grid()
-        self._update_source_grid()
+        self._decorations.update_chunk_grid()
+        self._decorations.update_source_grid()
         self._playback_stats.note_detail("chunkgrid", time.perf_counter() - stage)
         if self._playback_stats.active:
             line = self._playback_stats.note_rendered(
@@ -2386,14 +2399,14 @@ class ImagePanel(QWidget):
     def _draw_overlays(self) -> None:
         stats = self._playback_stats
         if not stats.active:
-            self._draw_crop_outline()
-            self._draw_landmarks()
-            self._draw_scale_bar()
+            self._decorations.draw_crop_outline()
+            self._decorations.draw_landmarks()
+            self._decorations.draw_scale_bar()
             self._draw_roi_overlay(only_if_changed=True)
             return
         for name, draw in (
-            ("ov_crop", self._draw_crop_outline), ("ov_landmarks", self._draw_landmarks),
-            ("ov_scalebar", self._draw_scale_bar), ("ov_rois", lambda: self._draw_roi_overlay(only_if_changed=True)),
+            ("ov_crop", self._decorations.draw_crop_outline), ("ov_landmarks", self._decorations.draw_landmarks),
+            ("ov_scalebar", self._decorations.draw_scale_bar), ("ov_rois", lambda: self._draw_roi_overlay(only_if_changed=True)),
         ):
             started = time.perf_counter()
             draw()
@@ -2630,268 +2643,6 @@ class ImagePanel(QWidget):
             return float(width) / max(float(height), 1.0)
         raw = self._dataset.raw_plane_shape()
         return float(raw[1]) / max(float(raw[0]), 1.0) if raw else 1.5
-
-    def _on_show_landmarks_changed(self, visible: bool) -> None:
-        self._landmark_overlay_visible = bool(visible)
-        self._schedule_redraw()
-        self.chromatic_view_changed.emit(self._landmark_overlay_visible, self._landmark_all_wavelengths)
-
-    def _on_landmark_scope_changed(self, all_wavelengths: bool) -> None:
-        self._landmark_all_wavelengths = bool(all_wavelengths)
-        self._schedule_redraw()
-        self.chromatic_view_changed.emit(self._landmark_overlay_visible, self._landmark_all_wavelengths)
-
-    def _draw_scale_bar(self, *_args: object) -> None:
-        """Lay the scale bar out for the current view and units (display only)."""
-        settings = self._geometry.settings()
-        um_per_px = (
-            self._geometry.microns_per_pixel_scalar()
-            if settings.display_units == "um" and self._geometry.can_display_micrometers()
-            else None
-        )
-        shown = bool(settings.scale_bar_visible) and self._active_tool.active() not in _PREVIEW_TOOLS
-        self._scale_bar_item.update_view(shown, um_per_px)
-
-    def _draw_landmarks(self) -> None:
-        """Chromatic landmarks (display only); drawing rules in
-        `landmark_overlay.draw_landmarks`."""
-        shown = self._landmark_overlay_visible and self._active_tool.active() not in _PREVIEW_TOOLS
-        # The all-wavelengths view does not depend on the viewed frame at all,
-        # so slider moves leave it alone; the current-wavelength view depends
-        # on the frame. Anything else that changes the picture bumps
-        # `_landmark_version` (chromatic model, dataset).
-        frame = None if self._landmark_all_wavelengths else (self._current_cube(), self._current_wavelength())
-        key = (shown, self._landmark_all_wavelengths, frame, self._landmark_version)
-        if key == self._landmark_drawn_key:
-            return
-        self._landmark_drawn_key = key
-        self._landmark_observed_item.clear()
-        self._landmark_fitted_item.clear()
-        self._landmark_line_item.clear()
-        if not shown:
-            return
-        draw_landmarks(
-            self._chromatic,
-            self._dataset,
-            self._landmark_observed_item,
-            self._landmark_fitted_item,
-            self._landmark_line_item,
-            current_cube=self._current_cube(),
-            current_wavelength=self._current_wavelength(),
-            all_wavelengths=self._landmark_all_wavelengths,
-        )
-
-    def _draw_crop_outline(self) -> None:
-        """The existing crop as a dashed rectangle over the uncropped
-        preview - only while a preview tool is active. Crop coordinates are
-        in the rotated+flipped canvas, which is exactly what the uncropped
-        preview shows (transform order: rotate -> flip -> crop)."""
-        crop = self._geometry.settings().crop
-        if self._active_tool.active() not in _PREVIEW_TOOLS or not crop.enabled or crop.width <= 0 or crop.height <= 0:
-            self._crop_outline_curve.clear()
-            return
-        x0, y0 = float(crop.x), float(crop.y)
-        x1, y1 = x0 + float(crop.width), y0 + float(crop.height)
-        self._crop_outline_curve.setData([x0, x1, x1, x0, x0], [y0, y0, y1, y1, y0])
-
-    # -- mask overlay (display-only, see mask_overlay_controls.py) ----------
-
-    def _update_mask_overlay(
-        self,
-        authored_mask: np.ndarray | None,
-        geometry: GeometrySettings | None,
-        warp_affine: np.ndarray | None,
-        *,
-        hidden: bool,
-    ) -> None:
-        """Redraw the mask-overlay tint from an already-resolved mask -
-        synchronous GUI-thread work, same as `_draw_overlays` (a few
-        thousand boolean pixels, cheap next to a full image re-render).
-
-        Caches its arguments as `self._mask_overlay_state` so a pure
-        visibility/color/alpha change (`_on_mask_overlay_*` below) can
-        redraw without re-resolving the mask or touching the async
-        pixel-render pipeline at all - none of those three controls change
-        what is *computed*, only how the already-resolved mask is drawn."""
-        self._mask_overlay_state = (authored_mask, geometry, warp_affine, hidden)
-        if hidden or not self._mask_tint.visible or authored_mask is None or geometry is None:
-            self._mask_tint.item.hide()
-            self._mask_painted = None
-            return
-        mask = resolve_external_mask(authored_mask, geometry, warp_affine)
-        if mask is None or not np.any(mask):
-            self._mask_tint.item.hide()
-            self._mask_painted = None
-            return
-        # `resolve_external_mask` hands back the same object for the same
-        # inputs, so a wavelength change that resolves to the same mask does not
-        # rebuild and re-upload the tint image.
-        painted = self._mask_painted
-        style = (self._mask_tint.color.rgba(), self._mask_tint.alpha)
-        if painted is not None and painted[0] is mask and (painted[1], painted[2]) == style:
-            self._mask_tint.item.show()
-            return
-        self._mask_tint.paint(mask)
-        self._mask_painted = (mask, style[0], style[1])
-
-    def _redraw_mask_overlay_from_cache(self) -> None:
-        if self._mask_overlay_state is not None:
-            authored_mask, geometry, warp_affine, hidden = self._mask_overlay_state
-            self._update_mask_overlay(authored_mask, geometry, warp_affine, hidden=hidden)
-
-    def _emit_overlay_style(self, kind: str) -> None:
-        tint = self._mask_tint if kind == "mask" else self._highlight_tint
-        self.overlay_style_changed.emit(kind, tint.style())
-
-    def _on_mask_overlay_visibility_changed(self, visible: bool) -> None:
-        self._mask_tint.visible = bool(visible)
-        self._redraw_mask_overlay_from_cache()
-        self._emit_overlay_style("mask")
-
-    def _on_mask_overlay_color_changed(self, color: QColor) -> None:
-        self._mask_tint.color = QColor(color)
-        self._redraw_mask_overlay_from_cache()
-        self._emit_overlay_style("mask")
-
-    def _on_mask_overlay_alpha_changed(self, alpha: float) -> None:
-        self._mask_tint.alpha = float(alpha)
-        self._redraw_mask_overlay_from_cache()
-        self._emit_overlay_style("mask")
-
-    # -- histogram highlight overlay (display-only, see histogram_highlight_overlay_controls.py) --
-
-    def _update_highlight_overlay(self) -> None:
-        """Redraw the histogram highlight-overlay tint from the cached,
-        already-displayed pixel array (`_current_display_image`, set in
-        `_on_rendered`) - synchronous GUI-thread work, same cost reasoning
-        as `_update_mask_overlay`. A pure visibility/color/alpha change
-        (`_on_highlight_overlay_*` below) and a range change
-        (`_on_highlight_range_changed`) both land here; neither needs a new
-        render, since the tint is a threshold over pixels already on
-        screen - matches the stable app's own
-        `_update_selected_intensity_overlay`."""
-        if not self._highlight_tint.visible or self._current_display_image is None or self._show_background:
-            self._highlight_tint.item.hide()
-            return
-        range_ = self._highlight_range.current_range()
-        if range_ is None:
-            self._highlight_tint.item.hide()
-            return
-        lower, upper = range_
-        image = self._current_display_image
-        data_range = self._last_data_range  # the displayed frame's own finite min / max, computed once in `_on_rendered`
-        if data_range is not None and (upper < data_range[0] or lower > data_range[1] or (lower <= data_range[0] and upper >= data_range[1])):
-            # Nothing in range, or every finite pixel in range: either way no tint is drawn (below). Decided from
-            # the min / max alone: building the full-image mask for it cost ~6-10 ms of every Play frame.
-            self._highlight_tint.item.hide()
-            return
-        selection_mask = (image >= lower) & (image <= upper)
-        # Hide rather than tint when nothing is excluded (the whole image
-        # falls in range) as well as when nothing is included - a full-image
-        # tint carries no information, same reasoning the stable app applies
-        # against its own fixed sensor-range bounds (here, against the
-        # actually-displayed image's own range, since `HighlightRangeModule`
-        # seeds to that, not a fixed 16-bit constant - see that module's
-        # docstring).
-        # Pixels without a value (NaN) are never selected and do not count as
-        # "excluded" either: "everything in range" is judged on finite pixels.
-        if not np.any(selection_mask):
-            self._highlight_tint.item.hide()
-            return
-        # "Every finite pixel is in range" was already decided from the frame's min / max above whenever those are
-        # known (all finite pixels lie between them), so the full-image `selection_mask[np.isfinite(image)]` test
-        # (a ~1 MP copy, 2-3 ms per Play frame) only runs for a frame without a known range.
-        if data_range is None and bool(np.all(selection_mask[np.isfinite(image)])):
-            self._highlight_tint.item.hide()
-            return
-        self._highlight_tint.paint(selection_mask)
-
-    def _on_highlight_range_changed(self, _range: tuple[float, float] | None) -> None:
-        self._update_highlight_overlay()
-
-    def _on_highlight_overlay_visibility_changed(self, visible: bool) -> None:
-        self._highlight_tint.visible = bool(visible)
-        self._update_highlight_overlay()
-        self._emit_overlay_style("highlight")
-
-    def _on_highlight_overlay_color_changed(self, color: QColor) -> None:
-        self._highlight_tint.color = QColor(color)
-        self._update_highlight_overlay()
-        self._emit_overlay_style("highlight")
-
-    def _on_highlight_overlay_alpha_changed(self, alpha: float) -> None:
-        self._highlight_tint.alpha = float(alpha)
-        self._update_highlight_overlay()
-        self._emit_overlay_style("highlight")
-
-    def _update_chunk_grid(self) -> None:
-        """Draw (or clear) the Export section's chunk-grid preview - lines
-        at every `chunk_size_px` boundary over the last rendered plane, so
-        the maintainer can see how the chosen chunk size will actually
-        divide up the image before exporting. Reads `DatasetModule` only
-        (see its `chunk_grid_preview` docstring) - never touches the Export
-        section's widgets.
-
-        The grid lives in raw pixels (the export writes raw pixels, 2026-10-20): its lines run from the grid offset
-        across the raw frame and are mapped onto the displayed image, so with a rotation they appear tilted and with
-        a crop shifted - exactly where the exported chunks will fall."""
-        preview = self._dataset.chunk_grid_preview()
-        if preview.processed:
-            # The export applies rotation/flip/crop (2026-10-20): the grid lies on the processed image itself, drawn
-            # straight. Hidden while a preview tool shows the uncropped canvas (another coordinate space, as the ROIs).
-            hidden = self._active_tool.active() in _PREVIEW_TOOLS
-            raw_shape = None if hidden else self._last_image_shape
-        else:
-            raw_shape = self._dataset.raw_plane_shape() if preview.enabled else None
-        if not preview.enabled or raw_shape is None or preview.chunk_w <= 0 or preview.chunk_h <= 0:
-            self._chunk_grid_curve.clear()
-            # Nothing else re-renders on a toggle, so without this the removed lines stay painted until the mouse
-            # moves over the image.
-            self._view.viewport().update()
-            return
-        to_display = (
-            np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
-            if preview.processed
-            else raw_to_processed_affine_xy((int(raw_shape[0]), int(raw_shape[1])), self._geometry.settings())
-        )
-        xs, ys = self._grid_polyline(raw_shape, to_display, preview.chunk_w, preview.chunk_h, preview.offset_x, preview.offset_y)
-        self._chunk_grid_curve.setData(xs, ys)
-        self._view.viewport().update()
-
-    def _update_source_grid(self) -> None:
-        """Draw (or clear) the loaded OME-Zarr's own chunk grid (the View tab's blue toggle): lines at every stored chunk
-        boundary from pixel (0, 0), in raw pixels and mapped onto the displayed image like the export preview's raw
-        branch (tilted under a rotation, shifted by a crop). A TIFF stack has no chunks, so nothing is drawn."""
-        module = self._dataset
-        chunk = module.source_chunk_shape() if module.source_chunk_grid_visible() else None
-        raw_shape = module.raw_plane_shape() if chunk is not None else None
-        if chunk is None or raw_shape is None or chunk[0] <= 0 or chunk[1] <= 0:
-            self._source_grid_curve.clear()
-            self._view.viewport().update()  # nothing else re-renders on a toggle (see `_update_chunk_grid`)
-            return
-        to_display = raw_to_processed_affine_xy((int(raw_shape[0]), int(raw_shape[1])), self._geometry.settings())
-        xs, ys = self._grid_polyline(raw_shape, to_display, chunk[1], chunk[0], 0, 0)
-        self._source_grid_curve.setData(xs, ys)
-        self._view.viewport().update()
-
-    @staticmethod
-    def _grid_polyline(
-        raw_shape: tuple[int, int], to_display: np.ndarray, chunk_w: int, chunk_h: int, offset_x: int, offset_y: int
-    ) -> tuple[list[float], list[float]]:
-        """Grid lines at ``offset + k * chunk`` across the raw frame, mapped to the displayed image by ``to_display``."""
-        raw_h, raw_w = float(raw_shape[0]), float(raw_shape[1])
-        xs: list[float] = []
-        ys: list[float] = []
-
-        def segment(x0: float, y0: float, x1: float, y1: float) -> None:
-            pts = to_display @ np.array([[x0, x1], [y0, y1], [1.0, 1.0]])
-            _append_polyline(xs, ys, pts[0], pts[1])
-
-        for x in np.arange(offset_x % chunk_w, raw_w + 0.5, chunk_w, dtype=np.float64):
-            segment(x, 0.0, x, raw_h)
-        for y in np.arange(offset_y % chunk_h, raw_h + 0.5, chunk_h, dtype=np.float64):
-            segment(0.0, y, raw_w, y)
-        return xs, ys
 
     # -- interaction --------------------------------------------------------
 
@@ -3479,14 +3230,3 @@ class _blocked:
 
     def __exit__(self, *_exc: object) -> None:
         self._widget.blockSignals(self._previous)
-
-
-def _append_polyline(xs: list[float], ys: list[float], new_x: np.ndarray, new_y: np.ndarray) -> None:
-    """Append one closed curve, separated from whatever came before by a
-    NaN. ``PlotDataItem(connect="finite")`` breaks the line at non-finite
-    points, which is what lets a single item draw many disjoint circles."""
-    if xs:
-        xs.append(float("nan"))
-        ys.append(float("nan"))
-    xs.extend(new_x.tolist())
-    ys.extend(new_y.tolist())
