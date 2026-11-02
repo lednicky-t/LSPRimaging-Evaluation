@@ -130,7 +130,6 @@ from ...selection.frame_roles_module import FrameRolesModule
 from ..cursor_overlay import CursorOverlay
 from ..ribbon_drawer import RibbonDrawer
 from ..subtitle_column import SubtitleColumn
-from .slider_ticks import cube_slider_major_ticks, wavelength_slider_major_ticks
 from .transforms_settings import TransformsSection
 from ...image_tools.chromatic_auto_task import ChromaticAutoDetect
 from ...image_tools.mask.mask_pointers import MaskPointersModule
@@ -141,7 +140,6 @@ from ..roi_feature_task import RoiFeatureTask
 from ...storage.session_carry_task import SessionCarry
 from ...roi.array_task import ArrayAction
 from ...roi.display_style import RoiDisplayStyle
-from ...domain.roi_model import SCOPE_PERSISTENT
 from ...roi.scope import RoiEditTarget, RoiScopeModule
 from .area_selection_tool import AreaSelectionTool
 from .background_tab import BACKGROUND_INFO_HTML, BackgroundTab
@@ -167,6 +165,8 @@ from .frame_status_text import FrameStatusText
 from .cursor_readout import CursorReadout
 from .roi_queries import RoiQueries
 from .crop_measure_controls import CropMeasureControls
+from .slider_marks import SliderMarks
+from .slideshow_state import restore_slideshow_settings
 from .prefetch import prefetch_order
 from .render import ImageRenderer, RenderRequest, RenderResult
 from .roi_gestures import RoiGestures
@@ -192,42 +192,27 @@ from ...storage.ui_state_keys import (
     ROI_ROW_SELECTED_ONLY,
     ROI_ROW_VISIBLE,
     ROI_SCOPE,
-    SLIDER_COLOR_KEYS,
     SLIDER_RIBBON_OPEN,
     TOP_RIBBON_OPEN,
-    SLIDESHOW_END,
-    SLIDESHOW_SKIP_DARK,
-    SLIDESHOW_SKIP_IGNORED,
-    SLIDESHOW_THIN_ROI_OUTLINE,
-    SLIDESHOW_CALM_HISTOGRAM,
-    SLIDESHOW_MODE,
-    SLIDESHOW_REPEAT,
-    SLIDESHOW_SPEED,
     read,
 )
 from ..ui_state import UiStateStore
 from .scale_bar_overlay import ScaleBarItem
-from . import roi_layout_menu
-from .mark_colors import cube_color, roi_color, wavelength_color
+from .mark_colors import cube_color, wavelength_color
 from .mask_rows import MaskRows
-from .timeline_strip import TimelineStrip, StripMark
+from .timeline_strip import TimelineStrip
 from .slider_colors import SliderColors
 from ...applog.events import log_event, timed
 from .playback_stats import PlaybackStats
 from .timed_canvas import TimedImageItem, TimedLayoutWidget
 from .slider_ribbon import SliderRibbon, SliderRibbonDrawer
 from .slideshow import (
-    END_CUBE,
-    END_DATASET,
     MODE_ALL,
     MODE_EVENTS,
     MODE_MASK_STATES,
-    MODE_ONE_WAVELENGTH,
     MODE_ROI_STATES,
     MODE_ROW_MARKS,
-    SPEEDS,
     SlideshowController,
-    SlideshowSettings,
 )
 from .tool_ribbon import ROI_TAB, VIEW_TAB, ImageToolRibbon
 
@@ -256,10 +241,6 @@ def _slider_axis_title_style(color: str) -> str:
     titles use identical numbers instead of two hand-copied versions that
     can drift."""
     return f"color: {color}; font-size: 11px; font-weight: 600;"
-
-
-def _count_phrase(count: int, noun: str) -> str:
-    return f"{count} {noun}{'' if count == 1 else 's'}"
 
 
 MASK_TAB = "Mask"  # ribbon tab label; the edit preview (the pixels the picked tool would change) is drawn only while it is open
@@ -587,7 +568,7 @@ class ImagePanel(QWidget):
         cache_mb = env_mb if env_mb is not None else int(read(store, IMAGE_OVERLAY_CACHE_MB))
         self._roi_overlay.layers.set_budget_bytes(int(max(cache_mb, 0) * 1024 * 1024))
         self._restore_slideshow_settings(store)
-        self._set_roi_row(read(store, ROI_ROW_VISIBLE) is not False, read(store, ROI_ROW_SELECTED_ONLY) is True)
+        self._slider_marks.set_roi_row(read(store, ROI_ROW_VISIBLE) is not False, read(store, ROI_ROW_SELECTED_ONLY) is True)
         self._slider_ribbon.roi_row_toggled.connect(lambda on: store.set(ROI_ROW_VISIBLE.key, bool(on)))
         self._slider_ribbon.roi_selected_only_toggled.connect(lambda on: store.set(ROI_ROW_SELECTED_ONLY.key, bool(on)))
         mask_rows_shown = read(store, MASK_ROWS_VISIBLE) is not False
@@ -1240,8 +1221,6 @@ class ImagePanel(QWidget):
         self._roi_strip.index_requested.connect(self._cube_slider.setValue)
         # One zoom window for the Cube slider and the ROI row (their marks must stay under their ticks); λ has its own.
         self._roi_strip.set_window(self._cube_slider.axis_window())
-        self._cube_slider.axis_window().changed.connect(self._refresh_cube_slider_labels)
-        self._wavelength_slider.axis_window().changed.connect(self._refresh_wavelength_slider_labels)
         roi_title = QLabel("ROIs", self)
         roi_title.setStyleSheet(_slider_axis_title_style(get_active_theme().text_muted))
         roi_title.setToolTip(
@@ -1255,13 +1234,6 @@ class ImagePanel(QWidget):
         roi_row.addWidget(self._roi_strip, 1)
         self._roi_row = QWidget(self)
         self._roi_row.setLayout(roi_row)
-        self._roi_row_selected_only = False
-        self._roi_states: tuple[int, ...] = ()  # see `_roi_state_cubes`
-        self._roi_states_key: tuple | None = None
-        self._roi_marks_timer = QTimer(self)  # the ROI marks follow ROI edits, one update per burst (a drag)
-        self._roi_marks_timer.setSingleShot(True)
-        self._roi_marks_timer.setInterval(_REDRAW_COALESCE_MS)
-        self._roi_marks_timer.timeout.connect(self._update_roi_marks)
 
         # The two Mask rows (2026-10-16): one under the Cube slider, one under the wavelength slider (`mask_rows.py`).
         # Each shares its slider's zoom window; titles are sized with the other rows' below.
@@ -1328,18 +1300,41 @@ class ImagePanel(QWidget):
         # The slider ribbon (2026-10-13): frame icon controls, Play, slideshow settings, slider colours.
         self._slider_colors = SliderColors()
         self._slider_ribbon = SliderRibbon(self)
+        # What the two sliders mark besides the handle: reference, dark, ignored, the ROI row, the colours, the tick labels (slider_marks.py).
+        self._slider_marks = SliderMarks(
+            self._dataset,
+            self._selection,
+            self._roi_toolbox,
+            self._frame_roles,
+            self._cube_display,
+            cube_slider=self._cube_slider,
+            wavelength_slider=self._wavelength_slider,
+            roi_row=self._roi_row,
+            roi_strip=self._roi_strip,
+            slider_colors=self._slider_colors,
+            slider_ribbon=self._slider_ribbon,
+            menu_parent=self,
+            current_cube=self._current_cube,
+            current_wavelength=self._current_wavelength,
+            resolve_reference_frame=self._resolve_reference_frame,
+            roi_revision=lambda: self._roi_revision,
+            status=self._on_tool_status,
+            coalesce_ms=_REDRAW_COALESCE_MS,
+        )
+        self._cube_slider.axis_window().changed.connect(self._slider_marks.refresh_cube_labels)
+        self._wavelength_slider.axis_window().changed.connect(self._slider_marks.refresh_wavelength_labels)
         self._slider_ribbon.slider_colors.set_colors(self._slider_colors)
         self._slider_ribbon.slider_colors.color_changed.connect(self._on_slider_color_changed)
         self._slideshow = SlideshowController(
             self._dataset, self._selection, self._frame_roles, self, state_cubes=self._state_cubes_for_mode
         )
         self._slider_ribbon.set_roi_row(True, False)  # the defaults; `restore_ui_state` puts back what was saved
-        self._slider_ribbon.roi_row_toggled.connect(self._on_roi_row_toggled)
-        self._slider_ribbon.roi_selected_only_toggled.connect(self._on_roi_selected_only_toggled)
+        self._slider_ribbon.roi_row_toggled.connect(self._slider_marks.on_roi_row_toggled)
+        self._slider_ribbon.roi_selected_only_toggled.connect(self._slider_marks.on_roi_selected_only_toggled)
         self._slider_ribbon.play_toggled.connect(self._slideshow.toggle)
         # The wheel over the ROI row always hops between its marks, whatever Play steps through.
         self._roi_strip.step_requested.connect(lambda direction: self._slideshow.step(direction, MODE_ROI_STATES))
-        self._roi_strip.mark_menu_requested.connect(self._on_roi_mark_menu)
+        self._roi_strip.mark_menu_requested.connect(self._slider_marks.on_mark_menu)
         # The wheel over the Mask row under the Cube slider hops between ALL its marks, masks and standing scan pointers.
         self._mask_rows.cube_strip.step_requested.connect(lambda direction: self._slideshow.step(direction, MODE_ROW_MARKS))
         # The wheel turned on past the last / first wavelength goes on into the next / previous cube, as Play does in its
@@ -1420,9 +1415,9 @@ class ImagePanel(QWidget):
         self._roi_toolbox.cosmetic_changed.connect(self._schedule_roi_redraw)
         # The ROI row's marks depend on the ROI timelines only, never on the cube shown: they are not part of the
         # redraw above (which runs on every Play step) and wait for quiet after an edit.
-        self._roi_toolbox.geometry_changed.connect(self._schedule_roi_marks)
-        self._roi_toolbox.roi_ids_renumbered.connect(self._schedule_roi_marks)
-        self._selection.roi_selection_changed.connect(self._on_roi_selection_for_marks)
+        self._roi_toolbox.geometry_changed.connect(self._slider_marks.schedule_roi_marks)
+        self._roi_toolbox.roi_ids_renumbered.connect(self._slider_marks.schedule_roi_marks)
+        self._selection.roi_selection_changed.connect(self._slider_marks.on_roi_selection_for_marks)
         self._selection.cube_changed.connect(self._schedule_redraw)
         self._selection.wavelength_changed.connect(self._schedule_redraw)
         # Which ROIs are selected changes their outline, never a pixel: the background estimate's exclusion uses
@@ -1497,7 +1492,7 @@ class ImagePanel(QWidget):
             self._refresh_controls_bar_theme()
         if hasattr(self, "_slider_ribbon"):
             self._ribbon_drawer.refresh_theme()
-            self._update_all_slider_marks()  # a default colour follows the theme
+            self._slider_marks.update_all()  # a default colour follows the theme
         if hasattr(self, "_top_bar"):
             self._refresh_top_bar_theme()
 
@@ -1597,14 +1592,14 @@ class ImagePanel(QWidget):
             self._cube_slider.setMaximum(max(len(cubes) - 1, 0))
             self._cube_slider.setSingleStep(1)
             self._cube_slider.setPageStep(1)
-            self._cube_slider.set_ticks(list(cubes), self._cube_slider_major_ticks(cubes))
+            self._cube_slider.set_ticks(list(cubes), self._slider_marks.cube_slider_major_ticks(cubes))
             if cubes and self._current_cube() in cubes:
                 self._cube_slider.setValue(cubes.index(self._current_cube()))
         self._roi_strip.set_axis_count(len(cubes))
         self._mask_rows.refresh_cube_row()
-        self._roi_states_key = None  # another dataset: the ROI states are looked up again
+        self._slider_marks.forget_roi_states()  # another dataset: the ROI states are looked up again
         self._refresh_wavelength_range()
-        self._update_all_slider_marks()
+        self._slider_marks.update_all()
 
     def _refresh_wavelength_range(self) -> None:
         """Re-fetches the *current cube's* wavelength set, not the dataset's
@@ -1631,7 +1626,7 @@ class ImagePanel(QWidget):
             # here was wrong.
             self._wavelength_slider.set_ticks(
                 list(wavelengths),
-                self._wavelength_slider_major_ticks(wavelengths, self._wavelength_slider.axis_window().view_for(len(wavelengths))),
+                self._slider_marks.wavelength_slider_major_ticks(wavelengths, self._wavelength_slider.axis_window().view_for(len(wavelengths))),
             )
             if wavelengths and wavelength in wavelengths:
                 self._wavelength_slider.setValue(wavelengths.index(wavelength))
@@ -1686,7 +1681,7 @@ class ImagePanel(QWidget):
         self._roi_strip.set_cursor(cursor)
         self._mask_rows.set_cube_cursor(cursor)
         self._refresh_wavelength_range()
-        self._update_slider_marks()
+        self._slider_marks.update_marks()
         self._refresh_frame_tools()
 
     def _on_selection_wavelength_changed(self, _wavelength: float) -> None:
@@ -1696,7 +1691,7 @@ class ImagePanel(QWidget):
             if wavelengths and wavelength in wavelengths:
                 self._wavelength_slider.setValue(wavelengths.index(wavelength))
         self._mask_rows.set_wavelength_cursor(wavelength)
-        self._update_slider_marks()
+        self._slider_marks.update_marks()
         self._refresh_frame_tools()
 
     # -- reference-frame highlight (ReferenceFrameModule) --------------------
@@ -1707,94 +1702,6 @@ class ImagePanel(QWidget):
         cube's best-contrast wavelength (None while it is still being found).
         `ReferenceFrameModule.resolve` does the work; it only needs the viewed cube."""
         return self._reference_frame.resolve(self._selection.current_cube())
-
-    def _update_slider_marks(self) -> None:
-        """What the sliders mark besides the handle (colours: `slider_colors.py`):
-        the reference frame, the dark background and the ignored wavelengths.
-        Run on every cube / wavelength step, so it only looks at the viewed
-        cube's own wavelengths. The ignored *cubes* are marked by
-        `_update_ignored_cube_ticks`, which only runs when they or the cube
-        list change."""
-        self._update_reference_highlight()
-        self._update_wavelength_role_ticks()
-
-    def _update_all_slider_marks(self) -> None:
-        """Every mark, after a change that is not a step (roles, colours, theme, a new dataset)."""
-        self._update_slider_marks()
-        self._update_ignored_cube_ticks()
-        self._update_roi_marks()
-
-    # -- the ROI row (timeline_strip.py) ------------------------------------------------------------
-
-    def _on_roi_row_toggled(self, shown: bool) -> None:
-        self._roi_row.setVisible(bool(shown))
-        if shown:
-            self._update_roi_marks()
-
-    def _on_roi_selected_only_toggled(self, only_selected: bool) -> None:
-        self._roi_row_selected_only = bool(only_selected)
-        self._update_roi_marks()
-
-    def _set_roi_row(self, shown: bool, selected_only: bool) -> None:
-        """Put the ROI row's two toggles back as saved (no signal, so nothing is saved again)."""
-        self._roi_row_selected_only = bool(selected_only)
-        self._roi_row.setVisible(bool(shown))
-        self._slider_ribbon.set_roi_row(shown, selected_only)
-        self._update_roi_marks()
-
-    def _schedule_roi_marks(self, *_args: object) -> None:
-        if not self._roi_row.isHidden():
-            self._roi_marks_timer.start()
-
-    def _on_roi_selection_for_marks(self, *_args: object) -> None:
-        if self._roi_row_selected_only:
-            self._schedule_roi_marks()
-
-    def _cube_phrase(self, cube: int) -> str:
-        label = self._cube_display.label_for(cube)
-        return f"Cube {cube}" if label == str(cube) else f"Cube {cube} ({label})"
-
-    def _on_roi_mark_menu(self, mark: StripMark, global_pos: object) -> None:
-        """Right click on a mark of the ROI row: go to its cube, make it individual / persistent, or delete it. Each acts on
-        the whole point (every ROI's change at that cube; the menu says how many) and is one undo step. The first cube's
-        mark is the start layout: only "Go to this cube" is offered there."""
-        cubes = self._dataset.spectral_cubes()
-        if not 0 <= mark.index < len(cubes):
-            return
-        cube = cubes[mark.index]
-        toolbox = self._roi_toolbox
-        is_start = mark.index == 0
-        point = toolbox.layout_points().get(cube)
-        if is_start:
-            roi_ids = frozenset(roi.area_roi_id for roi in toolbox.rois())
-            kind = SCOPE_PERSISTENT
-        elif point is None:
-            return  # the mark was stale (its change was undone meanwhile)
-        else:
-            roi_ids, kind = frozenset(point.roi_ids), point.kind
-        shown = (roi_ids & self._selection.selected_roi_ids()) if self._roi_row_selected_only else roi_ids
-        phrase = self._cube_phrase(cube)
-        choice = roi_layout_menu.show_layout_point_menu(
-            self, cube_text=phrase, kind=kind, is_start=is_start,
-            roi_count=len(roi_ids), hidden_count=len(roi_ids) - len(shown), pos=global_pos,
-        )
-        if choice is None:
-            return
-        what = roi_layout_menu.who(len(roi_ids))
-        try:
-            if choice == roi_layout_menu.GO_TO:
-                self._cube_slider.setValue(mark.index)
-            elif choice == roi_layout_menu.DELETE and not is_start:
-                toolbox.delete_layout_point(cube)
-                self._on_tool_status(f"{phrase}: layout change deleted ({what}).")
-            elif choice == roi_layout_menu.MAKE_INDIVIDUAL and not is_start:
-                toolbox.make_layout_point_individual(cube)
-                self._on_tool_status(f"{phrase} is now an individual change ({what}); the cubes after it go back to the earlier layout.")
-            elif choice == roi_layout_menu.MAKE_PERSISTENT and not is_start:
-                toolbox.make_layout_point_persistent(cube)
-                self._on_tool_status(f"{phrase} is now a persistent change ({what}); its layout carries on to the cubes after it.")
-        except (ValueError, KeyError) as exc:
-            self._on_tool_status(f"ROI row: {exc}")
 
     def _visible_cube_range(self) -> tuple[int, int] | None:
         """The first and last cube number in view on the Cube slider, or ``None`` when it shows every cube (what the Scan group's
@@ -1814,166 +1721,17 @@ class ImagePanel(QWidget):
             return self._mask_rows.event_state_cubes()
         if mode == MODE_ROW_MARKS:
             return self._mask_rows.marked_cubes()
-        return self._mask_rows.state_cubes() if mode == MODE_MASK_STATES else self._roi_state_cubes()
-
-    def _roi_state_cubes(self) -> tuple[int, ...]:
-        """The cubes the ROI row marks, ascending: the first cube (the start layout) and every cube where the layout
-        changes. What Previous / Next and Play step through in the "ROI states" mode, and what the wheel over the row hops
-        between. Follows the "only selected ROIs" filter like the marks do (not whether the row is shown). Asked on every
-        Play step in that mode, so it is cached on what it depends on."""
-        cubes = self._dataset.spectral_cubes()
-        selected = frozenset(self._selection.selected_roi_ids()) if self._roi_row_selected_only else None
-        key = (self._roi_revision, selected, cubes[:1], len(cubes))
-        if key != self._roi_states_key:
-            if cubes and self._roi_toolbox.rois():
-                known = set(cubes)
-                states = {cubes[0], *(cube for cube in self._roi_toolbox.layout_points(selected) if cube in known)}
-                self._roi_states = tuple(sorted(states))
-            else:
-                self._roi_states = ()
-            self._roi_states_key = key
-        return self._roi_states
-
-    def _update_roi_marks(self) -> None:
-        """The ROI row: a ``>`` at the first cube (the start layout, always persistent) and one mark per cube where the
-        layout changes (`RoiToolbox.layout_points`: ``>`` persistent, a line individual), counting only the selected ROIs
-        when that toggle is on. Cost grows with the number of ROI changes, not with the dataset; it runs when ROIs, the
-        selection filter, the colour or the dataset change, never per cube step."""
-        if self._roi_row.isHidden():
-            return
-        strip = self._roi_strip
-        strip.set_color(roi_color())  # no colour control for the row (maintainer); follows the theme
-        cubes = self._dataset.spectral_cubes()
-        strip.setEnabled(bool(cubes))
-        strip.set_axis_count(len(cubes))
-        if not cubes:
-            strip.set_marks(())
-            strip.set_cursor(None)
-            return
-        toolbox = self._roi_toolbox
-        existing = {roi.area_roi_id for roi in toolbox.rois()}
-        only = (self._selection.selected_roi_ids() & existing) if self._roi_row_selected_only else None
-        noun = "selected ROI" if only is not None else "ROI"
-        marks: list[StripMark] = []
-        if existing:
-            count = len(existing) if only is None else len(only)
-            marks.append(
-                StripMark(0, SCOPE_PERSISTENT, f"{self._cube_phrase(cubes[0])} - start layout (persistent): {_count_phrase(count, noun)}")
-            )
-        position = {cube: index for index, cube in enumerate(cubes)}
-        for cube, point in toolbox.layout_points(only).items():
-            index = position.get(cube)
-            if index is None or (index == 0 and point.kind == SCOPE_PERSISTENT):
-                continue  # no such cube in this dataset; or the start layout, already marked
-            how = "persistent, holds from here on" if point.kind == SCOPE_PERSISTENT else "individual, this cube only"
-            marks.append(StripMark(index, point.kind, f"{self._cube_phrase(cube)} - {how}: {_count_phrase(len(point.roi_ids), noun)} changed"))
-        strip.set_marks(marks)
-        strip.set_cursor(position.get(self._current_cube()))
-
-    def _update_wavelength_role_ticks(self) -> None:
-        """The wavelength slider's dark and ignored ticks. The dark is a wavelength,
-        not a cube, so it is marked only where the viewed cube has that wavelength,
-        and the cube slider has no dark tick. An ignored wavelength is ignored in
-        every cube, so its ticks are red on this slider whichever cube is viewed."""
-        roles = self._frame_roles
-        dark = roles.dark_wavelength() if roles is not None else None
-        ignored = frozenset(float(wl) for wl in roles.ignored_wavelengths()) if roles is not None else frozenset()
-        dark_index = None
-        ignored_indices: frozenset[int] = frozenset()
-        if (dark is not None or ignored) and self._dataset.spectral_cubes():
-            wavelengths = self._dataset.wavelengths_for_cube(self._current_cube())
-            if dark is not None:
-                dark_index = next((i for i, wl in enumerate(wavelengths) if abs(float(wl) - float(dark)) < 1e-6), None)
-            ignored_indices = frozenset(i for i, wl in enumerate(wavelengths) if float(wl) in ignored)
-        colors = self._slider_colors
-        self._wavelength_slider.set_dark_tick(dark_index, colors.color("dark") if dark_index is not None else None)
-        self._wavelength_slider.set_ignored_ticks(ignored_indices, colors.color("ignored"))
-
-    def _update_ignored_cube_ticks(self) -> None:
-        """The cube slider's ticks of the ignored cubes (ignoring a cube drops every
-        frame of that time point)."""
-        roles = self._frame_roles
-        cubes = self._dataset.spectral_cubes()
-        ignored = roles.ignored_cubes() if roles is not None else ()
-        indices = frozenset(cubes.index(cube) for cube in ignored if cube in cubes)
-        self._cube_slider.set_ignored_ticks(indices, self._slider_colors.color("ignored"))
+        return self._mask_rows.state_cubes() if mode == MODE_MASK_STATES else self._slider_marks.roi_state_cubes()
 
     def _on_slider_color_changed(self, role: str, color: str | None) -> None:
-        """A swatch in the ribbon was picked (or reset): keep it, show it on the swatch and the sliders."""
-        self._slider_colors.set(role, color)
-        self._slider_ribbon.slider_colors.refresh()
-        self._update_all_slider_marks()
+        """A swatch in the ribbon was picked (or reset): the sliders take it (`SliderMarks`), and so does the dock subtitle."""
+        self._slider_marks.on_slider_color_changed(role, color)
         self._frame_text.refresh()  # the dock subtitle's Dark / Reference / Ignored word has the same colour
 
     def _restore_slider_colors(self, store: UiStateStore) -> None:
         """The slider colours back as last left, and keep saving them."""
-        for role, key in SLIDER_COLOR_KEYS.items():
-            saved = read(store, key)
-            self._slider_colors.set(role, saved if isinstance(saved, str) else None)
-        self._slider_ribbon.slider_colors.refresh()
-        self._update_all_slider_marks()
+        self._slider_marks.restore_colors(store)
         self._frame_text.refresh()
-        self._slider_ribbon.slider_colors.color_changed.connect(
-            lambda role, color: store.set(SLIDER_COLOR_KEYS[role].key, color)
-        )
-
-    def _update_reference_highlight(self) -> None:
-        """Highlights the slider handle (in the reference colour) whenever the
-        currently-displayed cube/wavelength is the
-        reference - ported from the stable app's
-        `_update_reference_navigation_styles` (the stable app also recolored
-        the spin boxes next to the sliders; this panel has none since
-        2026-10-18, and the slider handle color carries the information)."""
-        reference = self._resolve_reference_frame()
-        if reference is None:
-            self._cube_slider.set_reference_highlight(None)
-            self._wavelength_slider.set_reference_highlight(None)
-            self._cube_slider.set_reference_tick(None)
-            self._wavelength_slider.set_reference_tick(None)
-            return
-        reference_cube, reference_wavelength = reference
-        # Mark the reference's own tick on each rail (not just the handle
-        # when it happens to sit on it). The wavelength tick only exists if
-        # the *current* cube has that wavelength.
-        cubes = self._dataset.spectral_cubes()
-        cube_tick = cubes.index(int(reference_cube)) if int(reference_cube) in cubes else None
-        wavelengths = self._dataset.wavelengths_for_cube(self._current_cube())
-        wavelength_tick = next(
-            (i for i, wl in enumerate(wavelengths) if abs(float(wl) - float(reference_wavelength)) < 1e-6), None
-        )
-        color = self._slider_colors.color("reference")
-        self._cube_slider.set_reference_tick(cube_tick, color)
-        self._wavelength_slider.set_reference_tick(wavelength_tick, color)
-        cube_is_reference = int(self._current_cube()) == int(reference_cube)
-        wavelength_is_reference = abs(float(self._current_wavelength()) - float(reference_wavelength)) < 1e-6
-        self._cube_slider.set_reference_highlight(color if cube_is_reference else None)
-        self._wavelength_slider.set_reference_highlight(color if wavelength_is_reference else None)
-
-    # -- slider tick labels ---------------------------------------------------
-
-    @staticmethod
-    def _wavelength_slider_major_ticks(values: tuple[float, ...], view: tuple[float, float] | None = None) -> dict[int, str]:
-        """See `slider_ticks.wavelength_slider_major_ticks`; `view`: the stretch on screen when the axis is zoomed."""
-        return wavelength_slider_major_ticks(values, view)
-
-    def _cube_slider_major_ticks(self, values: tuple[int, ...]) -> dict[int, str]:
-        """See `slider_ticks.cube_slider_major_ticks`; labels follow the cube display unit and the stretch on screen."""
-        return cube_slider_major_ticks(values, self._cube_display.label_for, self._cube_slider.axis_window().view_for(len(values)))
-
-    def _refresh_cube_slider_labels(self) -> None:
-        """The Cube axis was zoomed or panned: label the ticks that are on screen now."""
-        cubes = self._dataset.spectral_cubes()
-        if cubes and len(cubes) == self._cube_slider.axis_window().count():
-            self._cube_slider.set_ticks(list(cubes), self._cube_slider_major_ticks(cubes))
-
-    def _refresh_wavelength_slider_labels(self) -> None:
-        """The wavelength axis was zoomed or panned: label the ticks that are on screen now."""
-        wavelengths = self._dataset.wavelengths_for_cube(self._current_cube())
-        window = self._wavelength_slider.axis_window()
-        if wavelengths and len(wavelengths) == window.count():
-            self._wavelength_slider.set_ticks(
-                list(wavelengths), self._wavelength_slider_major_ticks(wavelengths, window.view_for(len(wavelengths)))
-            )
 
     # -- rendering ----------------------------------------------------------
 
@@ -2582,37 +2340,8 @@ class ImagePanel(QWidget):
         self._roi_overlay.set_label_placement(placement)
 
     def _restore_slideshow_settings(self, store: UiStateStore) -> None:
-        """Slideshow speed / mode / repeat / end back as last left, and keep saving them."""
-        saved = SlideshowSettings(
-            speed=read(store, SLIDESHOW_SPEED),
-            mode=read(store, SLIDESHOW_MODE),
-            repeat=read(store, SLIDESHOW_REPEAT),
-            end=read(store, SLIDESHOW_END),
-            skip_ignored=read(store, SLIDESHOW_SKIP_IGNORED),
-            skip_dark=read(store, SLIDESHOW_SKIP_DARK),
-            thin_roi_outline=read(store, SLIDESHOW_THIN_ROI_OUTLINE),
-            calm_histogram=read(store, SLIDESHOW_CALM_HISTOGRAM),
-        )
-        if (
-            saved.speed not in SPEEDS
-            or saved.mode not in (MODE_ALL, MODE_ONE_WAVELENGTH, MODE_ROI_STATES, MODE_MASK_STATES, MODE_EVENTS)
-            or saved.end not in (END_CUBE, END_DATASET)
-        ):
-            saved = SlideshowSettings()  # a hand-edited settings file
-        self._slider_ribbon.set_settings(saved)
-        self._slideshow.set_settings(saved)
-
-        def save(settings: SlideshowSettings) -> None:
-            store.set(SLIDESHOW_SPEED.key, settings.speed)
-            store.set(SLIDESHOW_MODE.key, settings.mode)
-            store.set(SLIDESHOW_REPEAT.key, settings.repeat)
-            store.set(SLIDESHOW_END.key, settings.end)
-            store.set(SLIDESHOW_SKIP_IGNORED.key, settings.skip_ignored)
-            store.set(SLIDESHOW_SKIP_DARK.key, settings.skip_dark)
-            store.set(SLIDESHOW_THIN_ROI_OUTLINE.key, settings.thin_roi_outline)
-            store.set(SLIDESHOW_CALM_HISTOGRAM.key, settings.calm_histogram)
-
-        self._slider_ribbon.settings_changed.connect(save)
+        """Slideshow speed / mode / repeat / end back as last left, and keep saving them (`slideshow_state.py`)."""
+        restore_slideshow_settings(store, self._slider_ribbon, self._slideshow)
 
     def _sync_roi_overlay_controls(self) -> None:
         """Show the panel's ROI display options on the ribbon controls (after
@@ -2675,12 +2404,12 @@ class ImagePanel(QWidget):
         return self._frame_text.columns()
 
     def _on_reference_frame_changed(self) -> None:
-        self._update_slider_marks()
+        self._slider_marks.update_marks()
         self._refresh_frame_tools()  # Go to reference is enabled only while a reference exists
         self._frame_text.refresh()
 
     def _on_frame_roles_changed(self) -> None:
-        self._update_all_slider_marks()
+        self._slider_marks.update_all()
         self._refresh_frame_tools()
         self._frame_text.refresh()
 
@@ -2689,8 +2418,8 @@ class ImagePanel(QWidget):
         self._frame_text.forget_widest()  # "Cube 314" and "Cube 1:23:45" are not equally wide
         self._cube_title.setText(self._cube_display.axis_title())
         cubes = self._dataset.spectral_cubes()
-        self._cube_slider.set_ticks(list(cubes), self._cube_slider_major_ticks(cubes))
-        self._update_roi_marks()  # the mark tooltips name cubes in the new unit
+        self._cube_slider.set_ticks(list(cubes), self._slider_marks.cube_slider_major_ticks(cubes))
+        self._slider_marks.update_roi_marks()  # the mark tooltips name cubes in the new unit
         self._refresh_frame_tools()
         self._frame_text.refresh()
 

@@ -86,3 +86,22 @@ Batch 1 was committed and pushed first (eva `93d32e2`, umbrella `dd41196`, CI gr
 **What a person must look at:** the dock title bar's subtitle (cube, wavelength, time, comment, and the Dark / Reference / Ignored word in its slider colour; after changing the cube unit and after changing a slider colour); the cursor readout under the mouse and its colours after a theme change; clicking, rubber-banding, moving and resizing ROIs, also on a frame with a chromatic shift; Crop (size boxes under the rectangle, Apply, zoom and pan with it active); Measure (the boxes follow the ruler point, Apply, a rejected value).
 
 **Next:** batch 3 (slider marks and Play, about 350 lines).
+
+## Done 2026-11-02 (item D, batch 3 of 3; built, waiting for the maintainer's visual check)
+
+Batches 1 and 2 are pushed (eva `93d32e2`, `db8189d`; CI green). Batch 3, same pattern (`panels/image/`):
+
+- `slider_marks.py`, `SliderMarks`: what the two navigation sliders mark besides the handle (reference frame, dark background, ignored wavelengths and cubes), the ROI row (its marks, the "only selected ROIs" switch, the cached ROI states Play steps through, the right-click menu of a mark), the slider colours, and the tick labels. It owns the state of the ROI row and its update timer; the panel still creates the sliders, the row and the ribbon (they sit in its layout) and hands them in. The code of the 20 moved methods is the old code; the only change in behaviour-carrying lines is that the two slots that also refreshed the dock subtitle (`_on_slider_color_changed`, `_restore_slider_colors`) stay in the panel as short forwards and do that refresh themselves.
+- `slideshow_state.py`, `restore_slideshow_settings`: the slideshow settings back as last left, and saved when they change.
+- `panel.py`: 2,901 -> 2,630 lines, 138 -> 120 methods in `ImagePanel`; the size-budget test is lowered to 2,710 lines / 124 methods.
+- The navigation bar builder now creates `SliderMarks` right after the ribbon, and the two connections of the sliders' zoom windows (tick labels) come right after it; the helper's methods are connected where the panel's own were.
+
+**What stays in the panel on purpose:** the Play handlers (`_on_playback_changed`, `_apply_play_outline`, `_flush_redraw_for_step`, `_play_config_fields`). They are the glue between the slideshow and about ten other panel objects (timers, tints, decorations, ribbons, the playback statistics); a helper would need a constructor as long as the methods and decouple nothing. Also `_state_cubes_for_mode`, `_visible_cube_range` and `_show_slider_menu` (they serve the Mask tab, the slideshow and the frame tools, not the marks).
+
+**Proof it is a move:** the 20 moved methods compared line by line with the committed text; 5 import-layer contracts kept; 362 modules import; ruff clean. Tests: 6 new ones drive `SliderMarks` without a panel (`test_lspri_slider_marks.py`); the 91 test files that touch the Image panel or the app pass (1,917 tests, four at a time).
+
+**What a person must look at:** the reference tick and handle highlight on both sliders (set a reference, step through cubes and wavelengths); the dark tick and the ignored ticks (ignore a wavelength and a cube); the ROI row (marks appear after moving ROIs in different cubes, the ">" and line marks, "only selected ROIs", right-click a mark: Go to / Individual / Persistent / Delete, Previous / Next and the wheel over the row); changing a slider colour (the sliders and the dock subtitle word follow it); the tick labels when zooming and panning either slider and after switching the cube unit; restarting the app (slider colours, ROI row switches and slideshow settings come back).
+
+## Where item D ends (2026-11-02)
+
+`panel.py` went from 3,492 to 2,630 lines and `ImagePanel` from 178 to 120 methods, in 8 new helper files (`tint_overlays`, `decoration_overlays`, `frame_status_text`, `cursor_readout`, `roi_queries`, `crop_measure_controls`, `slider_marks`, `slideshow_state`). Not done, deliberately: construction (`__init__`, the `_build_*` methods, about 860 lines, touching 105 of the panel's 118 fields) needs a different design (a navigation-bar object that owns its widgets), the Play handlers (above), and theme refresh. `RoiTablePanel` and `RoiToolbox` (also named in item D) were not looked at.
