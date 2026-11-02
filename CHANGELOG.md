@@ -7,6 +7,7 @@ This project follows a simple release log so format and workflow changes stay vi
 ### Added
 
 - Help -> Keyboard shortcuts: one table now both binds every shortcut and builds the list, so the list cannot drift from the keys that really work (2026-10-30; `docs/keyboard_shortcut_registry_design_2026-10-30.md`). Key matching is now exact: a few unusual modifier combinations that used to trigger a command no longer do (listed in the design doc, section 8).
+- Help -> About: the version, how to cite the software (with a copy button) and its license. OME-Zarr exports now record how to cite the software that wrote them in their `lspr` attributes (`software`: name, version, DOI, citation line), so the acknowledgement travels with the data (2026-11-02; `NOTICE.md` of the Suite).
 
 ### Fixed
 

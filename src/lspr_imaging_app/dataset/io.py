@@ -25,7 +25,7 @@ except Exception:  # pragma: no cover - optional acceleration path  # noqa: BLE0
     _tifffile_imwrite = None
     _tifffile_TiffFile = None
 
-from lspr_core import ImagingAcquisitionMetadata
+from lspr_core import ImagingAcquisitionMetadata, software_stamp
 from lspr_core.perf import get_runtime, lower_process_priority
 from lspr_io import is_imaging_measurement_file, read_imaging_acquisition_metadata
 
@@ -72,6 +72,7 @@ from .ome_metadata import (
     plane_times_s,
     valid_pixel_size,
 )
+from ..version import APP_VERSION
 from ..plane_reader import (
     OME_ZARR_ARRAY_DIRNAME,
     OME_ZARR_ARRAY_META_FILENAME,
@@ -1397,6 +1398,8 @@ def _export_ome_zarr_dataset_to_path(
         }
     if pixel_size is not None:
         lspr_attrs["pixel_size_um"] = {"x": pixel_size[0], "y": pixel_size[1]}
+    # How to cite the software that wrote this export (informational; no reader interprets it): lspr_core.citation.
+    lspr_attrs["software"] = software_stamp("LSPRimaging Evaluation", APP_VERSION)
     group.attrs[OME_ZARR_LSPR_KEY] = lspr_attrs
 
     # Mirror any loaded acquisition metadata (camera/illumination settings,

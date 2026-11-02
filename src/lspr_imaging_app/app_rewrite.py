@@ -26,8 +26,9 @@ from PyQt6.QtCore import Qt, QByteArray, QTimer, QUrl
 from PyQt6.QtGui import QAction, QActionGroup, QDesktopServices
 from PyQt6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMenu, QMessageBox, QStatusBar, QWidget
 
+from lspr_core import ACKNOWLEDGEMENT_REQUEST, DISCLAIMER_POINTS, LICENSE_NAME, NOTICE_URL, citation_text
 from lspr_core.perf import get_runtime
-from lspr_ui import APP_ID_LSPRI_EVALUATION, app_icon, set_active_theme, set_windows_app_user_model_id
+from lspr_ui import APP_ID_LSPRI_EVALUATION, app_icon, set_active_theme, set_windows_app_user_model_id, show_about_dialog
 
 from .analysis import AnalysisSettingsModule
 from .analysis.scan_jobs import ScanSource, source_from_modules
@@ -139,7 +140,7 @@ from .storage.session_coordinator import SessionCoordinator
 from .storage.session_carry_task import TASK_ID as SESSION_CARRY_TASK_ID, CarriedResult, SessionCarry
 from .shortcuts import bind_action
 from .undo import UndoManager, undo_manager
-from .version import APP_NAME, version_string
+from .version import APP_NAME, APP_VERSION, version_string
 
 logger = logging.getLogger(__name__)
 
@@ -205,7 +206,7 @@ def _build_menu_bar(window: QMainWindow) -> tuple[QMenu, QMenu]:
     (``docs/rewrite_gui_shell_design_2026-09.md`` §2). File->Exit is real;
     View gets the panel toggles, layout presets and theme switching, Edit gets
     undo/redo (`_wire_edit_menu`) and Preferences (`_wire_preferences`), Help
-    holds the Log Console. (The Options menu was replaced by Edit ->
+    holds the Log Console and, last, About. (The Options menu was replaced by Edit ->
     Preferences on 2026-10-19.)
 
     Returns (Edit menu, View menu) so the caller can add the actions once the
@@ -1649,6 +1650,33 @@ def _wire_shortcuts_dialog(window: QMainWindow, ui_state: UiStateStore) -> QActi
     return action
 
 
+APP_TITLE = "LSPRimaging Evaluation"  # the name the About dialog and the citation use
+
+
+def _wire_about(window: QMainWindow) -> None:
+    """Help -> About, the last Help entry: the version, how to cite the software and its licence. The dialog is shared by the apps
+    (`lspr_ui.about_dialog`); the wording comes from `lspr_core.citation`."""
+    help_menu = next((action.menu() for action in window.menuBar().actions() if action.text() == "&Help"), None)
+    if help_menu is None:
+        return
+    help_menu.addSeparator()
+    help_menu.addAction(f"&About {APP_TITLE}...", lambda: _show_about(window))
+
+
+def _show_about(window: QMainWindow) -> None:
+    show_about_dialog(
+        window,
+        title=f"About {APP_TITLE}",
+        app_line=f"{APP_TITLE} {APP_VERSION}",
+        description="Evaluation of LSPR imaging data: ROIs, masks, chromatic correction and sensorgrams.",
+        citation=citation_text(APP_TITLE, APP_VERSION),
+        acknowledgement=ACKNOWLEDGEMENT_REQUEST,
+        license_line=f"{LICENSE_NAME}, Copyright (c) 2026 Tomáš Lednický. Free to use, also commercially.",
+        notice_url=NOTICE_URL,
+        disclaimer=DISCLAIMER_POINTS,
+    )
+
+
 def _wire_log_console(window: QMainWindow, ui_state: UiStateStore, image_panel: ImagePanel | None = None) -> PanelContainer:
     """Help -> Log Console (Ctrl+Shift+L) and Help -> Open Log Folder (2026-10-14,
     docs/logging_design_2026-10-14.md). The Log panel is a normal dock, created floating
@@ -1795,6 +1823,7 @@ def build_main_window(
     stages.done("dock layout")
     _wire_shortcuts_dialog(window, ui_state)
     log_dock = _wire_log_console(window, ui_state, image_panel)
+    _wire_about(window)  # after the other Help entries: it is the last one
     stages.done("Log console")
     # A display panel does no work while its dock is hidden (closed, behind a tab, window minimised) and
     # catches up once when it is shown again (panels/visibility_gate.py).
