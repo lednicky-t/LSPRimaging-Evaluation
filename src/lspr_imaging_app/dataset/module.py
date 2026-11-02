@@ -76,7 +76,7 @@ from ..analysis.worker import AnalysisWorker
 from ..applog.events import log_event, timed
 from ..diagnostics import instrumented
 from ..storage.workspace import save_acquisition_metadata_sidecar
-from .export_stats import ExportStats
+from ..export_stats import ExportStats
 from .io import (
     dataset_record_map,
     DatasetLoadChoice,

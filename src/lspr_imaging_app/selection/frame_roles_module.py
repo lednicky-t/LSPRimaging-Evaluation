@@ -40,7 +40,7 @@ from ..dataset.model import DARK_FRAME_WAVELENGTH_NM
 from ..dataset.module import DatasetModule
 from ..diagnostics import instrumented
 from ..undo import FunctionCommand, undo_manager
-from .frame_roles_state import FrameRolesState
+from ..frame_roles_state import FrameRolesState
 from .reference_frame_module import MODE_AUTO, MODE_MANUAL, ReferenceFrameModule
 
 ROLE_NORMAL = "normal"

@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 from PyQt6.QtCore import QAbstractItemModel, QMimeData, QModelIndex, Qt, pyqtSignal
 
-from ...roi.model import AreaRoi, AreaRoiDetectionSettings, AreaRoiGroup
+from ...domain.roi_model import AreaRoi, AreaRoiDetectionSettings, AreaRoiGroup
 from ...roi.palette import DEFAULT_ROI_COLOR_HEX
 from .rows import (
     COLUMN_COUNT,

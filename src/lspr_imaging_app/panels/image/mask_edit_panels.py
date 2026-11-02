@@ -90,7 +90,7 @@ from ...dataset import DatasetModule
 from ...image_tools import ChromaticModule, GeometryModule, MaskModule, MaskScopeModule
 from ...image_tools.mask.model import MaskSettings
 from ...image_tools.mask.roi_feature_run import FeatureParams
-from ...image_tools.roi_feature_task import FeatureSummary, RoiFeatureTask
+from ..roi_feature_task import FeatureSummary, RoiFeatureTask
 from ...selection import HighlightRangeModule
 from ..mask_candidate_editor import MaskCandidateEditor
 from ..mask_edit_common import (

@@ -100,7 +100,7 @@ These come from real incidents. Violating any of them will likely reproduce a bu
 
 **Rule:** no module reads or writes another module's internal state. Coordinate through a documented interface method or a signal.
 
-**Import layers (checked by `lint-imports` and in CI):** a package may import only from packages below it in the order `app_rewrite` > `panels` > `selection` > `dataset` > `io` > `storage` > `analysis` > `roi` > `image_tools` > `plan` > small helpers. The full floors, the 16 known upward imports and how to fix a failure: `docs/import_layering_2026-11-02.md`. If a new import fails the check, move the thing you need down or pass it in; don't add an exception without asking.
+**Import layers (checked by `lint-imports` and in CI):** a package may import only from packages below it in the order `app_rewrite` > `panels` > `selection` > `dataset` > `io` > `storage` > `analysis` > `roi` > `image_tools` > `plan` > small helpers. The full floors, the 4 known upward imports and how to fix a failure: `docs/import_layering_2026-11-02.md`. If a new import fails the check, move the thing you need down or pass it in; don't add an exception without asking.
 
 ## Communication
 

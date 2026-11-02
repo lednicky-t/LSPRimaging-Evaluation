@@ -32,7 +32,7 @@ from ...image_tools.mask.mask_pointers import MaskPointersModule
 from ...image_tools.mask_auto_task import MaskAutoTask
 from ...image_tools.mask_export_task import MaskExportTask
 from ...image_tools.mask_scan_task import TransientScanTask
-from ...image_tools.roi_feature_task import RoiFeatureTask
+from ..roi_feature_task import RoiFeatureTask
 from ...selection import HighlightRangeModule
 from ..mask_edit_preview import MaskEditPreview
 from ..mask_grain_eraser import MaskGrainEraser

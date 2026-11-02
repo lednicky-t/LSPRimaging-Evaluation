@@ -12,7 +12,7 @@ import math
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 
-from ...roi.model import AreaRoi, AreaRoiDetectionSettings, AreaRoiGroup
+from ...domain.roi_model import AreaRoi, AreaRoiDetectionSettings, AreaRoiGroup
 from ...roi.palette import DEFAULT_ROI_COLOR_HEX
 
 COLUMN_ID, COLUMN_NAME, COLUMN_X, COLUMN_Y, COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT = range(7)

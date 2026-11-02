@@ -28,7 +28,7 @@ from collections import OrderedDict
 
 import numpy as np
 
-from ..roi.model import AreaRoi, AreaRoiDetectionSettings
+from ..domain.roi_model import AreaRoi, AreaRoiDetectionSettings
 from .background.estimate import BackgroundWeightsCache, estimate_background_profile, flatten_background, flatten_background_at
 from .background.model import BackgroundSettings
 from .chromatic.warp import warp_boolean_mask_affine

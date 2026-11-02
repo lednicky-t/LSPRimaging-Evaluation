@@ -14,7 +14,7 @@ from PyQt6.QtCore import QPoint
 from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import QMenu, QWidget
 
-from ...roi.model import SCOPE_PERSISTENT
+from ...domain.roi_model import SCOPE_PERSISTENT
 
 GO_TO = "go_to"
 MAKE_INDIVIDUAL = "make_individual"

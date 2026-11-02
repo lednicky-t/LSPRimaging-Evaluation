@@ -52,7 +52,7 @@ from ..image_tools.mask.mask_pointers_state import MaskPointer, MaskPointersStat
 from ..image_tools.mask.model import MaskChange
 from ..image_tools.mask.transient_detection import ContourMask
 from ..progress import StageProgress
-from ..roi.model import AreaRoi, RoiArrayGroup, RoiMask
+from ..domain.roi_model import AreaRoi, RoiArrayGroup, RoiMask
 from .session import SessionState, write_json_file
 
 logger = logging.getLogger(__name__)

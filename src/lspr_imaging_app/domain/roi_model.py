@@ -10,6 +10,9 @@ TODO: adopt ``docs/roi_system_roadmap.md``'s ``Pair`` vocabulary
 keeping the ``sample_*``/``reference_*`` field-pair shape verbatim forever -
 this port is a faithful move of the current representation, not yet the
 roadmap's redesign.
+
+Lives in `domain/` since 2026-11-02 (moved from `roi/model.py`, layering): `image_tools` and `storage` use these classes, and `roi/`
+sits above `image_tools`. It imports nothing from the app.
 """
 
 from __future__ import annotations

@@ -43,7 +43,7 @@ from PyQt6.QtWidgets import QGraphicsRectItem
 
 from ...applog.events import emit_timing
 from ...roi import RoiToolbox
-from ...roi.model import SCOPE_PERSISTENT
+from ...domain.roi_model import SCOPE_PERSISTENT
 from ...roi.scope import RoiEditTarget
 from ...roi.rasterize import effective_reference_diameters
 from ...roi.toolbox import MIN_SAMPLE_DIAMETER_PX

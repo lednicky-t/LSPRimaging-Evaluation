@@ -1,7 +1,7 @@
 """The ROI feature finder as one job: crops -> fits on worker processes -> findings and a mask (2026-10-29).
 
 `roi_features.py` is the method (pure maths, one ROI or the whole array at a time). This is how it is run for the Mask tab's
-"ROI features" tool, still without Qt and without any module, so the task (`image_tools/roi_feature_task.py`), a script and a test
+"ROI features" tool, still without Qt and without any module, so the task (`panels/roi_feature_task.py`), a script and a test
 call it alike:
 
 1. The caller cuts a **crop** per ROI out of the processed image (`RoiCrop`: the pixels around the ROI, its sample disk and its

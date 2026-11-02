@@ -91,13 +91,13 @@ from pathlib import Path
 import numpy as np
 
 from ..analysis.provenance import (
-    FrameNamingScheme,
     MaskSnapshotRef,
     mask_scope_tag,
     persist_mask_snapshot_with_status,
 )
 from ..analysis.settings import MetricSettings, StatisticsSettings
 from ..applog import timed
+from ..frame_naming import FrameNamingScheme
 from ..image_tools.background.model import BackgroundSettings
 from ..image_tools.chromatic.model import (
     ChromaticLandmarkObservation,
@@ -112,8 +112,8 @@ from ..image_tools.mask.mask_pointers_state import from_payload as mask_pointers
 from ..image_tools.mask.mask_pointers_state import to_payload as mask_pointers_to_payload
 from ..progress import Cancelled, ProgressCallback
 from ..plan.state import PlanEditsState
-from ..selection.frame_roles_state import FrameRolesState
-from ..roi.model import (
+from ..frame_roles_state import FrameRolesState
+from ..domain.roi_model import (
     AreaRoi,
     AreaRoiDetectionSettings,
     AreaRoiGroup,

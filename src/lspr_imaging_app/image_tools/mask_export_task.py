@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
-from ..analysis.provenance import FrameNamingScheme
+from ..frame_naming import FrameNamingScheme
 from .mask.export import ExportResult, export_masks
 from .mask.model import MaskChange
 from ..threaded_task import ThreadedTask

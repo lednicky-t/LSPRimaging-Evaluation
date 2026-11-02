@@ -40,7 +40,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 from ...analysis.worker import AnalysisWorker
 from ...progress import Cancelled
-from ...roi.model import AreaRoi
+from ...domain.roi_model import AreaRoi
 from ...roi.rasterize import union_roi_masks
 
 logger = logging.getLogger(__name__)

@@ -36,7 +36,7 @@ import numpy as np
 from ..image_tools.background.model import BackgroundSettings
 from ..image_tools.geometry.model import GeometrySettings
 from ..image_tools.preprocess import resolve_external_mask
-from ..roi.model import AreaRoi, AreaRoiDetectionSettings
+from ..domain.roi_model import AreaRoi, AreaRoiDetectionSettings
 from .frame_reduce import RoiSet, build_roi_set
 from .provenance import DEFAULT_REFERENCE_EXCLUSION_MODE
 from .reduction import DEFAULT_TRIMMED_MEAN_FRACTION

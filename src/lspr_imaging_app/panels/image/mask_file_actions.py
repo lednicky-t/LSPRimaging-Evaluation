@@ -55,7 +55,7 @@ from PyQt6.QtWidgets import QFileDialog, QHBoxLayout, QMessageBox, QWidget
 
 from ...dataset import DatasetModule
 from ...image_tools import MaskModule, MaskScopeModule
-from ...analysis.provenance import FrameNamingScheme
+from ...frame_naming import FrameNamingScheme
 from ...image_tools.mask.export import INDEX_FILE_NAME, existing_clashes, planned_files
 from ...image_tools.mask.io import read_mask_image, write_mask_image
 from ...image_tools.mask_export_task import MaskExportTask

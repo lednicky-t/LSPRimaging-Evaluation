@@ -47,7 +47,7 @@ from ...image_tools.background.model import BackgroundSettings
 from ...image_tools.geometry.model import GeometrySettings
 from ...image_tools.geometry.transform import spatial_output_shape
 from ...image_tools.preprocess import apply_preprocessing, estimate_background_image, resolve_external_mask
-from ...roi.model import AreaRoi, AreaRoiDetectionSettings
+from ...domain.roi_model import AreaRoi, AreaRoiDetectionSettings
 
 logger = logging.getLogger(__name__)
 

@@ -78,7 +78,7 @@ from ..image_tools.chromatic.warp import warp_boolean_mask_affine
 from ..image_tools.geometry.model import GeometrySettings
 from ..image_tools.geometry.transform import combined_geometry_affine_xy
 from ..progress import Cancelled
-from .model import AreaRoi, RoiMask
+from ..domain.roi_model import AreaRoi, RoiMask
 
 # -- arbitrary-mask geometry: crop/expand between stored and working form ---
 

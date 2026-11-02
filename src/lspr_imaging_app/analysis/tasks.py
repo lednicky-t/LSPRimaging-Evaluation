@@ -104,14 +104,14 @@ from pathlib import Path
 
 import numpy as np
 
+from ..frame_naming import FrameNamingScheme
 from ..image_tools.background.model import BackgroundSettings
 from ..image_tools.geometry.model import GeometrySettings
 from ..image_tools.preprocess import apply_preprocessing, resolve_external_mask
-from ..roi.model import AreaRoi, AreaRoiDetectionSettings
+from ..domain.roi_model import AreaRoi, AreaRoiDetectionSettings
 from ..roi.rasterize import rasterize_reference, rasterize_sample
 from .provenance import (
     DEFAULT_REFERENCE_EXCLUSION_MODE,
-    FrameNamingScheme,
     ProvenanceRecord,
     SettingsSnapshot,
     background_exclusion_digest,

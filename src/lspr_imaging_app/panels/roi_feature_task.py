@@ -1,6 +1,7 @@
 """Finds the small features on the ROIs of the image on screen, off the GUI thread (the Mask tab's "ROI features" tool, 2026-10-29).
 
-The method is `mask/roi_features.py`, the job around it (crops, worker processes, findings) is `mask/roi_feature_run.py`; this QObject
+The method is `image_tools/mask/roi_features.py`, the job around it (crops, worker processes, findings) is
+`image_tools/mask/roi_feature_run.py`; this QObject
 is the thread / progress / Cancel wrapper and the keeper of the **result**, with the same signals as `MaskAutoTask` and
 `TransientScanTask` (`task_progress`, `task_finished` for the status bar's task indicator).
 
@@ -29,6 +30,9 @@ model change (`forget_result`, wired by the Image panel), and a run that was goi
 (`invalidate`).
 
 Threads: a plain ``threading.Thread`` (never ``QThreadPool``: the plane may come from OME-Zarr), through `ThreadedTask`.
+
+Lives in `panels/`, not `image_tools/` (moved 2026-11-02, layering): it reads the `DatasetModule` and the ROI toolbox as well as three
+image tools, and `image_tools` sits below both. Its users are the Mask tab and the app shell.
 """
 
 from __future__ import annotations
@@ -43,19 +47,19 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 from ..applog.events import log_event
 from ..dataset import DatasetModule
+from ..image_tools import preprocess as pp
+from ..image_tools.background.model import BackgroundSettings
+from ..image_tools.background.module import BackgroundModule
+from ..image_tools.chromatic.module import ChromaticModule
+from ..image_tools.geometry.model import GeometrySettings
+from ..image_tools.geometry.module import GeometryModule
+from ..image_tools.mask import roi_feature_run as run
+from ..image_tools.mask import roi_features as rf
 from ..progress import Cancelled, throttled
 from ..roi import rasterize as rz
-from ..roi.model import AreaRoi, AreaRoiDetectionSettings
+from ..domain.roi_model import AreaRoi, AreaRoiDetectionSettings
 from ..roi.toolbox import RoiToolbox
 from ..threaded_task import TaskRefused, ThreadedTask
-from . import preprocess as pp
-from .background.model import BackgroundSettings
-from .background.module import BackgroundModule
-from .chromatic.module import ChromaticModule
-from .geometry.model import GeometrySettings
-from .geometry.module import GeometryModule
-from .mask import roi_feature_run as run
-from .mask import roi_features as rf
 
 logger = logging.getLogger(__name__)
 

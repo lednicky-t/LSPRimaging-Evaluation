@@ -119,7 +119,7 @@ from ..change_events import RoiComputationalChange, RoiCosmeticChange
 from ..diagnostics import instrumented
 from ..image_tools.chromatic.affine import apply_affine_to_points
 from ..undo import FunctionCommand, undo_manager
-from .model import (
+from ..domain.roi_model import (
     GEOMETRY_SCOPES,
     SCOPE_INDIVIDUAL,
     SCOPE_PERSISTENT,

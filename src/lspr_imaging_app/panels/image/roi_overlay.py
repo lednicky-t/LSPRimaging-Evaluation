@@ -29,7 +29,7 @@ from PyQt6.QtGui import QBrush, QColor, QPainterPath
 from PyQt6.QtWidgets import QGraphicsPathItem
 
 from ...roi.display_style import DEFAULT_REFERENCE_COLOR, RoiCircleStyle, RoiDisplayStyle
-from ...roi.model import AreaRoi, AreaRoiGroup
+from ...domain.roi_model import AreaRoi, AreaRoiGroup
 from ...roi.overlay_geometry import circle_outlines, circle_points
 from ...roi.rasterize import effective_reference_diameters
 from .group_label_overlay import GroupLabelItem, GroupLabelSettings, group_label_entries

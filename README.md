@@ -78,7 +78,7 @@ file per pytest process: all files in one process stalls.
 `docs/roi_editor_branch_plan.md`, `roi_implementation_direction.md`, and
 `roi_table_direction.md` document an earlier ROI redesign proposal;
 the ROI model that actually shipped is `AreaRoi`/`AreaRoiGroup` in
-`roi/model.py`, not the naming those docs propose — treat them as
+`domain/roi_model.py`, not the naming those docs propose — treat them as
 historical context, not a current plan.
 
 ## Citing this software

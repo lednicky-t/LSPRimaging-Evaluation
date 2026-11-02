@@ -10,7 +10,8 @@ anything else). Nothing in ``src/`` imports this file.
 
 from __future__ import annotations
 
-from lspr_imaging_app.analysis.provenance import DEFAULT_REFERENCE_EXCLUSION_MODE, FrameNamingScheme
+from lspr_imaging_app.analysis.provenance import DEFAULT_REFERENCE_EXCLUSION_MODE
+from lspr_imaging_app.frame_naming import FrameNamingScheme
 from lspr_imaging_app.analysis.reduction import DEFAULT_TRIMMED_MEAN_FRACTION
 from lspr_imaging_app.analysis.tasks import DEFAULT_COVERAGE_THRESHOLDS, CoverageThresholds, WavelengthComputeInput
 from lspr_imaging_app.dataset.model import is_dark_frame_wavelength

@@ -42,7 +42,7 @@ from ...image_tools.mask.transient_detection import KIND_ARTEFACT, KIND_GLOBAL, 
 from ...image_tools.mask.mask_pointers import MaskPointersModule
 from ...image_tools.mask.mask_pointers_state import MaskPointer
 from ...image_tools.mask.transient_masks import group_by_frame, maskable
-from ...roi.model import SCOPE_INDIVIDUAL, SCOPE_PERSISTENT
+from ...domain.roi_model import SCOPE_INDIVIDUAL, SCOPE_PERSISTENT
 from ...selection import SelectionModule
 from .data_axis_slider import AxisWindow
 from .mask_row_menu import MenuEntry, show_entries_menu

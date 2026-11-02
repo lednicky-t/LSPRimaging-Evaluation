@@ -36,7 +36,7 @@ from PyQt6.QtWidgets import QSizePolicy, QToolTip, QWidget
 
 from lspr_ui import get_active_theme
 
-from ...roi.model import SCOPE_PERSISTENT
+from ...domain.roi_model import SCOPE_PERSISTENT
 from .data_axis_slider import AxisWindow, axis_index, axis_track, axis_x
 
 _HEIGHT = 14

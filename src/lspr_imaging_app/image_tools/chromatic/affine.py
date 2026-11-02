@@ -1,7 +1,7 @@
 """Core point-based affine/similarity fitting - the actual "points in, matrix
 out" math the whole Chromatic correction feature is built on.
 
-Deliberately dependency-free (only `numpy` + `roi.model.AreaRoi`'s type):
+Deliberately dependency-free (only `numpy` + `domain.roi_model.AreaRoi`'s type):
 no image registration, no landmark detection, no Qt. Given a handful of
 matched `(source, target)` point pairs (however they were obtained - a
 human clicking landmarks, or `auto_landmarks.py`'s automatic finder),
@@ -24,16 +24,10 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
-    # Type-only: roi/toolbox.py now imports this module directly
-    # (2026-09-21, display_position()), and roi/__init__.py imports
-    # toolbox.py - a real (not just type-checking-time) import here would
-    # be circular (roi -> toolbox -> chromatic.affine -> roi.model ->
-    # (needs the roi package, already mid-init) -> ImportError). Safe to
-    # defer to TYPE_CHECKING only: AreaRoi is never used as a runtime
-    # value in this file (`from __future__ import annotations` already
-    # means the type hint itself is never evaluated), only as a type
-    # annotation on transform_rois_affine's `rois` parameter.
-    from ...roi.model import AreaRoi
+    # Type-only: AreaRoi is never used as a runtime value in this file (`from __future__ import annotations` means the hint
+    # on transform_rois_affine's `rois` parameter is never evaluated). (Until 2026-11-02 this also avoided a circular import
+    # through the roi package; the class now lives in `domain/`, which imports nothing of the app.)
+    from ...domain.roi_model import AreaRoi
 
 
 def identity_affine_matrix() -> np.ndarray:

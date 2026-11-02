@@ -141,11 +141,11 @@ from ...image_tools.mask.mask_pointers import MaskPointersModule
 from ...image_tools.mask_auto_task import MaskAutoTask
 from ...image_tools.mask_export_task import MaskExportTask
 from ...image_tools.mask_scan_task import TransientScanTask
-from ...image_tools.roi_feature_task import RoiFeatureTask
+from ..roi_feature_task import RoiFeatureTask
 from ...storage.session_carry_task import SessionCarry
 from ...roi.array_task import ArrayAction
 from ...roi.display_style import RoiDisplayStyle
-from ...roi.model import SCOPE_PERSISTENT
+from ...domain.roi_model import SCOPE_PERSISTENT
 from ...roi.scope import RoiEditTarget, RoiScopeModule
 from .area_selection_tool import AreaSelectionTool
 from .background_tab import BACKGROUND_INFO_HTML, BackgroundTab

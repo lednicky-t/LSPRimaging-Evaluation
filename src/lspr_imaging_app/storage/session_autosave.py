@@ -76,7 +76,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
-from ..analysis.provenance import FrameNamingScheme
+from ..frame_naming import FrameNamingScheme
 from ..applog import timed
 from .session import PreparedSession, SessionState, SessionWriter, prepare_session
 

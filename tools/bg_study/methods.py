@@ -1,7 +1,7 @@
 import numpy as np
 import cv2
 from lspr_imaging_app.image_tools.background.estimate import estimate_background_profile
-from lspr_imaging_app.roi.model import AreaRoiDetectionSettings
+from lspr_imaging_app.domain.roi_model import AreaRoiDetectionSettings
 
 _S = AreaRoiDetectionSettings(ignore_marked_pixels=True)
 

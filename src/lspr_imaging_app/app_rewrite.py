@@ -41,7 +41,7 @@ from .analysis.scan_pool import MODE_NORMAL, MODE_PERFORMANCE, MODES
 from .analysis.scan_task import TASK_ID as ANALYSIS_SCAN_TASK_ID, ScanTask
 from .applog import LogSystem, RingBufferHandler, configure_logging, log_event
 from .applog import current as current_log_system
-from .analysis.provenance import FrameNamingScheme
+from .frame_naming import FrameNamingScheme
 from .dataset import DatasetModule
 from .gil_tuning import apply_switch_interval
 from .gui.app_theme import LSPRI_BRIGHT_THEME, LSPRI_DARK_THEME, apply_app_theme
@@ -52,7 +52,7 @@ from .image_tools.mask.mask_pointers import MaskPointersModule
 from .plan.module import ExperimentPlanModule
 from .image_tools.mask_auto_task import TASK_ID as AUTO_MASK_TASK_ID
 from .image_tools.mask_export_task import TASK_ID as MASK_EXPORT_TASK_ID
-from .image_tools.roi_feature_task import TASK_ID as ROI_FEATURES_TASK_ID
+from .panels.roi_feature_task import TASK_ID as ROI_FEATURES_TASK_ID
 from .dataset.module import EXPORT_TASK_ID as ZARR_EXPORT_TASK_ID
 from .image_tools.mask_scan_task import TASK_ID as SCAN_TASK_ID, TransientScanTask
 from .roi.array_task import TASK_ID as ARRAY_TASK_ID

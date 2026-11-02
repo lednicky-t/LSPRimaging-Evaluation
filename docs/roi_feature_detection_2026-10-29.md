@@ -135,7 +135,7 @@ the edge of the data and the edge rule would drop it. A consequence worth knowin
 a mask edit never makes a result stale.
 
 **Pieces**: `image_tools/mask/roi_feature_run.py` (pure job: `RoiCrop`, `FeatureParams`, `fit_crops`, `find_in_crops`, `RoiFinding`),
-`image_tools/roi_feature_task.py` (`RoiFeatureTask(ThreadedTask)`: crops, preprocessing without the mask, raw-pixel result),
+`panels/roi_feature_task.py` (moved from `image_tools/` on 2026-11-02; `RoiFeatureTask(ThreadedTask)`: crops, preprocessing without the mask, raw-pixel result),
 `RoiFeaturesEditPanel` in `panels/image/mask_edit_panels.py`, the preview kind `KIND_ROI_FEATURES` in `panels/mask_edit_preview.py`,
 Apply through `MaskCandidateEditor`, the icon `roi_features_icon` in `panels/image/mask_edit_tool_icons.py`, task-indicator and
 Cancel wiring in `app_rewrite.py`.

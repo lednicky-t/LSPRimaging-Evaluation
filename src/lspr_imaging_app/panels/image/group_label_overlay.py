@@ -24,7 +24,7 @@ import pyqtgraph as pg
 from PyQt6.QtCore import QPointF, QRectF
 from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QPainter
 
-from ...roi.model import AreaRoi, AreaRoiGroup
+from ...domain.roi_model import AreaRoi, AreaRoiGroup
 from .label_placement import DEFAULT_GROUP_PLACEMENT, placement_origin
 
 POSITIONS = ("first", "last")

@@ -37,7 +37,7 @@ from .dataset import DatasetModule
 from .image_tools import GeometryModule
 from .image_tools.geometry.model import GeometryComputationalChange, GeometrySettings
 from .image_tools.geometry.transform import remap_point_for_geometry_change
-from .roi.model import RoiMask
+from .domain.roi_model import RoiMask
 from .roi.rasterize import remap_roi_mask
 from .roi.toolbox import RoiRemapReport, RoiToolbox
 

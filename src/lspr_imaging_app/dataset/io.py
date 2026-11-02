@@ -67,7 +67,7 @@ from lspr_imaging_app.image_tools.geometry.transform import (
 )
 
 from lspr_imaging_app.applog.events import emit_timing, log_event
-from .export_stats import ExportStats
+from ..export_stats import ExportStats
 from .model import ImageDataset, ImageKey, ImageRecord, compact_dataset_image_timings, rehydrated_acquisition_metadata
 from .ome_metadata import (
     build_axes,

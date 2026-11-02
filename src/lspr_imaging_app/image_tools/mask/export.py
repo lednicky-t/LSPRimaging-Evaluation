@@ -23,7 +23,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from ...analysis.provenance import FrameNamingScheme
+from ...frame_naming import FrameNamingScheme
 from ...progress import ProgressCallback, StageProgress
 from .io import write_mask_image
 from .model import MaskChange

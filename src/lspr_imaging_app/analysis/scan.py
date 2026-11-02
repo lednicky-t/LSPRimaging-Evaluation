@@ -40,7 +40,7 @@ from ..image_tools.geometry.model import GeometrySettings
 from ..image_tools.geometry.transform import spatial_transform_is_identity
 from ..image_tools.preprocess import apply_preprocessing_at, apply_spatial_preprocessing
 from ..progress import Cancelled
-from ..roi.model import AreaRoiDetectionSettings
+from ..domain.roi_model import AreaRoiDetectionSettings
 from .frame_reduce import LayoutCache, RoiSet, reduce_frame
 from .provenance import DEFAULT_REFERENCE_EXCLUSION_MODE
 from .reduction import DEFAULT_TRIMMED_MEAN_FRACTION

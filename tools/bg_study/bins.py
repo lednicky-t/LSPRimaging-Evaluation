@@ -5,7 +5,7 @@ from scipy.spatial import cKDTree
 import scipy.ndimage as ndi
 from common import H, W, load
 from lspr_imaging_app.image_tools.background import estimate as E
-from lspr_imaging_app.roi.model import AreaRoiDetectionSettings
+from lspr_imaging_app.domain.roi_model import AreaRoiDetectionSettings
 
 st = pickle.load(open("setup.pkl", "rb"))
 EXCL = st["EXCL"]

@@ -30,8 +30,8 @@ from pathlib import Path
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from ..analysis.provenance import FrameNamingScheme
-from ..dataset.export_stats import ExportStats
+from ..frame_naming import FrameNamingScheme
+from ..export_stats import ExportStats
 from ..progress import Cancelled, throttled
 from . import session_carry as carry
 from . import session_index

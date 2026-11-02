@@ -32,8 +32,8 @@ import cv2
 import numpy as np
 from scipy import ndimage
 
-from ...roi.detection import ignored_pixel_mask
-from ...roi.model import AreaRoi, AreaRoiDetectionSettings
+from ...domain.ignored_pixels import ignored_pixel_mask
+from ...domain.roi_model import AreaRoi, AreaRoiDetectionSettings
 from .apply import apply_background, apply_background_at
 
 

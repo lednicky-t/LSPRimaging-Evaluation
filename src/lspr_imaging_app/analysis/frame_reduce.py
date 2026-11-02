@@ -49,7 +49,7 @@ import numpy as np
 
 from ..image_tools.chromatic.affine import apply_affine_to_points, invert_affine_matrix
 from ..roi import rasterize as rz
-from ..roi.model import AreaRoi
+from ..domain.roi_model import AreaRoi
 from .provenance import DEFAULT_REFERENCE_EXCLUSION_MODE, REFERENCE_EXCLUSION_MODES
 from .reduction import DEFAULT_TRIMMED_MEAN_FRACTION, REDUCTION_METHODS, reduce_sample_and_reference
 

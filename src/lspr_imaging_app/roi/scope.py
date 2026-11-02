@@ -16,7 +16,7 @@ from collections.abc import Callable
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from .model import GEOMETRY_SCOPES, SCOPE_INDIVIDUAL, SCOPE_PERSISTENT
+from ..domain.roi_model import GEOMETRY_SCOPES, SCOPE_INDIVIDUAL, SCOPE_PERSISTENT
 
 __all__ = ["RoiEditTarget", "RoiScopeModule", "SCOPE_INDIVIDUAL", "SCOPE_PERSISTENT"]
 

@@ -38,7 +38,7 @@ from ..image_tools.mask_candidates import MaskCandidates, Ready
 from .mask_edit_common import resolve_mask_edit_base
 
 if TYPE_CHECKING:
-    from ..image_tools.roi_feature_task import RoiFeatureTask
+    from .roi_feature_task import RoiFeatureTask
 
 logger = logging.getLogger(__name__)
 
