@@ -51,7 +51,7 @@ destructive pixel change here the way Crop's apply has, so there is no
 reason to force an exit just from moving a point. **Clicking Apply does
 exit** (maintainer's spec, 2026-09-29, added after the first cut left
 Measure the only Image Tools tool that didn't - `panel.py`'s
-`_on_measure_apply_requested`, the same shape as Crop's own apply-exits
+`CropMeasureControls.on_measure_apply_requested`, the same shape as Crop's own apply-exits
 rule), matching the expectation that Apply is "done, not just try it".
 """
 
@@ -143,7 +143,7 @@ class MeasureLineTool(QObject):
             # crop or rotation could happen while Measure is off, which
             # would make the old pixel coordinates meaningless. Re-activating
             # always starts from a clean slate (the floating controls hide
-            # accordingly - see panel.py's `_reposition_measure_controls`).
+            # accordingly - see `CropMeasureControls.reposition_measure`).
             self._clear_placed()
         self.status_changed.emit("")
 

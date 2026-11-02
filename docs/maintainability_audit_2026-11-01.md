@@ -70,3 +70,19 @@ Layering contract for the app: contracts `lspri-layers` (13 floors, exhaustive, 
 **What a person must look at** (tests cannot see these): mask overlay on / off, colour and opacity (Mask tab and View tab); histogram highlight (drag the range, colour, opacity, off); scale bar while zooming and in the preview tools; landmarks (eye and stack toggles, after a chromatic run); crop outline while the Crop and Rotate tools are active; chunk grid and source grid toggles; Play with all of them on.
 
 **Next:** batch 2 (frame status text, cursor readout, ROI queries, crop and measure controls, about 340 lines) and batch 3 (slider marks and Play, about 350 lines).
+
+## Done 2026-11-02 (item D, batch 2 of 3; built, waiting for the maintainer's visual check)
+
+Batch 1 was committed and pushed first (eva `93d32e2`, umbrella `dd41196`, CI green). Batch 2, same pattern (`panels/image/`):
+
+- `frame_status_text.py`, `FrameStatusText`: the dock subtitle (one line and the fixed-place fields), with its state (`status`, the dock fields, the viewed frame, the widest texts). The panel passes the slider colour of a role and the two sinks (its `frame_status_changed` / `frame_columns_changed` signals).
+- `cursor_readout.py`, `CursorReadout`: the "(col, row) = value" label (it now owns the label) and the pixel lookup behind it.
+- `roi_queries.py`, `RoiQueries`: which ROI is under a point, which are in a rectangle, where the selected ones are, display point -> reference frame. The panel keeps `roi_at` and `rois_in_rect` as its public hit-testing API (one-line forwards); tests drive them.
+- `crop_measure_controls.py`, `CropMeasureControls`: the floating size / calibration widgets of the Crop and Measure tools and what the tools' signals do to them. The tools and widgets are still created by the panel; their signal connections moved to just after the helper is built (nothing emits in between, and the relative order of the two `sigTransformChanged` connections is kept).
+- `panel.py`: 3,232 -> 2,901 lines (3,492 before the split), 158 -> 138 methods in `ImagePanel` (178 before); the size-budget test is lowered to 2,990 lines / 143 methods.
+
+**Proof it is a move:** the 23 moved methods were compared line by line with the committed text; the differences are names, `self._x` fields that became helper attributes or passed-in functions, and docstring pointers. 5 import-layer contracts kept, 360 modules import, ruff clean. Tests: 13 new ones drive `FrameStatusText`, `RoiQueries` and `CursorReadout` without a panel (`test_lspri_frame_status_roi_queries_cursor_readout.py`); the unit test of the role prefix now builds `FrameStatusText` directly instead of a stand-in panel; 90 test files that touch the Image panel or the app pass (1,911 tests, four at a time).
+
+**What a person must look at:** the dock title bar's subtitle (cube, wavelength, time, comment, and the Dark / Reference / Ignored word in its slider colour; after changing the cube unit and after changing a slider colour); the cursor readout under the mouse and its colours after a theme change; clicking, rubber-banding, moving and resizing ROIs, also on a frame with a chromatic shift; Crop (size boxes under the rectangle, Apply, zoom and pan with it active); Measure (the boxes follow the ruler point, Apply, a rejected value).
+
+**Next:** batch 3 (slider marks and Play, about 350 lines).

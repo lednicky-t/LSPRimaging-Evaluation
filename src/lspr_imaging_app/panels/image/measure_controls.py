@@ -75,7 +75,7 @@ a signal, a module change comes back as a redraw/refresh, never a direct
 mutation from inside a widget.
 
 **What the um fields show is `panel.py`'s call, not this widget's** - see
-`_on_measure_tool_measured`'s docstring: zero for a fresh placement with no
+`CropMeasureControls.on_measure_measured`'s docstring: zero for a fresh placement with no
 calibration yet, the live calibrated distance whenever one already exists.
 This widget just displays whatever it's told (`set_um_values`) until the
 maintainer types over it.
@@ -234,7 +234,7 @@ class MeasureCalibrationControls(QWidget):
 
     def set_um_values(self, dx_um: float, dy_um: float) -> None:
         """Programmatic update (a reset to 0, or a live calibrated
-        readout - see `panel.py`'s `_on_measure_tool_measured`) - blocks
+        readout - see `CropMeasureControls.on_measure_measured`) - blocks
         signals so it never re-triggers the um-field auto-calc, the same
         reasoning `CropSizeControls.set_size` documents for its own
         programmatic updates. `d_um` is derived from the two, not a

@@ -30,7 +30,7 @@ documents) and leaves this class's own state untouched - the rectangle
 stays exactly as resizable/movable as it was, so `CropToolTest` can (and
 does) drive a second resize-and-apply pass directly. Whether a *session*
 ends there is deliberately not this class's call: `panel.py`'s
-`_on_crop_apply_requested` is the one that decides "apply also exits Crop
+`CropMeasureControls.on_crop_apply_requested` is the one that decides "apply also exits Crop
 mode" (maintainer's spec, 2026-09-29 - added after the first cut left
 Crop's own preview-uncropped rule, below, showing no visible change on
 apply) by switching `ActiveToolModule` off afterward, which reaches this

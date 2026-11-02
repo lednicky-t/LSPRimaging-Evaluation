@@ -75,7 +75,6 @@ visible while measuring too. Mouse/keyboard rules: ``image_controls.py``.
 
 from __future__ import annotations
 
-import html
 
 import itertools
 import math
@@ -85,7 +84,7 @@ from dataclasses import replace
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import QEvent, QObject, QPointF, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QEvent, QObject, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFontMetrics
 from PyQt6.QtWidgets import (
     QMenu,
@@ -118,8 +117,7 @@ from ...image_tools.geometry.model import CropDefinition
 from ...diagnostics.thread_times import thread_cpu_times
 from ...image_tools.preprocess import area_selection_to_raw, resolve_external_mask
 from ...roi import RoiToolbox
-from ...roi.rasterize import effective_reference_diameters
-from .no_data import format_pixel_value, no_data_overlay_rgba
+from .no_data import no_data_overlay_rgba
 from ...selection import (
     AreaSelectionModule,
     CubeDisplayModule,
@@ -127,8 +125,8 @@ from ...selection import (
     ReferenceFrameModule,
     SelectionModule,
 )
-from ...selection.cube_display_module import MODE_CUBE, MODE_TIME, format_elapsed_seconds
-from ...selection.frame_roles_module import ROLE_DARK, ROLE_IGNORED, ROLE_REFERENCE, FrameRolesModule
+from ...selection.cube_display_module import MODE_CUBE, MODE_TIME
+from ...selection.frame_roles_module import FrameRolesModule
 from ..cursor_overlay import CursorOverlay
 from ..ribbon_drawer import RibbonDrawer
 from ..subtitle_column import SubtitleColumn
@@ -165,9 +163,13 @@ from .overlay_style import OverlayStyle
 from .overlay_tint import OverlayTint
 from .tint_overlays import TintOverlays
 from .decoration_overlays import DecorationOverlays
+from .frame_status_text import FrameStatusText
+from .cursor_readout import CursorReadout
+from .roi_queries import RoiQueries
+from .crop_measure_controls import CropMeasureControls
 from .prefetch import prefetch_order
 from .render import ImageRenderer, RenderRequest, RenderResult
-from .roi_gestures import RoiGestures, SelectedApertures
+from .roi_gestures import RoiGestures
 from .roi_overlay import SAMPLE_WIDTH, SAMPLE_WIDTH_FAST, RoiOverlay, add_curve
 from .array_actions import AutoCropReadiness
 from .roi_tab import RoiTab
@@ -260,10 +262,6 @@ def _count_phrase(count: int, noun: str) -> str:
     return f"{count} {noun}{'' if count == 1 else 's'}"
 
 
-# The frame-role word of the dock subtitle: role -> (slider colour role, word), in the colour of its slider tick.
-_ROLE_WORDS = {ROLE_DARK: ("dark", "Dark background"), ROLE_REFERENCE: ("reference", "Reference"), ROLE_IGNORED: ("ignored", "Ignored")}
-_WIDEST_ROLE_WORD = max((word for _color, word in _ROLE_WORDS.values()), key=len)
-_WIDEST_FRAME_TIME = "00:00:00.00"  # H:MM:SS.ss with a two-digit hour (the dock measures every digit as the widest)
 MASK_TAB = "Mask"  # ribbon tab label; the edit preview (the pixels the picked tool would change) is drawn only while it is open
 CHROMATIC_TAB = "Chromatic"  # ribbon tab label (full name "Chromatic Corrections" is its tooltip)
 BACKGROUND_TAB = "Background"  # ribbon tab label; green while background removal is applied
@@ -339,7 +337,7 @@ class ImagePanel(QWidget):
     # ("Cannot show this frame: ...") deliberately do not go through this
     # signal - they go through `tool_status_changed` instead (a transient
     # status-bar message, the same convention every other guarded command in
-    # this panel already uses - see `_on_measure_apply_requested`), since an
+    # this panel already uses - see `CropMeasureControls.on_measure_apply_requested`), since an
     # error is not "what frame is displayed", it's "why nothing is".
     frame_status_changed = pyqtSignal(str, str)  # subtitle text, tooltip (the comment / why it is N/A)
     # The same status as fixed-place fields (2026-10-16, maintainer request: the dock title bar's
@@ -422,7 +420,6 @@ class ImagePanel(QWidget):
         self._dataset = dataset
         # How a cube is named (number or start time); optional so tests build the panel alone.
         self._cube_display = cube_display if cube_display is not None else CubeDisplayModule(dataset, self)
-        self._frame_key: tuple[int, float] | None = None  # the frame the dock subtitle describes
         self._geometry = geometry
         self._mask = mask
         self._mask_scope = mask_scope
@@ -483,15 +480,16 @@ class ImagePanel(QWidget):
             show_background=lambda: self._show_background,
             style_changed=self.overlay_style_changed.emit,
         )
-        # Mirrors the last `frame_status_changed` emission (same "cached
-        # alongside the signal" shape as `_tool_status` above) - lets a test
-        # (or any other direct caller) read the current frame-status text
-        # without needing a dock title bar in the loop to observe it.
-        self._frame_status = ""
-        self._frame_columns: tuple[SubtitleColumn, ...] = ()  # the same, as the dock's fixed-place fields
-        # The widest cube and wavelength texts of the loaded dataset (sizes of two dock fields);
-        # None = look them up on next use (dataset loaded / cleared, cube unit changed).
-        self._frame_widest: tuple[str, str] | None = None
+        # What the dock title bar's subtitle says about the frame on screen (frame_status_text.py); `status` mirrors the last
+        # `frame_status_changed` emission, as `_tool_status` does for the tool status above.
+        self._frame_text = FrameStatusText(
+            dataset,
+            self._cube_display,
+            frame_roles,
+            slider_color=lambda role: self._slider_colors.color(role),
+            status_changed=self.frame_status_changed.emit,
+            columns_changed=self.frame_columns_changed.emit,
+        )
 
         self._serial = itertools.count(1)
         self._latest_serial = 0
@@ -549,7 +547,7 @@ class ImagePanel(QWidget):
         # No dataset yet at construction - same text `_on_dataset_cleared`
         # emits later, so the dock title bar's subtitle never sits blank
         # while genuinely nothing is loaded.
-        self._set_frame_status("No dataset loaded.")
+        self._frame_text.set_status("No dataset loaded.")
 
     def restore_ui_state(self, store: UiStateStore) -> None:
         """Put the cursor readout toggle and the Mask edit tool pick back as
@@ -815,42 +813,53 @@ class ImagePanel(QWidget):
 
         self._crop_tool = CropTool(self._plot, self._geometry, parent=self)
         self._crop_tool.status_changed.connect(self._on_tool_status)
-        self._crop_tool.changed.connect(self._on_crop_tool_changed)
         # Left-button drags do nothing by default (image_controls.py); Crop
         # is the first tool to claim them - declines (returns False) unless
         # it is the active tool, so every other case is untouched.
         self._plot.vb.set_left_drag_handler(self._on_left_drag_event)
-        self._plot.vb.sigTransformChanged.connect(self._reposition_crop_controls)
 
         # A real QWidget (QSpinBox/QToolButton need actual input, unlike a
         # painted overlay item - see crop_size_controls.py), parented to the
         # viewport so it draws on top of the graphics content. Positioned in
-        # screen pixels by `_reposition_crop_controls`; hidden until Crop is
+        # screen pixels by `CropMeasureControls.reposition_crop`; hidden until Crop is
         # active and has a rectangle to show a size for.
         self._crop_controls = CropSizeControls(self._view.viewport(), get_active_theme())
         self._crop_controls.setVisible(False)
         self._crop_controls.size_edited.connect(self._crop_tool.set_size)
-        self._crop_controls.apply_requested.connect(self._on_crop_apply_requested)
 
         self._measure_tool = MeasureLineTool(self._plot, self._geometry, parent=self)
         self._measure_tool.status_changed.connect(self._on_tool_status)
-        self._measure_tool.measured.connect(self._on_measure_tool_measured)
 
         self._measure_controls = MeasureCalibrationControls(self._view.viewport(), get_active_theme())
         self._measure_controls.setVisible(False)
-        self._measure_controls.apply_requested.connect(self._on_measure_apply_requested)
-        self._plot.vb.sigTransformChanged.connect(self._reposition_measure_controls)
+        # Where the two floating control widgets sit and what the tools' results do to them (crop_measure_controls.py).
+        self._crop_measure = CropMeasureControls(
+            self._plot,
+            self._view,
+            self._geometry,
+            self._active_tool,
+            crop_tool=self._crop_tool,
+            crop_controls=self._crop_controls,
+            measure_tool=self._measure_tool,
+            measure_controls=self._measure_controls,
+            status=self._on_tool_status,
+        )
+        self._crop_tool.changed.connect(self._crop_measure.on_crop_tool_changed)
+        self._plot.vb.sigTransformChanged.connect(self._crop_measure.reposition_crop)
+        self._crop_controls.apply_requested.connect(self._crop_measure.on_crop_apply_requested)
+        self._measure_tool.measured.connect(self._crop_measure.on_measure_measured)
+        self._measure_controls.apply_requested.connect(self._crop_measure.on_measure_apply_requested)
+        self._plot.vb.sigTransformChanged.connect(self._crop_measure.reposition_measure)
 
         # Area selection (2026-10-03): drag gesture + marching-ants outline.
         # The state is `AreaSelectionModule`'s; this only draws/forwards.
         self._area_tool = AreaSelectionTool(self._plot, self._area_selection, parent=self)
 
         # Cursor readout text lives on the canvas, top-left (maintainer,
-        # 2026-10-03) - the toggle itself sits in the "General" group.
-        self._cursor_readout = QLabel(self._view.viewport())
-        self._cursor_readout.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self._cursor_readout.move(6, 6)
-        self._cursor_readout.hide()
+        # 2026-10-03) - the toggle itself sits in the "General" group (cursor_readout.py).
+        self._cursor_readout = CursorReadout(
+            self._view.viewport(), self._image_item, value_changed=self.cursor_value_changed.emit
+        )
 
     def _build_toolbar_and_layout(self) -> None:
         # Top toolbar (2026-09-30, flipped from a vertical strip along the
@@ -914,11 +923,20 @@ class ImagePanel(QWidget):
         layout.addWidget(self._controls_bar)
 
         scene = self._image_item.scene()
+        # Which ROI is under a point, which are inside a rectangle, where the selected ones are (roi_queries.py).
+        self._roi_queries = RoiQueries(
+            self._selection,
+            self._roi_toolbox,
+            self._chromatic,
+            current_cube=self._current_cube,
+            current_wavelength=self._current_wavelength,
+            reference_visible=lambda: bool(self._roi_overlay.reference.visible),
+        )
         roi_gestures = RoiGestures(
             self._plot, self._roi_toolbox, self._selection,
-            rois_in_rect=self.rois_in_rect, selected_apertures=self._selected_apertures,
+            rois_in_rect=self._roi_queries.rois_in_rect, selected_apertures=self._roi_queries.selected_apertures,
             view_pixel_size=lambda: float(self._plot.vb.viewPixelSize()[0]),
-            display_linear=self._display_linear, redraw_overlay=self._draw_roi_overlay,
+            display_linear=self._roi_queries.display_linear, redraw_overlay=self._draw_roi_overlay,
             edit_target=self._edit_target, parent=self,
         )
         roi_gestures.refused.connect(self._on_tool_status)  # e.g. an individual change on a persistent point
@@ -928,10 +946,10 @@ class ImagePanel(QWidget):
             area_selection=self._area_selection,
             rotate_tool=self._rotate_tool, crop_tool=self._crop_tool, measure_tool=self._measure_tool,
             area_tool=self._area_tool,
-            image_shape=lambda: self._last_image_shape, roi_at=self.roi_at, apply_crop=self._on_crop_apply_requested,
+            image_shape=lambda: self._last_image_shape, roi_at=self._roi_queries.roi_at, apply_crop=self._crop_measure.on_crop_apply_requested,
             roi_gestures=roi_gestures,
             roi_tab_active=lambda: self._tool_ribbon.current_category() == ROI_TAB,
-            to_reference=self._display_to_reference,
+            to_reference=self._roi_queries.display_to_reference,
             notify=self._on_tool_status,
             eraser_armed=self._eraser_armed,
             erase_at=lambda x, y: self._mask_tab.grain_eraser.erase_at(x, y),
@@ -1114,7 +1132,7 @@ class ImagePanel(QWidget):
         # Cursor-crosshair toggle (maintainer's request, 2026-09-29 - "copy
         # all functions, as hiding, showing values" from the stable app's
         # cursor-toggle overlay). Shares `cursor_overlay.CursorOverlay` with
-        # the Histogram plot; only `_cursor_value_at` (a pixel lookup here,
+        # the Histogram plot; only `CursorReadout.value_at` (a pixel lookup here,
         # a nearest-bin lookup there) differs. No `on_changed` callback
         # (2026-09-30) - its icon used to need manual repositioning when its
         # width changed (icon vs. live text); now that it is a normal
@@ -1124,9 +1142,9 @@ class ImagePanel(QWidget):
             scene_view=self._view,
             plot_item=self._plot,
             overlay_parent=self._top_bar,
-            value_at=self._cursor_value_at,
+            value_at=self._cursor_readout.value_at,
             theme=get_active_theme(),
-            readout_sink=self._set_cursor_readout,
+            readout_sink=self._cursor_readout.set_text,
         )
         # Restyled to match Select/Add ROI (2026-09-30, maintainer request -
         # "make cursor and i icon same as other icons in the bar... this
@@ -1474,7 +1492,7 @@ class ImagePanel(QWidget):
         if hasattr(self, "_export_tab"):
             self._export_tab.refresh_theme()
         if hasattr(self, "_cursor_readout"):
-            self._style_cursor_readout()
+            self._cursor_readout.restyle()
         if hasattr(self, "_controls_bar"):
             self._refresh_controls_bar_theme()
         if hasattr(self, "_slider_ribbon"):
@@ -1482,23 +1500,6 @@ class ImagePanel(QWidget):
             self._update_all_slider_marks()  # a default colour follows the theme
         if hasattr(self, "_top_bar"):
             self._refresh_top_bar_theme()
-
-    def _style_cursor_readout(self) -> None:
-        theme = get_active_theme()
-        self._cursor_readout.setStyleSheet(
-            f"color: {theme.text_primary}; background: rgba(0, 0, 0, 140); padding: 1px 4px; border-radius: 2px;"
-        )
-
-    def _set_cursor_readout(self, text: str) -> None:
-        """Sink for `CursorOverlay`: shows *text* in the canvas's top-left
-        corner, hides the label for an empty string."""
-        self._style_cursor_readout()
-        self._cursor_readout.setText(text)
-        self._cursor_readout.adjustSize()
-        self._cursor_readout.setVisible(bool(text))
-        self._cursor_readout.raise_()
-        if not text:
-            self.cursor_value_changed.emit(None)
 
     def area_selection(self) -> AreaSelectionModule:
         """The shared area selection - editors read it from here so each
@@ -1549,7 +1550,7 @@ class ImagePanel(QWidget):
 
     def _on_dataset_loaded(self, _dataset: object) -> None:
         self._stop_dataset_bound_tasks()
-        self._frame_widest = None
+        self._frame_text.forget_widest()
         self._renderer.clear_prefetch()
         self._decorations.invalidate_landmarks()
         self._refresh_navigation_ranges()
@@ -1562,7 +1563,7 @@ class ImagePanel(QWidget):
         and panel holding dataset-derived state to reset itself (see its
         module docstring) - this is the first subscriber to actually do so."""
         self._stop_dataset_bound_tasks()
-        self._frame_widest = None
+        self._frame_text.forget_widest()
         self._refresh_frame_tools()
         self._renderer.clear_prefetch()
         self._decorations.invalidate_landmarks()
@@ -1578,7 +1579,7 @@ class ImagePanel(QWidget):
         self._last_image_shape = None
         self._area_tool.set_image_shape(None)
         self._refresh_navigation_ranges()
-        self._set_frame_status("No dataset loaded.")
+        self._frame_text.set_status("No dataset loaded.")
         self.image_cleared.emit()
         # A tool with no image under it has nothing to do; the Workflow
         # panel's buttons follow this signal.
@@ -1902,7 +1903,7 @@ class ImagePanel(QWidget):
         self._slider_colors.set(role, color)
         self._slider_ribbon.slider_colors.refresh()
         self._update_all_slider_marks()
-        self._refresh_frame_status()  # the dock subtitle's Dark / Reference / Ignored word has the same colour
+        self._frame_text.refresh()  # the dock subtitle's Dark / Reference / Ignored word has the same colour
 
     def _restore_slider_colors(self, store: UiStateStore) -> None:
         """The slider colours back as last left, and keep saving them."""
@@ -1911,7 +1912,7 @@ class ImagePanel(QWidget):
             self._slider_colors.set(role, saved if isinstance(saved, str) else None)
         self._slider_ribbon.slider_colors.refresh()
         self._update_all_slider_marks()
-        self._refresh_frame_status()
+        self._frame_text.refresh()
         self._slider_ribbon.slider_colors.color_changed.connect(
             lambda role, color: store.set(SLIDER_COLOR_KEYS[role].key, color)
         )
@@ -2291,7 +2292,7 @@ class ImagePanel(QWidget):
             listeners_s = time.perf_counter() - listeners_started
             self._playback_stats.note_detail("listeners", listeners_s)
             stage = time.perf_counter()
-            self._show_frame_status(result.request.cube_index, result.request.wavelength_nm)
+            self._frame_text.show_frame(result.request.cube_index, result.request.wavelength_nm)
             self._playback_stats.note_detail("status", time.perf_counter() - stage)
         if not showing_estimate:
             stage = time.perf_counter()
@@ -2365,12 +2366,12 @@ class ImagePanel(QWidget):
         self._highlight_tint.item.hide()
         finite = estimate[np.isfinite(estimate)]
         spread = f", range {finite.min():.0f}-{finite.max():.0f}" if finite.size else ""
-        self._frame_key = None  # a transient estimate, not the real frame: not re-described on a unit change
+        self._frame_text.forget_frame()  # a transient estimate, not the real frame: not re-described on a unit change
         cube_text = f"Cube {self._cube_display.label_for(request.cube_index)}"
         wavelength_text = f"{request.wavelength_nm:.0f} nm"
-        self._set_frame_status(
+        self._frame_text.set_status(
             f"{cube_text}, {wavelength_text} - background estimate{spread}",
-            columns=self._frame_fields(
+            columns=self._frame_text.fields(
                 cube=cube_text, wavelength=wavelength_text, comment=f"Background estimate{spread}"
             ),
         )
@@ -2650,7 +2651,7 @@ class ImagePanel(QWidget):
         self._rotate_tool.set_active(tool is ImageTool.ROTATE)
         self._crop_tool.set_active(tool is ImageTool.CROP)
         self._measure_tool.set_active(tool is ImageTool.MEASURE)
-        self._reposition_measure_controls()
+        self._crop_measure.reposition_measure()
         self._view.viewport().unsetCursor()  # drop any resize/move cursor left over from Crop
         if tool is ImageTool.SELECT_AREA:
             self._view.viewport().setCursor(Qt.CursorShape.CrossCursor)
@@ -2669,139 +2670,29 @@ class ImagePanel(QWidget):
         self._tool_status = text
         self.tool_status_changed.emit(text)
 
-    def _set_frame_status(
-        self, text: str, tooltip: str = "", columns: tuple[SubtitleColumn, ...] | None = None
-    ) -> None:
-        """Publish the frame status as one line (`frame_status_changed`) and as the dock's fixed-place
-        fields (`frame_columns_changed`). A message with no frame in it ("No dataset loaded.") has no
-        *columns*: it is shown in the comment field, the one that has room."""
-        self._frame_status = text
-        self._frame_columns = columns if columns is not None else self._frame_fields(comment=text, tooltip=tooltip)
-        self.frame_status_changed.emit(text, tooltip)
-        self.frame_columns_changed.emit(self._frame_columns)
-
     def frame_columns(self) -> tuple[SubtitleColumn, ...]:
         """The dock fields of the last frame status (to seed a dock that connected after the panel was built)."""
-        return self._frame_columns
-
-    def _frame_fields(
-        self,
-        *,
-        role: tuple[str, str] | None = None,
-        cube: str = "",
-        wavelength: str = "",
-        time: str = "",
-        comment: str = "",
-        tooltip: str = "",
-    ) -> tuple[SubtitleColumn, ...]:
-        """The dock fields, left to right: cube, wavelength, the frame's own time, comment, frame role
-        (word, colour). The role word is empty on most frames and has a fixed width (the widest role word), so it
-        comes last, at the right end: anywhere before the comment it would be a blank gap (2026-10-24). Every field but the comment has the width of the widest thing it can
-        show, so an empty one keeps its place and the ones after it never move."""
-        widest_cube, widest_wavelength = self._widest_frame_texts()
-        return (
-            SubtitleColumn(cube, widest_cube),
-            SubtitleColumn(wavelength, widest_wavelength),
-            SubtitleColumn(time, _WIDEST_FRAME_TIME),
-            SubtitleColumn(comment, tooltip=tooltip),
-            SubtitleColumn(role[0] if role else "", _WIDEST_ROLE_WORD, role[1] if role else None),
-        )
-
-    def _widest_frame_texts(self) -> tuple[str, str]:
-        """The longest "Cube X" and "NNN nm" of the loaded dataset (the highest cube and wavelength: the
-        most digits; the last cube has the longest start time). Looked up once per dataset / cube unit,
-        not per frame, since the status is rebuilt on every Play step."""
-        if self._frame_widest is None:
-            cubes = self._dataset.spectral_cubes()
-            wavelengths = self._dataset.wavelengths()
-            self._frame_widest = (
-                f"Cube {self._cube_display.label_for(cubes[-1])}" if cubes else "Cube 0",
-                f"{max(wavelengths):.0f} nm" if wavelengths else "0 nm",
-            )
-        return self._frame_widest
-
-    def _show_frame_status(self, cube_index: int, wavelength_nm: float) -> None:
-        """The dock subtitle for a real frame: "Cube X, 550 nm | 1:23.45 | <comment>".
-        The middle part is this frame's own experimental time (H:MM:SS.ss, or M:SS.ss
-        under an hour, since the acquisition start - the same t = 0 as the
-        cube's Time label, which is only the cube's *first* frame); it is left
-        out when the frame has no timing. The comment is the experiment-record
-        entry active when the frame was taken. "N/A" (with the reason in the
-        tooltip) when there is none: either the frame is not linked to
-        experiment data (no acquisition metadata or no timing for it), or no
-        comment was recorded yet."""
-        self._frame_key = (int(cube_index), float(wavelength_nm))
-        linked, comment = self._dataset.frame_comment(cube_index, wavelength_nm)
-        cube_text = f"Cube {self._cube_display.label_for(cube_index)}"
-        wavelength_text = f"{wavelength_nm:.0f} nm"
-        head = f"{cube_text}, {wavelength_text}"
-        frame_seconds = self._dataset.frame_start_seconds(cube_index, wavelength_nm)
-        time_text = "" if frame_seconds is None else format_elapsed_seconds(frame_seconds, decimals=2)  # tens of ms: frames of a cube are close
-        if time_text:
-            head = f"{head} | {time_text}"
-        if comment:
-            text, tooltip = f"{head} | {comment}", comment
-        elif linked:
-            text, tooltip = f"{head} | N/A", "No comment was recorded at the time this image was acquired."
-        else:
-            text, tooltip = (
-                f"{head} | N/A",
-                "This image is not linked to experiment data (no acquisition metadata, or no timing for it).",
-            )
-        role = self._role_word(cube_index, wavelength_nm)
-        self._set_frame_status(
-            self._with_role_prefix(text, cube_index, wavelength_nm),
-            tooltip,
-            self._frame_fields(
-                role=role, cube=cube_text, wavelength=wavelength_text, time=time_text,
-                comment=comment or "N/A", tooltip=tooltip,
-            ),
-        )
-
-    def _role_word(self, cube_index: int, wavelength_nm: float) -> tuple[str, str] | None:
-        """("Dark background" | "Reference" | "Ignored", its slider colour) for such a frame
-        (`slider_colors.py`: the colour of its tick); None for any other frame."""
-        if self._frame_roles is None:
-            return None
-        shown = _ROLE_WORDS.get(self._frame_roles.role_of(cube_index, wavelength_nm))
-        if shown is None:
-            return None
-        color_role, word = shown
-        return word, self._slider_colors.color(color_role)
-
-    def _with_role_prefix(self, text: str, cube_index: int, wavelength_nm: float) -> str:
-        """The one-line status: the role word, in its colour, before the Cube/wavelength text; other
-        frames: the text unchanged (plain). A rich-text line, so the whole text is escaped."""
-        role = self._role_word(cube_index, wavelength_nm)
-        if role is None:
-            return text
-        return f'<span style="color:{role[1]}">{role[0]}</span> {html.escape(text)}'
-
-    def _refresh_frame_status(self) -> None:
-        """Show the viewed frame's dock subtitle again (a role or a slider colour changed)."""
-        if self._frame_key is not None:
-            self._show_frame_status(*self._frame_key)
+        return self._frame_text.columns()
 
     def _on_reference_frame_changed(self) -> None:
         self._update_slider_marks()
         self._refresh_frame_tools()  # Go to reference is enabled only while a reference exists
-        self._refresh_frame_status()
+        self._frame_text.refresh()
 
     def _on_frame_roles_changed(self) -> None:
         self._update_all_slider_marks()
         self._refresh_frame_tools()
-        self._refresh_frame_status()
+        self._frame_text.refresh()
 
     def _on_cube_display_changed(self, _mode: str) -> None:
         """The cube unit (number / start time) changed anywhere in the app."""
-        self._frame_widest = None  # "Cube 314" and "Cube 1:23:45" are not equally wide
+        self._frame_text.forget_widest()  # "Cube 314" and "Cube 1:23:45" are not equally wide
         self._cube_title.setText(self._cube_display.axis_title())
         cubes = self._dataset.spectral_cubes()
         self._cube_slider.set_ticks(list(cubes), self._cube_slider_major_ticks(cubes))
         self._update_roi_marks()  # the mark tooltips name cubes in the new unit
         self._refresh_frame_tools()
-        if self._frame_key is not None:
-            self._show_frame_status(*self._frame_key)
+        self._frame_text.refresh()
 
     def _frame_tools_state(self) -> FrameToolsState:
         """What the frame icons show now (ribbon and right-click menu alike)."""
@@ -2962,236 +2853,14 @@ class ImagePanel(QWidget):
         selection (always True with none)."""
         return self._interaction.in_selection(x, y)
 
-    def _on_crop_apply_requested(self) -> None:
-        """Apply and exit crop mode (maintainer's spec, 2026-09-29): a
-        successful apply switches Crop off, which is what makes the panel
-        actually show the cropped result - while any preview tool
-        (`_PREVIEW_TOOLS`) is active the panel always renders the
-        *uncropped* frame, on purpose, so staying in Crop mode after
-        applying would keep showing the full frame with no visible change.
-        A failed apply (nothing to apply, or Image Tools switched off)
-        leaves the session exactly as it was."""
-        if self._crop_tool.apply():
-            self._active_tool.set_active(ImageTool.CROP, False)
-        else:
-            self._reposition_crop_controls()
-
-    def _on_crop_tool_changed(self) -> None:
-        """`CropTool.changed`: refresh the floating size-controls widget
-        it does not own (see crop_size_controls.py's docstring). No redraw
-        here - the rendered pixels never change until `apply()`, which
-        already triggers one via `GeometryModule.geometry_changed`."""
-        # Max *before* size: QSpinBox.setValue() clamps to whatever range is
-        # already set, so on the very first activation (spin boxes still at
-        # their construction-time range of [1, 1]) setting a pre-filled
-        # rectangle's real width/height first would silently clip it to 1.
-        frame = self._crop_tool.frame_size()
-        if frame is not None:
-            self._crop_controls.set_max_size(*frame)
-        rect = self._crop_tool.rect()
-        if rect is not None:
-            self._crop_controls.set_size(rect[2], rect[3])
-        self._reposition_crop_controls()
-
-    def _reposition_crop_controls(self) -> None:
-        """Moves the (real QWidget) size controls just under the
-        rectangle's bottom-right corner - the apply button flush with the
-        crop's right edge, the fields packed tightly to its left
-        (maintainer's spec, 2026-09-29) - in the view's current screen
-        pixels. Called on every rectangle change and on every pan/zoom
-        (`sigTransformChanged`), since a `QWidget` child, unlike the
-        pyqtgraph overlay items `CropTool` itself owns, does not track the
-        view transform on its own."""
-        rect = self._crop_tool.rect()
-        if not self._crop_tool.is_active() or rect is None:
-            self._crop_controls.setVisible(False)
-            return
-        x, y, w, h = rect
-        scene_pos = self._plot.vb.mapViewToScene(QPointF(float(x + w), float(y + h)))
-        view_pos = self._view.mapFromScene(scene_pos)
-        margin = 4
-        self._crop_controls.move(view_pos.x() - self._crop_controls.width(), view_pos.y() + margin)
-        self._crop_controls.set_apply_enabled(self._crop_tool.has_pending_changes())
-        self._crop_controls.setVisible(True)
-        self._crop_controls.raise_()
-
-    def _on_measure_tool_measured(self, dx_px: float, dy_px: float, is_fresh_placement: bool) -> None:
-        """`MeasureLineTool.measured`: the current measurement changed -
-        point 1 just placed (a reset), the cursor moving toward point 2
-        before it's clicked, point 2's click committing the pair, or a
-        later drag of either point (`MeasureLineTool.measured`'s own
-        docstring has the full list). Show the floating controls with the
-        current px deltas either way.
-
-        **If a calibration already exists**, the tool doubles as a plain
-        ruler: the um fields are live-filled from the existing microns-per-
-        pixel scale on *every* update (maintainer's spec, 2026-09-29 -
-        "moving... should automatically use this coefficient"). Typing a
-        different value still works afterward (to re-calibrate against a
-        different reference), it just gets overwritten by the next
-        placement/hover/drag the same way a plain placement's 0 used to.
-
-        **Without a calibration yet**, the um fields reset to 0 only when
-        `is_fresh_placement` is `True` - point 1 just being placed, i.e. a
-        brand-new measurement session starting - not on every hover/drag
-        update after that: fine-tuning where point 2 lands, before or after
-        it's clicked, must not throw away a distance already typed in for
-        the first-time calibration this measurement is building toward."""
-        self._measure_controls.set_deltas(dx_px, dy_px)
-        if self._geometry.can_display_micrometers():
-            settings = self._geometry.settings()
-            self._measure_controls.set_um_values(
-                abs(dx_px) * settings.microns_per_pixel_x, abs(dy_px) * settings.microns_per_pixel_y
-            )
-        elif is_fresh_placement:
-            self._measure_controls.reset_um_fields()
-        self._reposition_measure_controls()
-
-    def _reposition_measure_controls(self) -> None:
-        """Moves the floating calibration controls so the Apply button (not
-        the widget's top-left corner) sits under the ruler's second point -
-        or, while point 2 hasn't been clicked yet, under the live cursor
-        (`current_anchor_point()`, maintainer's "live measurement" request,
-        2026-09-29) - with the px/um fields to its left (maintainer's spec,
-        2026-09-29) - same idea as `_reposition_crop_controls`, just
-        anchored at a point in the middle of the widget instead of at one
-        edge. Called on every placement, every hover/drag update, and every
-        pan/zoom. Hidden whenever Measure isn't active or nothing has been
-        placed/hovered yet."""
-        point = self._measure_tool.current_anchor_point()
-        if not self._measure_tool.is_active() or point is None:
-            self._measure_controls.setVisible(False)
-            return
-        x, y = point
-        scene_pos = self._plot.vb.mapViewToScene(QPointF(float(x), float(y)))
-        view_pos = self._view.mapFromScene(scene_pos)
-        margin = 4
-        apply_center_x = self._measure_controls.apply_button_center_x()
-        self._measure_controls.move(view_pos.x() - apply_center_x, view_pos.y() + margin)
-        self._measure_controls.setVisible(True)
-        self._measure_controls.raise_()
-
-    def _on_measure_apply_requested(self, dx_um: float, dy_um: float) -> None:
-        """`MeasureCalibrationControls.apply_requested`. A `ValueError`
-        (no real dx/dy entered, or a zero pixel delta on the requested
-        axis - `GeometryModule.apply_measurement_calibration`'s own three
-        guards) is reported as a status message rather than raised, the
-        same convention `RotateLineTool`/`CropTool` callers already use for
-        this module's other guarded commands. A *successful* apply exits
-        Measure mode (maintainer's spec, 2026-09-29 - "apply, the tool will
-        cancel and settings will [be] applied"), the same shape as
-        `_on_crop_apply_requested`: a failed attempt leaves the session
-        exactly as it was, still in the tool, so a mistyped value doesn't
-        also cost the placed ruler."""
-        try:
-            self._geometry.apply_measurement_calibration(dx_um, dy_um)
-        except ValueError as exc:
-            self._on_tool_status(str(exc))
-            return
-        self._on_tool_status("Measurement calibration applied - display units switched to micrometers.")
-        self._active_tool.set_active(ImageTool.MEASURE, False)
-
-    # -- cursor readout -------------------------------------------------------
-
-    def _cursor_value_at(self, view_x: float, view_y: float) -> tuple[float, float, str] | None:
-        """Floors to the pixel under the cursor and reads its displayed
-        intensity - `_image_item.image` is exactly what is on screen
-        (post crop/rotate/mask/CC/background, `_on_rendered`'s own float32
-        array), so this reads no state this panel doesn't already own.
-        `None` off the image entirely, matching `CursorOverlay`'s "show
-        nothing" contract for an out-of-data cursor position."""
-        image = self._image_item.image
-        if image is None:
-            return None
-        col = int(np.floor(view_x))
-        row = int(np.floor(view_y))
-        height, width = image.shape[:2]
-        if not (0 <= row < height and 0 <= col < width):
-            return None
-        value = float(image[row, col])
-        self.cursor_value_changed.emit(value if np.isfinite(value) else None)
-        return col + 0.5, row + 0.5, f"({col}, {row}) = {format_pixel_value(value)}"
-
     def roi_at(self, x: float, y: float) -> int | None:
-        """The ROI whose sample aperture contains display-space point
-        (x, y), or `None`. Public because it is the one piece of this
-        panel's hit-testing worth driving directly from a test - clicking by
-        screen coordinate is exactly what CLAUDE.md's testability rule says
-        to avoid needing.
-
-        Nearest-center wins when apertures overlap, so a small ROI sitting
-        inside a large one stays reachable."""
-        frame = (self._current_cube(), self._current_wavelength())
-        affine = self._chromatic.affine_for(frame)
-        rois = self._roi_toolbox.rois_at(frame[0])
-        if not rois:
-            return None
-        centers = self._roi_toolbox.display_positions(frame, affine)
-        distances = np.hypot(x - centers[:, 0], y - centers[:, 1])
-        radii = np.fromiter((roi.sample_diameter_px for roi in rois), dtype=np.float64, count=len(rois)) / 2.0
-        distances = np.where(distances <= radii, distances, np.inf)
-        nearest = int(np.argmin(distances))  # first of equal distances wins, as before
-        return rois[nearest].area_roi_id if np.isfinite(distances[nearest]) else None
+        """The ROI whose sample aperture contains display-space point (x, y), or `None` (`RoiQueries.roi_at`). Public: the one piece of
+        this panel's hit-testing worth driving directly from a test, so a test needs no screen coordinates."""
+        return self._roi_queries.roi_at(x, y)
 
     def rois_in_rect(self, x0: float, y0: float, x1: float, y1: float) -> set[int]:
-        """Ids of the ROIs whose display-space *centre* lies in the rectangle
-        (the rubber-band select). Public for the same reason as `roi_at`."""
-        rois = self._roi_toolbox.rois()
-        if not rois:
-            return set()
-        frame = (self._current_cube(), self._current_wavelength())
-        centers = self._roi_toolbox.display_positions(frame, self._chromatic.affine_for(frame))
-        inside = (centers[:, 0] >= x0) & (centers[:, 0] <= x1) & (centers[:, 1] >= y0) & (centers[:, 1] <= y1)
-        return {roi.area_roi_id for roi, hit in zip(rois, inside, strict=True) if hit}
-
-    def _selected_apertures(self) -> SelectedApertures | None:
-        """The selected ROIs' display centres and diameters, for the border/inside hit test; `None` with no selection."""
-        selected = self._selection.selected_roi_ids()
-        rois = self._roi_toolbox.rois_at(self._current_cube())
-        if not selected or not rois:
-            return None
-        keep = np.fromiter((roi.area_roi_id in selected for roi in rois), dtype=bool, count=len(rois))
-        if not keep.any():
-            return None
-        frame = (self._current_cube(), self._current_wavelength())
-        centers = self._roi_toolbox.display_positions(frame, self._chromatic.affine_for(frame))[keep]
-        chosen = [roi for roi, hit in zip(rois, keep, strict=True) if hit]
-        detection = self._roi_toolbox.detection_settings()
-        rings = np.array(
-            [
-                effective_reference_diameters(roi, detection.reference_inner_diameter_px, detection.reference_outer_diameter_px)
-                for roi in chosen
-            ],
-            dtype=np.float64,
-        ).reshape(-1, 2)
-        resizable = np.array([roi.sample_geometry_type != "mask" for roi in chosen], dtype=bool)
-        return SelectedApertures(
-            ids=np.array([roi.area_roi_id for roi in chosen], dtype=np.int64),
-            centers=centers,
-            diameters=np.array([roi.sample_diameter_px for roi in chosen], dtype=np.float64),
-            resizable=resizable,
-            ring_inner=rings[:, 0],
-            ring_outer=rings[:, 1],
-            ring_resizable=resizable & bool(self._roi_overlay.reference.visible) & (rings[:, 1] > rings[:, 0]),
-        )
-
-    def _current_affine(self) -> np.ndarray:
-        frame = (self._current_cube(), self._current_wavelength())
-        return np.asarray(self._chromatic.affine_for(frame), dtype=np.float64)
-
-    def _display_linear(self) -> np.ndarray:
-        """The linear (2x2) part of the shown frame's affine: how a drag in display space maps to the stored ROI centres."""
-        return self._current_affine()[:2, :2]
-
-    def _display_to_reference(self, x: float, y: float) -> tuple[float, float]:
-        """Display-space point -> reference-frame point (what `RoiToolbox` stores), by inverting the affine."""
-        matrix = self._current_affine()
-        linear, shift = matrix[:2, :2], matrix[:2, 2]
-        try:
-            reference = np.linalg.solve(linear, np.array([x, y]) - shift)
-        except np.linalg.LinAlgError:
-            return x, y
-        return float(reference[0]), float(reference[1])
+        """Ids of the ROIs whose display-space *centre* lies in the rectangle (`RoiQueries.rois_in_rect`). Public for the same reason as `roi_at`."""
+        return self._roi_queries.rois_in_rect(x0, y0, x1, y1)
 
     def _on_drag(self, roi_id: int, x: float, y: float) -> None:
         """Forwards a drag gesture to the owning module - never mutates ROI

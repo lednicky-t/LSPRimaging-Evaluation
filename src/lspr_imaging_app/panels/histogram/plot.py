@@ -617,7 +617,7 @@ class HistogramPlot(QWidget):
     def _reposition_range_readout(self, lo: float | None = None, hi: float | None = None) -> None:
         """Centered under the region's own midpoint, just above the bottom
         axis - same `ViewBox`-scene-to-viewport mapping technique
-        `ImagePanel._reposition_crop_controls` and the stable app's
+        `CropMeasureControls.reposition_crop` and the stable app's
         `plot_corner_overlay.reposition_overlay` both use. `lo`/`hi` let a
         caller that already has the region's current bounds (the live-drag
         path) skip re-querying `self._region.getRegion()` for the same
