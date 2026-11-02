@@ -14,13 +14,14 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
-from PyQt6.QtWidgets import QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QGraphicsItem, QVBoxLayout, QWidget
 
 from lspr_ui import get_active_theme
 
 from ...analysis.scan_view import RoiSpectrum
 from ..axis_cursor import AxisCursor
 from ..image.mark_colors import wavelength_color
+from ..plot_item_pool import PlotItemPool
 
 Y_LABELS = {
     "absorbance": "Absorbance (A)",
@@ -36,6 +37,8 @@ _PEN_STYLES = {
     "solid": Qt.PenStyle.SolidLine, "dash": Qt.PenStyle.DashLine, "dot": Qt.PenStyle.DotLine, "dashdot": Qt.PenStyle.DashDotLine,
 }
 _LINE_WIDTH = {"solid": 1.0, "dash": 1.5, "dot": 1.5, "dashdot": 1.5}  # a broken line at one pixel is hard to read
+FIT_WIDTH = 2.0  # px, the fitted curve while few ROIs are drawn
+FIT_WIDE_MAX_ROIS = 10  # with more ROIs the fitted curves are 1 px antialiased: Qt paints only 1 px lines fast (2 px was ~10x slower for 160 ROIs, 2026-11-02)
 DEFAULT_POINT_SIZE = 6
 POINT_SIZE_RANGE = (2, 20)
 
@@ -65,7 +68,7 @@ class SpectraPlot(QWidget):
         self._item.setLabel("bottom", "Wavelength (nm)")
         self._item.setLabel("left", Y_LABELS["absorbance"])
         self._legend: pg.LegendItem | None = None
-        self._items: list[pg.GraphicsObject] = []
+        self._pool = PlotItemPool(self._item)
         self._show_points, self._point_size = True, DEFAULT_POINT_SIZE
         self._show_lines, self._line_style = True, "solid"
         self._window = pg.LinearRegionItem(values=(0.0, 1.0), brush=pg.mkBrush(*_WINDOW_BRUSH), pen=pg.mkPen(120, 160, 255, 160), movable=True)
@@ -79,6 +82,8 @@ class SpectraPlot(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._widget)
+        for name in ("bottom", "left"):  # kept as pictures by Qt: the moving wavelength cursor no longer repaints the axes' text (2026-11-02)
+            self._item.getAxis(name).setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
         self.refresh_theme()
 
     # -- theme -----------------------------------------------------------------------------------------------------------------
@@ -95,10 +100,13 @@ class SpectraPlot(QWidget):
 
     # -- drawing -----------------------------------------------------------------------------------------------------------------
 
+    @property
+    def _items(self) -> list[pg.GraphicsObject]:
+        """The items drawn now: per ROI the points (and line), the error bars and the fitted curve (each when drawn), then one item with every metric marker."""
+        return self._pool.drawn
+
     def clear(self) -> None:
-        for item in self._items:
-            self._item.removeItem(item)
-        self._items.clear()
+        self._pool.clear()
         if self._legend is not None:
             self._legend.clear()
 
@@ -116,14 +124,19 @@ class SpectraPlot(QWidget):
     def show_spectra(
         self, entries: Sequence[tuple[str, str, RoiSpectrum]], *, error_bars: bool, dimmed: bool
     ) -> None:
-        """``entries``: (legend name, colour hex, spectrum) per ROI. ``dimmed``: the results are out of date (drawn faint, still readable)."""
-        self.clear()
-        alpha = _DIM_ALPHA if dimmed else 255
-        if len(entries) <= MAX_LEGEND_ROIS:
-            if self._legend is None:
-                self._legend = self._item.addLegend(offset=(8, 8))
-        elif self._legend is not None:
+        """``entries``: (legend name, colour hex, spectrum) per ROI. ``dimmed``: the results are out of date (drawn faint, still readable).
+
+        The items are reused between redraws (`PlotItemPool`): creating and adding ~4 items per ROI took ~2 s on the GUI thread for 160 ROIs
+        (2026-11-02, ``docs/spectra_sensorgram_draw_cost_2026-11-02.md``)."""
+        pool = self._pool
+        pool.begin()
+        if self._legend is not None:
             self._legend.clear()
+        alpha = _DIM_ALPHA if dimmed else 255
+        fit_width = FIT_WIDTH if len(entries) <= FIT_WIDE_MAX_ROIS else 1.0
+        markers: list[tuple[float, float, object]] = []
+        if len(entries) <= MAX_LEGEND_ROIS and self._legend is None:
+            self._legend = self._item.addLegend(offset=(8, 8))
         for name, color_hex, spectrum in entries:
             if spectrum.values.size == 0:
                 continue
@@ -134,31 +147,34 @@ class SpectraPlot(QWidget):
             legend_name = name if len(entries) <= MAX_LEGEND_ROIS else None
             data_drawn = self._show_points or self._show_lines  # with both off the legend entry belongs to the fitted curve (below)
             pen = pg.mkPen(line, width=_LINE_WIDTH[self._line_style], style=_PEN_STYLES[self._line_style]) if self._show_lines else pg.mkPen(None)
-            points = pg.PlotDataItem(
+            points = pool.take("points", pg.PlotDataItem)
+            points.setData(
                 spectrum.wavelengths_nm, spectrum.values, pen=pen,
                 symbol="o" if self._show_points else None, symbolSize=self._point_size, symbolBrush=pg.mkBrush(color), symbolPen=None,
                 name=legend_name if data_drawn else None,
             )
-            self._item.addItem(points)
-            self._items.append(points)
+            if legend_name is not None and data_drawn:
+                self._legend.addItem(points, legend_name)
             if error_bars:
                 errors = np.where(np.isfinite(spectrum.errors), spectrum.errors, 0.0)
-                bars = pg.ErrorBarItem(x=spectrum.wavelengths_nm, y=spectrum.values, height=2.0 * errors, beam=0.0, pen=pg.mkPen(color, width=1))
-                self._item.addItem(bars)
-                self._items.append(bars)
+                bars = pool.take("bars", lambda: pg.ErrorBarItem(x=np.empty(0), y=np.empty(0), beam=0.0))
+                bars.setData(x=spectrum.wavelengths_nm, y=spectrum.values, height=2.0 * errors, beam=0.0, pen=pg.mkPen(color, width=1))
             if spectrum.fit_values is not None:
-                fit = pg.PlotDataItem(
-                    spectrum.fit_wavelengths_nm, spectrum.fit_values, pen=pg.mkPen(color, width=2), name=None if data_drawn else legend_name
+                fit = pool.take("fit", pg.PlotCurveItem)
+                fit.setData(
+                    spectrum.fit_wavelengths_nm, spectrum.fit_values, pen=pg.mkPen(color, width=fit_width), antialias=fit_width <= 1.0,
+                    name=None if data_drawn else legend_name,
                 )
-                self._item.addItem(fit)
-                self._items.append(fit)
+                if legend_name is not None and not data_drawn:
+                    self._legend.addItem(fit, legend_name)
             if spectrum.metric_wavelength_nm is not None and spectrum.metric_value is not None:
-                marker = pg.ScatterPlotItem(
-                    [spectrum.metric_wavelength_nm], [spectrum.metric_value], symbol="d", size=11, brush=pg.mkBrush(color),
-                    pen=pg.mkPen(255, 255, 255, alpha),
-                )
-                self._item.addItem(marker)
-                self._items.append(marker)
+                markers.append((spectrum.metric_wavelength_nm, spectrum.metric_value, pg.mkBrush(color)))
+        if markers:  # one item for every ROI's marker, on top (one item per ROI cost ~0.4 ms each in pyqtgraph's bookkeeping)
+            marker = pool.take("marker", pg.ScatterPlotItem, z=1.0)
+            marker.setData(
+                [m[0] for m in markers], [m[1] for m in markers], symbol="d", size=11, brush=[m[2] for m in markers], pen=pg.mkPen(255, 255, 255, alpha),
+            )
+        pool.end()
         self._item.getViewBox().autoRange()
 
     # -- the cursor and the fit window ---------------------------------------------------------------------------------------------------------

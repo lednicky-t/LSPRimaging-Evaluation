@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import (
 
 from lspr_ui import GuiTheme, get_active_theme
 
-from ..image.general_group import style_general_icon_button
+from ..icon_button_style import style_general_icon_button
 from ..image.roi_overlay_controls import OverlaySpec, RoiOverlayControls
 from ..ribbon_fields import style_ribbon_number_field
 from .stat_icons import _STROKE, _at, _canvas, _pen, _polyline, _slash

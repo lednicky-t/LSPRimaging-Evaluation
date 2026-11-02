@@ -70,7 +70,8 @@ from ...storage.ui_state_keys import (
     ROI_TABLE_SORT,
     ROI_TABLE_VIEW_MODE,
 )
-from ..image.general_group import ICON_SIZE, style_general_icon_button
+from ..icon_button_style import style_general_icon_button
+from ..ribbon_icon_size import ICON_SIZE
 from ..ui_state import UiStateStore
 from ..visibility_gate import HiddenPanelGate
 from ..unit_toggle import UnitToggle

@@ -39,7 +39,7 @@ from PyQt6.QtWidgets import QColorDialog, QHBoxLayout, QToolButton, QWidget
 
 from lspr_ui import CompactWedgeSlider, GuiTheme, get_active_theme, load_tabler_icon, transparent_icon_button_stylesheet
 
-from .general_group import BUTTON_SIZE as _BUTTON_SIZE  # the ribbon's one icon-button size
+from ..ribbon_icon_size import BUTTON_SIZE as _BUTTON_SIZE  # the ribbon's one icon-button size
 from .general_group import ICON_SIZE as _ICON_SIZE
 
 _RENDER_SIZE = _ICON_SIZE * 2  # rendered at 2x, scaled down - crisper than a native bitmap

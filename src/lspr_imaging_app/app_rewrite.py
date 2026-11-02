@@ -1791,6 +1791,7 @@ def build_main_window(
         live=m.analysis_live, mask=m.mask, experiment_plan=m.experiment_plan,
     )
     sensorgram_panel.restore_ui_state(ui_state)
+    spectra_panel.set_fit_pool(sensorgram_panel.fit_pool())  # Spectra fits in the same helper process (never competing with the window)
     stages.done("ROI table, Spectra and Sensorgram panels")
     workflow = _build_workflow_panel(m, writer, ui_state)
     stages.done("Workflow panel", "Assembling the window...")

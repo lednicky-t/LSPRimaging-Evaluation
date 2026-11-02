@@ -35,7 +35,7 @@ from lspr_ui import get_active_theme, load_tabler_icon
 from ...plan.edits import EffectiveStep
 from ...plan.state import EvalPair, StepRef
 from ...storage.ui_state_keys import SENSORGRAM_EVAL_PAIRS, read
-from ..image.general_group import style_general_icon_button
+from ..icon_button_style import style_general_icon_button
 from ..ribbon_icon_size import ICON_SIZE
 from ..step_picker import StepPicker
 from ..ui_state import UiStateStore

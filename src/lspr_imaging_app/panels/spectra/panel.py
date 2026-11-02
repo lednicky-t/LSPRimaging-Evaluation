@@ -19,6 +19,10 @@ sets the wavelength to the nearest scanned one, as the slider does. Hidden while
 **Threads and pacing.** The formula, the fit and the metric (``analysis/scan_view.compute_spectra``) run on a plain worker thread, never on the
 GUI thread (CLAUDE.md: no fit on the GUI thread, "live preview" included). A redraw is coalesced for 100 ms, only the newest request is
 computed, a result from before a clear is dropped, and nothing is done while the dock is hidden (``HiddenPanelGate``).
+Since 2026-11-02 (``docs/spectra_sensorgram_draw_cost_2026-11-02.md``): the fits themselves run in the Sensorgram's helper process when it is
+started and idle (``trace_pool.TracePool.run_spectra``; same numbers), spectra already computed for this scan are kept (back to a cube, or one
+more ROI selected, computes only what is new), and each ROI's reference spectrum for the template shift is built once, not at every cube.
+A colour or group change only redraws.
 
 **Status bar.** A computation that lasts more than a moment (``panel_task.PanelTask``) appears in the app's task indicator ("Spectra: fitting
 3 ROIs on cube 5") with a Cancel button; a quick one leaves no trace. Cancel drops the result and clears the plot, so a plot that no longer matches
@@ -47,7 +51,10 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections import OrderedDict
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from dataclasses import field as dataclass_field
 
 import numpy as np
 import pyqtgraph as pg
@@ -66,6 +73,7 @@ from ...analysis.scan_trace import trace_input
 from ...analysis.scan_view import RoiSpectrum, SpectraRequest, compute_spectra
 from ...analysis.settings import FIT_METHODS, METRIC_KEYS, MetricSettings
 from ...analysis.settings_module import AnalysisSettingsModule
+from ...analysis.trace_pool import TracePool
 from ...applog import timed
 from ...roi import RoiToolbox
 from ...selection import SelectionModule
@@ -137,6 +145,7 @@ SHOW_POINTS_KEY = "spectra/show_points"
 POINT_SIZE_KEY = "spectra/point_size"
 SHOW_LINES_KEY = "spectra/show_lines"
 _RELEVANT_ROI_CHANGES = {"detection_settings", "session_restored", "added", "deleted", "detected"}  # a drag changes no spectrum
+_RECOMPUTE_COSMETIC_CHANGES = {"renumbered", "session_restored"}  # other cosmetic changes (colour, groups) only redraw
 _FALLBACK_HUES = 9
 
 
@@ -157,6 +166,16 @@ class _Job:
     generation: int  # a job from before a clear (dataset or scan changed) is dropped
     stored: StoredScan
     request: SpectraRequest
+    known: Mapping[int, RoiSpectrum] = dataclass_field(default_factory=dict)  # ROIs of the request already in the cache: only the others are computed
+
+
+_CACHE_MAX = 4000  # spectra kept (one ROI on one cube, ~4 KB each: ~16 MB); oldest dropped first
+
+
+def _cache_key(cube: int, roi_id: int, request: SpectraRequest) -> tuple:
+    """Everything a spectrum depends on, for one stored scan (the cache is emptied when the scan changes). The metric settings by value (they
+    are not hashable): a field that does not matter for the spectra only costs a recompute."""
+    return (int(cube), int(roi_id), request.formula_key, repr(request.metric))
 
 
 class SpectraPanel(QWidget):
@@ -186,6 +205,12 @@ class SpectraPanel(QWidget):
         self._pending = False
         self._thread: threading.Thread | None = None
         self._last: tuple[_Job, list[RoiSpectrum]] | None = None
+        # Spectra already computed for this scan (2026-11-02): going back to a cube, or adding a ROI to the selection, computes only what is
+        # new. Touched on the GUI thread only. `_templates`: the ROIs' reference spectra (template shift), filled by the worker; replaced, not
+        # cleared, when the scan changes (a running worker keeps writing into the old one).
+        self._cache: OrderedDict[tuple, RoiSpectrum] = OrderedDict()
+        self._templates: dict = {}
+        self._fit_pool: TracePool | None = None
         self._quality: OrderQuality | None = None  # the verdicts of the polynomial orders (analysis/order_quality.py)
         self._quality_key: tuple | None = None  # what they were computed for (a cube change does not change it)
         self._quality_generation = 0
@@ -366,7 +391,7 @@ class SpectraPanel(QWidget):
         self._selection.roi_selection_changed.connect(lambda _ids: self._schedule_redraw())
         self._settings.settings_changed.connect(lambda _change: self._on_settings_changed())
         self._roi_toolbox.geometry_changed.connect(self._on_roi_changed)
-        self._roi_toolbox.cosmetic_changed.connect(lambda _change: self._schedule_redraw())
+        self._roi_toolbox.cosmetic_changed.connect(self._on_roi_cosmetic)
         self._scan.results_changed.connect(self._on_results_changed)
         self._scan.staleness_changed.connect(self._draw_last)
 
@@ -558,8 +583,22 @@ class SpectraPanel(QWidget):
             self._sync_controls()  # the formula lives in the detection settings
             self._schedule_redraw()
 
+    def _on_roi_cosmetic(self, change: object) -> None:
+        """A colour or a group changed: the spectra are the same, only drawn again (the colours are read at drawing). New ROI numbers or a
+        restored session may change which ROI is which: computed again."""
+        if getattr(change, "reason", "") in _RECOMPUTE_COSMETIC_CHANGES:
+            self._schedule_redraw()
+        else:
+            self._draw_last()
+
+    def set_fit_pool(self, pool: TracePool | None) -> None:
+        """The helper process the fits run in (the Sensorgram's; the app hands it over once both panels exist). None: fits in the worker thread."""
+        self._fit_pool = pool
+
     def _on_results_changed(self) -> None:
         self._generation += 1  # what was computed from the old file must not be drawn
+        self._cache = OrderedDict()
+        self._templates = {}
         self._last = None
         self._quality_key = None  # and the verdicts of the orders belong to the old file too
         self._schedule_redraw()
@@ -634,9 +673,20 @@ class SpectraPanel(QWidget):
         request = SpectraRequest(roi_ids, int(self._selection.current_cube()), self._roi_toolbox.detection_settings().formula_key,
                                  self._settings.metric_settings())
         self._refresh_quality(stored, roi_ids, request)  # before the busy check: the order menu does not wait for the spectra
-        job = _Job(self._generation, stored, request)
         if self._busy:
             self._pending = True  # newest request wins: computed when the running one is back
+            return
+        known = {}
+        for roi_id in roi_ids:
+            key = _cache_key(request.cube, roi_id, request)
+            if key in self._cache:
+                self._cache.move_to_end(key)
+                known[roi_id] = self._cache[key]
+        job = _Job(self._generation, stored, request, known)
+        if len(known) == len(roi_ids):  # all computed before: drawn at once, no thread
+            self._last = (job, [known[r] for r in roi_ids])
+            self._draw_last()
+            self.task.end("completed")
             return
         self._busy = True
         self.task.begin(self._task_message(request))
@@ -714,9 +764,14 @@ class SpectraPanel(QWidget):
         self.task.end("cancelled")
 
     def _compute(self, job: _Job) -> None:
+        missing = tuple(r for r in job.request.roi_ids if r not in job.known)
+        pool = self._fit_pool
         try:
-            with timed(logger, "spectra.compute", rois=len(job.request.roi_ids), cube=job.request.cube):
-                results: object = compute_spectra(job.stored, job.request)
+            with timed(logger, "spectra.compute", rois=len(missing), cached=len(job.known), cube=job.request.cube, pool=pool is not None):
+                results: object = compute_spectra(
+                    job.stored, replace(job.request, roi_ids=missing), templates=self._templates,
+                    fit_runner=None if pool is None else pool.run_spectra,
+                )
         except BaseException as exc:  # nothing may escape a thread silently
             logger.exception("Computing the spectra failed")
             results = exc
@@ -727,7 +782,12 @@ class SpectraPanel(QWidget):
         if isinstance(results, BaseException):
             self._status.setText(f"The spectra could not be computed: {results}")
         elif job.generation == self._generation:
-            self._last = (job, results)  # type: ignore[assignment]
+            new = {s.roi_id: s for s in results}  # type: ignore[attr-defined]
+            for roi_id, spectrum in new.items():
+                self._cache[_cache_key(job.request.cube, roi_id, job.request)] = spectrum
+            while len(self._cache) > _CACHE_MAX:
+                self._cache.popitem(last=False)
+            self._last = (job, [new[r] if r in new else job.known[r] for r in job.request.roi_ids])
             self._draw_last()
         if self._pending:
             self._pending = False

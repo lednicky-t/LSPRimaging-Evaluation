@@ -42,6 +42,7 @@ from lspr_core.perf import get_runtime, lower_process_priority
 
 from ..applog import current as current_log_system
 from ..applog import log_event
+from .scan_view import RoiSpectrum, SpectrumFitJob, fit_spectra
 from .settings import MetricSettings
 from .trace_fit import BATCH_ROWS, TraceInput, traces_from_inputs
 
@@ -101,6 +102,7 @@ class TracePool:
         self._closed = False
         self._started = 0  # helper processes started this session (numbers the crash-dump file)
         self._fault_path: Path | None = None
+        self._trace_runs = 0  # Sensorgram runs in progress (the Spectra fits stay in their thread meanwhile)
 
     # -- the process --------------------------------------------------------------------------------------------------------------
 
@@ -165,6 +167,41 @@ class TracePool:
             self._closed = True
         self._discard()
 
+    # -- the Spectra panel's fits (one cube, several ROIs) -------------------------------------------------------------------------------
+
+    def run_spectra(self, jobs: list[SpectrumFitJob], metric: MetricSettings) -> list[RoiSpectrum]:
+        """``scan_view.fit_spectra`` in the helper process (2026-11-02): the Spectra panel refits every selected ROI at each cube change, and
+        in a thread of the app that took the interpreter lock from the window as the Sensorgram's fits did. Same function, same numbers; if the
+        process is not available or dies, the fits run in the calling thread (logged, as for the traces). Shares the one process with the
+        Sensorgram. Not used (the fits run in the calling thread, as before) while the process is not started yet (starting takes ~2 s; it is
+        started in the background for the next time) or busy with a Sensorgram run (a Gaussian fit of 160 ROIs can take long)."""
+        if not jobs:
+            return []
+        with self._lock:
+            ready = self._executor is not None and self._trace_runs == 0 and not self._closed
+            start = self._executor is None and not self._closed and self._failures < _GIVE_UP_AFTER
+        if not ready:
+            if start:
+                threading.Thread(target=self.warm_up, name="trace-pool-warmup", daemon=True).start()
+            return fit_spectra(jobs, metric)
+        t0 = time.perf_counter()
+        try:
+            executor = self._get()
+            if executor is None:
+                raise BrokenExecutor("the helper process is not available in this session")
+            out = executor.submit(fit_spectra, jobs, metric).result()  # an error inside a fit is raised here, to the caller
+            log_event(logger, "spectra.fit_run", logging.DEBUG, where="process", rois=len(jobs), wall_ms=round((time.perf_counter() - t0) * 1e3, 1))
+            return out
+        except (BrokenExecutor, OSError, EOFError) as exc:
+            self._failures += 1
+            exit_report = self._exit_report(self._executor)
+            self._discard()
+            log_event(
+                logger, "spectra.pool_fallback", logging.WARNING, reason=f"{type(exc).__name__}: {exc}", failures=self._failures,
+                after_ms=round((time.perf_counter() - t0) * 1e3, 1), **exit_report,
+            )
+        return fit_spectra(jobs, metric)
+
     # -- running ---------------------------------------------------------------------------------------------------------------------
 
     def run(
@@ -182,6 +219,15 @@ class TracePool:
         done: dict[int, np.ndarray] = {}
         if not jobs:
             return done, False
+        with self._lock:
+            self._trace_runs += 1
+        try:
+            return self._run(jobs, formula_key, metric, cancelled, progress, done)
+        finally:
+            with self._lock:
+                self._trace_runs -= 1
+
+    def _run(self, jobs, formula_key, metric, cancelled, progress, done) -> tuple[dict[int, np.ndarray], bool]:
         timings: dict[str, float] = {}
         t0, cpu0 = time.perf_counter(), time.thread_time()
         try:

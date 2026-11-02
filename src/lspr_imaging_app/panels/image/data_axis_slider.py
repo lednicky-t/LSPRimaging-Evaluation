@@ -48,7 +48,7 @@ import math
 import statistics
 
 from PyQt6.QtCore import QObject, QPointF, QRectF, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QContextMenuEvent, QPainter, QPen, QPolygonF
+from PyQt6.QtGui import QColor, QContextMenuEvent, QPainter, QPen, QPixmap, QPolygonF
 from PyQt6.QtWidgets import QAbstractSlider, QMenu, QSlider, QWidget
 
 from lspr_ui import get_active_theme
@@ -326,6 +326,9 @@ class DataAxisSlider(QSlider):
         self._dark_tick_color: str | None = None
         self._ignored_tick_indices: frozenset[int] = frozenset()
         self._ignored_tick_color: str | None = None
+        self._ticks_version = 0  # changes when `set_ticks` gets other values or labels (part of the static picture's key)
+        self._static: QPixmap | None = None  # everything but the handle (`_static_picture`)
+        self._static_key: tuple | None = None
         self._window = AxisWindow(self)
         self._window.changed.connect(self.update)
         self.setFixedHeight(32)
@@ -420,6 +423,8 @@ class DataAxisSlider(QSlider):
             # re-request it via set_tick_cache_state once they've
             # recomputed against the new values.
             self._cached_tick_indices = None
+        if new_tick_values != self._tick_values or dict(major_labels) != self._major_labels:
+            self._ticks_version += 1
         self._tick_values = new_tick_values
         self._major_labels = dict(major_labels)
         self._window.set_count(len(new_tick_values))  # another tick count (another dataset): the full axis again
@@ -482,12 +487,53 @@ class DataAxisSlider(QSlider):
         return (self.value() - self.minimum()) / float(span)
 
     def paintEvent(self, _event) -> None:
+        """The rail, ticks, labels and marks come from a picture made once (`_static_picture`); only the handle is drawn each time. During
+        Play the value changes every frame, and drawing every tick and label in Python each time was ~17 % of the GUI thread (py-spy,
+        2026-11-02, ``docs/spectra_sensorgram_draw_cost_2026-11-02.md``)."""
         theme = get_active_theme()
+        enabled = self.isEnabled()
+        count = len(self._tick_values)
+        view = self._window.view_for(count)
         painter = QPainter(self)
+        painter.drawPixmap(0, 0, self._static_picture(theme, enabled, count, view))
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        lo, hi = view
+        left = self._track_rect().left()
+
+        handle_index = self._value_fraction() * max(count - 1.0, 0.0)
+        if enabled and count > 0 and lo - 0.5 <= handle_index <= hi + 0.5:  # off screen only after a pan
+            handle_x = axis_x(handle_index, count, self.width(), view) if count > 1 else left
+            handle_color = QColor(self._reference_highlight_color or self._accent_color)
+            painter.setPen(QPen(handle_color, 2.0))
+            painter.setBrush(QColor(theme.window_bg))
+            painter.drawEllipse(QPointF(handle_x, self._TRACK_TOP + self._TRACK_HEIGHT / 2.0), 5.0, 5.0)
+
+        painter.end()
+
+    def _static_picture(self, theme, enabled: bool, count: int, view: tuple[float, float]) -> QPixmap:
+        """Everything but the handle, redrawn only when something it shows changed: the size, the theme, enabled, the zoomed window, the ticks
+        and labels (`set_ticks`), the cached-tick colours and the marks (ignored, dark, reference)."""
+        dpr = self.devicePixelRatioF()
+        colors = (theme.control_border, theme.control_disabled_border, theme.control_bg, theme.control_disabled_bg, theme.text_dim)
+        key = (
+            self.width(), self.height(), dpr, enabled, count, tuple(view), colors, self.font().key(), self._ticks_version,
+            self._cached_tick_indices, self._ignored_tick_indices, self._ignored_tick_color, self._dark_tick_index, self._dark_tick_color,
+            self._reference_tick_index, self._reference_tick_color,
+        )
+        if self._static is None or key != self._static_key:
+            picture = QPixmap(max(1, round(self.width() * dpr)), max(1, round(self.height() * dpr)))
+            picture.setDevicePixelRatio(dpr)
+            picture.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(picture)
+            self._paint_static(painter, theme, enabled, count, view)
+            painter.end()
+            self._static, self._static_key = picture, key
+        return self._static
+
+    def _paint_static(self, painter: QPainter, theme, enabled: bool, count: int, view: tuple[float, float]) -> None:
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         track = self._track_rect()
         left, width = track.left(), track.width()
-        enabled = self.isEnabled()
 
         rail_border = theme.control_border if enabled else theme.control_disabled_border
         rail = QRectF(left, self._TRACK_TOP, width, self._TRACK_HEIGHT)
@@ -495,13 +541,11 @@ class DataAxisSlider(QSlider):
         painter.setBrush(QColor(theme.control_bg if enabled else theme.control_disabled_bg))
         painter.drawRoundedRect(rail, 1.5, 1.5)
 
-        font = painter.font()
+        font = self.font()
         font.setPixelSize(9)
         painter.setFont(font)
         metrics = painter.fontMetrics()
 
-        count = len(self._tick_values)
-        view = self._window.view_for(count)
         lo, hi = view
         right = left + width
 
@@ -578,16 +622,6 @@ class DataAxisSlider(QSlider):
                     painter.drawLine(
                         QPointF(x, mark_top + n * segment), QPointF(x, mark_top + (n + 1) * segment)
                     )
-
-        handle_index = self._value_fraction() * max(count - 1.0, 0.0)
-        if enabled and count > 0 and lo - 0.5 <= handle_index <= hi + 0.5:  # off screen only after a pan
-            handle_x = x_of(handle_index) if count > 1 else left
-            handle_color = QColor(self._reference_highlight_color or self._accent_color)
-            painter.setPen(QPen(handle_color, 2.0))
-            painter.setBrush(QColor(theme.window_bg))
-            painter.drawEllipse(QPointF(handle_x, self._TRACK_TOP + self._TRACK_HEIGHT / 2.0), 5.0, 5.0)
-
-        painter.end()
 
     def _mark_colors(self, count: int) -> dict[int, list[str]]:
         """Colours of the marked ticks, by index (top to bottom: ignored, dark, reference)."""

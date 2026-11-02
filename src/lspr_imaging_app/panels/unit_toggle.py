@@ -13,7 +13,7 @@ from __future__ import annotations
 from PyQt6.QtWidgets import QToolButton, QWidget
 
 from ..image_tools.geometry.module import GeometryModule
-from .image.general_group import style_general_icon_button
+from .icon_button_style import style_general_icon_button
 
 
 class UnitToggle(QToolButton):

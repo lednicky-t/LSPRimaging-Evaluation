@@ -19,8 +19,8 @@ from collections.abc import Mapping, Sequence
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import QPoint, QPointF, QRectF, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFontMetricsF
-from PyQt6.QtWidgets import QApplication, QVBoxLayout, QWidget
+from PyQt6.QtGui import QColor, QFontMetricsF, QPen
+from PyQt6.QtWidgets import QApplication, QGraphicsItem, QVBoxLayout, QWidget
 
 from lspr_ui import get_active_theme
 
@@ -29,6 +29,7 @@ from ...plan.bar_model import ALIGN_DATA, POSITION_TOP, PlanBarSettings, PlanBar
 from ...plan.stats_table import StatsTable, StatsTableSettings
 from ..axis_cursor import AxisCursor
 from ..image.mark_colors import MASK_COLOR, cube_color
+from ..plot_item_pool import PlotItemPool
 from .baseline_selector_menu import DEFAULT_ALPHA, DEFAULT_COLOR, BaselineRangeReadout
 from .plan_bar import PlanBarItem
 from .plan_text_editor import StepTextEditor
@@ -48,6 +49,15 @@ _HOVER_LIFT = 0.08  # how much more opaque the fill gets under the pointer (pyqt
 _INVISIBLE_PEN = pg.mkPen(0, 0, 0, 0)  # a curve with no pen at all is left out of the auto-range; one with a fully transparent pen is not
 _LABEL_HIT_MARGIN = 4.0  # pixels around the y axis label that still count as a double-click on it
 _READOUT_GAP = 0  # pixels between the bottom edge of the "Baseline [start, end]" box and the x axis line (the plot area's bottom edge); it was 2
+LINE_WIDTH = 1.0  # px, antialiased. Qt paints only 1 px lines fast: 160 lines x 400 cubes took 140 ms at 1.5 px, 30 ms at 1 px antialiased (2026-11-02)
+DOTS_MAX_LINES = 10  # a dot on every point only up to this many lines (with more they merge into the lines and cost ~1 s per redraw at 160 ROIs)
+_Z_BAND, _Z_LINE, _Z_DOTS, _Z_RINGS, _Z_MARKS = -10.0, 0.0, 1.0, 2.0, 3.0  # bands behind the lines, rings and mask marks over the dots
+
+
+def _line_pen(color: QColor) -> QPen:
+    pen = pg.mkPen(color, width=LINE_WIDTH)
+    pen.setCosmetic(True)
+    return pen
 
 
 def snap_to_grid(grid: np.ndarray, value: float) -> float:
@@ -133,7 +143,7 @@ class SensorgramPlot(QWidget):
         self._item.showGrid(x=True, y=True, alpha=0.15)
         self._legend: pg.LegendItem | None = None
         self._legend_placed_by_table = False  # the step statistics table moved the legend (so it is put back when the table goes)
-        self._items: list[pg.GraphicsObject] = []
+        self._pool = PlotItemPool(self._item)
         self._axis_cursor = AxisCursor(self._item, cube_color(), self)
         self._axis_cursor.dragged.connect(self.x_clicked)
         self._cursor = self._axis_cursor.line
@@ -177,6 +187,11 @@ class SensorgramPlot(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._widget)
         self.set_axis_labels("Cube (#)", "Peak position (nm)")
+        # The cube cursor moves at every frame of Play and Qt repaints what it crosses: the plan bar, the table and the axes were painted
+        # again each time (~24 ms of 31 per move, offscreen, 2026-11-02). Qt keeps them as pictures instead and redraws a picture only
+        # when the item asks (update()) or the view range / size changes.
+        for item in (self._plan_bar, self._stats, self._item.getAxis("bottom"), self._item.getAxis("left")):
+            item.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
         self.refresh_theme()
 
     def refresh_theme(self) -> None:
@@ -198,10 +213,13 @@ class SensorgramPlot(QWidget):
 
     # -- drawing -----------------------------------------------------------------------------------------------------------------
 
+    @property
+    def _items(self) -> list[pg.GraphicsObject]:
+        """The items drawn now (lines, dots, bands, rings, marks), in the order they were drawn."""
+        return self._pool.drawn
+
     def clear(self) -> None:
-        for item in self._items:
-            self._item.removeItem(item)
-        self._items.clear()
+        self._pool.clear()
         if self._legend is not None:
             self._legend.clear()
 
@@ -210,46 +228,66 @@ class SensorgramPlot(QWidget):
     ) -> None:
         """``stale``: bool per point (same length as the series' x); those points get a hollow marker on top: out-of-date results are still drawn.
         ``mask_marks``: series key -> (persistent, individual), bool per point; a persistent mask gets a hollow triangle (like a play button),
-        an individual one a hollow circle, both in the mask colour (None draws none)."""
-        self.clear()
+        an individual one a hollow circle, both in the mask colour (None draws none).
+
+        Drawing cost (2026-11-02, ``docs/spectra_sensorgram_draw_cost_2026-11-02.md``): the items are reused (`PlotItemPool`), the lines are 1 px
+        (Qt's fast path; 1.5 px was 8-11x slower to paint) and the dots on the points are drawn only up to `DOTS_MAX_LINES` lines (64,000 dots
+        for 160 ROIs cost ~1 s per redraw and cannot be told apart anyway)."""
+        pool = self._pool
+        pool.begin()
         named = len(series) <= MAX_LEGEND_ENTRIES
         if named:
             if self._legend is None:
                 self._legend = self._item.addLegend(offset=_LEGEND_OFFSET_PX)
+                # The table reads the legend's rows when it paints; with its picture cached it must be told when the legend moves or resizes.
+                for signal in (self._legend.geometryChanged, self._legend.xChanged, self._legend.yChanged):
+                    signal.connect(self._stats.update)
+            else:
+                self._legend.clear()
         elif self._legend is not None:
             self._legend.clear()
+        dots = len(series) <= DOTS_MAX_LINES
         for s in series:
             color = QColor(s.color)
-            line = pg.PlotDataItem(
-                s.x, s.y, pen=pg.mkPen(color, width=1.5), symbol="o", symbolSize=4, symbolBrush=pg.mkBrush(color), symbolPen=None,
-                connect="finite", name=s.label if named else None,
-            )
-            self._add(line)
+            finite = np.isfinite(s.y) & np.isfinite(s.x)
+            line = pool.take("line", lambda: pg.PlotCurveItem(antialias=True), z=_Z_LINE)
+            if finite.all():  # no gap to keep: one polyline, and pyqtgraph need not look for NaN again
+                line.setData(s.x, s.y, pen=_line_pen(color), connect="all", skipFiniteCheck=True, name=s.label if named else None)
+            else:  # a NaN stays a gap in the line
+                line.setData(s.x, s.y, pen=_line_pen(color), connect="finite", skipFiniteCheck=False, name=s.label if named else None)
+            if named:
+                self._legend.addItem(line, s.label)
+            if dots and finite.any():
+                # Out of the auto-range: the dots sit on the line's points (same bounds), and a dot item would also widen the range by its radius.
+                dot_item = pool.take("dots", lambda: pg.ScatterPlotItem(), ignore_bounds=True, z=_Z_DOTS)
+                dot_item.setData(s.x[finite], s.y[finite], symbol="o", size=4, brush=pg.mkBrush(color), pen=None)
             if s.band_low is not None and s.band_high is not None:
                 brush = QColor(color)
                 brush.setAlpha(_BAND_ALPHA)
                 for a, b in _finite_runs(s.x, s.band_low, s.band_high):
-                    low = pg.PlotDataItem(s.x[a:b], s.band_low[a:b], pen=_INVISIBLE_PEN)
-                    high = pg.PlotDataItem(s.x[a:b], s.band_high[a:b], pen=_INVISIBLE_PEN)
-                    fill = pg.FillBetweenItem(low, high, brush=pg.mkBrush(brush))
-                    fill.setZValue(-10)
+                    low = pool.take("band_edge", lambda: pg.PlotDataItem(pen=_INVISIBLE_PEN))
+                    high = pool.take("band_edge", lambda: pg.PlotDataItem(pen=_INVISIBLE_PEN))
+                    low.setData(s.x[a:b], s.band_low[a:b])
+                    high.setData(s.x[a:b], s.band_high[a:b])
                     # The fill's own bounding rectangle reaches far outside the band (the y range of an average ran from -32 to 641 nm for peaks near 595 nm),
                     # so it stays out of the auto-range; the two invisible edge curves, which are only data, give the band's real extent.
-                    self._add(low)
-                    self._add(high)
-                    self._add(fill, ignore_bounds=True)
+                    fill = pool.take("band_fill", lambda: pg.FillBetweenItem(low, high), ignore_bounds=True, z=_Z_BAND)  # noqa: B023 (called at once)
+                    fill.setCurves(low, high)
+                    fill.setBrush(pg.mkBrush(brush))
             if stale is not None and stale.any():
-                mask = np.asarray(stale, dtype=bool) & np.isfinite(s.y) & np.isfinite(s.x)
+                mask = np.asarray(stale, dtype=bool) & finite
                 if mask.any():
-                    hollow = pg.ScatterPlotItem(s.x[mask], s.y[mask], symbol="o", size=9, brush=None, pen=pg.mkPen(color, width=1.5))
-                    self._add(hollow)
+                    hollow = pool.take("stale", lambda: pg.ScatterPlotItem(), z=_Z_RINGS)
+                    hollow.setData(s.x[mask], s.y[mask], symbol="o", size=9, brush=None, pen=pg.mkPen(color, width=1.5))
             marks = None if mask_marks is None else mask_marks.get(s.key)
             if marks is not None:
-                finite = np.isfinite(s.y) & np.isfinite(s.x)
                 for flags, symbol, size in ((marks[0], "t2", 11), (marks[1], "o", 13)):
                     on = np.asarray(flags, dtype=bool) & finite
                     if on.any():
-                        self._add(pg.ScatterPlotItem(s.x[on], s.y[on], symbol=symbol, size=size, brush=None, pen=pg.mkPen(MASK_COLOR, width=1.8)))
+                        mark = pool.take(f"mark:{symbol}", lambda: pg.ScatterPlotItem(), z=_Z_MARKS)
+                        mark.setData(s.x[on], s.y[on], symbol=symbol, size=size, brush=None, pen=pg.mkPen(MASK_COLOR, width=1.8))
+        pool.end()
+        self._stats.update()  # new legend entries: new rows for the (cached) table
         self._tighten_legend()
         self._fit_legend(len(series))
         self._place_legend()
@@ -278,10 +316,6 @@ class SensorgramPlot(QWidget):
     def legend_entry_count(self) -> int:
         """How many lines the legend names right now (0: no legend)."""
         return 0 if self._legend is None else len(self._legend.items)
-
-    def _add(self, item: pg.GraphicsObject, ignore_bounds: bool = False) -> None:
-        self._item.addItem(item, ignoreBounds=ignore_bounds)
-        self._items.append(item)
 
     # -- the experiment steps ------------------------------------------------------------------------------------------------
 

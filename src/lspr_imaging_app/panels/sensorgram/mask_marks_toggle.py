@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import QToolButton, QWidget
 
 from lspr_ui import get_active_theme, load_tabler_icon
 
-from ..image.general_group import style_general_icon_button
+from ..icon_button_style import style_general_icon_button
 from ..ribbon_icon_size import ICON_SIZE
 
 _RENDER_SIZE = ICON_SIZE * 2

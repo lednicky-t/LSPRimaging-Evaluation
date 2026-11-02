@@ -29,7 +29,7 @@ from lspr_ui import GuiTheme, transparent_icon_button_stylesheet
 from ...image_tools import MaskEditTool, MaskEditToolModule
 from . import mask_edit_tool_icons as icons
 
-from .general_group import BUTTON_SIZE as _BUTTON_SIZE  # the ribbon's one icon-button size
+from ..ribbon_icon_size import BUTTON_SIZE as _BUTTON_SIZE  # the ribbon's one icon-button size
 from .general_group import ICON_SIZE as _ICON_SIZE
 
 # Ordered exactly as the maintainer listed them. Each entry: the icon

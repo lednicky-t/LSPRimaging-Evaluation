@@ -691,6 +691,10 @@ class SensorgramPanel(QWidget):
         self._thread = threading.Thread(target=self._compute, args=(job, dict(self._cache)), name="sensorgram-compute", daemon=True)
         self._thread.start()
 
+    def fit_pool(self) -> TracePool | None:
+        """The helper process the fits run in (None: in the worker thread). Owned here (shut down with this panel); lent to the Spectra panel."""
+        return self._trace_pool
+
     def start_helper_early(self) -> None:
         """The app is about to open a dataset (launch with "reopen the last dataset"): start the helper process now, while the window is still being
         built and the dataset read, instead of when the scan is first drawn (2026-10-24: it took 2.1 s to start and the first fit waited ~0.75 s of

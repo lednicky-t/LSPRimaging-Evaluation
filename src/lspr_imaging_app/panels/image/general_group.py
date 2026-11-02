@@ -23,7 +23,6 @@ Real `QAction`s (`.trigger()`), per the GUI-testability rule.
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QSize
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import QMenu, QToolButton, QWidget
 
@@ -31,7 +30,11 @@ from lspr_ui import GuiTheme, get_active_theme, load_tabler_icon, transparent_ic
 
 from ...image_tools import ActiveToolModule, ImageTool
 from ...selection import AreaSelectionMode, AreaSelectionModule
+from ..icon_button_style import style_general_icon_button  # also re-exported: the Image ribbon files import it from here
 from ..ribbon_icon_size import BUTTON_SIZE, ICON_SIZE  # also what the other ribbon files import from here
+
+# The two sizes and the button style are re-exported: the Image ribbon files import them from here.
+__all__ = ["BUTTON_SIZE", "ICON_SIZE", "AreaSelectionPicker", "mirror_icon_button", "style_general_icon_button"]
 
 # The ribbon's one icon-button size lives in `panels/ribbon_icon_size.py` (change it there); the other
 # ribbon files import it from here.
@@ -44,15 +47,6 @@ _SPECS: tuple[tuple[AreaSelectionMode, str, str], ...] = (
     (AreaSelectionMode.RECTANGLE, "Rectangular selection", "select-rectangle"),
     (AreaSelectionMode.LASSO, "Lasso (free-draw) selection", "select-lasso"),
 )
-
-
-def style_general_icon_button(button: QToolButton) -> None:
-    """The ribbon's icon-button look (`BUTTON_SIZE`), for any button in this group (the
-    cursor toggle is restyled through it so it matches the picker)."""
-    button.setAutoRaise(True)
-    button.setFixedSize(BUTTON_SIZE, BUTTON_SIZE)
-    button.setIconSize(QSize(ICON_SIZE, ICON_SIZE))
-    button.setStyleSheet(transparent_icon_button_stylesheet())
 
 
 def mirror_icon_button(source: QToolButton, parent: QWidget) -> QToolButton:

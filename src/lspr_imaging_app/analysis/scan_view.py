@@ -11,15 +11,19 @@ A wavelength without a value (no valid pixel on either side) is left out of the 
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 
-from .query import fit_and_metric, formula_spectrum
-from .scan_store import StoredScan
+from .query import FormulaSpectrum, fit_and_metric, formula_spectrum
 from .settings import MetricSettings
 from .spectrum_errors import formula_errors, standard_error
-from .template_shift import MIN_TEMPLATE_POINTS
+from .template_shift import MIN_TEMPLATE_POINTS, ReferenceTemplate
+
+if TYPE_CHECKING:  # only a type here: importing it would load h5py into the helper process that runs `fit_spectra`
+    from .scan_store import StoredScan
 
 SAMPLE, REFERENCE = 0, 1
 
@@ -55,9 +59,42 @@ def _primary_method(stored: StoredScan) -> str:
     return "mean" if "mean" in stored.values else next(iter(stored.values))
 
 
-def compute_spectra(stored: StoredScan, request: SpectraRequest) -> list[RoiSpectrum]:
+@dataclass
+class SpectrumFitJob:
+    """A spectrum ready for its fit (`fit_spectra`): the result so far (data, errors, notes), the formula spectrum and, for the template shift,
+    the ROI's reference. Small and picklable, so the fit can run in the helper process (``trace_pool.TracePool.run_spectra``)."""
+
+    result: RoiSpectrum
+    spectrum: FormulaSpectrum
+    template: ReferenceTemplate | None
+
+
+TemplateCache = dict  # (roi_id, formula_key, metric.template_key()) -> ReferenceTemplate | None, for one stored scan
+
+
+def compute_spectra(
+    stored: StoredScan,
+    request: SpectraRequest,
+    *,
+    templates: TemplateCache | None = None,
+    fit_runner: Callable[[list[SpectrumFitJob], MetricSettings], list[RoiSpectrum]] | None = None,
+) -> list[RoiSpectrum]:
     """One :class:`RoiSpectrum` per requested ROI, in the order requested. A ROI that is not in the file (added after the scan), or a cube
-    that was never scanned, gives an empty spectrum with a ``note``."""
+    that was never scanned, gives an empty spectrum with a ``note``.
+
+    ``templates``: a cache of the ROIs' reference spectra (template shift) kept by the caller for this stored scan; the reference of a ROI is the
+    mean of its reference cubes, the same for every cube shown, so it is built once instead of at every cube change. ``fit_runner``: run the fits
+    elsewhere (the helper process); None = here. The numbers are the same either way (`fit_spectra` is what runs)."""
+    prepared = prepare_spectra(stored, request, templates)
+    jobs = [p for p in prepared if isinstance(p, SpectrumFitJob)]
+    if not jobs:
+        return [p for p in prepared if isinstance(p, RoiSpectrum)]
+    fitted = iter((fit_runner or fit_spectra)(jobs, request.metric))
+    return [next(fitted) if isinstance(p, SpectrumFitJob) else p for p in prepared]
+
+
+def prepare_spectra(stored: StoredScan, request: SpectraRequest, templates: TemplateCache | None = None) -> list[RoiSpectrum | SpectrumFitJob]:
+    """Per requested ROI, in order: a finished :class:`RoiSpectrum` (nothing to fit: a note says why) or a :class:`SpectrumFitJob`."""
     empty = np.empty(0)
     try:
         cube_row = stored.cube_indices.index(int(request.cube))
@@ -66,12 +103,15 @@ def compute_spectra(stored: StoredScan, request: SpectraRequest) -> list[RoiSpec
     mean = stored.values[_primary_method(stored)]
     wavelengths = np.asarray(stored.wavelength_nm, dtype=np.float64)
     metric = request.metric
-    out: list[RoiSpectrum] = []
+    rows: dict[int, int] = {}
+    for row, stored_id in enumerate(stored.roi_ids):
+        rows.setdefault(stored_id, row)  # the first row of an id, as list.index gave
+    out: list[RoiSpectrum | SpectrumFitJob] = []
     for roi_id in request.roi_ids:
-        if roi_id not in stored.roi_ids:
+        row = rows.get(roi_id)
+        if row is None:
             out.append(RoiSpectrum(roi_id, empty, empty, empty, note="This ROI is not in the scan file: run the scan again."))
             continue
-        row = stored.roi_ids.index(roi_id)
         if not stored.cell_hash[cube_row, row]:
             out.append(RoiSpectrum(roi_id, empty, empty, empty, note="This cube has not been scanned yet."))
             continue
@@ -95,7 +135,13 @@ def compute_spectra(stored: StoredScan, request: SpectraRequest) -> list[RoiSpec
             from .scan_trace import trace_input  # imported here: scan_trace itself imports this module
             from .trace_fit import reference_template
 
-            template = reference_template(trace_input(stored, roi_id), request.formula_key, metric)
+            key = (roi_id, request.formula_key, metric.template_key())
+            if templates is not None and key in templates:
+                template = templates[key]
+            else:
+                template = reference_template(trace_input(stored, roi_id), request.formula_key, metric)
+                if templates is not None:
+                    templates[key] = template
             if template is None:
                 first, last = metric.reference_cube_range()
                 if len(wavelengths) < MIN_TEMPLATE_POINTS:
@@ -104,6 +150,15 @@ def compute_spectra(stored: StoredScan, request: SpectraRequest) -> list[RoiSpec
                     result.note = f"The reference cubes {first}-{last} have no usable data for this ROI: choose other reference cubes."
                 out.append(result)
                 continue
+        out.append(SpectrumFitJob(result, spectrum, template))
+    return out
+
+
+def fit_spectra(jobs: list[SpectrumFitJob], metric: MetricSettings) -> list[RoiSpectrum]:
+    """The fit and the metric of each job (``query.fit_and_metric``), in order. Pure numpy / scipy: runs in the helper process as well."""
+    out: list[RoiSpectrum] = []
+    for job in jobs:
+        result, spectrum, template = job.result, job.spectrum, job.template
         try:
             fit, x, y = fit_and_metric(spectrum, metric, template=template)
             if fit is not None:
