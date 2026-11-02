@@ -21,6 +21,7 @@ import numpy as np
 
 from lspr_imaging_app.analysis.scan_jobs import build_scan_plan, source_from_modules
 from lspr_imaging_app.dataset import io
+from lspr_imaging_app import plane_reader
 from proto_tile_cache import window_for
 
 zarr, session = Path(sys.argv[1]), Path(sys.argv[2])
@@ -35,21 +36,21 @@ plan = build_scan_plan(source, cubes=list(modules.dataset.spectral_cubes())[:60]
 jobs = plan.jobs
 rs, r = jobs[0].rois, 80
 affines = [f.affine for f in jobs[0].frames]
-grid = io.ome_zarr_plane_grid(jobs[0].frames[0].path)
+grid = plane_reader.ome_zarr_plane_grid(jobs[0].frames[0].path)
 y0, y1, x0, x1 = window_for(rs, r, affines, (grid.height, grid.width), 8)
 rows, cols = np.mgrid[y0:y1, x0:x1]
-read_plan = io.partial_read_plan(grid, (rows * grid.width + cols).reshape(-1), 1.0)
+read_plan = plane_reader.partial_read_plan(grid, (rows * grid.width + cols).reshape(-1), 1.0)
 paths = [f.path for j in jobs for f in j.frames]
 for p in paths[:200]:
-    io.read_plane_pixels(p, read_plan)  # warm: file cache, metadata caches, codec
+    plane_reader.read_plane_pixels(p, read_plan)  # warm: file cache, metadata caches, codec
 t = time.perf_counter()
 for p in paths:
-    io.read_plane_pixels(p, read_plan)
+    plane_reader.read_plane_pixels(p, read_plan)
 print(f"{len(paths)} planes, {len(read_plan.chunk_ids)} chunks each: {1000 * (time.perf_counter() - t) / len(paths):.2f} ms per plane (no profiler)")
 prof = cProfile.Profile()
 prof.enable()
 for p in paths:
-    io.read_plane_pixels(p, read_plan)
+    plane_reader.read_plane_pixels(p, read_plan)
 prof.disable()
 out = _io.StringIO()
 pstats.Stats(prof, stream=out).sort_stats("tottime").print_stats(12)

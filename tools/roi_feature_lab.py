@@ -40,6 +40,7 @@ from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 import analysis_stage_timing as stage  # noqa: E402  (its dataset / session loading, kept in one place)
 from lspr_imaging_app.dataset import io  # noqa: E402
+from lspr_imaging_app import plane_reader  # noqa: E402
 from lspr_imaging_app.image_tools import preprocess as pp  # noqa: E402
 from lspr_imaging_app.image_tools.mask import roi_features as rf  # noqa: E402
 from lspr_imaging_app.image_tools.mask.io import write_mask_image  # noqa: E402
@@ -80,7 +81,7 @@ def main() -> int:
     rois = {r.area_roi_id: r for r in modules.roi_toolbox.rois()}
     inner_default, outer_default = det.reference_inner_diameter_px, det.reference_outer_diameter_px
     records = io.dataset_record_map(dataset)
-    raw = io.load_image_array_uncached(str(records[(cube, wavelength)].path))
+    raw = plane_reader.load_image_array_uncached(str(records[(cube, wavelength)].path))
     image = pp.apply_preprocessing(raw, geometry, background, rois=list(rois.values()), mask_settings=det, external_mask=None)
     affine = modules.chromatic.affine_for((cube, wavelength))
     shape = image.shape[:2]

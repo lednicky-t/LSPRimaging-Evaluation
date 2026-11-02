@@ -69,7 +69,7 @@ class ScanSource:
     cube_indices: Callable[[], Sequence[int]]  # spectral cubes, in dataset order
     wavelengths_for_cube: Callable[[int], Sequence[float]]  # per cube, never the union (a cube may be short one wavelength)
     is_spectral: Callable[[int, float], bool]  # False for the dark frame and frames the user set aside
-    record_path: Callable[[int, float], str]  # the plane's record path, as ``dataset.io.load_image_array_uncached`` takes it
+    record_path: Callable[[int, float], str]  # the plane's record path, as ``plane_reader.load_image_array_uncached`` takes it
     rois: Callable[[], Sequence[AreaRoi]]
     rois_at: Callable[[int], Sequence[AreaRoi]]  # ROIs as they are on that cube (differs by cube only with a geometry timeline)
     has_timeline: Callable[[], bool]

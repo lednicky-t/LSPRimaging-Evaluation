@@ -25,6 +25,7 @@ for extra in (APP_SRC, *(APP_SRC.parents[3] / "packages" / name / "src" for name
         sys.path.insert(0, str(extra))
 
 from lspr_imaging_app.dataset import io  # noqa: E402
+from lspr_imaging_app import plane_reader  # noqa: E402
 from lspr_imaging_app.image_tools.mask.transient_detection import (  # noqa: E402
     KIND_GLOBAL,
     KIND_PARTICLE,
@@ -61,7 +62,7 @@ def main() -> int:
         frame_index.setdefault(int(cube), []).append(float(wavelength))
 
     def load_plane(cube: int, wavelength: float):
-        return io.load_image_array_uncached(str(records[(cube, wavelength)].path))
+        return plane_reader.load_image_array_uncached(str(records[(cube, wavelength)].path))
 
     cube_range = None
     if args.cubes:
@@ -82,7 +83,7 @@ def main() -> int:
             last_percent[0] = percent
             print(f"  {percent:3d} %  {message}", flush=True)
 
-    worker_init = None if args.no_fast_decoder else (lambda: io.use_fast_tiff_decoder(True))
+    worker_init = None if args.no_fast_decoder else (lambda: plane_reader.use_fast_tiff_decoder(True))
     result = scan_transients(frame_index, load_plane, params, progress=progress, worker_init=worker_init)
 
     print(

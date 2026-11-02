@@ -27,6 +27,7 @@ from lspr_imaging_app.analysis import frame_reduce as fr
 from lspr_imaging_app.analysis.scan import scan_cubes
 from lspr_imaging_app.analysis.scan_jobs import build_scan_plan, source_from_modules
 from lspr_imaging_app.dataset import io
+from lspr_imaging_app import plane_reader
 from lspr_imaging_app.image_tools.chromatic.affine import apply_affine_to_points
 
 
@@ -110,7 +111,7 @@ def main() -> int:
     n_cubes, n_wl = len(jobs), len(jobs[0].frames)
     affines = [f.affine for f in jobs[0].frames]
     same_affines = all(np.array_equal(j.frames[k].affine, affines[k]) for j in jobs[::40] for k in range(n_wl))
-    grid = io.ome_zarr_plane_grid(jobs[0].frames[0].path)
+    grid = plane_reader.ome_zarr_plane_grid(jobs[0].frames[0].path)
     shape = (grid.height, grid.width)
     box = window_for(rs, r, affines, shape, args.margin)
     y0, y1, x0, x1 = box
@@ -118,7 +119,7 @@ def main() -> int:
           f"{n_cubes} cubes x {n_wl} wavelengths; affines identical across cubes: {same_affines}")
     print(f"window {y1 - y0} x {x1 - x0} px = {(y1 - y0) * (x1 - x0)} px per frame (margin {args.margin} px)")
     rows, cols = np.mgrid[y0:y1, x0:x1]
-    read_plan = io.partial_read_plan(grid, (rows * shape[1] + cols).reshape(-1), 1.0)
+    read_plan = plane_reader.partial_read_plan(grid, (rows * shape[1] + cols).reshape(-1), 1.0)
     print(f"chunks per frame: {read_plan.chunk_ids.size} of {grid.n_chunks}")
 
     paths = [[f.path for f in j.frames] for j in jobs]
@@ -127,7 +128,7 @@ def main() -> int:
 
     def fill(index):
         c, k = divmod(index, n_wl)
-        got = io.read_plane_pixels(paths[c][k], read_plan)
+        got = plane_reader.read_plane_pixels(paths[c][k], read_plan)
         if got is None:
             raise RuntimeError("chunk read failed")
         tile[c, k] = got

@@ -77,6 +77,7 @@ from ..applog.events import log_event, timed
 from ..diagnostics import instrumented
 from ..storage.workspace import save_acquisition_metadata_sidecar
 from ..export_stats import ExportStats
+from ..plane_reader import load_image_array_uncached
 from .io import (
     dataset_record_map,
     DatasetLoadChoice,
@@ -85,7 +86,6 @@ from .io import (
     export_ome_zarr_dataset,
     load_dataset,
     load_image_array,
-    load_image_array_uncached,
     load_image_shape,
     dataset_file_stats,
     ome_zarr_chunk_shape,

@@ -112,7 +112,7 @@ Adding, splitting and deleting steps is **not** part of this (not requested). Mi
 | `plan/axis_map.py` | unix ms <-> axis value | no |
 | `plan/edits.py` | `PlanEdit`, `apply_edits`, drag clamping rules, fingerprint check | no |
 | `plan/state.py` | `PlanEditsState` (immutable, `from_payload`), like `FrameRolesState` | no |
-| `plan/module.py` | `ExperimentPlanModule(QObject)`: effective steps, `steps_changed(reason)` (reason `label`/`color` = cosmetic, `boundary` = computational for later consumers), commands each pushing one `undo.FunctionCommand` (a drag uses `begin_batch`/`end_batch`), `state()` / `restore_state()` | yes |
+| `selection/experiment_plan_module.py` (was `plan/module.py` until 2026-11-02) | `ExperimentPlanModule(QObject)`: effective steps, `steps_changed(reason)` (reason `label`/`color` = cosmetic, `boundary` = computational for later consumers), commands each pushing one `undo.FunctionCommand` (a drag uses `begin_batch`/`end_batch`), `state()` / `restore_state()` | yes |
 | `panels/sensorgram/plan_bar.py` | `PlanBarItem` + in-place editor + context menu | yes |
 | `panels/sensorgram/plan_group.py` | the ribbon controls, remembered | yes |
 | `panels/sensorgram/plot.py` (edit) | `set_plan(...)`, forwards the item's signals | |
@@ -171,7 +171,7 @@ Build progress: see section 10.
 | Time (unix ms) <-> plot x, built from the plotted cubes (exact in Time mode, in proportion inside a cube in Cube mode, mean-slope extrapolation) | `plan/axis_map.py` |
 | Saved shape: `PlanEdit` (fingerprint = step number + measured start + measured note; only changed fields), `PlanEditsState`, tolerant `from_payload` | `plan/state.py` |
 | `apply_edits` -> `EffectiveStep`s + warnings; `move_edge` (joined boundary moves both, snap to grid within neighbours, min length), `set_label`, `set_color`, `reset_step`, `reset_all` | `plan/edits.py` |
-| `ExperimentPlanModule`: `steps()`, `warnings()`, `axis_map(cubes, x)`, `snap_grid_unix_ms(cubes)`, undoable commands, `steps_changed(reason)`, `restore_state` | `plan/module.py` |
+| `ExperimentPlanModule`: `steps()`, `warnings()`, `axis_map(cubes, x)`, `snap_grid_unix_ms(cubes)`, undoable commands, `steps_changed(reason)`, `restore_state` | `selection/experiment_plan_module.py` |
 | `DatasetModule.cube_start_unix_ms(cube)`, `data_end_unix_ms()` | `dataset/module.py` |
 | Session schema 1.5, block `"plan"`, `SessionState.plan_edits` | `storage/session.py` |
 | Wired into capture / apply / autosave signals / session carry; `_Modules.experiment_plan` | `app_rewrite.py` |

@@ -85,7 +85,7 @@ class ScanSummary:
     rois_scanned: int = 0  # different ROIs computed in this run (``rois`` when a whole cube was); 0 = nothing was scanned
     partial_frames: int = 0  # frames read as chunks around the ROIs (OME-Zarr, background off, no rotation) instead of as whole planes
     index_seconds: float = 0.0  # busy time, summed over the workers, reading and checking OME-Zarr shard indexes (part of the read time)
-    crc_seconds: float = 0.0  # of which the CRC32C: KNOWN BOTTLENECK of scanning an OME-Zarr, see dataset/io.py
+    crc_seconds: float = 0.0  # of which the CRC32C: KNOWN BOTTLENECK of scanning an OME-Zarr, see plane_reader.py
     warm_pool: bool = False  # the run used worker processes that were already running (performance mode)
     first_cube_seconds: float = 0.0  # from the start of the workers' job to the first finished cube: the cost of starting the workers
 

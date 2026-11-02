@@ -83,7 +83,7 @@ from ...analysis.trace_pool import TracePool
 from ...applog import timed
 from ...dataset import DatasetModule
 from ...image_tools.mask.module import MaskModule
-from ...plan.module import ExperimentPlanModule
+from ...selection.experiment_plan_module import ExperimentPlanModule
 from ...roi import RoiToolbox
 from ...selection import CubeDisplayModule, SelectionModule
 from ...selection.cube_display_module import MODE_CUBE, MODE_TIME

@@ -28,13 +28,14 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 from lspr_core import ImagingPlan
 
+from ..analysis.step_stats import assign_cubes
 from ..dataset.module import DatasetModule
 from ..diagnostics import instrumented
+from ..plan import edits
+from ..plan.axis_map import AxisMap
+from ..plan.edits import AppliedPlan, Edge, EffectiveStep, Role, Side
+from ..plan.state import PlanEditsState, StepRef
 from ..undo import FunctionCommand, undo_manager
-from . import edits
-from .axis_map import AxisMap
-from .edits import AppliedPlan, Edge, EffectiveStep, Role, Side
-from .state import PlanEditsState, StepRef
 
 logger = logging.getLogger(__name__)
 
@@ -109,8 +110,6 @@ class ExperimentPlanModule(QObject):
     def cubes_of(self, step: EffectiveStep) -> tuple[int, ...]:
         """The whole cubes of `step` in cube order (a cube that straddles the step's edge belongs to neither step; `analysis.step_stats.assign_cubes`). Empty without a
         dataset or timing."""
-        from ..analysis.step_stats import assign_cubes  # here, not at the top: that module imports this package
-
         cubes = self._dataset.spectral_cubes()
         if not cubes:
             return ()

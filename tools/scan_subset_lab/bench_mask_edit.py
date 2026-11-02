@@ -34,6 +34,7 @@ from lspr_imaging_app.analysis.scan_jobs import MaskRef
 from lspr_imaging_app.analysis.scan_store import read_scan
 from lspr_imaging_app.analysis.scan_task import ScanTask
 from lspr_imaging_app.dataset import io
+from lspr_imaging_app import plane_reader
 
 _app = QApplication.instance() or QApplication([])
 
@@ -120,7 +121,7 @@ def main() -> int:
         cubes = list(modules.dataset.spectral_cubes())
         edited_cubes = set(cubes[100:100 + args.cubes])
         records = io.dataset_record_map(dataset)
-        frame_shape = io.load_image_array_uncached(records[next(iter(records))].path).shape  # read once, not per frame
+        frame_shape = plane_reader.load_image_array_uncached(records[next(iter(records))].path).shape  # read once, not per frame
         original = source.resolve_mask
 
         def edited(cube, wl):

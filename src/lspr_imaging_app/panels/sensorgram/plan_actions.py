@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import QColorDialog, QMenu, QToolTip
 
 from ...plan.axis_map import AxisMap
 from ...plan.bar_model import boundary_readout
-from ...plan.module import ExperimentPlanModule
+from ...selection.experiment_plan_module import ExperimentPlanModule
 from ...undo import undo_manager
 from .plot import SensorgramPlot
 

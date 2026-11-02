@@ -49,7 +49,7 @@ from .gui.windows_titlebar import apply_windows_titlebar_color
 from .image_tools.mask_scope import MaskScope
 from .image_tools.chromatic_auto_task import TASK_ID as CHROMATIC_TASK_ID, ChromaticAutoDetect
 from .image_tools.mask.mask_pointers import MaskPointersModule
-from .plan.module import ExperimentPlanModule
+from .selection.experiment_plan_module import ExperimentPlanModule
 from .image_tools.mask_auto_task import TASK_ID as AUTO_MASK_TASK_ID
 from .image_tools.mask_export_task import TASK_ID as MASK_EXPORT_TASK_ID
 from .panels.roi_feature_task import TASK_ID as ROI_FEATURES_TASK_ID

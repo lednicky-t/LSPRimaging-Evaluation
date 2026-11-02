@@ -43,6 +43,7 @@ from PyQt6.QtWidgets import QApplication  # noqa: E402
 from lspr_imaging_app import app_rewrite  # noqa: E402
 from lspr_imaging_app.analysis.tasks import compute_cell  # noqa: E402
 from lspr_imaging_app.dataset import io  # noqa: E402
+from lspr_imaging_app import plane_reader  # noqa: E402
 from lspr_imaging_app.image_tools import preprocess as pp  # noqa: E402
 from lspr_imaging_app.image_tools.background import estimate as bg_estimate  # noqa: E402
 from lspr_imaging_app.analysis.reduction import reduce_sample_and_reference  # noqa: E402
@@ -140,17 +141,17 @@ def pick_cubes(modules, count: int) -> list[int]:
 
 def time_reads(label: str, dataset, cubes: list[int], modules, fast_tiff: bool = False) -> dict:
     records = io.dataset_record_map(dataset)
-    io.use_fast_tiff_decoder(fast_tiff)
+    plane_reader.use_fast_tiff_decoder(fast_tiff)
     out = {}
     for pass_name in ("cold", "warm"):
         per_plane = []
         for cube in cubes:
             for wl in spectral_wavelengths(modules, cube):
-                _, took = timed(io.load_image_array_uncached, str(records[(cube, wl)].path))
+                _, took = timed(plane_reader.load_image_array_uncached, str(records[(cube, wl)].path))
                 per_plane.append(took)
         out[pass_name] = per_plane
         print(f"  {label:<28s} {pass_name:<5s} full plane: {stats(per_plane)}", flush=True)
-    io.use_fast_tiff_decoder(False)
+    plane_reader.use_fast_tiff_decoder(False)
     return {k: statistics.mean(v) for k, v in out.items()}
 
 
@@ -184,7 +185,7 @@ def time_zarr_scoped(dataset, cubes: list[int], modules, rois, geometry) -> dict
     full = []
     for cube in cubes:
         wl = wl_by_cube[cube][len(wl_by_cube[cube]) // 2]
-        _, took = timed(io.load_image_array_uncached, str(records[(cube, wl)].path))
+        _, took = timed(plane_reader.load_image_array_uncached, str(records[(cube, wl)].path))
         full.append(took)
     print(f"  {'full plane (reference)':<46s} {stats(full)}")
     out["full_plane_ms"] = statistics.mean(full)
@@ -238,7 +239,7 @@ def time_frame_stage(modules, dataset, cubes: list[int]) -> tuple[dict, list]:
             for key, value in lookups.items():
                 parts[key].append(value)  # `timed` already returns milliseconds
             masked_frames += ignore is not None
-            raw, t_read = timed(io.load_image_array_uncached, str(records[(cube, wl)].path))
+            raw, t_read = timed(plane_reader.load_image_array_uncached, str(records[(cube, wl)].path))
             parts["read (uncached)"].append(t_read)
 
             spatial, t = timed(pp.apply_spatial_preprocessing, raw, geometry)
@@ -562,16 +563,16 @@ def time_threads(label: str, dataset, modules, cubes: list[int], thread_counts: 
     jobs = jobs[:24]
 
     def read_only(job):
-        return io.load_image_array_uncached(job[0]).shape
+        return plane_reader.load_image_array_uncached(job[0]).shape
 
     def read_and_preprocess(job):
-        raw = io.load_image_array_uncached(job[0])
+        raw = plane_reader.load_image_array_uncached(job[0])
         return pp.apply_preprocessing(raw, geometry, background, rois=rois, mask_settings=det, external_mask=job[1]).shape
 
     out = {}
     for task_name, fn in (("read only", read_only), ("read + preprocess", read_and_preprocess)):
         for fn_warm in jobs:  # warm the file cache once so every thread count sees the same state
-            io.load_image_array_uncached(fn_warm[0])
+            plane_reader.load_image_array_uncached(fn_warm[0])
         base = None
         for threads in thread_counts:
             started = time.perf_counter()

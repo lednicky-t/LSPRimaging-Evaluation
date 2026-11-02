@@ -28,7 +28,14 @@ from ...analysis.settings_module import AnalysisSettingsModule
 from ...analysis.step_stats import StepMembership, assign_cubes, membership_segments
 from ...dataset import DatasetModule
 from ...plan.bar_model import PlanBarStep, build_bar_steps
-from ...plan.module import REASON_BOUNDARY, REASON_DATASET, REASON_RESET, REASON_RESTORED, REASON_STRUCTURE, ExperimentPlanModule
+from ...selection.experiment_plan_module import (
+    REASON_BOUNDARY,
+    REASON_DATASET,
+    REASON_RESET,
+    REASON_RESTORED,
+    REASON_STRUCTURE,
+    ExperimentPlanModule,
+)
 from ...plan.stats_table import StatsLine, build_stats_table
 from ...selection import CubeDisplayModule
 from ...selection.cube_display_module import MODE_TIME

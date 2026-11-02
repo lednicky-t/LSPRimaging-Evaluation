@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from lspr_core.perf import RunReport, get_runtime, lower_process_priority
 
-from ..dataset import io
+from .. import plane_reader
 from ..image_tools.background.estimate import BackgroundWeightsCache, roi_exclusion_mask
 from ..image_tools.background.model import BackgroundSettings
 from ..image_tools.geometry.model import GeometrySettings
@@ -65,7 +65,7 @@ class ScanSettings:
     methods: tuple[str, ...] = ("mean",)
     exclusion_mode: str = DEFAULT_REFERENCE_EXCLUSION_MODE
     trimmed_fraction: float = DEFAULT_TRIMMED_MEAN_FRACTION
-    fast_tiff_decoder: bool = True  # native decoder, verified against tifffile at runtime by dataset.io (maintainer OK 2026-10-19)
+    fast_tiff_decoder: bool = True  # native decoder, verified against tifffile at runtime by plane_reader (maintainer OK 2026-10-19)
     partial_reads: bool = True
     """Read only the chunks around the ROIs of an OME-Zarr plane when that is possible (background removal off, no rotation / flip /
     crop, an export of this app, few enough chunks). Same numbers either way (pinned by tests), so like ``fast_tiff_decoder`` it is not
@@ -74,7 +74,7 @@ class ScanSettings:
 
 @dataclass(frozen=True)
 class FrameJob:
-    path: str  # the plane's record path, as dataset.io.load_image_array_uncached takes it
+    path: str  # the plane's record path, as plane_reader.load_image_array_uncached takes it
     affine: np.ndarray  # the frame's 2x3 chromatic matrix (identity when there is none)
     ignore: np.ndarray | None = None  # ignore mask in processed space, already warped to this frame; None = none
     ignore_key: bytes | None = None
@@ -112,7 +112,7 @@ class CubeResult:
     seconds: dict[str, float] = field(default_factory=dict)  # busy time per stage, this cube
     roi_subset: tuple[int, ...] | None = None
     partial_frames: int = 0  # frames of this cube that were read as chunks instead of as whole planes
-    index_seconds: float = 0.0  # time this cube spent reading and checking shard indexes (part of ``seconds["read"]``); KNOWN BOTTLENECK, see dataset/io.py
+    index_seconds: float = 0.0  # time this cube spent reading and checking shard indexes (part of ``seconds["read"]``); KNOWN BOTTLENECK, see dataset/plane_reader.py
     crc_seconds: float = 0.0  # of which the CRC32C
 
 
@@ -131,13 +131,13 @@ class _Worker:
         self._chunk_reads = bool(
             settings.partial_reads and not settings.background.flatten_background_enabled and spatial_transform_is_identity(settings.geometry)
         )
-        self._read_plans: dict[tuple, tuple[object, io.PartialReadPlan | None]] = {}
+        self._read_plans: dict[tuple, tuple[object, plane_reader.PartialReadPlan | None]] = {}
 
-    def _read_plan(self, layout, grid: io.ZarrPlaneGrid) -> io.PartialReadPlan | None:
+    def _read_plan(self, layout, grid: plane_reader.ZarrPlaneGrid) -> plane_reader.PartialReadPlan | None:
         key = (id(layout), grid)
         cached = self._read_plans.get(key)
         if cached is None:
-            cached = self._read_plans[key] = (layout, io.partial_read_plan(grid, layout.needed_flat, PARTIAL_READ_MAX_SHARE))
+            cached = self._read_plans[key] = (layout, plane_reader.partial_read_plan(grid, layout.needed_flat, PARTIAL_READ_MAX_SHARE))
         return cached[1]
 
     def processed_shape(self, raw: np.ndarray) -> tuple[int, int]:
@@ -172,22 +172,22 @@ class _Worker:
         seconds = {"read": 0.0, "prepare": 0.0, "reduce": 0.0}
         clock = time.perf_counter
         partial_frames = 0
-        index_before = io.shard_index_seconds()
+        index_before = plane_reader.shard_index_seconds()
         for k, frame in enumerate(job.frames):
             t0 = clock()
             at_rois = None
-            grid = io.ome_zarr_plane_grid(frame.path) if self._chunk_reads else None
+            grid = plane_reader.ome_zarr_plane_grid(frame.path) if self._chunk_reads else None
             if grid is not None:
                 # The processed frame is the stored plane, so its shape is the grid's and the layout needs no pixels.
                 layout = self.layouts.get(rs, frame.affine, (grid.height, grid.width), s.exclusion_mode, subset=subset)
                 plan = self._read_plan(layout, grid)
                 if plan is not None:
-                    at_rois = io.read_plane_pixels(frame.path, plan)
+                    at_rois = plane_reader.read_plane_pixels(frame.path, plan)
             if at_rois is not None:
                 partial_frames += 1
                 t1 = t2 = clock()
             else:
-                raw = io.load_image_array_uncached(frame.path)
+                raw = plane_reader.load_image_array_uncached(frame.path)
                 t1 = clock()
                 shape = self.processed_shape(raw)
                 layout = self.layouts.get(rs, frame.affine, shape, s.exclusion_mode, subset=subset)
@@ -210,7 +210,7 @@ class _Worker:
             seconds["read"] += t1 - t0
             seconds["prepare"] += t2 - t1
             seconds["reduce"] += t3 - t2
-        index_after = io.shard_index_seconds()
+        index_after = plane_reader.shard_index_seconds()
         return CubeResult(
             job.cube_pos, values, std, n_valid, n_nominal, n_masked, seconds, subset, partial_frames,
             index_after[0] - index_before[0], index_after[1] - index_before[1],
@@ -272,7 +272,7 @@ def _run_in_process(run_number: int, settings: ScanSettings, jobs: tuple[CubeJob
     global _WORKER, _WORKER_RUN
     if _WORKER is None or _WORKER_RUN != run_number:
         _WORKER = None  # free the old caches before the new ones are built
-        io.use_fast_tiff_decoder(settings.fast_tiff_decoder)
+        plane_reader.use_fast_tiff_decoder(settings.fast_tiff_decoder)
         _WORKER, _WORKER_RUN = _Worker(settings), run_number
     return [_WORKER.run_cube(job) for job in jobs]
 
@@ -324,7 +324,7 @@ def scan_cubes(
     if any(f.ignore_key is not None and f.ignore is None for job in jobs for f in job.frames):
         raise ValueError("a frame has an ignore-mask key but no mask: this plan was built to be checked (resolve_masks=False), not to be scanned")
     if processes is not None and processes <= 1:
-        io.use_fast_tiff_decoder(settings.fast_tiff_decoder)
+        plane_reader.use_fast_tiff_decoder(settings.fast_tiff_decoder)
         worker = _Worker(settings)
         for done, job in enumerate(jobs, start=1):
             if cancelled is not None and cancelled():

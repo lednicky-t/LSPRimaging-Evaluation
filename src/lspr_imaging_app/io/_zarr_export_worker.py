@@ -18,6 +18,8 @@ from pathlib import Path
 
 import numpy as np
 
+from lspr_imaging_app.shard_crc import _crc32c
+
 
 def _worker_init() -> None:
     """Called once per worker process by ProcessPoolExecutor on startup.
@@ -35,38 +37,11 @@ def _worker_init() -> None:
 
 @lru_cache(maxsize=8)
 def _source_ome_root(folder: Path) -> Path | None:
-    """`dataset.io._ome_zarr_root`, asked once per source folder instead of once per plane (it costs up to five file-system checks,
+    """`plane_reader._ome_zarr_root`, asked once per source folder instead of once per plane (it costs up to five file-system checks,
     and an export reads thousands of planes from the same folder; the folder's layout does not change while it runs)."""
-    from lspr_imaging_app.dataset.io import _ome_zarr_root
+    from lspr_imaging_app.plane_reader import _ome_zarr_root
 
     return _ome_zarr_root(folder)
-
-
-def _build_crc32c_table() -> list[int]:
-    poly = 0x82F63B78
-    table: list[int] = []
-    for i in range(256):
-        crc = i
-        for _ in range(8):
-            crc = (crc >> 1) ^ poly if crc & 1 else crc >> 1
-        table.append(crc)
-    return table
-
-
-_CRC32C_TABLE = _build_crc32c_table()
-
-
-def _crc32c(data: bytes) -> int:
-    """CRC32C (Castagnoli) checksum — required by the zarr v3 shard index format."""
-    try:
-        import crc32c as _lib  # type: ignore[import-untyped]
-        return _lib.crc32c(data)
-    except ImportError:
-        pass
-    crc = 0xFFFFFFFF
-    for byte in data:
-        crc = (crc >> 8) ^ _CRC32C_TABLE[(crc ^ byte) & 0xFF]
-    return crc ^ 0xFFFFFFFF
 
 
 @dataclass
@@ -188,16 +163,16 @@ def _load_image(path_str: str) -> np.ndarray:
     # Re-exporting a dataset that was itself loaded from OME-Zarr (e.g. to
     # change chunk size/shard mode) hands us records whose `.path` is a
     # synthetic, non-existent per-plane key (`{cube}.{wl}.0.0` under the
-    # array dir - see dataset/io.py's `_ome_zarr_plane_path`/
-    # `_read_ome_zarr_plane_by_path`), not a real file. tifffile/PIL below
+    # array dir - see dataset/io.py's `_ome_zarr_plane_path` and
+    # plane_reader.py's `_read_ome_zarr_plane_by_path`), not a real file. tifffile/PIL below
     # can't open that - it has to be routed through the same zarr-aware
     # reader the main process already uses for OME-Zarr reads
     # (dataset_load_plane/dataset_load_plane_roi). Each worker process
     # opens its own read-only zarr handle here (lazy import: this module
-    # otherwise stays free of zarr/dataset.io imports at module scope so
+    # otherwise stays free of zarr/plane_reader imports at module scope so
     # worker startup stays fast); the underlying store reads are plain
     # stateless file I/O, safe from a separate process.
-    from lspr_imaging_app.dataset.io import (
+    from lspr_imaging_app.plane_reader import (
         OME_ZARR_ARRAY_DIRNAME,
         _ome_zarr_array_dir,
         _read_ome_zarr_plane_by_path,
@@ -211,7 +186,7 @@ def _load_image(path_str: str) -> np.ndarray:
         return _read_ome_zarr_plane_by_path(path, ome_root)
     if path.suffix.lower() in {".tif", ".tiff"}:
         # libtiff decodes the whole file in ONE native call, the decoder the Image panel's render thread already uses
-        # (`dataset/io.py`, "fast TIFF decoding"): the same pixels, 2x faster on LZW files with hundreds of strips
+        # (`plane_reader.py`, "fast TIFF decoding"): the same pixels, 2x faster on LZW files with hundreds of strips
         # (measured 2026-10-22 on the 04_Bulk set: 27 ms against 56 ms a plane, 28 % of an export's CPU time). Each worker
         # process checks its own first files against tifffile before it trusts it, falls back to tifffile for anything but a
         # plain 2-D image, and `LSPR_TIFF_DECODER=tifffile` switches it off.

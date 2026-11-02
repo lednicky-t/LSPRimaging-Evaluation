@@ -41,7 +41,7 @@ from PyQt6.QtWidgets import QCheckBox, QFormLayout, QHBoxLayout, QMenu, QSpinBox
 from lspr_ui import make_compact_spinbox
 
 from ...dataset import DatasetModule
-from ...dataset import io as dataset_io
+from ... import plane_reader
 from ...thread_priority import lower_current_thread_priority
 from ...image_tools import ChromaticModule, MaskModule
 from ...image_tools.mask.transient_detection import DetectionParams
@@ -255,7 +255,7 @@ class MaskScanControls(QWidget):
 def _scan_worker_init() -> None:
     """Runs once in every worker thread of the scan: the fast TIFF decoder, and below-normal priority so the window keeps its turn
     for a core while twelve threads read and screen frames (`thread_priority.py`)."""
-    dataset_io.use_fast_tiff_decoder(True)
+    plane_reader.use_fast_tiff_decoder(True)
     lower_current_thread_priority()
 
 

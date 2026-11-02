@@ -32,7 +32,7 @@ PLANE_TIMES_ARRAY = "plane_times_s"
 # 2-D uint8 (stored height x stored width), the same for every plane: 1 = the stored pixel was measured, 0 = it has
 # no source pixel (corners a rotation created, lossless frame padding) and holds the fill value 0. Written only for
 # integer exports (a float export marks those pixels NaN itself); readers turn 0 pixels into NaN (2026-10-20).
-VALID_MASK_ARRAY = "valid_mask"
+# (The name of this array, `VALID_MASK_ARRAY`, is defined in `plane_reader.py`: the readers need it and sit below this package.)
 
 
 def plane_times_s(

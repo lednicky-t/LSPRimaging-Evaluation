@@ -18,6 +18,9 @@ Histogram-specific pub/sub.
 ``AreaSelectionModule`` (2026-10-03): the rectangle/lasso area selection that
 restricts editing tools and the Histogram plot - same transient shared-state
 shape; see its own docstring.
+
+``ExperimentPlanModule`` (``experiment_plan_module.py``, moved here from ``plan/`` on 2026-11-02): the experiment steps with the user's edits on top.
+Not re-exported here, so importing this package does not load the analysis code it uses.
 """
 
 from .area_selection_module import AreaSelectionMode, AreaSelectionModule

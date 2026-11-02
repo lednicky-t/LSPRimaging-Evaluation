@@ -38,6 +38,7 @@ from PyQt6.QtWidgets import QApplication  # noqa: E402
 from lspr_imaging_app.analysis.frame_reduce import EXCLUDE_ALL_SAMPLE_ROIS, LayoutCache, build_roi_set, reduce_frame  # noqa: E402
 from lspr_imaging_app.analysis.reduction import REDUCTION_METHODS, reduce_sample_and_reference  # noqa: E402
 from lspr_imaging_app.dataset import io  # noqa: E402
+from lspr_imaging_app import plane_reader  # noqa: E402
 from lspr_imaging_app.image_tools import preprocess as pp  # noqa: E402
 from lspr_imaging_app.image_tools.background.estimate import roi_exclusion_mask  # noqa: E402
 from lspr_imaging_app.roi import rasterize as rz  # noqa: E402
@@ -72,7 +73,7 @@ class Context:
     def processed_shape(self) -> tuple[int, int]:
         if self._processed_shape is None:
             first = next(iter(self.records.values()))
-            self._processed_shape = pp.apply_spatial_preprocessing(io.load_image_array_uncached(str(first.path)), self.geometry).shape[:2]
+            self._processed_shape = pp.apply_spatial_preprocessing(plane_reader.load_image_array_uncached(str(first.path)), self.geometry).shape[:2]
         return self._processed_shape
 
     def cube_context(self, cube: int):
@@ -96,7 +97,7 @@ def pick_frames(ctx: Context, cubes: list[int], per_cube: int = 4):
         for wl in wls:
             affine, ignore, _ = st.frame_inputs(ctx.m, cube, wl)
             if wl in chosen or ignore is not None:
-                raw = io.load_image_array_uncached(str(ctx.records[(cube, wl)].path))
+                raw = plane_reader.load_image_array_uncached(str(ctx.records[(cube, wl)].path))
                 rois, rs, _ = ctx.cube_context(cube)
                 processed = pp.apply_preprocessing(raw, ctx.geometry, ctx.background, rois=rois, mask_settings=ctx.det, external_mask=ignore)
                 frames.append((cube, wl, raw, processed, affine, ignore))
@@ -299,7 +300,7 @@ def section_scan(ctx: Context, cubes: list[int], threads: int, processes: int, m
     for job in rng.sample(jobs, min(6, len(jobs))):
         cube_pos, wl_pos, path, affine, ignore, rs, _ = job
         rois = list(rs.rois)
-        raw = io.load_image_array_uncached(path)
+        raw = plane_reader.load_image_array_uncached(path)
         processed = pp.apply_preprocessing(raw, geometry, background, rois=rois, mask_settings=det, external_mask=ignore)
         valid = np.isfinite(processed)
         union = st._incremental_union(rois, processed.shape[:2], affine) if ctx.mode == EXCLUDE_ALL else None

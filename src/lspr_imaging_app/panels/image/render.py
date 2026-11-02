@@ -40,7 +40,7 @@ import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from ...applog.events import emit_timing
-from ...dataset.io import use_fast_tiff_decoder
+from ...plane_reader import use_fast_tiff_decoder
 from .display_picture import FrameDisplay, prepare_frame_display
 from ...image_tools.background.estimate import BackgroundWeightsCache, roi_exclusion_mask
 from ...image_tools.background.model import BackgroundSettings
@@ -316,7 +316,7 @@ class ImageRenderer(QObject):
                 self._work.wait(remaining)
 
     def _reader_loop(self) -> None:
-        use_fast_tiff_decoder(True)  # this thread only: plane reads here use the native TIFF decoder (dataset/io.py)
+        use_fast_tiff_decoder(True)  # this thread only: plane reads here use the native TIFF decoder (plane_reader.py)
         while True:
             key = self._next_read_ahead()
             if key is None:
@@ -341,7 +341,7 @@ class ImageRenderer(QObject):
         return self._load_plane(cube_index, wavelength_nm)
 
     def _loop(self) -> None:
-        use_fast_tiff_decoder(True)  # this thread only: plane reads here use the native TIFF decoder (dataset/io.py)
+        use_fast_tiff_decoder(True)  # this thread only: plane reads here use the native TIFF decoder (plane_reader.py)
         while not self._stopping:
             self._wake.wait()
             self._wake.clear()

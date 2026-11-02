@@ -41,7 +41,7 @@ Extracted from the moved paragraphs; the record explains why. Each is a rule, no
 
 **Parallel work and export**
 - A fan-out job (export, scan, analysis step 1, ROI features) takes its worker count from `lspr_core.perf` (`get_runtime().begin(...)`); the default is **Standard** (every core but one). **A tuned job must write / find identical results at any worker count** (hash test: `tests/integration/test_lspri_export_workers.py`); never tune what is saved. A new fan-out follows `docs/performance_tuning.md` (repo root). Saved counts live in `perf_profile.json` (`perf_setup.py`, installed in `main()` only, so tests never touch it).
-- The fast libtiff TIFF decoder (`dataset/io.py`) is on for every thread and verified against tifffile at run time; `LSPR_TIFF_DECODER=tifffile` switches it off.
+- The fast libtiff TIFF decoder (`plane_reader.py`) is on for every thread and verified against tifffile at run time; `LSPR_TIFF_DECODER=tifffile` switches it off.
 
 **Mask Scan, Auto mask, ROI features**
 - A scan or an Auto mask run belongs to the dataset, session and mask it started with (lifecycle rules in the audit `docs/transient_scan_automask_slider_audit_2026-10-17.md`).
@@ -54,7 +54,7 @@ Extracted from the moved paragraphs; the record explains why. Each is a rule, no
 - Never remove the `stamped_by_previous_formula` recognition (`ScanStore.restamp`) without a migration: files from before would rescan every cube with a mask.
 - The scan file's schema is `lspri_scan` 1.1 (it has the `n_masked` array the Sensorgram's mask marks read); an older scan file is replaced by a rescan.
 - Finished cubes are written by `scan_store.ScanWriter` (a thread of its own), never by the thread that collects the workers' results (the pool is topped up only when that thread is back). The scan file holds plain (uncompressed) chunks; `write_batch` never writes a row outside its batch.
-- `snapshot_source` runs on the GUI thread, everything else of a scan off-thread (`scan_jobs.py`). A partial read of an OME-Zarr export is bit-identical to a whole-plane read (`ScanSettings.partial_reads` switches it off). Known bottleneck, to be solved later (maintainer, 2026-10-27): the CRC32C check of every shard's index (cheaper ideas in the comment above `_shard_index` in `dataset/io.py`).
+- `snapshot_source` runs on the GUI thread, everything else of a scan off-thread (`scan_jobs.py`). A partial read of an OME-Zarr export is bit-identical to a whole-plane read (`ScanSettings.partial_reads` switches it off). Known bottleneck, to be solved later (maintainer, 2026-10-27): the CRC32C check of every shard's index (cheaper ideas in the comment above `_SHARD_INDEX_CACHE_SHARDS` in `plane_reader.py`).
 - Performance mode keeps a warm worker pool (~150 MB per idle worker); workers end by themselves when the app is gone (`scan._start_parent_watch`); a mode chosen during a scan applies after it.
 - **Tools that build the app's modules (`tools/analysis_stage_timing.py` `build_modules`) must keep autosave suspended**: an edit made by a script was once saved into the real test session.
 
@@ -100,7 +100,7 @@ These come from real incidents. Violating any of them will likely reproduce a bu
 
 **Rule:** no module reads or writes another module's internal state. Coordinate through a documented interface method or a signal.
 
-**Import layers (checked by `lint-imports` and in CI):** a package may import only from packages below it in the order `app_rewrite` > `panels` > `selection` > `dataset` > `io` > `storage` > `analysis` > `roi` > `image_tools` > `plan` > small helpers. The full floors, the 4 known upward imports and how to fix a failure: `docs/import_layering_2026-11-02.md`. If a new import fails the check, move the thing you need down or pass it in; don't add an exception without asking.
+**Import layers (checked by `lint-imports` and in CI):** a package may import only from packages below it in the order `app_rewrite` > `panels` > `selection` > `dataset` > `io` > `storage` > `analysis` > `roi` > `image_tools` > `plan` > small helpers. The full floors (no upward import is excused today) and how to fix a failure: `docs/import_layering_2026-11-02.md`. If a new import fails the check, move the thing you need down or pass it in; don't add an exception without asking.
 
 ## Communication
 
@@ -168,7 +168,7 @@ A **dataset** is raw images plus acquisition metadata, never written to. A **ses
 
 ## Testing rules
 
-- Pure-computation files must import and test with **zero Qt, GUI, or dataset dependency**: `analysis/tasks.py`, `analysis/provenance.py`, `analysis/reduction.py`, `roi/rasterize.py`, `roi/detection.py`. A test of one of these that needs a `QApplication` means something is wired wrong.
+- Pure-computation files must import and test with **zero Qt, GUI, or dataset dependency**: `analysis/tasks.py`, `analysis/provenance.py`, `analysis/reduction.py`, `roi/rasterize.py`, `roi/detection.py`. A test of one of these that needs a `QApplication` means something is wired wrong. This is checked: contract `lspri-science-no-qt` in `.importlinter` lists the Qt-free modules (add a new pure one there; details: `docs/import_layering_2026-11-02.md`).
 - A weighted reduction must match its unweighted counterpart exactly when all weights are equal.
 - Root numerical-tolerance and simulated-hardware rules apply.
 
