@@ -9,6 +9,7 @@ step through, so a colour is defined once and both the slider / row and the icon
 - **ROI**: the ROIs row's marks (the theme's blue).
 - **Mask**: the Mask rows' marks (a fixed orange, `mask_rows.MASK_COLOR`).
 - **Pointers**: the Mask scan's pointers (a fixed pink, `mask_rows.EVENT_COLOR`).
+- **Out of date**: the Sensorgram's marks on points whose scan results no longer match the app (a fixed slate grey: none of the colours above, and not the line's own colour).
 
 Theme colours are functions, not constants, so a theme switch recolours them.
 """
@@ -19,7 +20,9 @@ from lspr_ui import get_active_theme
 
 from .mask_rows import EVENT_COLOR, MASK_COLOR
 
-__all__ = ["EVENT_COLOR", "MASK_COLOR", "cube_color", "roi_color", "wavelength_color"]
+STALE_COLOR = "#94a3b8"  # slate-400 (Tailwind, as the other fixed colours); read by the Sensorgram plot and its View button
+
+__all__ = ["EVENT_COLOR", "MASK_COLOR", "STALE_COLOR", "cube_color", "roi_color", "wavelength_color"]
 
 
 def cube_color() -> str:

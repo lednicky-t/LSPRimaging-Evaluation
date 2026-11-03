@@ -1,6 +1,6 @@
 """Sensorgram plot widget - the pyqtgraph-facing half of the Sensorgram panel (sketch §10 "sensorgram/panel.py + plot.py").
 
-Draws what it is handed: a line per series (the metric against time or cube number), a band for averaged series, hollow markers where the
+Draws what it is handed: a line per series (the metric against time or cube number), a band for averaged series, grey hollow diamonds where the
 scan is out of date, mask marks (a triangle: a persistent mask touched the point's ROIs, a circle: an individual one did), a vertical line at the current cube and an optional draggable baseline selector (a band along the bottom tenth of the plot, with its own colour and fill opacity). It computes nothing and reads no module.
 A double-click on the y axis label emits ``y_label_double_clicked`` (the panel turns it into "absolute position / shift from the baseline"); one on the x axis label emits ``x_label_double_clicked`` (time <-> cube number, app-wide).
 A left click inside the plot emits ``x_clicked`` with the x value (the panel turns it into "go to that cube"); dragging the circle on the x axis
@@ -28,7 +28,7 @@ from ...analysis.scan_trace import Series
 from ...plan.bar_model import ALIGN_DATA, POSITION_TOP, PlanBarSettings, PlanBarStep, label_headroom_px, reserved_range
 from ...plan.stats_table import StatsTable, StatsTableSettings
 from ..axis_cursor import AxisCursor
-from ..image.mark_colors import MASK_COLOR, cube_color
+from ..image.mark_colors import MASK_COLOR, STALE_COLOR, cube_color
 from ..plot_item_pool import PlotItemPool
 from ..svg_layers import SvgPart
 from .baseline_selector_menu import DEFAULT_ALPHA, DEFAULT_COLOR, BaselineRangeReadout
@@ -245,7 +245,8 @@ class SensorgramPlot(QWidget):
     def show_series(
         self, series: Sequence[Series], stale: np.ndarray | None = None, mask_marks: Mapping[str, tuple[np.ndarray, np.ndarray]] | None = None
     ) -> None:
-        """``stale``: bool per point (same length as the series' x); those points get a hollow marker on top: out-of-date results are still drawn.
+        """``stale``: bool per point (same length as the series' x); those points get a hollow grey diamond on top (a shape and colour of their own, so they are never
+        taken for a mask mark, and not in the line's colour): out-of-date results are still drawn. None draws none.
         ``mask_marks``: series key -> (persistent, individual), bool per point; a persistent mask gets a hollow triangle (like a play button),
         an individual one a hollow circle, both in the mask colour (None draws none).
 
@@ -301,7 +302,7 @@ class SensorgramPlot(QWidget):
                 mask = np.asarray(stale, dtype=bool) & finite
                 if mask.any():
                     hollow = pool.take("stale", lambda: pg.ScatterPlotItem(), z=_Z_RINGS)
-                    hollow.setData(s.x[mask], s.y[mask], symbol="o", size=9, brush=None, pen=pg.mkPen(color, width=1.5))
+                    hollow.setData(s.x[mask], s.y[mask], symbol="d", size=10, brush=None, pen=pg.mkPen(STALE_COLOR, width=1.5))
                     self._svg_parts.append(SvgPart("Out-of-date marks", s.label, hollow))
             marks = None if mask_marks is None else mask_marks.get(s.key)
             if marks is not None:

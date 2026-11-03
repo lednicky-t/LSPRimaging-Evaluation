@@ -10,7 +10,8 @@ cube number, following the app-wide Cube / Time choice. A dashed line marks the 
 analysis. ``analysis/scan_trace.py`` fits every cube of every selected ROI (all cubes of a ROI at once, ``trace_fit.py``, in a helper process, ``trace_pool.py``) and then applies the statistics of
 ``AnalysisSettingsModule`` **per ROI** (spike removal, smoothing, baseline, in that order) and only then, for "Average all" / "Average by group",
 combines the finished per-ROI traces (mean or median, band = SD or SEM). Averaging fitted values, never spectra (CLAUDE.md). Points of cubes
-whose results are out of date are marked with a hollow ring, never hidden. The **View** group's mask button (2026-10-24) adds orange marks
+whose results are out of date are marked with a grey hollow diamond, never hidden (2026-11-03: the **View** group's clock button hides the marks only, never the points;
+it is on by default and remembered, and its tool tip says how many cubes are out of date). The **View** group's mask button (2026-10-24) adds orange marks
 where an ignore mask touched the ROIs of a line: a triangle for a persistent mask, a circle for an individual one. They are read from
 ``n_masked`` in the scan file (``analysis/scan_mask_marks.py``), so only masks that really removed pixels of a ROI's disk or ring are marked.
 
@@ -111,6 +112,7 @@ from ..spectra.view_menu import IconToggle
 from ..visibility_gate import HiddenPanelGate
 from .baseline_selector_menu import DEFAULT_ALPHA, DEFAULT_COLOR, SPEC as BASELINE_BAND_SPEC, BaselineSelectorMenu, make_font_box, make_height_box
 from .mask_marks_toggle import MaskMarksToggle
+from .stale_marks_toggle import StaleMarksToggle
 from .stat_icons import band_picture, center_picture, display_picture, smoothing_picture, spikes_icon, subtract_icon, within_steps_icon
 from .step_overlays import StepOverlays
 from .plot import SensorgramPlot, snap_window
@@ -121,6 +123,7 @@ TASK_ID = "sensorgram.compute"
 PLOT_TAB = "Plot"  # the control row's first tab: how the traces are made and drawn
 PLAN_TAB = "Experimental plan"  # its second: the plan bar, the baseline / signal steps, the numbers per step; the plan bar's structure tools are live only here
 MASK_MARKS_KEY = "sensorgram/mask_marks"
+STALE_MARKS_KEY = "sensorgram/stale_marks"
 BAND_HEIGHT_KEY = "sensorgram/baseline_band_height"
 BAND_FONT_KEY = "sensorgram/baseline_readout_font_size"
 _REDRAW_COALESCE_MS = 100  # sketch §8
@@ -259,6 +262,8 @@ class SensorgramPanel(QWidget):
         )
         self._mask_toggle = MaskMarksToggle(self)
         self._mask_toggle.setChecked(True)
+        self._stale_toggle = StaleMarksToggle(self)
+        self._stale_toggle.setChecked(True)  # on by default: out-of-date results are never hidden unless the user says so
         self._band_visible = True  # the baseline selector: the controls hold the truth, these copies follow their signals
         self._band_color = QColor(DEFAULT_COLOR)
         self._band_alpha = DEFAULT_ALPHA
@@ -285,7 +290,7 @@ class SensorgramPanel(QWidget):
         self._ribbon.add_group("Statistic", self._display, self._center, self._band)  # how the ROIs are shown, and how an average is made
         self._ribbon.add_group("Smoothing", self._smoothing, self._window, self._within_steps, self._spikes)
         self._ribbon.add_group("Baseline", self._baseline, self._band_menu)
-        self._ribbon.add_group("View", self._mask_toggle)
+        self._ribbon.add_group("View", self._mask_toggle, self._stale_toggle)
         self.export_button = PlotExportButton("sensorgram", lambda: self._plot.plot_item(), self._export_data, self, svg_parts=self._plot.export_parts)
         self._ribbon.add_group("Export", self.export_button)
         self._ribbon.add_stretch()
@@ -327,6 +332,7 @@ class SensorgramPanel(QWidget):
         self._spikes.toggled.connect(self._on_controls_changed)
         self._baseline.toggled.connect(self._on_baseline_toggled)
         self._mask_toggle.toggled.connect(lambda _on: self._draw_last())
+        self._stale_toggle.toggled.connect(lambda _on: self._draw_last())
         self._plot.baseline_window_changed.connect(self._on_baseline_dragged)
         self._plot.y_label_double_clicked.connect(self._on_y_label_double_clicked)
         self._plot.x_label_double_clicked.connect(self._on_x_label_double_clicked)
@@ -357,6 +363,7 @@ class SensorgramPanel(QWidget):
 
     def restore_ui_state(self, store: UiStateStore) -> None:
         store.bind(MASK_MARKS_KEY, self._mask_toggle)
+        store.bind(STALE_MARKS_KEY, self._stale_toggle)
         store.bind(BAND_HEIGHT_KEY, self._band_height)
         self._plot.set_baseline_height(self._band_height.value())  # a restored value arrives without a signal
         store.bind(BAND_FONT_KEY, self._band_font)
@@ -390,6 +397,7 @@ class SensorgramPanel(QWidget):
         self._plan_ribbon.refresh_theme()
         self._ribbon_tabs.refresh_theme(get_active_theme())
         self._mask_toggle.refresh_theme()
+        self._stale_toggle.refresh_theme()
         for menu in (self._display, self._center, self._band, self._smoothing):
             menu.refresh_theme()
         self._spikes.refresh_theme()
@@ -759,6 +767,15 @@ class SensorgramPanel(QWidget):
             return None
         return np.array([c in stale for c in stored.cube_indices], dtype=bool)
 
+    def _stale_note(self, stale: np.ndarray | None) -> str:
+        """The out-of-date state in words, for the View button's tool tip (the status row is hidden, so a switched-off mark must still say it)."""
+        if stale is not None:
+            reason = self._scan.stale_reason()
+            return f"{int(stale.sum())} of {len(stale)} cubes are out of date{': ' + reason if reason else ''}."
+        if self._scan.stale_cubes() is not None:
+            return "every cube is up to date."
+        return "checking if the scan is up to date..." if self._scan.is_checking() else ""
+
     def _mask_marks(self, stored: StoredScan, series: list[Series]) -> dict[str, tuple[np.ndarray, np.ndarray]] | None:
         """Per line, the cubes a persistent / an individual mask touched (None while the View button is off). Cheap: it reads ``n_masked``."""
         if not self._mask_toggle.isChecked():
@@ -780,7 +797,8 @@ class SensorgramPanel(QWidget):
         if stats.baseline_enabled:
             y_label = y_label.replace("position", "shift")
         self._plot.set_axis_labels(label, y_label)
-        self._plot.show_series(series, stale, self._mask_marks(job.stored, series))
+        self._plot.show_series(series, stale if self._stale_toggle.isChecked() else None, self._mask_marks(job.stored, series))  # the toggle hides the marks, never the points
+        self._stale_toggle.set_note(self._stale_note(stale))
         if stats.baseline_window_start is not None and stats.baseline_window_end is not None:
             window = (stats.baseline_window_start, stats.baseline_window_end)
         else:
@@ -829,7 +847,7 @@ class SensorgramPanel(QWidget):
             parts.append(f"template shift against the mean of cubes {first}-{last}")
         if stale is not None:
             reason = self._scan.stale_reason()
-            parts.append(f"{int(stale.sum())} of {len(stale)} cubes OUT OF DATE (hollow rings{': ' + reason if reason else ''}); run the scan again")
+            parts.append(f"{int(stale.sum())} of {len(stale)} cubes OUT OF DATE (grey diamonds{': ' + reason if reason else ''}); run the scan again")
         elif self._scan.is_checking() and self._scan.stale_cubes() is None:
             parts.append("checking if the scan is up to date...")
         stats = job.request.statistics
