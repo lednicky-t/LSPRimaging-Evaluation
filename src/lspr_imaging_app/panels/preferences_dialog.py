@@ -42,6 +42,8 @@ class Preferences:
     reopen_last_dataset: bool = True
     auto_apply_layout_preset: bool = False
     overlay_cache_mb: int = DEFAULT_BUDGET_MB
+    gpu_drawing: bool = True
+    """Draw the Image panel's canvas with the graphics card (OpenGL viewport; `image/gpu_view.py`)."""
     perf: PerfPreferences = DEFAULT_PERF_PREFERENCES
     """Parallel work (export, scans): standard, tune automatically or a fixed number of workers; cores kept free; low priority."""
 
@@ -107,8 +109,16 @@ class PreferencesDialog(QDialog):
         )
         self.cache_environment_label.setWordWrap(True)
         self.cache_environment_label.setVisible(cache_set_by_environment)
+        self.gpu_check = QCheckBox("Draw the image with the graphics card (OpenGL)", memory)
+        self.gpu_check.setToolTip(
+            "The Image panel's picture, ROIs and overlays are painted by the graphics card instead of the processor. "
+            "Play was about 15-20 % faster per frame on the computer it was measured on. On by default; an old or virtual graphics "
+            "driver can draw wrongly or slowly: turn it off if the image looks wrong. Takes effect at once. "
+            "Without OpenGL on this computer it stays off."
+        )
         memory_layout = QVBoxLayout(memory)
         memory_layout.addLayout(form)
+        memory_layout.addWidget(self.gpu_check)
         memory_layout.addWidget(self.cache_status_label)
         memory_layout.addWidget(self.cache_environment_label)
 
@@ -188,6 +198,7 @@ class PreferencesDialog(QDialog):
             reopen_last_dataset=self.reopen_check.isChecked(),
             auto_apply_layout_preset=self.auto_apply_check.isChecked(),
             overlay_cache_mb=int(self.cache_combo.currentData()),
+            gpu_drawing=self.gpu_check.isChecked(),
             perf=self._perf_values(),
         )
 
@@ -217,6 +228,7 @@ class PreferencesDialog(QDialog):
         index = self.cache_combo.findData(int(preferences.overlay_cache_mb))
         if index >= 0:
             self.cache_combo.setCurrentIndex(index)
+        self.gpu_check.setChecked(preferences.gpu_drawing)
         perf = preferences.perf
         self.perf_mode_combo.setCurrentIndex(max(self.perf_mode_combo.findData(perf.mode), 0))
         if perf.manual_workers > 0:

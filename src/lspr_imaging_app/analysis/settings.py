@@ -21,12 +21,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-FIT_METHODS: tuple[str, ...] = ("none", "polynomial", "gaussian", "template")
+FIT_METHODS: tuple[str, ...] = ("none", "polynomial", "gaussian", "voigt", "template")
 """How a ROI's formula spectrum becomes a curve before the metric is read
 off it. ``"none"`` reads the metric straight off the measured points - a
 real option, not a disabled state (see `query.metric_from_spectrum`).
 ``"template"`` (2026-10-25) is not a curve with a top to find: the spectrum is compared, point by point over its whole range, with the reference spectrum
-of the same ROI and the sideways shift that fits best is the metric (`template_shift.py`). It has no fit window, order or maximum / centroid choice."""
+of the same ROI and the sideways shift that fits best is the metric (`template_shift.py`). It has no fit window, order or maximum / centroid choice.
+``"voigt"`` (2026-11-02): a Voigt peak (Gaussian convolved with Lorentzian) on a flat offset, fitted in photon energy (`voigt_fit.py`)."""
 
 METRIC_KEYS: tuple[str, ...] = ("maximum", "centroid")
 """Which number a fitted (or unfitted) spectrum collapses to - layer 3's

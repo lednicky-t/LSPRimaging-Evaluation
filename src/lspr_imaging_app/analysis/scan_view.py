@@ -154,13 +154,50 @@ def prepare_spectra(stored: StoredScan, request: SpectraRequest, templates: Temp
     return out
 
 
+def _batch_solved(jobs: list[SpectrumFitJob], metric: MetricSettings) -> dict[int, np.ndarray | None]:
+    """For the iterative fits (Gaussian, Voigt): every job's coefficients from one solver call per set of windowed wavelengths (2026-11-03: 160
+    spectra one at a time took 0.67 s Gaussian / 0.85 s Voigt per cube). Job index -> coefficients, or None where the batch did not converge
+    (that spectrum goes to scipy, as the per-spectrum path sends it). Jobs not listed are fitted the usual way. The solvers fit each row alone, so
+    the coefficients are those of a one-row call."""
+    from .fit_window import spectrum_window
+    from .gaussian_fit import solve_gaussian
+    from .query import _windowed
+    from .voigt_fit import solve_voigt
+
+    method = str(metric.fit_method).strip().lower()
+    if method not in ("gaussian", "voigt") or metric.uses_template or len(jobs) < 2:
+        return {}
+    solve, min_points = (solve_gaussian, 4) if method == "gaussian" else (solve_voigt, 5)
+    groups: dict[bytes, tuple[np.ndarray, list[int], list[np.ndarray]]] = {}
+    for i, job in enumerate(jobs):
+        wl_min, wl_max = spectrum_window(job.spectrum.wavelengths_nm, job.spectrum.values, metric)
+        x, y = _windowed(job.spectrum.wavelengths_nm, job.spectrum.values, wl_min, wl_max)
+        if x.size < min_points:
+            continue  # the per-spectrum path gives its "too few points" result
+        entry = groups.setdefault(x.tobytes(), (x, [], []))
+        entry[1].append(i)
+        entry[2].append(y)
+    solved: dict[int, np.ndarray | None] = {}
+    for x, indices, rows in groups.values():
+        params, ok = solve(x, np.vstack(rows))
+        for k, i in enumerate(indices):
+            solved[i] = params[k] if ok[k] else None
+    return solved
+
+
 def fit_spectra(jobs: list[SpectrumFitJob], metric: MetricSettings) -> list[RoiSpectrum]:
-    """The fit and the metric of each job (``query.fit_and_metric``), in order. Pure numpy / scipy: runs in the helper process as well."""
+    """The fit and the metric of each job (``query.fit_and_metric``), in order. Pure numpy / scipy: runs in the helper process as well.
+    The Gaussian and Voigt solvers run once for all jobs (``_batch_solved``); what follows the solve is per job, as before."""
     out: list[RoiSpectrum] = []
-    for job in jobs:
+    solved = _batch_solved(jobs, metric)
+    for index, job in enumerate(jobs):
         result, spectrum, template = job.result, job.spectrum, job.template
         try:
-            fit, x, y = fit_and_metric(spectrum, metric, template=template)
+            if index in solved:
+                coefficients = solved[index]  # None: the batch did not converge on it -> scipy, as the one-spectrum path would
+                fit, x, y = fit_and_metric(spectrum, metric, template=template, solved=coefficients, gaussian_fast_first=coefficients is not None)
+            else:
+                fit, x, y = fit_and_metric(spectrum, metric, template=template)
             if fit is not None:
                 if fit.fitted_wavelengths_nm.size > 1:
                     result.fit_wavelengths_nm, result.fit_values = fit.fitted_wavelengths_nm, fit.fitted_values

@@ -660,6 +660,25 @@ def _decode_mask_changes(
     return tuple(decoded), versions
 
 
+_MODEL_FIELDS = tuple(f.name for f in fields(ChromaticTransformModel))
+_LANDMARK_FIELDS = tuple(f.name for f in fields(ChromaticLandmarkObservation))
+
+
+def _flat_asdict(obj: object, names: tuple[str, ...]) -> dict:
+    """`dataclasses.asdict` for a dataclass whose fields are plain values or lists (of plain values or lists): the same dict, ~5x faster.
+
+    The autosave turns the session into plain data on the GUI thread; `asdict` on the ~8,000 chromatic models of a real session took ~85 ms
+    of the ~95 ms (and ~340 ms with Play running; 2026-11-02, ``docs/spectra_sensorgram_draw_cost_2026-11-02.md``). The field names come
+    from the dataclass, so a new field is included; a field holding something else (a nested dataclass) is refused by a test."""
+    out = {}
+    for name in names:
+        value = getattr(obj, name)
+        if isinstance(value, list):
+            value = [list(item) if isinstance(item, list) else item for item in value]
+        out[name] = value
+    return out
+
+
 def prepare_session(state: SessionState, naming: FrameNamingScheme) -> PreparedSession:
     """Turn `state` into a `PreparedSession`: plain data, copied, ready to be written from any thread. No file is touched.
 
@@ -679,8 +698,8 @@ def prepare_session(state: SessionState, naming: FrameNamingScheme) -> PreparedS
         },
         "chromatic": {
             "settings": asdict(state.chromatic_settings),
-            "models": [asdict(model) for model in state.chromatic_models],
-            "landmarks": [asdict(landmark) for landmark in state.chromatic_landmarks],
+            "models": [_flat_asdict(model, _MODEL_FIELDS) for model in state.chromatic_models],
+            "landmarks": [_flat_asdict(landmark, _LANDMARK_FIELDS) for landmark in state.chromatic_landmarks],
         },
         # Its own block, not folded into "roi": these drive the query layer
         # (how stored numbers are displayed), and nothing in them can make a

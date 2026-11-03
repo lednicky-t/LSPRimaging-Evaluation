@@ -237,8 +237,10 @@ def fit_gaussian(
     wl_max: float | None = None,
     sample_count: int = 400,
     fast_first: bool = True,
+    solved: np.ndarray | None = None,
 ) -> FitResult:
-    """`coefficients` holds `[amplitude, center, sigma, offset]`.
+    """`coefficients` holds `[amplitude, center, sigma, offset]`. ``solved``: these coefficients from the batch solver (the Spectra panel solves
+    all its spectra in one call, 2026-11-03), so the solver is not run again; everything after the solve is the same.
 
     Solved by `gaussian_fit.solve_gaussian` (centre and width iterated, amplitude and offset solved directly; the same solver the Sensorgram
     uses for all cubes at once). Where that does not converge - in practice a fit window of a handful of points around the top, where the width
@@ -252,8 +254,8 @@ def fit_gaussian(
         return FitResult(x.copy(), y.copy())
 
     x_min, x_max = float(np.min(x)), float(np.max(x))
-    coefficients = None
-    if fast_first:
+    coefficients = None if solved is None else np.asarray(solved, dtype=np.float64)
+    if coefficients is None and fast_first:
         params, converged = solve_gaussian(x, y[None, :])
         if converged[0]:
             coefficients = params[0]
@@ -304,6 +306,58 @@ def fit_gaussian(
     )
 
 
+def fit_voigt(
+    wavelengths_nm,
+    values,
+    wl_min: float | None = None,
+    wl_max: float | None = None,
+    sample_count: int = 400,
+    fast_first: bool = True,
+    solved: np.ndarray | None = None,
+) -> FitResult:
+    """(``solved``: as for ``fit_gaussian``.) A Voigt peak on a flat offset, fitted in photon energy (``voigt_fit.py``, 2026-11-02). ``coefficients`` holds ``voigt_fit.VOIGT_PARAMS``:
+    ``[amplitude, centre_ev, sigma_ev, gamma_ev, offset]``.
+
+    Solved by ``voigt_fit.solve_voigt`` (the batch solver, here one spectrum); where it does not converge, by scipy's ``least_squares`` from the
+    same start (``fast_first=False``: scipy straight away). Like the Gaussian: the curve is sampled at ``max(400, n)`` wavelengths between the
+    window's ends, the maximum is the centre's wavelength (clipped to the window) and the centroid is that of the sampled curve in nm. An empty
+    ``FitResult`` (no metric: a gap) for fewer than 5 points or when both solvers fail."""
+    from .voigt_fit import model as voigt_model
+    from .voigt_fit import peak_wavelength_nm, solve_voigt, solve_voigt_scipy
+
+    x, y = _windowed(wavelengths_nm, values, wl_min, wl_max)
+    if x.size < 5:
+        return FitResult(x.copy(), y.copy())
+    x_min, x_max = float(np.min(x)), float(np.max(x))
+    coefficients = None if solved is None else np.asarray(solved, dtype=np.float64)
+    if coefficients is None and fast_first:
+        params, converged = solve_voigt(x, y[None, :])
+        if converged[0]:
+            coefficients = params[0]
+    if coefficients is None:
+        coefficients = solve_voigt_scipy(x, y)
+        if coefficients is None:
+            return FitResult(x.copy(), y.copy())
+    fitted_x = np.asarray([x_min]) if x_max <= x_min else np.linspace(x_min, x_max, max(int(sample_count), int(x.size)))
+    fitted_y = voigt_model(fitted_x, coefficients)[0]
+    peak_wavelength = float(np.clip(peak_wavelength_nm(coefficients)[0], x_min, x_max))
+    peak_value = float(voigt_model(np.asarray([peak_wavelength]), coefficients)[0, 0])
+    centroid = None
+    area = float(np.trapezoid(fitted_y, fitted_x))
+    if np.isfinite(area) and abs(area) > 1.0e-12:
+        centroid_value = float(np.trapezoid(fitted_y * fitted_x, fitted_x)) / area
+        if np.isfinite(centroid_value):
+            centroid = float(np.clip(centroid_value, x_min, x_max))
+    return FitResult(
+        fitted_wavelengths_nm=fitted_x,
+        fitted_values=np.asarray(fitted_y, dtype=np.float64),
+        coefficients=np.asarray(coefficients, dtype=np.float64),
+        peak_wavelength_nm=peak_wavelength,
+        centroid_nm=centroid,
+        peak_value=peak_value,
+    )
+
+
 def fit_spectrum(
     spectrum: FormulaSpectrum,
     fit_method: str,
@@ -312,6 +366,7 @@ def fit_spectrum(
     wl_min: float | None = None,
     wl_max: float | None = None,
     gaussian_fast_first: bool = True,
+    solved: np.ndarray | None = None,
 ) -> FitResult | None:
     """Single dispatch point for "which fit does this method key use" -
     both the spectrum plot and the sensorgram loop go through here rather
@@ -329,7 +384,9 @@ def fit_spectrum(
     if key == "template":  # not a curve fitted to this spectrum alone: it needs the ROI's reference (fit_and_metric); never fall through to the polynomial
         raise ValueError("The template shift needs the reference spectrum of the ROI: use fit_and_metric(..., template=...).")
     if key == "gaussian":
-        return fit_gaussian(spectrum.wavelengths_nm, spectrum.values, wl_min=wl_min, wl_max=wl_max, fast_first=gaussian_fast_first)
+        return fit_gaussian(spectrum.wavelengths_nm, spectrum.values, wl_min=wl_min, wl_max=wl_max, fast_first=gaussian_fast_first, solved=solved)
+    if key == "voigt":
+        return fit_voigt(spectrum.wavelengths_nm, spectrum.values, wl_min=wl_min, wl_max=wl_max, fast_first=gaussian_fast_first, solved=solved)
     return fit_polynomial(
         spectrum.wavelengths_nm, spectrum.values,
         poly_order=poly_order, wl_min=wl_min, wl_max=wl_max,
@@ -437,7 +494,8 @@ def template_fit_and_metric(spectrum: FormulaSpectrum, template: ReferenceTempla
 
 
 def fit_and_metric(
-    spectrum: FormulaSpectrum, metric: MetricSettings, *, gaussian_fast_first: bool = True, template: ReferenceTemplate | None = None
+    spectrum: FormulaSpectrum, metric: MetricSettings, *, gaussian_fast_first: bool = True, template: ReferenceTemplate | None = None,
+    solved: np.ndarray | None = None,
 ) -> tuple[FitResult | None, float | None, float | None]:
     """The fit (None for "no fit") and the metric position and height read off it - or, without a fit, off the measured points. The one place
     that decides this, so the Spectra panel (one cube) and the Sensorgram (every cube) cannot disagree. May raise what the fit raises.
@@ -451,7 +509,7 @@ def fit_and_metric(
     wl_min, wl_max = spectrum_window(spectrum.wavelengths_nm, spectrum.values, metric)
     fit = fit_spectrum(
         spectrum, metric.fit_method, poly_order=metric.poly_order, wl_min=wl_min, wl_max=wl_max,
-        gaussian_fast_first=gaussian_fast_first,
+        gaussian_fast_first=gaussian_fast_first, solved=solved,
     )
     if fit is None:
         x, y = metric_from_spectrum(spectrum, metric.metric_key, wl_min=wl_min, wl_max=wl_max)

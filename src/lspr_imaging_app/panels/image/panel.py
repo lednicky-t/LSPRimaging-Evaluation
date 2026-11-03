@@ -150,6 +150,7 @@ from .crop_tool import CropTool
 from .data_axis_slider import DataAxisSlider
 from .frame_tools import FrameToolsState, FrameToolsWidget
 from .general_group import AreaSelectionPicker, style_general_icon_button
+from .gpu_view import apply_gpu_drawing
 from .image_controls import ImageViewBox, controls_text
 from .interaction import CanvasInteraction
 from .edit_preview_layer import EditPreviewLayer
@@ -184,6 +185,7 @@ from ...storage.ui_state_keys import (
     IMAGE_CURSOR_READOUT,
     IMAGE_MASK_EDIT_PREVIEW,
     IMAGE_MASK_EDIT_TOOL,
+    IMAGE_GPU_DRAWING,
     IMAGE_OVERLAY_CACHE_MB,
     IMAGE_ROI_LABELS,
     IMAGE_SCALE_BAR_COLOR,
@@ -567,6 +569,8 @@ class ImagePanel(QWidget):
         env_mb = environment_budget_mb()  # LSPR_OVERLAY_CACHE_MB, if set, wins over the saved choice for this run
         cache_mb = env_mb if env_mb is not None else int(read(store, IMAGE_OVERLAY_CACHE_MB))
         self._roi_overlay.layers.set_budget_bytes(int(max(cache_mb, 0) * 1024 * 1024))
+        if read(store, IMAGE_GPU_DRAWING) is not False:  # on unless turned off in Preferences
+            apply_gpu_drawing(self._view, True)
         self._restore_slideshow_settings(store)
         self._slider_marks.set_roi_row(read(store, ROI_ROW_VISIBLE) is not False, read(store, ROI_ROW_SELECTED_ONLY) is True)
         self._slider_ribbon.roi_row_toggled.connect(lambda on: store.set(ROI_ROW_VISIBLE.key, bool(on)))
@@ -1939,9 +1943,11 @@ class ImagePanel(QWidget):
         if playing:
             stats.start(time.perf_counter(), self._slideshow.interval_seconds())
             self._view.paint_listener = lambda s: stats.note_detail("paint_view", s)
+            self._view.paint_cpu_listener = lambda s: stats.note_detail("paint_view_cpu", s)  # paint_view minus this = waiting
             self._image_item.paint_listener = lambda s: stats.note_detail("paint_image", s)
             return
         self._view.paint_listener = None
+        self._view.paint_cpu_listener = None
         self._image_item.paint_listener = None
         # The frames shown while playing were built the fast way (`RenderRequest.fast_rotation`: bilinear rotation,
         # one-pass grey picture): show the frame Play stopped on again, exactly, so the Histogram, Mask tools and
@@ -2323,6 +2329,18 @@ class ImagePanel(QWidget):
             self._draw_roi_overlay()
         if self._roi_overlay_store is not None:
             self._roi_overlay_store.set(IMAGE_OVERLAY_CACHE_MB.key, megabytes)
+
+    @property
+    def gpu_drawing(self) -> bool:
+        """The canvas is painted through OpenGL (Preferences; `gpu_view.py`)."""
+        return type(self._view.viewport()).__name__ == "QOpenGLWidget"
+
+    def set_gpu_drawing(self, on: bool) -> bool:
+        """Preferences: draw the canvas with the graphics card (remembered). Returns what is in effect (False if OpenGL is not available)."""
+        applied = apply_gpu_drawing(self._view, bool(on))
+        if self._roi_overlay_store is not None:
+            self._roi_overlay_store.set(IMAGE_GPU_DRAWING.key, applied)
+        return applied
 
     def overlay_cache_status(self) -> str:
         return self._roi_overlay.layers.status_text()

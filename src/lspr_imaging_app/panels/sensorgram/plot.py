@@ -30,6 +30,7 @@ from ...plan.stats_table import StatsTable, StatsTableSettings
 from ..axis_cursor import AxisCursor
 from ..image.mark_colors import MASK_COLOR, cube_color
 from ..plot_item_pool import PlotItemPool
+from ..svg_layers import SvgPart
 from .baseline_selector_menu import DEFAULT_ALPHA, DEFAULT_COLOR, BaselineRangeReadout
 from .plan_bar import PlanBarItem
 from .plan_text_editor import StepTextEditor
@@ -194,6 +195,24 @@ class SensorgramPlot(QWidget):
             item.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
         self.refresh_theme()
 
+    def export_parts(self) -> list[SvgPart]:
+        """What each drawn item is, for a layered SVG (`svg_layers.py`): the lines, points, bands and marks of the last `show_series` by line, and
+        the plan bar, the step table, the baseline window and the cube cursor. Axes and legend are named there."""
+        parts = list(getattr(self, "_svg_parts", []))
+        parts += [
+            SvgPart("Experimental plan", "Plan bar", self._plan_bar),
+            SvgPart("Step statistics", "Table", self._stats),
+            SvgPart("Cursor", "Cube cursor line", self._axis_cursor.line),
+            SvgPart("Cursor", "Cube cursor handle", self._axis_cursor.handle),
+        ]
+        if self._window_in_scene:
+            parts.append(SvgPart("Baseline window", "Baseline window", self._window))
+        return parts
+
+    def plot_item(self) -> pg.PlotItem:
+        """The pyqtgraph plot (for the export button: figures are drawn from it)."""
+        return self._item
+
     def refresh_theme(self) -> None:
         """pyqtgraph draws its own canvas and ignores Qt stylesheets: called at construction and on every live theme switch."""
         theme = get_active_theme()
@@ -235,6 +254,7 @@ class SensorgramPlot(QWidget):
         for 160 ROIs cost ~1 s per redraw and cannot be told apart anyway)."""
         pool = self._pool
         pool.begin()
+        self._svg_parts: list[SvgPart] = []  # names for a layered SVG export (svg_layers.py): one per drawn item
         named = len(series) <= MAX_LEGEND_ENTRIES
         if named:
             if self._legend is None:
@@ -255,12 +275,14 @@ class SensorgramPlot(QWidget):
                 line.setData(s.x, s.y, pen=_line_pen(color), connect="all", skipFiniteCheck=True, name=s.label if named else None)
             else:  # a NaN stays a gap in the line
                 line.setData(s.x, s.y, pen=_line_pen(color), connect="finite", skipFiniteCheck=False, name=s.label if named else None)
+            self._svg_parts.append(SvgPart("Lines", s.label, line))
             if named:
                 self._legend.addItem(line, s.label)
             if dots and finite.any():
                 # Out of the auto-range: the dots sit on the line's points (same bounds), and a dot item would also widen the range by its radius.
                 dot_item = pool.take("dots", lambda: pg.ScatterPlotItem(), ignore_bounds=True, z=_Z_DOTS)
                 dot_item.setData(s.x[finite], s.y[finite], symbol="o", size=4, brush=pg.mkBrush(color), pen=None)
+                self._svg_parts.append(SvgPart("Points", s.label, dot_item))
             if s.band_low is not None and s.band_high is not None:
                 brush = QColor(color)
                 brush.setAlpha(_BAND_ALPHA)
@@ -274,11 +296,13 @@ class SensorgramPlot(QWidget):
                     fill = pool.take("band_fill", lambda: pg.FillBetweenItem(low, high), ignore_bounds=True, z=_Z_BAND)  # noqa: B023 (called at once)
                     fill.setCurves(low, high)
                     fill.setBrush(pg.mkBrush(brush))
+                    self._svg_parts += [SvgPart("Bands", s.label, fill), SvgPart("Bands", f"{s.label} (edges)", low), SvgPart("Bands", f"{s.label} (edges)", high)]
             if stale is not None and stale.any():
                 mask = np.asarray(stale, dtype=bool) & finite
                 if mask.any():
                     hollow = pool.take("stale", lambda: pg.ScatterPlotItem(), z=_Z_RINGS)
                     hollow.setData(s.x[mask], s.y[mask], symbol="o", size=9, brush=None, pen=pg.mkPen(color, width=1.5))
+                    self._svg_parts.append(SvgPart("Out-of-date marks", s.label, hollow))
             marks = None if mask_marks is None else mask_marks.get(s.key)
             if marks is not None:
                 for flags, symbol, size in ((marks[0], "t2", 11), (marks[1], "o", 13)):
@@ -286,6 +310,8 @@ class SensorgramPlot(QWidget):
                     if on.any():
                         mark = pool.take(f"mark:{symbol}", lambda: pg.ScatterPlotItem(), z=_Z_MARKS)
                         mark.setData(s.x[on], s.y[on], symbol=symbol, size=size, brush=None, pen=pg.mkPen(MASK_COLOR, width=1.8))
+                        kind = "persistent mask" if symbol == "t2" else "individual mask"
+                        self._svg_parts.append(SvgPart("Mask marks", f"{s.label} ({kind})", mark))
         pool.end()
         self._stats.update()  # new legend entries: new rows for the (cached) table
         self._tighten_legend()

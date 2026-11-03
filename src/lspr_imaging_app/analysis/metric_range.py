@@ -32,8 +32,11 @@ _MIN_AREA = 1.0e-12  # weights that add up to less than this have no centroid (a
 def curve_base(fit_method: str, coefficients: np.ndarray | None, curves: np.ndarray) -> np.ndarray:
     """The baseline of every curve ``[n]``: a Gaussian's fitted offset (``coefficients`` ``[n, 4]``: amplitude, centre, sigma, offset), else the lowest
     point of the curve."""
-    if str(fit_method).strip().lower() == "gaussian" and coefficients is not None and coefficients.shape[-1] == 4:
+    method = str(fit_method).strip().lower()
+    if method == "gaussian" and coefficients is not None and coefficients.shape[-1] == 4:
         return np.asarray(coefficients, dtype=np.float64)[:, 3]
+    if method == "voigt" and coefficients is not None and coefficients.shape[-1] == 5:  # voigt_fit.VOIGT_PARAMS: the offset is last
+        return np.asarray(coefficients, dtype=np.float64)[:, 4]
     return np.min(curves, axis=1)
 
 

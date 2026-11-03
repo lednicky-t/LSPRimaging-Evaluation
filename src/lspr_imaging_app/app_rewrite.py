@@ -109,6 +109,7 @@ from .selection.reference_auto_task import TASK_ID as REFERENCE_TASK_ID, Referen
 from .storage.app_settings import AppSettings, load_app_settings, save_app_settings
 from .storage.ui_state_keys import (
     ANALYSIS_MODE,
+    PLOT_EXPORT_FOLDER,
     CHROMATIC_ALL_WAVELENGTHS,
     CUBE_DISPLAY_MODE,
     CHROMATIC_BORDER_PERCENT,
@@ -1792,6 +1793,27 @@ def build_main_window(
     )
     sensorgram_panel.restore_ui_state(ui_state)
     spectra_panel.set_fit_pool(sensorgram_panel.fit_pool())  # Spectra fits in the same helper process (never competing with the window)
+
+    def export_context() -> tuple[Path | None, dict[str, object]]:
+        """For the plots' export buttons: the dialogs open where the last export was saved (remembered across launches) while that folder exists,
+        else in `<session>/exports` (made on first use); the record names the dataset and session."""
+        session_root = m.session_autosave.root()
+        dataset_home = m.dataset.dataset_home()
+        last = read(ui_state, PLOT_EXPORT_FOLDER)
+        if last and Path(str(last)).is_dir():
+            folder: Path | None = Path(str(last))
+        else:
+            folder = None if session_root is None else Path(session_root) / "exports"
+        return (
+            folder,
+            {"dataset": None if dataset_home is None else str(dataset_home), "session": None if session_root is None else str(session_root)},
+        )
+
+    def remember_export_folder(folder: Path) -> None:
+        ui_state.set(PLOT_EXPORT_FOLDER.key, str(folder))
+
+    for button in (sensorgram_panel.export_button, spectra_panel.export_button, histogram_panel.export_button()):
+        button.set_context(export_context, remember_export_folder)
     stages.done("ROI table, Spectra and Sensorgram panels")
     workflow = _build_workflow_panel(m, writer, ui_state)
     stages.done("Workflow panel", "Assembling the window...")
@@ -1919,6 +1941,7 @@ def _wire_preferences(
             reopen_last_dataset=bool(writer.settings.auto_reopen_last_dataset),
             auto_apply_layout_preset=layout_preset_manager.auto_apply,
             overlay_cache_mb=image_panel.overlay_cache_mb,
+            gpu_drawing=image_panel.gpu_drawing,
             perf=get_runtime().preferences,
         )
 
@@ -1934,6 +1957,9 @@ def _wire_preferences(
         if new.overlay_cache_mb != old.overlay_cache_mb:
             image_panel.set_overlay_cache_mb(new.overlay_cache_mb)
             changed.append("overlay_cache_mb")
+        if new.gpu_drawing != old.gpu_drawing:
+            image_panel.set_gpu_drawing(new.gpu_drawing)  # stays off (WARNING in the log) where OpenGL is not available
+            changed.append("gpu_drawing")
         if new.perf != old.perf:
             get_runtime().set_preferences(new.perf)  # takes effect for the next export or scan; a running one keeps its own
             changed.extend(f"perf_{name}" for name in write_perf_preferences(ui_state, new.perf))

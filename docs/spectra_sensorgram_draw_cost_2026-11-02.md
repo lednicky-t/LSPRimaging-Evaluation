@@ -112,6 +112,41 @@ Fixed after the profile (uncommitted):
 
 **Confirmed in the app** (maintainer, same dataset and layout): Play 16.5 fps -> 21-25 fps.
 
+## OpenGL viewport for the image view: measured, not worth it (2026-11-02)
+
+Standalone benchmark on the real display (dev laptop), 800 x 1275 RGBA picture swapped each frame, 1200 x 800 window, FullViewportUpdate,
+swap interval 0, medians of 60 frames:
+
+| Viewport | image only: repaint / cycle | image + 160 circles: repaint / cycle |
+|---|---|---|
+| software (today) | 5.3 / 11.3 ms | 8.5 / 17.4 ms |
+| OpenGL (`QOpenGLWidget`) | 8.5 / 8.7 ms | 14.6 / 14.8 ms |
+
+At most ~2.5 ms per frame gained, and QPainter paths (the ROI circles, and so the labels and overlays) draw slower through OpenGL; plus the
+driver risk on lab PCs. First judged not worth it; the maintainer chose to take the gain: built as Edit -> Preferences "Draw the image with
+the graphics card (OpenGL)" (`panels/image/gpu_view.py`, UI-state key `image/gpu_drawing`), **on by default**; without OpenGL it stays off with a
+WARNING (silently in the offscreen tests). Not confirmed in the app yet. A real GPU gain would need GPU-native drawing (textures + shaders, e.g. VisPy), i.e. rewriting the image
+view and every overlay item: not justified at 21-25 fps.
+
+## After the fixes: what the 21 fps Play log says, and the next round (same night, uncommitted)
+
+Session `lspri-20261102-224702-51296` (10x, 160 ROIs, mask overlay on): fps 21.3 (very steady), cycle 47 ms, GUI thread **26 % busy**
+(was 80 %+), `pic_ms` 5 ms, `queue_ms` / `deliver_ms` ~1 ms (were ~30). But `d_paint_view_ms` = 33 ms of wall time per frame while the GUI
+thread is mostly idle: the paint waits for something. Not the reader threads: an offscreen test (picture + 160 Python-painted circles,
+2 threads reading planes of this dataset back to back) repaints in 8.3 ms vs 9.2 ms alone. Candidates left: the flush to the real screen, the
+window size, the mask overlay (on in this run, off in the profiled one). **Added `d_paint_view_cpu_ms`** (thread CPU time inside the same
+paint, `timed_canvas.paint_cpu_listener`): the next Play log tells drawing from waiting.
+
+Tried and dropped (measured, no change made):
+* zarrs (Rust) whole-plane read instead of the per-chunk fast read: identical pixels, 12 -> 140 ms vs 2,800 ms against a 100 % busy Python
+  thread, but against a realistic ~30 % busy one 15.6 ms vs today's 13.4 ms. The app's 40-70 ms reads are not explained by the GIL alone.
+* Highlight overlay: `cv2.inRange` + an Indexed8 layer (identical pixels) builds in 1.1 ms instead of 3.8 ms but Qt then paints it 1.6 ms
+  slower; `rgba_layer` itself is at the memory-bandwidth limit (np.multiply / cv2 variants were slower).
+
+Fixed: **autosave capture on the GUI thread** (`session.capture` 340 ms in that log): `prepare_session` spent ~85 of ~95 ms (standalone, the
+real session: 8,164 chromatic models, 624 landmarks) in `dataclasses.asdict`. `_flat_asdict` (field names from the dataclass, lists
+copied) gives identical dicts and identical JSON: 96 -> 37 ms (`tests/unit/test_lspri_session_writer.py::ChromaticEncodingTests`).
+
 ## Image panel (Play): what is left
 
 From `playback.summary` (session 20261102-162648, 160 ROIs, 10x): fps 12.5-15 at target 23-30, GUI busy 76-79 %,

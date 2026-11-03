@@ -14,7 +14,12 @@ being converted to powers of the wavelength in nm (the conversion subtracts larg
 error the scaled ones do not); and so the roots and integrals are found in t. The result agrees with the per-cube path to rounding error
 (measured: ``docs/sensorgram_fit_freeze_2026-10-24.md``; pinned by ``tests/unit/test_lspri_analysis_trace_fit.py``).
 
-**The Gaussian fit** is batched the same way (``gaussian_fit.py``: centre and width iterated, amplitude and offset solved).
+**The Gaussian fit** is batched the same way (``gaussian_fit.py``: centre and width iterated, amplitude and offset solved), and so is **the Voigt
+fit** (``voigt_fit.py``, 2026-11-02: centre and the two widths iterated, in photon energy). **The "no fit" metric** (read off the measured points)
+is batched too since 2026-11-02 (``_points_group``: the same numpy calls per row; it was one cube at a time, 2 s for 160 ROIs x 314 cubes).
+**Speed-ups of 2026-11-02** (same numbers): the cubes are grouped by their usable wavelengths with ``row_patterns`` (``np.unique(axis=0)`` was
+~300 ms of a 160-ROI Sensorgram), and a sampled curve's centroid is one matrix product with the trapezoid weights (``trapezoid_weights``;
+rounding differences <= 1e-12 nm).
 
 **What stays per cube.** The "no fit" metric and any cube where the batch could not be trusted go through ``query.fit_and_metric`` one cube at a
 time, exactly as before: for the polynomial fit a non-finite coefficient, a vanishing leading coefficient or a failed eigenvalue solve; for the
@@ -93,8 +98,9 @@ def traces_from_inputs(
     flat = np.full(int(offsets[-1]), np.nan)  # the traces of all ROIs one after the other; a cube is addressed by offsets[roi] + cube
     outs = [flat[offsets[i] : offsets[i + 1]] for i in range(len(inputs))]
     method = str(metric.fit_method).strip().lower()
-    group_fit = _gaussian_group if method == "gaussian" else _polynomial_group
-    per_cube = method == "none"  # no fit to batch: the metric is read off the measured points, one cube at a time
+    group_fit = {"gaussian": _gaussian_group, "voigt": _voigt_group, "none": _points_group}.get(method, _polynomial_group)
+    min_points = 1 if method == "none" else 2  # read off the points, one point still has a maximum (and a "centroid": itself)
+    per_cube = False  # every method is batched (the "no fit" metric too since 2026-11-02: it was one cube at a time, 2 s for 160 ROIs)
     template_here = 0.0  # seconds of the template shift in this call (not part of the preparation)
     pending: dict[bytes, list[tuple[np.ndarray, np.ndarray, np.ndarray]]] = {}  # wavelengths -> (cube addresses, x, rows of values)
     for i, data in enumerate(inputs):
@@ -121,13 +127,12 @@ def traces_from_inputs(
         wl, values, valid = wl[order], values[:, order], valid[:, order]
         valid = restrict_to_window(wl, values, valid, metric)  # the fit window: a fixed range, or each cube's own (fit_window.py)
         wanted_cubes = np.flatnonzero(wanted)
-        patterns, inverse = np.unique(valid[wanted_cubes], axis=0, return_inverse=True)  # cubes with the same usable wavelengths fit together
-        inverse = np.ravel(inverse)
+        patterns, inverse = row_patterns(valid[wanted_cubes])  # cubes with the same usable wavelengths fit together
         for g, pattern in enumerate(patterns):
             cubes = wanted_cubes[inverse == g]
             x = wl[pattern]
-            if x.size < 2:
-                continue  # fewer than two points: no fit, no metric (a gap)
+            if x.size < min_points:
+                continue  # too few points: no fit, no metric (a gap)
             pending.setdefault(x.tobytes(), []).append((offsets[i] + cubes, x, values[np.ix_(cubes, np.flatnonzero(pattern))]))
     t_fit = clock()
     t_ms["prep_ms"] += (t_fit - t_start - per_cube_here - template_here) * 1e3
@@ -159,6 +164,25 @@ def traces_from_inputs(
         t_ms["per_cube_ms"] += (clock() - t_redo) * 1e3
         t_ms["per_cube_cubes"] += failed.size
     return outs
+
+
+def row_patterns(mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """``np.unique(mask, axis=0, return_inverse=True)`` for a 2-D bool array, with the inverse flattened: the distinct rows in the same
+    (lexicographic) order and, per row, the index of its pattern.
+
+    ``np.unique(..., axis=0)`` sorts the rows as raw byte strings, which took ~300 of the ~460 ms of preparing a Sensorgram of 160 ROIs x 314 cubes
+    (2026-11-02). Each row's bits packed into one big-endian integer (first wavelength = highest bit) sort in exactly the same order, as plain
+    integers. Up to 64 wavelengths; more go the original way."""
+    mask = np.asarray(mask, dtype=bool)
+    if mask.ndim != 2 or mask.shape[1] > 64 or mask.shape[0] == 0:
+        patterns, inverse = np.unique(mask, axis=0, return_inverse=True)
+        return patterns, np.ravel(inverse)
+    packed = np.packbits(mask, axis=1)  # big-endian bit order: the first column is the highest bit of the first byte
+    padded = np.zeros((mask.shape[0], 8), dtype=np.uint8)
+    padded[:, : packed.shape[1]] = packed
+    keys = padded.view(">u8")[:, 0]
+    _keys, first, inverse = np.unique(keys, return_index=True, return_inverse=True)
+    return mask[first], np.ravel(inverse)
 
 
 def trace_from_input_per_cube(data: TraceInput, formula_key: str, metric: MetricSettings) -> np.ndarray:
@@ -207,18 +231,100 @@ def _gaussian_group(x: np.ndarray, y: np.ndarray, metric: MetricSettings) -> tup
     elif key == "centroid":
         fitted_x = np.linspace(x_min, x_max, max(400, x.size))
         amplitude, centre, sigma, offset = (params[converged, i : i + 1] for i in range(4))
-        curve = amplitude * np.exp(-((fitted_x[None, :] - centre) ** 2) / (2.0 * sigma * sigma)) + offset
+        curve = sampled_curve(fitted_x, amplitude, centre, sigma, offset)
         if metric.ranged_centroid:  # part of the fitted curve only; the baseline is the fitted offset (metric_range.py)
             found[converged] = range_centroid(fitted_x, curve, offset[:, 0], metric)
             return good, found
-        area = np.trapezoid(curve, fitted_x, axis=1)
+        # The two trapezoid integrals as one matrix product with the trapezoid weights (2026-11-02): the same sums in another order, so the
+        # centroid differs from np.trapezoid's by rounding only (<= 1e-12 nm measured), at a third of the cost (no curve * x array).
+        sums = curve @ trapezoid_weights(fitted_x)
+        area = sums[:, 0]
         with np.errstate(all="ignore"):
-            centroid = np.trapezoid(curve * fitted_x[None, :], fitted_x, axis=1) / area
+            centroid = sums[:, 1] / area
         has = np.isfinite(area) & (np.abs(area) > _MIN_AREA) & np.isfinite(centroid)
         values = np.full(area.shape, np.nan)
         values[has] = np.clip(centroid[has], x_min, x_max)
         found[converged] = values
     return good, found
+
+
+def _voigt_group(x: np.ndarray, y: np.ndarray, metric: MetricSettings) -> tuple[np.ndarray, np.ndarray] | None:
+    """The Voigt fit of every row (``voigt_fit.solve_voigt``) and its metric, as ``query.fit_voigt`` + ``metric_from_fit`` read it: the centre's
+    wavelength clipped to the window, or the centroid of the curve sampled at ``max(400, n)`` wavelengths. A row that did not converge is not
+    ``good`` and goes to scipy afterwards (the per-cube path with ``gaussian_fast_first=False``)."""
+    from .voigt_fit import model as voigt_model
+    from .voigt_fit import peak_wavelength_nm, solve_voigt
+
+    n_spectra = y.shape[0]
+    if x.size < 5:
+        return np.ones(n_spectra, dtype=bool), np.full(n_spectra, np.nan)  # fewer points than parameters: a gap, as in fit_voigt
+    x_min, x_max = float(x[0]), float(x[-1])
+    if not x_max > x_min:
+        return None
+    params, converged = solve_voigt(x, y)
+    found = np.full(n_spectra, np.nan)
+    key = str(metric.metric_key).strip().lower()
+    if not converged.any():
+        return converged, found
+    if key == "maximum":
+        found[converged] = np.clip(peak_wavelength_nm(params[converged]), x_min, x_max)
+    elif key == "centroid":
+        fitted_x = np.linspace(x_min, x_max, max(400, x.size))
+        curve = voigt_model(fitted_x, params[converged])
+        if metric.ranged_centroid:  # the baseline is the fitted offset (metric_range.curve_base)
+            found[converged] = range_centroid(fitted_x, curve, params[converged, 4], metric)
+            return converged, found
+        sums = curve @ trapezoid_weights(fitted_x)
+        with np.errstate(all="ignore"):
+            centroid = sums[:, 1] / sums[:, 0]
+        has = np.isfinite(sums[:, 0]) & (np.abs(sums[:, 0]) > _MIN_AREA) & np.isfinite(centroid)
+        values = np.full(sums.shape[0], np.nan)
+        values[has] = np.clip(centroid[has], x_min, x_max)
+        found[converged] = values
+    return converged, found
+
+
+def _points_group(x: np.ndarray, y: np.ndarray, metric: MetricSettings) -> tuple[np.ndarray, np.ndarray] | None:
+    """The "no fit" metric of every row, read off the measured points as ``query.metric_from_spectrum`` reads it: the maximum is the wavelength of
+    the highest point (the first of equal ones), the centroid the intensity-weighted mean wavelength by the trapezoid rule, clipped to the points'
+    range (none when the area is below 1e-12). The same numpy functions on the same numbers, a row at a time in one call."""
+    n_spectra = y.shape[0]
+    good = np.ones(n_spectra, dtype=bool)
+    found = np.full(n_spectra, np.nan)
+    key = str(metric.metric_key).strip().lower()
+    if key == "maximum":
+        found[:] = x[np.argmax(y, axis=1)]
+    elif key == "centroid":
+        if x.size < 2:
+            found[:] = x[0]
+            return good, found
+        area = np.trapezoid(y, x, axis=1)
+        with np.errstate(all="ignore"):
+            centroid = np.trapezoid(y * x[None, :], x, axis=1) / area
+        has = np.isfinite(area) & (np.abs(area) >= _MIN_AREA) & np.isfinite(centroid)
+        found[has] = np.clip(centroid[has], x[0], x[-1])
+    return good, found
+
+
+def sampled_curve(grid: np.ndarray, amplitude: np.ndarray, centre: np.ndarray, sigma: np.ndarray, offset: np.ndarray) -> np.ndarray:
+    """``amplitude * exp(-(grid - centre)^2 / (2 sigma^2)) + offset`` for column vectors of parameters: ``[spectrum, grid]``. Built in place
+    (one array instead of six temporaries; the same operations in the same order, so the same numbers as the expression above)."""
+    curve = grid[None, :] - centre
+    np.square(curve, out=curve)
+    curve /= -(2.0 * sigma * sigma)  # -(d^2) / (2 s^2): negating the divisor is exact
+    np.exp(curve, out=curve)
+    curve *= amplitude
+    curve += offset
+    return curve
+
+
+def trapezoid_weights(grid: np.ndarray) -> np.ndarray:
+    """``[len(grid), 2]``: ``curve @ w`` gives ``(trapezoid(curve, grid), trapezoid(curve * grid, grid))`` for every row of ``curve``."""
+    weights = np.zeros_like(grid, dtype=np.float64)
+    step = np.diff(grid)
+    weights[:-1] += step / 2.0
+    weights[1:] += step / 2.0
+    return np.stack([weights, weights * grid], axis=1)
 
 
 def _polynomial_group(x: np.ndarray, y: np.ndarray, metric: MetricSettings) -> tuple[np.ndarray, np.ndarray] | None:

@@ -166,6 +166,11 @@ class ScanTask(ThreadedTask):
                 log_event(logger, "analysis.pool_ready", logging.INFO, workers=len(pids), seconds=round(time.perf_counter() - started, 1))
                 self.pool_state_changed.emit("ready", len(pids))
             except Exception:  # noqa: BLE001 - performance mode is an extra: a pool that cannot start leaves the scans as they were
+                if generation != self._pool_generation:
+                    # Switched off (or the app closed) while the workers were starting: the pool was shut down under the start, which then fails
+                    # ("cannot schedule new futures after shutdown"). That is the switch-off working, not a failure (2026-11-03: it was logged as one).
+                    logger.debug("warm pool start ended by a switch-off", exc_info=True)
+                    return
                 logger.warning("the warm worker pool could not be started; scans start their own workers", exc_info=True)
                 self.pool_state_changed.emit("failed", 0)
             finally:
@@ -182,6 +187,7 @@ class ScanTask(ThreadedTask):
 
     def shutdown(self) -> None:
         super().shutdown()
+        self._pool_generation += 1  # a start still going ends itself quietly (as after a switch-off)
         warm, self._warm = self._warm, None
         if warm is not None:
             warm.shutdown()

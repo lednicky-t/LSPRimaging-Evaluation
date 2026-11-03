@@ -53,7 +53,7 @@ import logging
 import threading
 from collections import OrderedDict
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from dataclasses import field as dataclass_field
 
 import numpy as np
@@ -77,10 +77,13 @@ from ...analysis.trace_pool import TracePool
 from ...applog import timed
 from ...roi import RoiToolbox
 from ...selection import SelectionModule
-from ...storage.ui_state_keys import SPECTRA_LINE_STYLE, SPECTRA_RIBBON_OPEN, read
+from ...storage.ui_state_keys import SPECTRA_LINE_STYLE, SPECTRA_RIBBON_OPEN, SPECTRA_X_UNIT, read
 from ..live_toggle import LiveToggle
 from ..ribbon_row import RibbonRow, rolled_ribbon
+from ...analysis.export_tables import spectra_table
+from ...analysis.voigt_fit import HC_EV_NM
 from ..panel_task import PanelTask
+from ..plot_export_button import ExportData, PlotExportButton
 from ..ui_state import UiStateStore
 from ..visibility_gate import HiddenPanelGate
 from ..ribbon_fields import style_ribbon_number_field
@@ -112,11 +115,13 @@ FORMULA_TIPS = {
     "ratio": "Sample intensity divided by reference intensity.",
     "relative_change": "Reference minus sample, divided by reference.",
 }
-FIT_LABELS = {"none": "No fit", "polynomial": "Polynomial", "gaussian": "Gaussian", "template": "Template shift"}
+FIT_LABELS = {"none": "No fit", "polynomial": "Polynomial", "gaussian": "Gaussian", "voigt": "Voigt", "template": "Template shift"}
 FIT_TIPS = {
     "none": "Show the measured points only.",
     "polynomial": "Fit a polynomial through the points.",
     "gaussian": "Fit a Gaussian (bell curve) through the points.",
+    "voigt": "Fit a Voigt peak (a Gaussian and a Lorentzian combined: size spread and plasmon damping) on a flat background. Fitted in photon energy, "
+             "where a plasmon's width is symmetric; drawn and read in nm. Slower than the Gaussian.",
     "template": "Move the ROI's reference spectrum (the mean of its reference cubes) sideways until it agrees best with the spectrum, using every point. "
                 "The metric is the reference's peak plus that shift. No fit window, order or maximum / centroid is needed.",
 }
@@ -345,6 +350,8 @@ class SpectraPanel(QWidget):
         self._ribbon.add_group("Fit", self._fit, self._order, self._window_mode)
         self._ribbon.add_group("Metric", self._metric, self._metric_range)
         self._ribbon.add_group("View", self._view_menu)
+        self.export_button = PlotExportButton("spectra", lambda: self._plot.plot_item(), self._export_data, self, svg_parts=self._plot.export_parts)
+        self._ribbon.add_group("Export", self.export_button)
         self._ribbon.add_stretch()
         self._ribbon_drawer = rolled_ribbon(self._ribbon, "Show the spectra controls.", self)
         controls = QHBoxLayout()
@@ -411,6 +418,8 @@ class SpectraPanel(QWidget):
         saved_style = read(store, SPECTRA_LINE_STYLE)
         self._line_style.set_style(saved_style if saved_style in LINE_STYLES else SPECTRA_LINE_STYLE.default)  # not a widget `bind`: a row of buttons
         self._line_style.style_changed.connect(lambda key: store.set(SPECTRA_LINE_STYLE.key, key))
+        self._plot.set_x_unit(str(read(store, SPECTRA_X_UNIT)))  # nm or eV: a double-click on the x axis label switches (display only)
+        self._plot.x_unit_changed.connect(lambda unit: store.set(SPECTRA_X_UNIT.key, unit))
         self._draw_last()
         self._ribbon_drawer.set_expanded(read(store, SPECTRA_RIBBON_OPEN) is not False, animate=False)
         self._ribbon_drawer.expanded_changed.connect(lambda open_: store.set(SPECTRA_RIBBON_OPEN.key, bool(open_)))
@@ -800,6 +809,24 @@ class SpectraPanel(QWidget):
             self.task.end("completed")
 
     # -- drawing -------------------------------------------------------------------------------------------------------------------
+
+    def _export_data(self) -> ExportData | None:
+        """What "Save data" writes (export what is drawn): the spectra of the cube shown (measured points with errors, the fitted curves, the
+        metric points), in nm and eV; the record holds the cube, whether it is out of date and the settings."""
+        if self._last is None:
+            return None
+        job, spectra = self._last
+        current = self._scan.is_cube_current(job.request.cube)
+        table = spectra_table(spectra, [f"ROI {s.roi_id}" for s in spectra], HC_EV_NM)
+        if current is False:
+            table = replace(table, notes=(f"Cube {job.request.cube} is out of date (the inputs changed since the scan); run the scan again.",))
+        info = {
+            "cube": int(job.request.cube),
+            "out_of_date": current is False,
+            "roi_ids": [int(r) for r in job.request.roi_ids],
+            "settings": {"formula": job.request.formula_key, "metric": asdict(job.request.metric)},
+        }
+        return ExportData({"spectra": table}, info)
 
     def _roi_colors(self, roi_ids: tuple[int, ...]) -> dict[int, str]:
         by_id = {roi.area_roi_id: roi for roi in self._roi_toolbox.rois()}

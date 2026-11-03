@@ -215,6 +215,10 @@ class HistogramPanel(QWidget):
             self._plot.set_curve_styles(saved)
         self._plot.curve_styles_changed.connect(lambda styles: store.set(HISTOGRAM_CURVE_STYLES.key, json.dumps(styles)))
 
+    def export_button(self):
+        """The plot's export control (figure and data); the app tells it where to save (`PlotExportButton.set_context`)."""
+        return self._plot.export_button
+
     # -- construction ---------------------------------------------------------
 
     def _build_ui(self) -> None:

@@ -111,6 +111,15 @@ def _bell_path() -> QPainterPath:
     return path
 
 
+def _voigt_path() -> QPainterPath:
+    """A peak with a sharper top and longer tails than the bell (`_bell_path`): what a Lorentzian part adds to a Gaussian."""
+    path = QPainterPath(QPointF(1.5, 16.0))
+    path.cubicTo(6.0, 15.5, 8.0, 13.0, 9.0, 6.0)
+    path.cubicTo(9.4, 3.2, 10.6, 3.2, 11.0, 6.0)
+    path.cubicTo(12.0, 13.0, 14.0, 15.5, 18.5, 16.0)
+    return path
+
+
 def _dots(painter: QPainter, color: QColor) -> None:
     painter.setPen(Qt.PenStyle.NoPen)
     painter.setBrush(color)
@@ -146,6 +155,8 @@ def fit_picture(kind: str) -> PictureFor:
         painter.setPen(QPen(ink, 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         if kind == "gaussian":
             painter.drawPath(_bell_path())
+        elif kind == "voigt":
+            painter.drawPath(_voigt_path())
         elif kind == "polynomial":
             wave = QPainterPath(QPointF(1.5, 15.5))
             wave.cubicTo(5.0, 3.0, 8.5, 19.0, 11.0, 9.0)

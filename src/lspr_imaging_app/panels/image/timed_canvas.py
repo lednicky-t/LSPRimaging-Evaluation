@@ -19,14 +19,20 @@ class TimedLayoutWidget(pg.GraphicsLayoutWidget):
     """The whole canvas: everything Qt paints for the view (image, overlays, axes)."""
 
     paint_listener: Callable[[float], None] | None = None
+    paint_cpu_listener: Callable[[float], None] | None = None
+    """Gets the CPU time this thread spent in the paint (2026-11-02): with `paint_listener`'s wall time it tells drawing from waiting (for the
+    interpreter lock, the screen, the graphics driver). A Play log had 33 ms of paint wall time per frame on a GUI thread busy only 26 %."""
 
     def paintEvent(self, event) -> None:
-        started = time.perf_counter()
+        started, cpu_started = time.perf_counter(), time.thread_time()
         super().paintEvent(event)
         elapsed = time.perf_counter() - started
         listener = self.paint_listener
         if listener is not None:
             listener(elapsed)
+        cpu_listener = self.paint_cpu_listener
+        if cpu_listener is not None:
+            cpu_listener(time.thread_time() - cpu_started)
 
 
 class TimedImageItem(pg.ImageItem):

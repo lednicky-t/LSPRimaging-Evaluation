@@ -68,8 +68,11 @@ from PyQt6.QtWidgets import QToolButton, QVBoxLayout, QWidget
 
 from lspr_ui import get_active_theme, load_tabler_icon, tint_tabler_icon
 
+from ...analysis.export_tables import histogram_table
 from ..cursor_overlay import CursorOverlay
 from ..image.canvas_tools import style_bar_icon_button
+from ..plot_export_button import ExportData, PlotExportButton
+from ..svg_layers import SvgPart
 from . import compute
 from .curve_style_menu import DEFAULT_FILL_ALPHA, pen_style, show_curve_style_menu
 from .highlight_range_controls import HighlightRangeReadout
@@ -242,6 +245,12 @@ class HistogramPlot(QWidget):
         self._settings_button.setToolTip("Histogram plot settings")
         self._settings_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._settings_button.clicked.connect(self.settings_requested)
+        # Save / copy the figure and save the curves as drawn (2026-11-03, the shared export control of every plot area).
+        self.export_button = PlotExportButton(
+            "histogram", lambda: self._plot_item, self._export_data, viewport, style=lambda b: style_bar_icon_button(b, fixed_width=True),
+            svg_parts=lambda: [SvgPart("Highlight range", "Range", self._region), SvgPart("Value tick", "Tick", self._value_tick)],
+        )
+        self.export_button.setCursor(Qt.CursorShape.PointingHandCursor)
 
         self._range_readout = HighlightRangeReadout(
             viewport,
@@ -387,6 +396,8 @@ class HistogramPlot(QWidget):
         self._settings_button.setIcon(icon)
         self._range_readout.refresh_theme(theme)
         self._cursor_overlay.refresh_theme(theme)
+        if hasattr(self, "export_button"):  # refresh_theme also runs while the plot is being built
+            self.export_button.refresh_theme()
         self._apply_curve_pens()
         self._title_color = theme.text_muted
         self.set_excluded_text(self._excluded_text)
@@ -592,6 +603,22 @@ class HistogramPlot(QWidget):
         self._reposition_cursor_overlay()
         self._reposition_range_readout()
 
+    def _export_data(self) -> ExportData | None:
+        """The curves drawn now (visible, with a legend name), one row per bin; the record notes the axis labels."""
+        curves = []
+        for item in self._plot_item.listDataItems():
+            if not item.isVisible() or not item.name():
+                continue
+            x, y = item.getData()
+            if x is None or y is None or len(y) == 0:
+                continue
+            curves.append((str(item.name()), np.asarray(x), np.asarray(y)))
+        if not curves:
+            return None
+        y_label = self._plot_item.getAxis("left").labelText or "value"
+        x_label = self._plot_item.getAxis("bottom").labelText or "x"
+        return ExportData({"histogram": histogram_table(curves, f"({x_label})", y_label)}, {"x_axis": x_label, "y_axis": y_label})
+
     def _reposition_settings_button(self) -> None:
         """Fixed to the top-right corner of the viewport - unlike the range
         readout, this does not track plot content, so a resize is the only
@@ -600,6 +627,9 @@ class HistogramPlot(QWidget):
         x = viewport.width() - self._settings_button.width() - _CORNER_MARGIN_PX
         self._settings_button.move(x, _CORNER_MARGIN_PX)
         self._settings_button.raise_()
+        export = self.export_button
+        export.move(x - export.width() - _CORNER_MARGIN_PX, _CORNER_MARGIN_PX + (self._settings_button.height() - export.height()) // 2)
+        export.raise_()
 
     def _reposition_cursor_overlay(self) -> None:
         """Immediately left of the settings gear, same top-right corner row
@@ -609,7 +639,7 @@ class HistogramPlot(QWidget):
         changes between the small icon and the (usually wider) live text."""
         label = self._cursor_overlay.icon_label
         label.adjustSize()
-        x = self._settings_button.x() - label.width() - _CORNER_MARGIN_PX
+        x = self.export_button.x() - label.width() - _CORNER_MARGIN_PX  # left of the export button, which is left of the gear
         y = self._settings_button.y() + (self._settings_button.height() - label.height()) // 2
         label.move(x, y)
         label.raise_()

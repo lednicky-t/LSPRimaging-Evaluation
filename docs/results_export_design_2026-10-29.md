@@ -140,6 +140,53 @@ An export builds its numbers with the panel's own functions; it marks out-of-dat
 6. **Is there a downstream script or colleague that needs the old schema-7 file?** (C2.) If yes, I need a sample of how it is read.
    **Answer:** the maintainer asked what that file is (explained 2026-10-29: the old app's results and backup file); no known use, see C2 in the cut-over plan.
 
+## 10a. Built 2026-11-03 (uncommitted): the shared plot export control, format 0.1 (provisional)
+
+Built from section 10 while the format is still open, so it can be tried and reshaped:
+
+- `panels/plot_export_button.py` `PlotExportButton`: an "Export" icon button with **Save figure (PNG or SVG)...**, **Copy figure** and **Save
+  data (CSV)...**. On the Sensorgram ribbon (group "Export"), the Spectra ribbon (group "Export") and the Histogram's corner (left of the gear;
+  the cursor readout moved one button to the left). PNG at twice the screen resolution (pyqtgraph `ImageExporter`); SVG through Qt's
+  `QSvgGenerator` (pyqtgraph 0.14's `SVGExporter` fails on Qt 6 paths), **fully vector**: during the export the items are told so
+(pyqtgraph `setExportMode`: dots drawn as shapes, not stamped from a cached picture) and Qt's item cache is off (the cached axes, plan bar and
+step table were embedded as pictures in the first version); both are restored afterwards. Pinned: no `<image` in the SVG. The SVG is written
+at 96 dpi (the resolution pyqtgraph's recorded `QPicture`s use; at Qt's default 72 dpi the axes and the step table came out at 0.75x, off
+their place) and pinned by drawing it back and comparing with the plot. `tidy_svg` then leaves out what cannot be seen: the finest grid level
+(28 lines at 1.6 % opacity on the Sensorgram; line groups under 3 % opacity) and the empty groups Qt writes for pen changes (78 per file).
+
+**Inkscape-friendly SVG (`panels/svg_layers.py`, same day).** Qt writes a flat list of unnamed groups (2,476 on a 6-line Sensorgram). The plot is
+now drawn one part at a time (every other item transparent; the part's parents not painting themselves, except the clipping view box) and put
+together as Inkscape layers (`inkscape:groupmode="layer"`, `inkscape:label`; ids for other editors): Background, Experimental plan, Step
+statistics, Cursor, Bands, Lines, Points, Out-of-date marks, Mask marks, Legend, Axes (Spectra: Spectra, Error bars, Fits, Metric markers, Fit
+window; Histogram: curves by name, Highlight range), one named group per line ("ROI 1", "g (n=4)") with a CSS class per kind. Stacked in screen
+paint order. Each part's shared style (stroke, fill, width, dash, opacity) sits on its group and the shapes inside carry none; Qt's per-dot
+wrapper groups are replaced by the dot with its transform. Why: in Inkscape a fill / stroke set on a group goes to everything inside it, and
+Edit > Select Same compares the style of shapes (never groups; it looks inside groups) with inherited values (`selection-chemistry.cpp`). Result
+on the 6-line plot: 68 groups, 692 KB (was 1,030 KB). Qt's SVG generator writes **no clipping** (curves and bands beyond the visible range ran
+past the frame, in the single-pass file too): the plot area is a `clipPath` used by every part drawn inside it. Checked by rendering with
+Inkscape 1.4.4 (`--export-type=png`, clip honoured; Qt's own `QSvgRenderer` ignores `clip-path`) and `--query-all` (all layers and groups read).
+
+**Logical layering (same day, `svg_layers.SECTIONS`).** The layers follow what the elements are, not Qt's paint order: top-level sections
+Background, **Plot area** (sub-layers bottom to top: Grid, Experimental plan, Baseline / Fit window, Highlight range, Regions, Bands, Error bars,
+Lines / Spectra / Curves, Fits, Points, Out-of-date marks, Mask marks, Metric markers, Value tick, Items, Cursor), **Annotations** (Step statistics,
+Legend), **Axes** (one group per axis), Other. The **grid is its own layer** under the data: pyqtgraph draws it as long ticks of each axis, so each
+axis is drawn twice (`SvgPart.setup`): grid only (axis line, tick labels and title transparent; the transparent text is then left out) and axis
+without grid; both restored afterwards. A kind not in the table goes to the plot area or the annotations after the listed ones.
+- Dialogs open in `<session>/exports/` (made on first use; `app_rewrite.export_context`), else the home folder. The dialog asks before replacing;
+  without a dialog a file is never replaced (`FileExistsError`). An export is complete or not there (a failure removes what it wrote).
+- `analysis/export_tables.py` (pure): **Sensorgram** wide (`cube`, x as on the axis, `out_of_date`, one column per line in nm, band low / high for
+  averages); **step statistics** long when the table is on the plot (`line, step, step_title, step_start, step_end, mean, sd, n`) as
+  `<name>_step_stats.csv`; **Spectra** long (`line, roi_id, kind (measured / fit / metric), wavelength (nm), photon energy (eV), value, error`);
+  **Histogram** long, one row per bin (`curve, bin start, bin end, value`). Floats at full precision (`repr`): the files read back to the numbers
+  drawn (pinned by tests).
+- `storage/plot_export.py`: the CSVs and `<name>.json` (format `lspri_plot_export` 0.1, app and version, UTC time, dataset, session, the plot's
+  settings (formula, metric, statistics), the lines and their member ROIs, notes). Out-of-date cubes: a column, a note in the record and a
+  warning after the export.
+- Tests: `tests/unit/test_lspri_export_tables.py`; one export test each in the Sensorgram, Spectra and Histogram panel tests.
+
+Still open (section 10's list): CSV vs other formats, wide vs long, units in headers, the Excel locale (decimal comma), what the record holds;
+the Workflow panel's *Outputs* section (a whole-session export) is not built.
+
 ## 10. What the answers change in the design (apply when the format is discussed and the export is built)
 
 - **One shared export control on every plot area** (today: Sensorgram, Spectra, Histogram), built once as a small shared component and wired to each plot, with two actions: **Save figure** (the plot as drawn; pyqtgraph can write PNG and SVG; to be confirmed when built) and **Save data** (the numbers behind that plot). "Export what is drawn" stays the rule, so the data of a plot is the data of that plot, and a test pins it.

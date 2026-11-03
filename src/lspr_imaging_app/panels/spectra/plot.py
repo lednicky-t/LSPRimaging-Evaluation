@@ -4,6 +4,10 @@ Draws what it is handed and nothing else: per ROI the measured points (optionall
 an optional draggable fit window and a cursor at the current wavelength (a dashed line and, on the x axis, the Wavelength slider's circle in
 its colour; dragging the circle or the line, or clicking anywhere else in the plot, emits ``wavelength_dragged``). It computes nothing (no fit, no formula: ``analysis/scan_view.py`` did that on a worker thread) and
 reads no module. A spectrum that is out of date is drawn dimmed, not hidden.
+
+**x axis in nm or eV** (2026-11-02): a double-click on the x axis label switches between wavelength (nm) and photon energy (eV = 1239.84198 / nm),
+display only. Everything the panel hands over and gets back stays in nm (spectra, fit window, cursor, clicks); only what is drawn is converted.
+``x_unit_changed`` tells the panel, which remembers the choice.
 """
 
 from __future__ import annotations
@@ -19,9 +23,11 @@ from PyQt6.QtWidgets import QGraphicsItem, QVBoxLayout, QWidget
 from lspr_ui import get_active_theme
 
 from ...analysis.scan_view import RoiSpectrum
+from ...analysis.voigt_fit import HC_EV_NM
 from ..axis_cursor import AxisCursor
 from ..image.mark_colors import wavelength_color
 from ..plot_item_pool import PlotItemPool
+from ..svg_layers import SvgPart
 
 Y_LABELS = {
     "absorbance": "Absorbance (A)",
@@ -29,6 +35,9 @@ Y_LABELS = {
     "relative_change": "(Reference - sample) / reference",
     "mod_absorbance": "Modified absorbance (mA)",
 }
+X_UNITS = ("nm", "ev")
+X_LABELS = {"nm": "Wavelength (nm)", "ev": "Photon energy (eV)"}
+_LABEL_HIT_MARGIN = 4.0  # pixels around the x axis label that still count as a double-click on it
 MAX_LEGEND_ROIS = 6
 _DIM_ALPHA = 90
 _WINDOW_BRUSH = (120, 160, 255, 40)
@@ -58,6 +67,7 @@ class SpectraPlot(QWidget):
 
     fit_window_changed = pyqtSignal(float, float)
     wavelength_dragged = pyqtSignal(float)  # nm under the pointer while the cursor circle is dragged (the panel snaps it to a scanned wavelength)
+    x_unit_changed = pyqtSignal(str)  # "nm" | "ev", after a double-click on the x axis label
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -65,7 +75,12 @@ class SpectraPlot(QWidget):
         self._widget.setMinimumHeight(100)
         self._item = self._widget.getPlotItem()
         self._item.showGrid(x=True, y=True, alpha=0.15)
-        self._item.setLabel("bottom", "Wavelength (nm)")
+        self._unit = "nm"
+        self._item.setLabel("bottom", X_LABELS["nm"])
+        self._item.getAxis("bottom").setToolTip("Double-click the label to switch between wavelength (nm) and photon energy (eV).")
+        self._last_draw: tuple | None = None  # (entries, error_bars, dimmed) of the last show_spectra: drawn again on a unit switch
+        self._window_nm: tuple[float, float] | None = None
+        self._cursor_nm: float | None = None
         self._item.setLabel("left", Y_LABELS["absorbance"])
         self._legend: pg.LegendItem | None = None
         self._pool = PlotItemPool(self._item)
@@ -77,7 +92,7 @@ class SpectraPlot(QWidget):
         self._window_in_scene = False
         self._setting_window = False
         self._axis_cursor = AxisCursor(self._item, wavelength_color(), self)
-        self._axis_cursor.dragged.connect(self.wavelength_dragged)
+        self._axis_cursor.dragged.connect(lambda x: self.wavelength_dragged.emit(self._to_nm(x)))
         self._item.scene().sigMouseClicked.connect(self._on_scene_clicked)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -87,6 +102,19 @@ class SpectraPlot(QWidget):
         self.refresh_theme()
 
     # -- theme -----------------------------------------------------------------------------------------------------------------
+
+    def export_parts(self) -> list[SvgPart]:
+        """What each drawn item is, for a layered SVG (`svg_layers.py`): per ROI its spectrum, error bars and fitted curve; the metric markers, the
+        fit window and the wavelength cursor. Axes and legend are named there."""
+        parts = list(getattr(self, "_svg_parts", []))
+        parts += [SvgPart("Cursor", "Wavelength cursor line", self._axis_cursor.line), SvgPart("Cursor", "Wavelength cursor handle", self._axis_cursor.handle)]
+        if self._window_in_scene:
+            parts.append(SvgPart("Fit window", "Fit window", self._window))
+        return parts
+
+    def plot_item(self) -> pg.PlotItem:
+        """The pyqtgraph plot (for the export button: figures are drawn from it)."""
+        return self._item
 
     def refresh_theme(self) -> None:
         """pyqtgraph draws its own canvas and ignores Qt stylesheets: called at construction and on every live theme switch."""
@@ -105,7 +133,50 @@ class SpectraPlot(QWidget):
         """The items drawn now: per ROI the points (and line), the error bars and the fitted curve (each when drawn), then one item with every metric marker."""
         return self._pool.drawn
 
+    # -- the x unit ------------------------------------------------------------------------------------------------------------------
+
+    def x_unit(self) -> str:
+        return self._unit
+
+    def set_x_unit(self, unit: str) -> None:
+        """Draw the x axis in ``unit`` ("nm" or "ev"; anything else is nm). Redraws what is shown; emits nothing."""
+        unit = unit if unit in X_UNITS else "nm"
+        if unit == self._unit:
+            return
+        self._unit = unit
+        self._item.setLabel("bottom", X_LABELS[unit])
+        if self._last_draw is not None:
+            self.show_spectra(self._last_draw[0], error_bars=self._last_draw[1], dimmed=self._last_draw[2])
+        self.set_fit_window(self._window_nm)
+        self.set_current_wavelength(self._cursor_nm)
+
+    def _axis(self, wavelength_nm):
+        """nm -> what the x axis shows (array in, array out)."""
+        values = np.asarray(wavelength_nm, dtype=np.float64)
+        if self._unit == "ev":
+            with np.errstate(divide="ignore"):
+                return HC_EV_NM / values
+        return values
+
+    def _to_nm(self, x: float) -> float:
+        """What the x axis shows -> nm (the same formula: the conversion is its own inverse)."""
+        return float(HC_EV_NM / x) if self._unit == "ev" and x != 0.0 else float(x)
+
+    def _on_x_label(self, scene_pos) -> bool:
+        label = self._item.getAxis("bottom").label
+        rect = label.sceneBoundingRect().adjusted(-_LABEL_HIT_MARGIN, -_LABEL_HIT_MARGIN, _LABEL_HIT_MARGIN, _LABEL_HIT_MARGIN)
+        return rect.contains(scene_pos)
+
+    def toggle_x_unit(self) -> None:
+        """nm <-> eV, as the double-click on the axis label does: redraw, show the whole range, tell the panel."""
+        self.set_x_unit("ev" if self._unit == "nm" else "nm")
+        self._item.getViewBox().autoRange()
+        self.x_unit_changed.emit(self._unit)
+
+    # -- drawing (continued) -------------------------------------------------------------------------------------------------------
+
     def clear(self) -> None:
+        self._last_draw = None
         self._pool.clear()
         if self._legend is not None:
             self._legend.clear()
@@ -128,6 +199,8 @@ class SpectraPlot(QWidget):
 
         The items are reused between redraws (`PlotItemPool`): creating and adding ~4 items per ROI took ~2 s on the GUI thread for 160 ROIs
         (2026-11-02, ``docs/spectra_sensorgram_draw_cost_2026-11-02.md``)."""
+        self._last_draw = (entries, error_bars, dimmed)
+        self._svg_parts: list[SvgPart] = []  # names for a layered SVG export (svg_layers.py)
         pool = self._pool
         pool.begin()
         if self._legend is not None:
@@ -149,28 +222,32 @@ class SpectraPlot(QWidget):
             pen = pg.mkPen(line, width=_LINE_WIDTH[self._line_style], style=_PEN_STYLES[self._line_style]) if self._show_lines else pg.mkPen(None)
             points = pool.take("points", pg.PlotDataItem)
             points.setData(
-                spectrum.wavelengths_nm, spectrum.values, pen=pen,
+                self._axis(spectrum.wavelengths_nm), spectrum.values, pen=pen,
                 symbol="o" if self._show_points else None, symbolSize=self._point_size, symbolBrush=pg.mkBrush(color), symbolPen=None,
                 name=legend_name if data_drawn else None,
             )
+            self._svg_parts.append(SvgPart("Spectra", name, points))
             if legend_name is not None and data_drawn:
                 self._legend.addItem(points, legend_name)
             if error_bars:
                 errors = np.where(np.isfinite(spectrum.errors), spectrum.errors, 0.0)
                 bars = pool.take("bars", lambda: pg.ErrorBarItem(x=np.empty(0), y=np.empty(0), beam=0.0))
-                bars.setData(x=spectrum.wavelengths_nm, y=spectrum.values, height=2.0 * errors, beam=0.0, pen=pg.mkPen(color, width=1))
+                self._svg_parts.append(SvgPart("Error bars", name, bars))
+                bars.setData(x=self._axis(spectrum.wavelengths_nm), y=spectrum.values, height=2.0 * errors, beam=0.0, pen=pg.mkPen(color, width=1))
             if spectrum.fit_values is not None:
                 fit = pool.take("fit", pg.PlotCurveItem)
+                self._svg_parts.append(SvgPart("Fits", name, fit))
                 fit.setData(
-                    spectrum.fit_wavelengths_nm, spectrum.fit_values, pen=pg.mkPen(color, width=fit_width), antialias=fit_width <= 1.0,
+                    self._axis(spectrum.fit_wavelengths_nm), spectrum.fit_values, pen=pg.mkPen(color, width=fit_width), antialias=fit_width <= 1.0,
                     name=None if data_drawn else legend_name,
                 )
                 if legend_name is not None and not data_drawn:
                     self._legend.addItem(fit, legend_name)
             if spectrum.metric_wavelength_nm is not None and spectrum.metric_value is not None:
-                markers.append((spectrum.metric_wavelength_nm, spectrum.metric_value, pg.mkBrush(color)))
+                markers.append((float(self._axis(spectrum.metric_wavelength_nm)), spectrum.metric_value, pg.mkBrush(color)))
         if markers:  # one item for every ROI's marker, on top (one item per ROI cost ~0.4 ms each in pyqtgraph's bookkeeping)
             marker = pool.take("marker", pg.ScatterPlotItem, z=1.0)
+            self._svg_parts.append(SvgPart("Metric markers", "Markers", marker))
             marker.setData(
                 [m[0] for m in markers], [m[1] for m in markers], symbol="d", size=11, brush=[m[2] for m in markers], pen=pg.mkPen(255, 255, 255, alpha),
             )
@@ -181,10 +258,12 @@ class SpectraPlot(QWidget):
 
     def set_current_wavelength(self, wavelength_nm: float | None) -> None:
         """The dashed line and the slider-style circle at the wavelength shown on the Image panel (None hides them)."""
-        self._axis_cursor.set_x(wavelength_nm)
+        self._cursor_nm = wavelength_nm
+        self._axis_cursor.set_x(None if wavelength_nm is None else float(self._axis(wavelength_nm)))
 
     def set_fit_window(self, window: tuple[float, float] | None) -> None:
         """Show the window (low, high) in nm, or hide it (None). Setting it here never emits ``fit_window_changed``."""
+        self._window_nm = None if window is None else (float(window[0]), float(window[1]))
         if window is None:
             if self._window_in_scene:
                 self._item.removeItem(self._window)
@@ -195,30 +274,41 @@ class SpectraPlot(QWidget):
             self._window_in_scene = True
         self._setting_window = True
         try:
-            self._window.setRegion(window)
+            low, high = sorted(float(v) for v in self._axis(np.asarray(window, dtype=np.float64)))  # in eV the order turns round
+            self._window.setRegion((low, high))
         finally:
             self._setting_window = False
 
     def fit_window(self) -> tuple[float, float] | None:
+        """The window as shown, in nm (low, high)."""
         if not self._window_in_scene:
             return None
-        low, high = self._window.getRegion()
-        return float(low), float(high)
+        low, high = sorted(self._to_nm(float(v)) for v in self._window.getRegion())
+        return low, high
 
     def x_range(self) -> tuple[float, float]:
-        low, high = self._item.getViewBox().viewRange()[0]
-        return float(low), float(high)
+        """The visible x range, in nm (low, high)."""
+        low, high = sorted(self._to_nm(float(v)) for v in self._item.getViewBox().viewRange()[0])
+        return low, high
 
     def _on_scene_clicked(self, event) -> None:
-        """A plain left click on the plot area puts the cursor there. Clicks another item handled (the fit window, the cursor) are not ours."""
-        if event.button() != Qt.MouseButton.LeftButton or event.double() or event.isAccepted():
+        """A plain left click on the plot area puts the cursor there; a double-click on the x axis label switches nm / eV. Clicks another item
+        handled (the fit window, the cursor) are not ours."""
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        if event.double():
+            if self._on_x_label(event.scenePos()):
+                self.toggle_x_unit()
+            return
+        if event.isAccepted():
             return
         view_box = self._item.getViewBox()
         if view_box.sceneBoundingRect().contains(event.scenePos()):
-            self.wavelength_dragged.emit(float(view_box.mapSceneToView(event.scenePos()).x()))
+            self.wavelength_dragged.emit(self._to_nm(float(view_box.mapSceneToView(event.scenePos()).x())))
 
     def _on_window_finished(self) -> None:
         if self._setting_window:
             return
-        low, high = self._window.getRegion()
-        self.fit_window_changed.emit(float(low), float(high))
+        low, high = self.fit_window()
+        self._window_nm = (low, high)
+        self.fit_window_changed.emit(low, high)

@@ -50,7 +50,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 
 import numpy as np
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
@@ -102,7 +102,9 @@ from ..ribbon_drawer import RibbonDrawer
 from ..ribbon_row import RibbonRow
 from ..image.roi_overlay_controls import RoiOverlayControls
 from ..image_first import ImageFirst
+from ...analysis.export_tables import sensorgram_table, step_stats_table
 from ..panel_task import PanelTask
+from ..plot_export_button import ExportData, PlotExportButton
 from ..ui_state import UiStateStore
 from ..spectra.pick_menu import PickMenu
 from ..spectra.view_menu import IconToggle
@@ -284,6 +286,8 @@ class SensorgramPanel(QWidget):
         self._ribbon.add_group("Smoothing", self._smoothing, self._window, self._within_steps, self._spikes)
         self._ribbon.add_group("Baseline", self._baseline, self._band_menu)
         self._ribbon.add_group("View", self._mask_toggle)
+        self.export_button = PlotExportButton("sensorgram", lambda: self._plot.plot_item(), self._export_data, self, svg_parts=self._plot.export_parts)
+        self._ribbon.add_group("Export", self.export_button)
         self._ribbon.add_stretch()
         # The experimental plan has a tab of its own (2026-10-29): the bar's controls, the baseline / signal steps, the table of numbers per step. The plan bar's structure tools
         # (remove, add, unify, the roles) are live only while it is the active tab, as the ROI gestures are only live on the Image ribbon's ROIs tab.
@@ -785,6 +789,27 @@ class SensorgramPanel(QWidget):
         self._update_cursor()
         self._steps.refresh()
         self._status.setText(self._status_line(job, series, stale))
+
+    def _export_data(self) -> ExportData | None:
+        """What "Save data" writes (export what is drawn): the lines as plotted with the out-of-date cubes marked, and the step statistics table
+        when it is on the plot; the record holds the settings that made them."""
+        if self._last is None:
+            return None
+        job, series = self._last
+        label, _x = self._x_axis()
+        tables = {"sensorgram": sensorgram_table(series, label, job.stored.cube_indices, self._stale_mask(job.stored))}
+        stats_item = self._plot.stats_item()
+        steps = step_stats_table(stats_item.table()) if stats_item.is_shown() else None
+        if steps is not None:
+            tables["step_stats"] = steps
+        request = job.request
+        info = {
+            "x_axis": label,
+            "roi_ids": [int(r) for r in request.roi_ids],
+            "settings": {"formula": request.formula_key, "metric": asdict(request.metric), "statistics": asdict(request.statistics)},
+            "lines": [{"label": s.label, "key": s.key, "members": [int(m) for m in s.member_ids], "baseline_nm": s.baseline} for s in series],
+        }
+        return ExportData(tables, info)
 
     def _drawn(self) -> tuple[StoredScan, list[Series]] | None:
         """The scan and the lines last drawn (None before the first draw or after a clear): what the step overlays are laid over."""

@@ -113,6 +113,7 @@ ROI_OVERLAY_KEYS = {
     for kind in ("sample", "reference")
 }
 IMAGE_OVERLAY_CACHE_MB = UiKey("image/overlay_cache_mb", 256, int)  # Edit -> Preferences: ROI overlay cache size in MB; 0 = off
+IMAGE_GPU_DRAWING = UiKey("image/gpu_drawing", True, bool)  # Edit -> Preferences: draw the image view with the graphics card (OpenGL viewport)
 # Edit -> Preferences: parallel work (lspr_core.perf; read by perf_setup.py). Mode "standard" (default) | "auto" (tune) | "manual";
 # 0 workers = not chosen.
 PERF_MODE = UiKey("perf/mode", "standard", str)
@@ -126,6 +127,8 @@ MASK_SCOPE = UiKey("mask/scope", None, str)  # a `MaskScope` value
 SLIDER_RIBBON_OPEN = UiKey("image/slider_ribbon_open", True, bool)  # rolled down (True) or up
 TOP_RIBBON_OPEN = UiKey("image/top_ribbon_open", True, bool)  # the tool ribbon above the canvas: rolled down (True) or up
 SPECTRA_RIBBON_OPEN = UiKey("spectra/ribbon_open", True, bool)  # the Spectra panel's control row: rolled down (True) or up
+PLOT_EXPORT_FOLDER = UiKey("export/last_folder", None, str)  # the folder a plot's figure or data was last saved to (all plots; the dialogs open there)
+SPECTRA_X_UNIT = UiKey("spectra/x_unit", "nm", str)  # the Spectra plot's x axis: "nm" (wavelength) | "ev" (photon energy); double-click the axis label
 SPECTRA_LINE_STYLE = UiKey("spectra/line_style", "solid", str)  # the line between the measured points: "solid" | "dash" | "dot" | "dashdot" (View menu)
 SENSORGRAM_RIBBON_TAB = UiKey("sensorgram/ribbon_tab", "Plot", str)  # the tab of the Sensorgram's control row that was shown: "Plot" or "Experimental plan"
 SENSORGRAM_RIBBON_OPEN = UiKey("sensorgram/ribbon_open", True, bool)  # the Sensorgram panel's control row: rolled down (True) or up
@@ -188,7 +191,7 @@ ARRAY_KEYS = {  # ROIs tab, "Array" group (panels/image/array_controls.py); leng
 HAND_WIRED_KEYS: tuple[UiKey, ...] = (
     HISTOGRAM_CURSOR_READOUT, HISTOGRAM_CURVE_STYLES, IMAGE_CURSOR_READOUT, IMAGE_MASK_EDIT_TOOL, IMAGE_MASK_EDIT_PREVIEW,
     IMAGE_SCALE_BAR_COLOR, IMAGE_ROI_LABELS,
-    IMAGE_OVERLAY_CACHE_MB, PERF_MODE, PERF_MANUAL_WORKERS, PERF_RESERVED_CORES, PERF_LOW_PRIORITY, ANALYSIS_MODE,
+    IMAGE_OVERLAY_CACHE_MB, IMAGE_GPU_DRAWING, PERF_MODE, PERF_MANUAL_WORKERS, PERF_RESERVED_CORES, PERF_LOW_PRIORITY, ANALYSIS_MODE,
     *(key for keys_for_kind in ROI_OVERLAY_KEYS.values() for key in keys_for_kind.values()),
     CUBE_DISPLAY_MODE, MASK_SCOPE, ROI_SCOPE, ROI_ROW_VISIBLE, ROI_ROW_SELECTED_ONLY, MASK_ROWS_VISIBLE, EXPORT_SHARD,
     *ARRAY_KEYS.values(), *SLIDER_COLOR_KEYS.values(),
