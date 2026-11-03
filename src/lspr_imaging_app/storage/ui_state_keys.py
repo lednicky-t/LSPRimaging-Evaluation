@@ -128,6 +128,7 @@ SLIDER_RIBBON_OPEN = UiKey("image/slider_ribbon_open", True, bool)  # rolled dow
 TOP_RIBBON_OPEN = UiKey("image/top_ribbon_open", True, bool)  # the tool ribbon above the canvas: rolled down (True) or up
 SPECTRA_RIBBON_OPEN = UiKey("spectra/ribbon_open", True, bool)  # the Spectra panel's control row: rolled down (True) or up
 PLOT_EXPORT_FOLDER = UiKey("export/last_folder", None, str)  # the folder a plot's figure or data was last saved to (all plots; the dialogs open there)
+PLOT_EXPORT_FIGURE_FORMAT = UiKey("export/figure_format", "png", str)  # the file type a plot's figure was last saved as, "png" | "svg" (all plots; the dialog opens on it)
 SPECTRA_X_UNIT = UiKey("spectra/x_unit", "nm", str)  # the Spectra plot's x axis: "nm" (wavelength) | "ev" (photon energy); double-click the axis label
 SPECTRA_LINE_STYLE = UiKey("spectra/line_style", "solid", str)  # the line between the measured points: "solid" | "dash" | "dot" | "dashdot" (View menu)
 SENSORGRAM_RIBBON_TAB = UiKey("sensorgram/ribbon_tab", "Plot", str)  # the tab of the Sensorgram's control row that was shown: "Plot" or "Experimental plan"

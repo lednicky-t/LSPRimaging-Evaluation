@@ -109,6 +109,7 @@ from .selection.reference_auto_task import TASK_ID as REFERENCE_TASK_ID, Referen
 from .storage.app_settings import AppSettings, load_app_settings, save_app_settings
 from .storage.ui_state_keys import (
     ANALYSIS_MODE,
+    PLOT_EXPORT_FIGURE_FORMAT,
     PLOT_EXPORT_FOLDER,
     CHROMATIC_ALL_WAVELENGTHS,
     CUBE_DISPLAY_MODE,
@@ -1812,8 +1813,13 @@ def build_main_window(
     def remember_export_folder(folder: Path) -> None:
         ui_state.set(PLOT_EXPORT_FOLDER.key, str(folder))
 
+    def remember_export_format(kind: str) -> None:
+        ui_state.set(PLOT_EXPORT_FIGURE_FORMAT.key, kind)
+
     for button in (sensorgram_panel.export_button, spectra_panel.export_button, histogram_panel.export_button()):
-        button.set_context(export_context, remember_export_folder)
+        button.set_context(
+            export_context, remember_export_folder, lambda: str(read(ui_state, PLOT_EXPORT_FIGURE_FORMAT)), remember_export_format
+        )
     stages.done("ROI table, Spectra and Sensorgram panels")
     workflow = _build_workflow_panel(m, writer, ui_state)
     stages.done("Workflow panel", "Assembling the window...")

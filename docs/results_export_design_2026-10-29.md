@@ -172,7 +172,9 @@ Lines / Spectra / Curves, Fits, Points, Out-of-date marks, Mask marks, Metric ma
 Legend), **Axes** (one group per axis), Other. The **grid is its own layer** under the data: pyqtgraph draws it as long ticks of each axis, so each
 axis is drawn twice (`SvgPart.setup`): grid only (axis line, tick labels and title transparent; the transparent text is then left out) and axis
 without grid; both restored afterwards. A kind not in the table goes to the plot area or the annotations after the listed ones.
-- Dialogs open in `<session>/exports/` (made on first use; `app_rewrite.export_context`), else the home folder. The dialog asks before replacing;
+- Dialogs open in the folder of the last save (`export/last_folder`, all plots, kept across launches) while it exists, else in `<session>/exports/` (made on
+  first use; `app_rewrite.export_context`), else the home folder. The figure dialog also opens on the file type of the last figure (`export/figure_format`,
+  "png" | "svg"; the type of the file written is what is kept: a typed `.svg` / `.png` wins, an unedited name follows the dialog's type list). The dialog asks before replacing;
   without a dialog a file is never replaced (`FileExistsError`). An export is complete or not there (a failure removes what it wrote).
 - `analysis/export_tables.py` (pure): **Sensorgram** wide (`cube`, x as on the axis, `out_of_date`, one column per line in nm, band low / high for
   averages); **step statistics** long when the table is on the plot (`line, step, step_title, step_start, step_end, mean, sd, n`) as
