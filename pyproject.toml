@@ -114,10 +114,12 @@ ignore = [
 ]
 
 [tool.ruff.lint.flake8-bugbear]
-# Immutable values, fine as default arguments (B008): QModelIndex() in the Qt model overrides, and the frozen FeatureSettings.
+# Immutable values, fine as default arguments (B008): QModelIndex() in the Qt model overrides, and the frozen FeatureSettings and
+# FeatureMapSettings.
 extend-immutable-calls = [
     "PyQt6.QtCore.QModelIndex",
     "lspr_imaging_app.image_tools.mask.roi_features.FeatureSettings",
+    "lspr_imaging_app.image_tools.mask.feature_map.FeatureMapSettings",
 ]
 
 [tool.ruff.lint.per-file-ignores]
