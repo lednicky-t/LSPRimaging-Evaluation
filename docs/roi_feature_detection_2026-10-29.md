@@ -334,9 +334,44 @@ is inside the disk with steep steps (2.4 %/px, 10.5 % deep) on a disk the map al
 where the image is least sharp, still uncertain. Test `test_soft_shadow_is_faint_dirt_and_not_masked_by_default`; the synthetic 3 %
 speck is now faint dirt too.
 
-**Next (not built):** the Mask tab: run the map (worker process: ~70 s on one core, the 26 wavelengths are independent), four kind
-switches, the limits in % in the settings popup, which cubes to average (e.g. the plan's baseline step), Apply into the mask (raw
-pixels, as now). The existing "ROI features" tool (sections 1-8) is still the one in the app.
+## 11. In the app: the Mask tab's "Feature map" tool (2026-11-04, maintainer: "wire it correctly")
+
+It **replaced** the ROI features tool of section 7 (same place in the Manual-edit picker, same row
+`[eye] [settings v] [process] [apply +]`, same Apply path through `MaskCandidateEditor`). Removed: `image_tools/mask/roi_feature_run.py`,
+`panels/roi_feature_task.py`, their tests; `roi_features.py` stays (the map uses `fit_patch`, `NotEnoughRois`), with
+`tools/roi_feature_lab.py` and its unit test. `MaskEditTool.FEATURE_MAP` keeps the stored value `"roi_features"`, so a remembered
+tool choice still opens it.
+
+**Pieces.**
+- `feature_map.py` split into `prepare` (disks, dirt / nanostructure maps: slow) and `score` (limits, kinds, trimming: ~2 s), its
+  three loops (disk fits on the raw picture, disk fits without shading, one model per wavelength) as top-level jobs run through a
+  `Mapper` (default: a plain loop). `stage_a_key(settings)` = what `prepare` depends on; the outlier pre-pass now uses a fixed 1 %
+  (was half the dirt limit: same at the default) so `prepare` never depends on a user limit. **Every kind's mask identical** to
+  before the split on the real data (668 features).
+- `feature_map_run.py`: `ProcessMapper`, one pool per run, one `lspr_core.perf` run per stage (keys `mask.feature_map.fits`,
+  `mask.feature_map.wavelengths`), results in job order: identical at any worker count (real data: plain loop 69.5 s, Standard 26.7 s,
+  3 workers 36 s, all identical). Workers keep the picture's nearest-disk map and radial model between wavelengths.
+- `panels/feature_map_task.py`: `FeatureMapTask`. Per wavelength the mean of the raw planes of `cubes` spectral cubes from the one on
+  screen on (`choose_cubes`; dark / ignored frames left out through the frame roles), cubes with one chromatic matrix averaged first,
+  each mean rotated / cropped once (linear, so equal to rotating each plane) **without background flattening** (it may use ROIs), then
+  moved onto the pixels of the frame on screen. Keeps every kind's raw mask (`set_kinds` is instant: Apply and the preview take the
+  union of the enabled kinds) and the `Prepared` (new limits: ~2 s). Dropped on a new rotation / crop or chromatic model (not on ROI
+  or background changes); a change while it runs refuses the result.
+- `FeatureMapEditPanel` (in `panels/image/mask_edit_panels.py`): popup with Dirt from %, Nanostructure from %, Certainty, Feature edge
+  %, Margin px, Cubes to average, five kind check boxes (faint dirt off) and Defaults; all remembered (`image/feature_map/...`).
+  Process is a Run / Stop button like the Analysis and Tuning tabs' (green `accent_green` play; red `#ef4444` stop while running, a
+  click cancels: nothing changes, an earlier result stays).
+
+**Tests:** `tests/unit/test_lspri_feature_map.py` (11), `tests/unit/test_lspri_feature_map_run.py` (3: identical at 1 / 2 processes,
+progress, Cancel), `tests/integration/test_lspri_feature_map_tool.py` (a real Image panel on two synthetic cubes x 10 wavelengths:
+kinds found, preview = enabled kinds, a kind's box acts without a run, moving ROIs keeps the result, rotation / chromatic drop it,
+change while running refused, Apply at both scopes / merged / one change / inside the area selection, re-score reuses the slow part
+and gives the same pixels back, settings remembered, picker + stored value).
+
+**Not done / open:** not looked at by eye in the running app (popup layout, wording); per-kind colours in the preview (it tints the
+union in one colour); the result belongs to one frame (Apply only there), though the features are static.
+
+(Built 2026-11-04 as section 11 describes; it replaced the "ROI features" tool of sections 1-8.)
 
 **Not done / open**: no per-ROI list in the UI yet (to keep or skip single ROIs; the status line names the ROIs left out, the
 findings are in `RoiFeatureTask.result().findings`); the memory limit per worker (`_WORKER_BYTES`, 300 MB) is three times what one

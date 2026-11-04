@@ -1,4 +1,4 @@
-"""The "Edit" group's seven per-tool control panels (five 2026-10-02, ROI features and Eraser 2026-10-29; maintainer
+"""The "Edit" group's seven per-tool control panels (five 2026-10-02, ROI features (now Feature map) and Eraser 2026-10-29; maintainer
 request) - one per `MaskEditTool`, swapped by `MaskEditToolPicker` via a
 `QStackedWidget` (`panel.py`'s `_build_ui`). Reorganizes the stable app's
 always-all-visible Mask section (Histogram masking / Relative threshold /
@@ -37,9 +37,10 @@ show the edits".
   thread (`image_tools/mask_candidates.py`; `threading.Thread`, never
   `QThreadPool` - see the zarr-crash invariant) and shared by the preview and
   the buttons.
-- **ROI features** (2026-10-29): `RoiFeaturesEditPanel`. Not a live preview but a Process button (3-16 s, worker processes, progress
-  and Cancel in the status bar), a settings popup and an Apply button that adds the found pixels at the Persistent / Individual
-  scope. Record: `docs/roi_feature_detection_2026-10-29.md`.
+- **Feature map** (2026-11-04, replaced the ROI features tool of 2026-10-29): `FeatureMapEditPanel`. Not a live preview but a
+  Process button (~20-30 s, worker processes, progress and Cancel in the status bar), a settings popup with the limits, the cubes and
+  one check box per kind, and an Apply button that adds the enabled kinds at the Persistent / Individual scope. No ROIs: the result
+  stays right when ROIs move. Record: `docs/roi_feature_detection_2026-10-29.md` sections 10-11.
 - **Eraser** (2026-10-29): `EraserEditPanel` is only a hint icon; the tool is a click on the image (`panels/mask_grain_eraser.py`,
   routed by `CanvasInteraction`), which removes the connected blob of mask pixels under it.
 - **Draw**: settings-only. The brush-size spinbox is real (same
@@ -66,12 +67,14 @@ already fits inside.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import QEvent, QObject, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QButtonGroup,
+    QCheckBox,
     QDoubleSpinBox,
     QFormLayout,
     QHBoxLayout,
@@ -89,8 +92,8 @@ from lspr_ui import get_active_theme, load_tabler_icon, make_compact_spinbox
 from ...dataset import DatasetModule
 from ...image_tools import ChromaticModule, GeometryModule, MaskModule, MaskScopeModule
 from ...image_tools.mask.model import MaskSettings
-from ...image_tools.mask.roi_feature_run import FeatureParams
-from ..roi_feature_task import FeatureSummary, RoiFeatureTask
+from ...image_tools.mask import feature_map as fm
+from ..feature_map_task import DEFAULT_CUBES, FeatureMapResult, FeatureMapSummary, FeatureMapTask
 from ...selection import HighlightRangeModule
 from ..mask_candidate_editor import MaskCandidateEditor
 from ..mask_edit_common import (
@@ -102,7 +105,7 @@ from ..mask_edit_common import (
     disabled_safe_icon,
     resolve_mask_edit_base,
 )
-from ..mask_edit_preview import KIND_LOCAL_CONTRAST, KIND_ROI_FEATURES, KIND_THRESHOLD, MaskEditPreview
+from ..mask_edit_preview import KIND_FEATURE_MAP, KIND_LOCAL_CONTRAST, KIND_THRESHOLD, MaskEditPreview
 from ..mask_highlight_editor import HistogramHighlightMaskEditor
 from ..ribbon_fields import style_ribbon_number_field
 from .edit_preview_toggle import EditPreviewToggle
@@ -560,109 +563,149 @@ class MorphologyEditPanel(QWidget):
 
 
 _PLAIN_ICON_COLOR = "#f8fafc"  # GuiTheme.text_primary, like the other real, active actions of this ribbon
+_STOP_COLOR = "#ef4444"  # the red stop of the Analysis, Tuning and Export tabs' Run / Stop buttons
 
 
-class _FeatureParamsPopover(QWidget):
-    """The finder's numbers, in the popup of the settings button (the ribbon row has no room for five fields). The widgets are the
-    panel's own (it reads and remembers them); `changed` fires when any of them does."""
+class _FeatureMapPopover(QWidget):
+    """The map's settings, in the popup of the settings button (the ribbon row has no room). The widgets are the panel's own (it reads
+    and remembers them). `numbers_changed` fires for a number (they need Process again: ~2 s with the kept slow part, a full run for
+    another cube count); `kinds_changed` for a kind's check box (instant: every kind of the result is kept)."""
 
-    changed = pyqtSignal()
+    numbers_changed = pyqtSignal()
+    kinds_changed = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        defaults = FeatureParams()
-        self.strength_spin = QDoubleSpinBox(self)
-        self.strength_spin.setRange(2.0, 20.0)
-        self.strength_spin.setDecimals(1)
-        self.strength_spin.setSingleStep(0.5)
-        self.strength_spin.setToolTip(
-            "How strongly a feature must stand out from what the other ROIs of the array look like (a score; about 1 is the ordinary "
-            "pixel-to-pixel scatter, 5 is clearly different). Lower finds fainter features and more false alarms."
+        self.dirt_spin = QDoubleSpinBox(self)
+        self.dirt_spin.setRange(0.5, 30.0)
+        self.dirt_spin.setDecimals(1)
+        self.dirt_spin.setSingleStep(0.5)
+        self.dirt_spin.setSuffix(" %")
+        self.dirt_spin.setToolTip("Dirt must take (or add) at least this share of the light. Lower finds fainter dirt.")
+        self.structure_spin = QSpinBox(self)
+        self.structure_spin.setRange(2, 90)
+        self.structure_spin.setSuffix(" %")
+        self.structure_spin.setToolTip(
+            "Nanostructure must be missing (or extra) by at least this share of a disk's normal plasmon contrast. A notch is typically 50-70 %."
         )
-        self.extent_spin = QDoubleSpinBox(self)
-        self.extent_spin.setRange(1.0, 10.0)
-        self.extent_spin.setDecimals(1)
-        self.extent_spin.setSingleStep(0.5)
-        self.extent_spin.setToolTip(
-            "Where a feature ends: the pixels next to a found feature that reach this score belong to it. Lower makes the features "
-            "bigger (and lets neighbouring ones merge). Never higher than the strength."
+        self.certainty_spin = QDoubleSpinBox(self)
+        self.certainty_spin.setRange(3.0, 15.0)
+        self.certainty_spin.setDecimals(1)
+        self.certainty_spin.setSingleStep(0.5)
+        self.certainty_spin.setToolTip(
+            "How clearly a feature must stand out of the pixel-to-pixel scatter at its place (a score; 5 is clearly). Lower finds "
+            "more, and more false alarms."
         )
-        self.width_spin = QSpinBox(self)
-        self.width_spin.setRange(4, 60)
-        self.width_spin.setSuffix(" px")
-        self.width_spin.setToolTip("Features wider than this are not small and are left alone (the sample disk is about 34 px across).")
+        self.edge_spin = QSpinBox(self)
+        self.edge_spin.setRange(0, 90)
+        self.edge_spin.setSuffix(" %")
+        self.edge_spin.setToolTip(
+            "Where a feature ends: where it is still at least this share of its own strongest pixels. A dense particle in a faint "
+            "shadow is then the particle, not the shadow. 0 lets features spread down to 60 % of the limits."
+        )
         self.margin_spin = QSpinBox(self)
         self.margin_spin.setRange(0, 10)
         self.margin_spin.setSuffix(" px")
-        self.margin_spin.setToolTip("The mask is the feature grown by this much (the edges of a feature are blurred by the optics).")
-        self.share_spin = QSpinBox(self)
-        self.share_spin.setRange(5, 100)
-        self.share_spin.setSuffix(" %")
-        self.share_spin.setToolTip(
-            "A ROI whose features would cover more than this share of its sample disk or its reference ring is left unmasked (too "
-            "little would be left to measure with). The status line lists it."
+        self.margin_spin.setToolTip("The mask is each feature grown by this much (the optics blur its edge).")
+        self.cubes_spin = QSpinBox(self)
+        self.cubes_spin.setRange(1, 200)
+        self.cubes_spin.setToolTip(
+            "How many cubes, from the one on screen on, are averaged before looking (the features are static; more cubes, less noise, "
+            "a longer first run: ~1 s per cube for reading)."
         )
+        self.kind_checks: dict[str, QCheckBox] = {}
+        for kind in fm.KINDS:
+            check = QCheckBox(fm.KIND_LABELS[kind], self)
+            check.setToolTip(_KIND_TIPS[kind])
+            self.kind_checks[kind] = check
         self.reset_button = QPushButton("Defaults", self)
-        self.reset_button.setToolTip("Put the five numbers back to their starting values.")
-        for spin in (self.strength_spin, self.extent_spin, self.width_spin, self.margin_spin, self.share_spin):
+        self.reset_button.setToolTip("Put the numbers and the kinds back to their starting values.")
+        for spin in (self.dirt_spin, self.structure_spin, self.certainty_spin, self.edge_spin, self.margin_spin, self.cubes_spin):
             spin.setKeyboardTracking(False)
-        self._set_defaults(defaults)
+        self._set_defaults()
         form = QFormLayout(self)
         form.setContentsMargins(10, 8, 10, 8)
         form.setSpacing(6)
-        form.addRow("Strength", self.strength_spin)
-        form.addRow("Extent", self.extent_spin)
-        form.addRow("Largest feature", self.width_spin)
+        form.addRow("Dirt from", self.dirt_spin)
+        form.addRow("Nanostructure from", self.structure_spin)
+        form.addRow("Certainty", self.certainty_spin)
+        form.addRow("Feature edge", self.edge_spin)
         form.addRow("Margin", self.margin_spin)
-        form.addRow("Skip ROIs above", self.share_spin)
+        form.addRow("Cubes to average", self.cubes_spin)
+        caption = QLabel("Add to the mask:", self)
+        form.addRow(caption)
+        for check in self.kind_checks.values():
+            form.addRow(check)
         form.addRow(self.reset_button)
-        for spin in (self.strength_spin, self.extent_spin):
-            spin.valueChanged.connect(lambda _v: self.changed.emit())
-        for spin in (self.width_spin, self.margin_spin, self.share_spin):
-            spin.valueChanged.connect(lambda _v: self.changed.emit())
-        self.reset_button.clicked.connect(lambda: self._set_defaults(FeatureParams()))
+        for spin in (self.dirt_spin, self.structure_spin, self.certainty_spin, self.edge_spin, self.margin_spin, self.cubes_spin):
+            spin.valueChanged.connect(lambda _v: self.numbers_changed.emit())
+        for check in self.kind_checks.values():
+            check.toggled.connect(lambda _on: self.kinds_changed.emit())
+        self.reset_button.clicked.connect(self._set_defaults)
 
-    def _set_defaults(self, defaults: FeatureParams) -> None:
-        self.strength_spin.setValue(defaults.strength)
-        self.extent_spin.setValue(defaults.extent)
-        self.width_spin.setValue(int(defaults.max_width_px))
-        self.margin_spin.setValue(int(defaults.margin_px))
-        self.share_spin.setValue(int(round(defaults.max_share * 100.0)))
+    def _set_defaults(self) -> None:
+        defaults = fm.FeatureMapSettings()
+        self.dirt_spin.setValue(defaults.dirt_min * 100.0)
+        self.structure_spin.setValue(int(round(defaults.structure_min * 100.0)))
+        self.certainty_spin.setValue(defaults.certainty)
+        self.edge_spin.setValue(int(round(defaults.core_share * 100.0)))
+        self.margin_spin.setValue(int(defaults.grow_px))
+        self.cubes_spin.setValue(DEFAULT_CUBES)
+        for kind, check in self.kind_checks.items():
+            check.setChecked(kind in defaults.kinds)
 
-    def params(self) -> FeatureParams:
-        return FeatureParams(
-            strength=float(self.strength_spin.value()),
-            extent=float(self.extent_spin.value()),
-            max_width_px=float(self.width_spin.value()),
-            margin_px=int(self.margin_spin.value()),
-            max_share=self.share_spin.value() / 100.0,
+    def kinds(self) -> frozenset[str]:
+        return frozenset(kind for kind, check in self.kind_checks.items() if check.isChecked())
+
+    def settings(self) -> fm.FeatureMapSettings:
+        return fm.FeatureMapSettings(
+            dirt_min=self.dirt_spin.value() / 100.0,
+            structure_min=self.structure_spin.value() / 100.0,
+            certainty=float(self.certainty_spin.value()),
+            core_share=self.edge_spin.value() / 100.0,
+            grow_px=int(self.margin_spin.value()),
+            kinds=self.kinds(),
         )
 
-
-def _ids_text(ids: tuple[int, ...], limit: int = 8) -> str:
-    shown = ", ".join(str(i) for i in ids[:limit])
-    return shown + (f" and {len(ids) - limit} more" if len(ids) > limit else "")
+    def cubes(self) -> int:
+        return int(self.cubes_spin.value())
 
 
-class RoiFeaturesEditPanel(QWidget):
-    """The ROI features tool: eye, settings, Process, Apply (2026-10-29).
+_KIND_TIPS = {
+    fm.DIRT_DARK: "Particles, specks, smudges that take light (the same at every wavelength).",
+    fm.DIRT_BRIGHT: "Something that adds light at every wavelength (rare; a bright rim next to a big dark smudge can be one).",
+    fm.STRUCTURE_MISSING: "Less nanostructure than a whole disk: notches at the rim, scratches across a disk. Looks brighter.",
+    fm.STRUCTURE_EXTRA: "More (denser) nanostructure than a whole disk. Looks darker.",
+    fm.DIRT_FAINT: (
+        "Dirt that dims gently (under 1.7 % of the light per pixel): soft shadows of dust out of focus, faint specks. Static and grey, "
+        "it moves no peak; off by default (masking costs good pixels)."
+    ),
+}
 
-    Screen purpose: find the small features (dust, scratches, notches at the rim) that lie on the sample disks or reference rings of
-    the ROIs, look at them on the image, and add them to the mask. Layout (one row, like the other tools):
+
+class FeatureMapEditPanel(QWidget):
+    """The Feature map tool: eye, settings, Process, Apply (2026-11-04; replaces the ROI features tool of 2026-10-29).
+
+    Screen purpose: map every small feature of the image (dirt, faint dirt, missing or extra nanostructure), without ROIs, look at it
+    on the image, and add the kinds wanted to the mask. A mask made this way stays right when ROIs are moved or changed.
+    Layout (one row, like the other tools):
 
         [eye] [settings v] [process] [apply +]
 
-    - **eye**: show or hide the found pixels on the image (the one switch of the three other tools too).
-    - **settings**: strength, extent, largest feature, margin and the share of a ROI above which it is left out (a popup; its tooltip
-      always shows the numbers). Remembered.
-    - **process**: look at the image on screen. Off the GUI thread (`RoiFeatureTask`); progress and Cancel are in the status bar.
-      A second run with other numbers on the same image takes a fraction of the first (the fit is kept).
-    - **apply**: add the found pixels to the mask in effect at this frame, at the scope the State group says (Persistent or
-      Individual), in one mask change, cut to the area selection if there is one. Like the other tools' Add it is not on the undo
-      stack (mask edits are not, see `MaskModule`'s docstring). Enabled only while the image on screen is the one the result was made
-      for; the tooltip says why it is not.
+    - **eye**: show or hide the pixels Apply would add (the enabled kinds) on the image.
+    - **settings**: the limits (dirt %, nanostructure %, certainty, feature edge, margin), the cubes to average and one check box per
+      kind (popup; its tooltip always shows the numbers). Remembered. A kind's check box acts at once; a number needs Process again
+      (~2 s on the same image and cubes: the slow part is kept).
+    - **process**: map the image on screen from the mean of the cubes (~20-40 s the first time, worker processes; progress in the
+      status bar). Changes no mask. A green play when idle; while it runs the same button is a red stop (like the Analysis and Tuning
+      tabs' Run / Stop): a click stops the run and changes nothing.
+    - **apply**: add the pixels of the enabled kinds to the mask in effect at this frame, at the scope the State group says
+      (Persistent or Individual), in one mask change, cut to the area selection if there is one. Like the other tools' Add it is not
+      on the undo stack. Enabled only while the image on screen is the one the map was made for.
 
-    The finder looks at the picture only, never at the mask, so what it finds does not change when the mask is edited."""
+    Important states: no image (Process disabled); running (all but the eye disabled); a result for another frame (Apply disabled,
+    its tooltip says which frame); numbers changed since the run (Process's tooltip says so). Errors: in the status line (no
+    dataset, fewer than 3 wavelengths, no disks found)."""
 
     def __init__(
         self,
@@ -672,7 +715,7 @@ class RoiFeaturesEditPanel(QWidget):
         image_panel: ImagePanel,
         mask_scope: MaskScopeModule,
         preview: MaskEditPreview,
-        features: RoiFeatureTask,
+        features: FeatureMapTask,
         status: Callable[[str], None],
         parent: QWidget | None = None,
     ) -> None:
@@ -684,12 +727,14 @@ class RoiFeaturesEditPanel(QWidget):
 
         self._toggle = EditPreviewToggle(preview, self)
 
-        # The numbers are in a popup: the Mask ribbon row is already ~800 px wide.
-        self._pop = _FeatureParamsPopover(self)
+        # The settings are in a popup: the Mask ribbon row is already ~800 px wide.
+        self._pop = _FeatureMapPopover(self)
         self._settings_button = QToolButton(self)
         self._settings_button.setAutoRaise(True)
-        self._process_button = action_button(self, "player-play", _PLAIN_ICON_COLOR, "")
-        self._process_button.clicked.connect(self.start)
+        # Run / Stop in one button, like the Analysis and Tuning tabs: a green play, a red stop while the map runs (a click stops it)
+        self._process_button = action_button(self, "player-play", get_active_theme().accent_green, "")
+        self._process_button.clicked.connect(self._on_process_clicked)
+        self._shows_stop: bool | None = None  # which icon the button shows (set by `_refresh_state`)
         self._settings_button.setFixedSize(self._process_button.size())
         self._settings_button.setIconSize(self._process_button.iconSize())
         self._settings_button.setStyleSheet(self._process_button.styleSheet())
@@ -700,7 +745,8 @@ class RoiFeaturesEditPanel(QWidget):
         action.setDefaultWidget(self._pop)
         menu.addAction(action)
         self._settings_button.setMenu(menu)
-        self._pop.changed.connect(self._refresh_state)
+        self._pop.numbers_changed.connect(self._refresh_state)
+        self._pop.kinds_changed.connect(self._on_kinds_changed)
 
         self._apply_button = action_button(self, "square-rounded-plus", ADD_COLOR, "")
         self._apply_button.clicked.connect(self.apply)
@@ -718,48 +764,77 @@ class RoiFeaturesEditPanel(QWidget):
         features.result_changed.connect(self._refresh_state)
         features.completed.connect(self._on_completed)
         features.failed.connect(status)
-        features.cancelled.connect(lambda: status("ROI features cancelled; nothing was changed."))
+        features.cancelled.connect(lambda: status("Feature map cancelled; nothing was changed."))
         self._frame_state: tuple[bool, bool] = (False, False)  # (an image is shown, the result belongs to it) at the last full refresh
         image_panel.image_rendered.connect(self._on_frame_changed)
         image_panel.image_cleared.connect(self._on_frame_changed)
         dataset.dataset_loaded.connect(lambda _ds: self._refresh_state())
         dataset.dataset_cleared.connect(self._refresh_state)
+        features.set_kinds(self._pop.kinds())
         self._refresh_state()
 
     # -- remembered state ---------------------------------------------------------------------------------
 
     def bind_ui_state(self, store) -> None:
-        """Remember the five numbers across restarts (`panels/ui_state.py`)."""
-        store.bind("image/mask_features/strength", self._pop.strength_spin)
-        store.bind("image/mask_features/extent", self._pop.extent_spin)
-        store.bind("image/mask_features/max_width_px", self._pop.width_spin)
-        store.bind("image/mask_features/margin_px", self._pop.margin_spin)
-        store.bind("image/mask_features/max_share_percent", self._pop.share_spin)
+        """Remember the numbers and the kinds across restarts (`panels/ui_state.py`)."""
+        store.bind("image/feature_map/dirt_percent", self._pop.dirt_spin)
+        store.bind("image/feature_map/structure_percent", self._pop.structure_spin)
+        store.bind("image/feature_map/certainty", self._pop.certainty_spin)
+        store.bind("image/feature_map/edge_percent", self._pop.edge_spin)
+        store.bind("image/feature_map/margin_px", self._pop.margin_spin)
+        store.bind("image/feature_map/cubes", self._pop.cubes_spin)
+        for kind, check in self._pop.kind_checks.items():
+            store.bind(f"image/feature_map/kind_{kind}", check)
+        self._features.set_kinds(self._pop.kinds())
 
     def refresh_theme(self) -> None:
         self._toggle.refresh_theme()
+        self._shows_stop = None  # the play icon takes the theme's green: redraw it
+        self._refresh_state()
 
-    def params(self) -> FeatureParams:
-        """The numbers the popup holds now."""
-        return self._pop.params()
+    def settings(self) -> fm.FeatureMapSettings:
+        """The settings the popup holds now."""
+        return self._pop.settings()
+
+    def popover(self) -> _FeatureMapPopover:
+        """The popup's widgets (tests set them like a user would)."""
+        return self._pop
 
     # -- the buttons ----------------------------------------------------------------------------------------
 
+    def _on_process_clicked(self) -> None:
+        """The Run / Stop button: start a run, or stop the one going on."""
+        if self._features.is_running():
+            self.stop()
+        else:
+            self.start()
+
+    def stop(self) -> None:
+        """Stop the run going on (the Stop face of the button; also callable by tests). Nothing is changed: the result of an earlier
+        run, if any, stays; no mask is touched."""
+        if self._features.is_running():
+            self._status("Stopping the feature map...")
+            self._features.cancel()
+
     def start(self) -> None:
-        """Process the image on screen with the numbers shown (the button's action; also callable by tests)."""
+        """Map the image on screen with the settings shown (the button's action; also callable by tests)."""
         frame = self._editor.frame()
         if frame is None or self._features.is_running():
             return
-        self._status("Looking for small features on the ROIs of this image... (progress and Cancel in the status bar)")
-        self._features.start(frame, self.params())
+        self._status("Mapping the features of this image... (progress and Cancel in the status bar)")
+        self._features.start(frame, self.settings(), self._pop.cubes())
 
     def apply(self) -> None:
-        """Add the found pixels to the mask (the button's action; also callable by tests)."""
+        """Add the pixels of the enabled kinds to the mask (the button's action; also callable by tests)."""
         if self._features.pixels_for(self._editor.frame()) is None:
             return
-        self._editor.apply(KIND_ROI_FEATURES, subtract=False, done=self._refresh_state)
+        self._editor.apply(KIND_FEATURE_MAP, subtract=False, done=self._refresh_state)
 
     # -- state ------------------------------------------------------------------------------------------------
+
+    def _on_kinds_changed(self) -> None:
+        self._features.set_kinds(self._pop.kinds())
+        self._refresh_state()
 
     def _on_frame_changed(self, *_args: object) -> None:
         """An image was rendered (every step of Play): O(1) unless the answer to "is there an image, and is the result its own" changed
@@ -768,6 +843,11 @@ class RoiFeaturesEditPanel(QWidget):
         if (frame is not None, self._features.pixels_for(frame) is not None) != self._frame_state:
             self._refresh_state()
 
+    def _numbers_changed_since(self, result: FeatureMapResult) -> bool:
+        now = dataclasses.replace(self.settings(), kinds=frozenset())
+        then = dataclasses.replace(result.settings, kinds=frozenset())
+        return now != then or self._pop.cubes() != len(result.cubes)
+
     def _refresh_state(self, *_args: object) -> None:
         frame = self._editor.frame()
         running = self._features.is_running()
@@ -775,50 +855,55 @@ class RoiFeaturesEditPanel(QWidget):
         result = self._features.result()
         shown = self._features.pixels_for(frame)
         self._frame_state = (loaded, shown is not None)
-        self._process_button.setEnabled(loaded and not running)
+        self._process_button.setEnabled(running or loaded)  # while running it is the Stop button
+        if self._shows_stop is not running:
+            self._process_button.setIcon(
+                disabled_safe_icon("player-stop", _STOP_COLOR) if running else disabled_safe_icon("player-play", get_active_theme().accent_green)
+            )
+            self._shows_stop = running
         self._settings_button.setEnabled(not running)
-        self._apply_button.setEnabled(shown is not None and not running)
-        params = self.params()
+        self._apply_button.setEnabled(shown is not None and bool(shown.any()) and not running)
+        s = self.settings()
+        kinds = ", ".join(fm.KIND_LABELS[k] for k in fm.KINDS if k in s.kinds) or "no kind"
         self._settings_button.setToolTip(
-            f"ROI feature settings: strength {params.strength:.1f}, extent {params.extent:.1f}, largest {params.max_width_px:.0f} px, "
-            f"margin {params.margin_px} px, skip ROIs above {params.max_share * 100:.0f} %. Click to change."
+            f"Feature map settings: dirt from {s.dirt_min * 100:.1f} %, nanostructure from {s.structure_min * 100:.0f} %, certainty "
+            f"{s.certainty:.1f}, feature edge {s.core_share * 100:.0f} %, margin {s.grow_px} px, {self._pop.cubes()} cubes. "
+            f"Adds: {kinds}. Click to change."
         )
         process_tip = (
-            "Find the small features (dust, scratches, notches at the rim) on the sample disks and reference rings of all ROIs of "
-            "this image. It looks at the picture only, takes a few seconds and changes no mask; progress and Cancel are in the status bar."
+            "Map every small feature of this image (dirt, faint dirt, missing or extra nanostructure) from the mean of the cubes, "
+            "without ROIs: moving ROIs later keeps the result. It changes no mask; progress and Cancel are in the status bar."
         )
-        if not loaded:
-            process_tip += "\nShow an image first."
         if running:
-            process_tip += "\nIt is running."
-        elif result is not None and result.params != params:
+            process_tip = "Stop the feature map. Nothing is changed: an earlier result stays, no mask is touched."
+        elif not loaded:
+            process_tip += "\nShow an image first."
+        elif result is not None and self._numbers_changed_since(result):
             process_tip += "\nThe settings changed since the last run: press to update the result."
         self._process_button.setToolTip(process_tip)
         if shown is not None:
-            count = int(shown.sum())
+            counts = ", ".join(f"{result.counts[k]} {fm.KIND_LABELS[k].lower()}" for k in fm.KINDS if k in self._features.kinds())
             self._apply_button.setToolTip(
-                f"Add the {count:,} pixels found ({sum(f.features for f in result.findings)} features on {len(result.findings)} ROIs) "
-                "to the mask, at the scope chosen under State (Persistent or Individual)."
+                f"Add the {int(shown.sum()):,} pixels of the enabled kinds ({counts or 'none enabled'}) to the mask, at the scope "
+                "chosen under State (Persistent or Individual)."
+                if shown.any() else "Nothing to add: no feature of the enabled kinds (see the settings' check boxes)."
             )
         elif result is not None:
             cube, wavelength = result.frame
             self._apply_button.setToolTip(
-                f"The features were found on cube {cube}, {wavelength:g} nm. Go back to that image to add them, or press Process here."
+                f"The map was made for cube {cube}, {wavelength:g} nm. Go back to that image to add it, or press Process here."
             )
         else:
             self._apply_button.setToolTip("Nothing to add yet: press Process first.")
 
-    def _on_completed(self, summary: FeatureSummary) -> None:
-        if summary.features == 0:
-            text = f"ROI features: no features found on the {summary.rois_judged} ROIs compared ({summary.seconds:.1f} s)."
-        else:
-            text = (
-                f"ROI features: {summary.features} features on {summary.rois_with_features} of {summary.rois_judged} ROIs "
-                f"({summary.pixels:,} px, {summary.seconds:.1f} s{', fit reused' if summary.fit_kept else ''}). "
-            )
-            if summary.left_out:
-                text += f"ROIs {_ids_text(summary.left_out)} left out (more than the set share of the disk or ring would go). "
-            text += "The eye shows them; the + button adds them to the mask."
+    def _on_completed(self, summary: FeatureMapSummary) -> None:
+        parts = [f"{summary.counts[k]} {fm.KIND_LABELS[k].lower()}" for k in fm.KINDS if summary.counts[k]]
+        added = ", ".join(fm.KIND_LABELS[k].lower() for k in fm.KINDS if k in self._features.kinds()) or "no kind"
+        text = (
+            f"Feature map ({summary.disks} disks, {summary.cubes} cubes, {summary.seconds:.0f} s"
+            f"{', slow part reused' if summary.kept else ''}): {', '.join(parts) if parts else 'nothing found'}. "
+            f"The eye shows the {summary.pixels:,} px of the enabled kinds ({added}); the + button adds them to the mask."
+        )
         self._status(text)
 
 

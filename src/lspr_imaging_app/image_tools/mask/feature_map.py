@@ -27,8 +27,9 @@ from __future__ import annotations
 
 import dataclasses
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from typing import Any, Protocol
 
 import numpy as np
 from scipy import ndimage, optimize
@@ -53,6 +54,8 @@ KIND_LABELS = {
 _KIND_MAP = {DIRT_DARK: ("grey", -1), DIRT_BRIGHT: ("grey", +1), STRUCTURE_MISSING: ("structure", -1), STRUCTURE_EXTRA: ("structure", +1), DIRT_FAINT: ("grey", -1)}
 _CROSS4 = ndimage.generate_binary_structure(2, 1)
 _BIN_PX = 0.5
+_OUTLIER_MIN = 0.01  # the pre-pass marks outliers from 1 % of light (half the default dirt limit; fixed, so the slow part
+# does not depend on the user's limits)
 
 
 @dataclass(frozen=True)
@@ -178,7 +181,44 @@ def shading(values: np.ndarray, use: np.ndarray, block_px: int, window_blocks: i
 # -- disks ----------------------------------------------------------------------------------------------------------------
 
 
-def find_disks(mean_log: np.ndarray, settings: FeatureMapSettings = FeatureMapSettings()) -> tuple[Disk, ...]:
+class Mapper(Protocol):
+    """Runs `fn` over `jobs` and returns the results in job order (`stage` names the step for progress). The default runs them here,
+    one after the other; the app passes one that uses worker processes (`feature_map_run.py`). The results never depend on which."""
+
+    def __call__(self, fn: Callable[[Any], Any], jobs: Sequence[Any], stage: str) -> list[Any]: ...
+
+
+def serial_mapper(fn: Callable[[Any], Any], jobs: Sequence[Any], stage: str) -> list[Any]:  # `stage`: the protocol's (unused here)
+    return [fn(job) for job in jobs]
+
+
+def _fit_job(intensity: np.ndarray, valid: np.ndarray, centre: tuple[float, float], radius: float, max_move: float) -> tuple:
+    """A radial fit of the disk at `centre` as plain data (a window copy: it may go to another process)."""
+    h, w = intensity.shape
+    cx, cy = centre
+    half = int(np.ceil(radius * 1.6)) + 4
+    y0, y1 = max(int(cy) - half, 0), min(int(cy) + half + 1, h)
+    x0, x1 = max(int(cx) - half, 0), min(int(cx) + half + 1, w)
+    return (np.array(intensity[y0:y1, x0:x1]), np.array(valid[y0:y1, x0:x1]), (x0, y0), (cx, cy), radius, max_move)
+
+
+def _fit_centre(job: tuple) -> tuple[float, float] | None:
+    """The disk's centre from `roi_features.fit_patch`, or None when the fit fails, wanders off, or moves more than allowed."""
+    win, ok, (x0, y0), (cx, cy), radius, max_move = job
+    try:
+        fit = rf.fit_patch(np.where(ok, win, 0.0), ok, (cx - x0, cy - y0), radius * 1.4)
+    except (IndexError, ValueError):  # the fit wandered off
+        return None
+    if fit is None:
+        return None
+    fx, fy = fit.centre[0] + x0, fit.centre[1] + y0
+    return (float(fx), float(fy)) if np.hypot(fx - cx, fy - cy) < max_move else None
+
+
+
+def find_disks(
+    mean_log: np.ndarray, settings: FeatureMapSettings = FeatureMapSettings(), mapper: "Mapper | None" = None
+) -> tuple[Disk, ...]:
     """The nanostructure disks in the picture: pixels clearly darker than the bright level around them, in round blobs of the
     common size; the centre refined by a radial fit (a speck of dirt on the edge does not pull it)."""
     valid = np.isfinite(mean_log)
@@ -207,7 +247,10 @@ def find_disks(mean_log: np.ndarray, settings: FeatureMapSettings = FeatureMapSe
     typical = float(np.median(big))
     radius = float(np.sqrt(typical / np.pi))
     centroids = ndimage.center_of_mass(dark, labels, np.arange(1, count + 1))
-    disks = []
+    disks: list[Disk] = []
+    jobs: list[tuple] = []
+    to_fit: list[int] = []
+    mapper = mapper if mapper is not None else serial_mapper
     intensity = np.exp(np.where(valid, mean_log, np.nanmedian(mean_log)))
     no_data = ndimage.binary_dilation(~valid, iterations=2)
     for label, area, (cy, cx) in zip(range(1, count + 1), areas, centroids):
@@ -224,17 +267,12 @@ def find_disks(mean_log: np.ndarray, settings: FeatureMapSettings = FeatureMapSe
             continue
         if area < 0.4 * typical:
             continue
-        half = int(np.ceil(radius * 1.6)) + 4
-        y0, y1 = max(int(cy) - half, 0), min(int(cy) + half + 1, h)
-        x0, x1 = max(int(cx) - half, 0), min(int(cx) + half + 1, w)
-        win, ok = intensity[y0:y1, x0:x1], valid[y0:y1, x0:x1]
-        try:
-            fit = rf.fit_patch(np.where(ok, win, 0.0), ok, (cx - x0, cy - y0), radius * 1.4)
-        except (IndexError, ValueError):  # the fit wandered off (not a round disk): keep the centroid
-            fit = None
-        if fit is not None and np.hypot(fit.centre[0] + x0 - cx, fit.centre[1] + y0 - cy) < radius * 0.3:
-            cx, cy = fit.centre[0] + x0, fit.centre[1] + y0
+        jobs.append(_fit_job(intensity, valid, (cx, cy), radius, max_move=radius * 0.3))
+        to_fit.append(len(disks))
         disks.append(Disk((float(cx), float(cy)), radius))
+    for index, centre in zip(to_fit, mapper(_fit_centre, jobs, "fitting the disks")):
+        if centre is not None:  # else the fit wandered off (not a round disk): the centroid stays
+            disks[index] = Disk(centre, radius)
     return _complete_on_lattice(disks, values, bright_full, valid, radius, settings)
 
 
@@ -293,27 +331,18 @@ def _complete_on_lattice(
     return tuple(kept)
 
 
-def refine_centres(mean_log: np.ndarray, disks: tuple[Disk, ...], shade: np.ndarray) -> tuple[Disk, ...]:
-    """The radial fit of each whole disk once more, on the picture without its shading (`mean_log - shade`): where the light falls
-    off across a disk (the field's edge) the fit on the raw picture is pulled sideways by a fraction of a pixel, which at the steep
-    disk edge shows up as a light / dark pair."""
+def refine_centres(mean_log: np.ndarray, disks: tuple[Disk, ...], shade: np.ndarray, mapper: "Mapper | None" = None) -> tuple[Disk, ...]:
+    """The radial fit of each disk once more, on the picture without its shading (`mean_log - shade`): where the light falls off
+    across a disk (the field's edge) the fit on the raw picture is pulled sideways by a fraction of a pixel, which at the steep disk
+    edge shows up as a light / dark pair. A correction, not a new place: accepted only within 1.5 px. A cut disk starts from its
+    lattice point and is refined too where enough of it has data (fit_patch: 60 %)."""
     valid = np.isfinite(mean_log)
     intensity = np.exp(np.where(valid, mean_log - shade, 0.0))
-    h, w = mean_log.shape
+    mapper = mapper if mapper is not None else serial_mapper
+    jobs = [_fit_job(intensity, valid, d.centre, d.radius, max_move=1.5) for d in disks]
     out = []
-    for d in disks:  # a cut disk starts from its lattice point; where enough of it has data (fit_patch: 60 %) it is refined too
-        cx, cy = d.centre
-        half = int(np.ceil(d.radius * 1.6)) + 4
-        y0, y1 = max(int(cy) - half, 0), min(int(cy) + half + 1, h)
-        x0, x1 = max(int(cx) - half, 0), min(int(cx) + half + 1, w)
-        ok = valid[y0:y1, x0:x1]
-        try:
-            fit = rf.fit_patch(np.where(ok, intensity[y0:y1, x0:x1], 0.0), ok, (cx - x0, cy - y0), d.radius * 1.4)
-        except (IndexError, ValueError):  # the fit wandered off (a badly damaged disk): keep the first centre
-            fit = None
-        if fit is not None and np.hypot(fit.centre[0] + x0 - cx, fit.centre[1] + y0 - cy) < 1.5:  # a correction, not a new place
-            d = Disk((float(fit.centre[0] + x0), float(fit.centre[1] + y0)), d.radius, cut=d.cut)
-        out.append(d)
+    for d, centre in zip(disks, mapper(_fit_centre, jobs, "refining the disk centres")):
+        out.append(d if centre is None else Disk(centre, d.radius, cut=d.cut))
     return tuple(out)
 
 
@@ -541,7 +570,7 @@ def _outliers(
     sh = shading(values - disk, valid, settings.block_px, settings.window_blocks)
     res = np.where(valid, mean_log - sh - model(mean_log - sh), 0.0)
     spread = _spread_by_distance(res, valid, bins, n_bins, 1e-3)
-    out = valid & (np.abs(res) > 3.0 * spread) & (np.abs(res) > 0.5 * settings.dirt_min)
+    out = valid & (np.abs(res) > 3.0 * spread) & (np.abs(res) > _OUTLIER_MIN)
     return ndimage.binary_dilation(out, iterations=2)
 
 
@@ -636,15 +665,74 @@ def _notch_rims(features: list["MapFeature"], r: np.ndarray, radius: float, stru
     return out
 
 
-def feature_map(
+@dataclass(frozen=True)
+class Prepared:
+    """What the slow part found (the disks, the dirt and nanostructure maps): everything `score` needs. It depends on the pictures and
+    on the stage-A settings only (`stage_a_key`), so new limits or kinds need `score` alone (~2 s)."""
+
+    disks: tuple[Disk, ...]
+    valid: np.ndarray  # bool
+    grey: np.ndarray  # float32: log of the dirt factor; NaN where no data
+    structure: np.ndarray  # float32: nanostructure change; NaN where not defined
+    which: np.ndarray  # int32: nearest disk
+    r: np.ndarray  # float32: distance to it
+    radius: float
+    reach: float
+
+
+def stage_a_key(settings: FeatureMapSettings) -> tuple:
+    """The settings `prepare` depends on (a change of any other setting needs only `score`)."""
+    return (settings.disk_contrast, settings.halo_factor, settings.min_contrast_share, settings.block_px, settings.window_blocks,
+            settings.unlit_level, settings.border_zone_px)
+
+
+def _bins(r: np.ndarray, reach: float) -> tuple[np.ndarray, int]:
+    n_bins = int(reach / _BIN_PX) + 1
+    return np.where(r <= reach, (r / _BIN_PX).astype(np.int64), n_bins).clip(0, n_bins), n_bins
+
+
+_MODEL_CACHE: dict[tuple, tuple] = {}  # per process: the nearest-disk map and radial model of the last picture
+
+
+def _model_for(shape: tuple[int, int], valid_bits: np.ndarray, disks: tuple[Disk, ...], reach: float) -> tuple:
+    key = (shape, valid_bits.tobytes(), tuple(d.centre for d in disks), float(reach))
+    if key not in _MODEL_CACHE:
+        _MODEL_CACHE.clear()  # one picture at a time: a worker keeps no more than one
+        valid = np.unpackbits(valid_bits, count=shape[0] * shape[1]).reshape(shape).astype(bool)
+        which, r = nearest_disk(shape, disks)
+        _MODEL_CACHE[key] = (valid, r, _RadialModel(which, r, valid, disks, reach))
+    return _MODEL_CACHE[key]
+
+
+def model_wavelength(job: tuple) -> tuple[np.ndarray, np.ndarray]:
+    """One wavelength: shading and every disk's round model (twice in turn), its deviation from both and the disk model itself
+    (float32). A plain-data job (it may run in another process): (log picture, packed valid, packed outliers, shape, disks, reach,
+    block px, window blocks)."""
+    log_w, valid_bits, exclude_bits, shape, disks, reach, block_px, window_blocks = job
+    valid, r, model = _model_for(shape, valid_bits, disks, reach)
+    exclude = np.unpackbits(exclude_bits, count=shape[0] * shape[1]).reshape(shape).astype(bool)
+    far = valid & (r > reach)
+    f = np.where(valid, log_w.astype(np.float64), np.nan)
+    values = np.where(valid, f, 0.0)
+    sh = shading(values, far & np.isfinite(f) & ~exclude, block_px, 2 * window_blocks - 1)
+    disk_model = model(f - sh, exclude)
+    # once more: the first shading had to bridge the disks from sparse pixels; with the disks out it can use every pixel
+    sh = shading(values - disk_model, valid & np.isfinite(f) & ~exclude, block_px, window_blocks)
+    disk_model = model(f - sh, exclude)
+    return np.where(valid, f - sh - disk_model, np.nan).astype(np.float32), disk_model.astype(np.float32)
+
+
+def prepare(
     logs: np.ndarray,
     settings: FeatureMapSettings = FeatureMapSettings(),
     *,
     disks: tuple[Disk, ...] | None = None,
+    mapper: Mapper | None = None,
     progress: Callable[[float, str], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
-) -> FeatureMap:
-    """Everything above for `logs` (W, H, W'): log intensity per wavelength, aligned, NaN where no data."""
+) -> Prepared:
+    """The slow part for `logs` (W, H, W'): log intensity per wavelength, aligned on one frame's pixels, NaN where no data."""
+    mapper = mapper if mapper is not None else serial_mapper
 
     def step(fraction: float, message: str) -> None:
         if cancelled is not None and cancelled():
@@ -662,37 +750,32 @@ def feature_map(
     step(0.0, "finding the disks")
     found_here = disks is None
     if disks is None:
-        disks = find_disks(mean_log, settings)
+        disks = find_disks(mean_log, settings, mapper)
     if not disks:
         raise rf.NotEnoughRois("No nanostructure disks found in the picture.")
     radius = float(np.median([d.radius for d in disks]))
     reach = settings.halo_factor * radius
     which, r = nearest_disk(mean_log.shape, disks)
     if found_here:
-        step(0.03, "refining the disk centres")
+        step(0.2, "refining the disk centres")
         far0 = valid & (r > reach)
-        disks = refine_centres(mean_log, disks, shading(np.where(valid, mean_log, 0.0), far0, settings.block_px, 2 * settings.window_blocks - 1))
+        shade = shading(np.where(valid, mean_log, 0.0), far0, settings.block_px, 2 * settings.window_blocks - 1)
+        disks = refine_centres(mean_log, disks, shade, mapper)
         which, r = nearest_disk(mean_log.shape, disks)
     model = _RadialModel(which, r, valid, disks, reach)
     far = valid & (r > reach)
-    n_bins = int(reach / _BIN_PX) + 1
-    bins = np.where(r <= reach, (r / _BIN_PX).astype(np.int64), n_bins).clip(0, n_bins)
-    step(0.04, "a first look for outliers")
+    bins, n_bins = _bins(r, reach)
+    step(0.3, "a first look for outliers")
     exclude = _outliers(mean_log, valid, far, model, bins, n_bins, settings)
+    step(0.35, "modelling the wavelengths")
+    shape = mean_log.shape
+    valid_bits, exclude_bits = np.packbits(valid), np.packbits(exclude)
+    jobs = [(logs[w], valid_bits, exclude_bits, shape, disks, reach, settings.block_px, settings.window_blocks) for w in range(n_wl)]
     dev = np.empty(logs.shape, dtype=np.float32)
     con = np.empty(logs.shape, dtype=np.float32)
-    for w in range(n_wl):
-        step(0.05 + 0.75 * w / n_wl, f"modelling wavelength {w + 1} of {n_wl}")
-        f = np.where(valid, logs[w], np.nan)
-        values = np.where(valid, f, 0.0)
-        sh = shading(values, far & np.isfinite(f) & ~exclude, settings.block_px, 2 * settings.window_blocks - 1)
-        disk_model = model(f - sh, exclude)
-        # once more: the first shading had to bridge the disks from sparse pixels; with the disks out it can use every pixel
-        sh = shading(values - disk_model, valid & np.isfinite(f) & ~exclude, settings.block_px, settings.window_blocks)
-        disk_model = model(f - sh, exclude)
-        dev[w] = np.where(valid, f - sh - disk_model, np.nan)
-        con[w] = disk_model
-    step(0.8, "splitting dirt from nanostructure")
+    for w, (d_w, c_w) in enumerate(mapper(model_wavelength, jobs, "modelling the wavelengths")):
+        dev[w], con[w] = d_w, c_w
+    step(0.95, "splitting dirt from nanostructure")
     finite = np.isfinite(dev)
     fw = finite.astype(np.float32)
     d = np.where(finite, dev, 0.0)
@@ -704,8 +787,18 @@ def feature_map(
     with np.errstate(divide="ignore", invalid="ignore"):
         g = np.where(defined, (scc * sd - sc * scd) / det, sd / np.maximum(n, 1))
         s = np.where(defined, (n * scd - sc * sd) / det, np.nan)
-    g = np.where(valid, g, np.nan).astype(np.float64)
-    step(0.9, "scoring")
+    g = np.where(valid, g, np.nan)
+    step(1.0, "done")
+    return Prepared(tuple(disks), valid, g.astype(np.float32), s.astype(np.float32), which.astype(np.int32), r.astype(np.float32),
+                    radius, reach)
+
+
+def score(prepared: Prepared, settings: FeatureMapSettings = FeatureMapSettings()) -> FeatureMap:
+    """The cheap part: the features, their kinds and masks for the limits in `settings`."""
+    disks, valid, radius, reach = prepared.disks, prepared.valid, prepared.radius, prepared.reach
+    which, r = prepared.which, prepared.r.astype(np.float64)
+    g, s = prepared.grey.astype(np.float64), prepared.structure.astype(np.float64)
+    bins, n_bins = _bins(r, reach)
     inner = ndimage.binary_erosion(valid, iterations=settings.edge_margin_px, border_value=0) if settings.edge_margin_px > 0 else valid
     near_border = ndimage.distance_transform_edt(np.pad(valid, 1))[1:-1, 1:-1] <= settings.border_zone_px  # the image array's edge too
     # nor dirt at the rim of a disk the border cuts: its round model sees only part of it
@@ -758,6 +851,18 @@ def feature_map(
     combined = np.zeros(valid.shape, dtype=bool)
     for kind in settings.kinds:
         combined |= kind_masks[kind]
-    step(1.0, "done")
     return FeatureMap(tuple(disks), tuple(features), kind_masks, combined, g.astype(np.float32), s.astype(np.float32),
                       z_g.astype(np.float32), z_s.astype(np.float32))
+
+
+def feature_map(
+    logs: np.ndarray,
+    settings: FeatureMapSettings = FeatureMapSettings(),
+    *,
+    disks: tuple[Disk, ...] | None = None,
+    mapper: Mapper | None = None,
+    progress: Callable[[float, str], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> FeatureMap:
+    """`prepare` then `score` (scripts and tests; the app keeps `prepare`'s result and re-scores it when only the limits change)."""
+    return score(prepare(logs, settings, disks=disks, mapper=mapper, progress=progress, cancelled=cancelled), settings)

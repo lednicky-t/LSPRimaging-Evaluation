@@ -32,7 +32,7 @@ from ...image_tools.mask.mask_pointers import MaskPointersModule
 from ...image_tools.mask_auto_task import MaskAutoTask
 from ...image_tools.mask_export_task import MaskExportTask
 from ...image_tools.mask_scan_task import TransientScanTask
-from ..roi_feature_task import RoiFeatureTask
+from ..feature_map_task import FeatureMapTask
 from ...selection import HighlightRangeModule
 from ..mask_edit_preview import MaskEditPreview
 from ..mask_grain_eraser import MaskGrainEraser
@@ -43,7 +43,7 @@ from .mask_edit_panels import (
     EraserEditPanel,
     LocalContrastEditPanel,
     MorphologyEditPanel,
-    RoiFeaturesEditPanel,
+    FeatureMapEditPanel,
     ThresholdEditPanel,
 )
 from .mask_edit_tool_picker import MaskEditToolPicker
@@ -80,7 +80,7 @@ class MaskTab(QWidget):
         scan: TransientScanTask,
         auto: MaskAutoTask,
         export: MaskExportTask,
-        features: RoiFeatureTask,
+        features: FeatureMapTask,
         status: Callable[[str], None],
         visible_cubes: Callable[[], tuple[int, int] | None] | None = None,
     ) -> None:
@@ -121,7 +121,7 @@ class MaskTab(QWidget):
             MaskEditTool.THRESHOLD,
             MaskEditTool.LOCAL_CONTRAST,
             MaskEditTool.MORPHOLOGY,
-            MaskEditTool.ROI_FEATURES,
+            MaskEditTool.FEATURE_MAP,
             MaskEditTool.DRAW,
             MaskEditTool.ERASER,
         )
@@ -138,7 +138,7 @@ class MaskTab(QWidget):
         self._edit_stack.addWidget(self._threshold_panel)
         self._edit_stack.addWidget(self._local_contrast_panel)
         self._edit_stack.addWidget(self._morphology_panel)
-        self._features_panel = RoiFeaturesEditPanel(
+        self._features_panel = FeatureMapEditPanel(
             mask, chromatic, dataset, image_panel, mask_scope, self._edit_preview, features, status
         )
         self._edit_stack.addWidget(self._features_panel)
@@ -226,8 +226,8 @@ class MaskTab(QWidget):
         return self._grain_eraser
 
     @property
-    def features_panel(self) -> RoiFeaturesEditPanel:
-        """The ROI features tool's panel (the Image panel remembers its numbers across restarts)."""
+    def features_panel(self) -> FeatureMapEditPanel:
+        """The Feature map tool's panel (the Image panel remembers its settings across restarts)."""
         return self._features_panel
 
     @property

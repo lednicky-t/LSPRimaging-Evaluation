@@ -27,7 +27,7 @@ import numpy as np
 from ..dataset import DatasetModule
 from ..image_tools import ChromaticModule, MaskModule, MaskScopeModule
 from .mask_edit_common import resolve_mask_edit_base
-from .mask_edit_preview import KIND_LABELS, KIND_NOUNS, KIND_ROI_FEATURES, MaskEditPreview
+from .mask_edit_preview import KIND_FEATURE_MAP, KIND_LABELS, KIND_NOUNS, MaskEditPreview
 
 if TYPE_CHECKING:
     # Deferred, as in mask_highlight_editor.py: a top-level import would close an import cycle.
@@ -77,7 +77,7 @@ class MaskCandidateEditor:
         if frame is None or raw_shape is None:
             done()
             return
-        if kind != KIND_ROI_FEATURES:  # the features are already found (the Process button); nothing is computed for Apply
+        if kind != KIND_FEATURE_MAP:  # the map is already made (the Process button); nothing is computed for Apply
             self._status(f"Computing the {KIND_NOUNS[kind]} mask...")
 
         def finish(candidate: np.ndarray | None) -> None:
@@ -94,8 +94,8 @@ class MaskCandidateEditor:
         label = KIND_LABELS[kind]
         noun = KIND_NOUNS[kind]
         if candidate is None:
-            if kind == KIND_ROI_FEATURES:
-                self._status("ROI features: nothing to add for this image. Press Process first (a change of the ROIs or the image clears the result).")
+            if kind == KIND_FEATURE_MAP:
+                self._status("Feature map: nothing to add for this image. Press Process first (a change of the rotation / crop or the chromatic correction clears the result).")
             else:
                 self._status(f"{label} mask: no pixels could be computed (see the log).")
             return

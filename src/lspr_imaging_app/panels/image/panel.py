@@ -136,7 +136,7 @@ from ...image_tools.mask.mask_pointers import MaskPointersModule
 from ...image_tools.mask_auto_task import MaskAutoTask
 from ...image_tools.mask_export_task import MaskExportTask
 from ...image_tools.mask_scan_task import TransientScanTask
-from ..roi_feature_task import RoiFeatureTask
+from ..feature_map_task import FeatureMapTask
 from ...storage.session_carry_task import SessionCarry
 from ...roi.array_task import ArrayAction
 from ...roi.display_style import RoiDisplayStyle
@@ -417,7 +417,10 @@ class ImagePanel(QWidget):
         self._transient_scan = transient_scan if transient_scan is not None else TransientScanTask(self._mask_pointers, self)
         self._mask_auto = MaskAutoTask(self._mask, self)  # Mask tab, Auto mask group (pointers -> masks, one undo step)
         self._mask_export = MaskExportTask(self)  # Mask tab, PNG group: export every mask
-        self._roi_features = RoiFeatureTask(geometry, background, chromatic, roi_toolbox, dataset, self)  # Mask tab, Manual edit: ROI features
+        # Mask tab, Manual edit: Feature map (dark and ignored frames are left out of its mean through the frame roles)
+        self._feature_map = FeatureMapTask(
+            geometry, chromatic, dataset, None if frame_roles is None else frame_roles.is_spectral, self
+        )
         self._array_action = ArrayAction(self)  # ROIs tab, Array group (panels/image/array_actions.py)
         # Persistent / Individual ROI edit scope, shared with the ROI table (optional so tests build the panel alone).
         self._roi_scope = roi_scope if roi_scope is not None else RoiScopeModule(self)
@@ -505,7 +508,7 @@ class ImagePanel(QWidget):
             app.aboutToQuit.connect(self._transient_scan.shutdown)
             app.aboutToQuit.connect(self._mask_export.shutdown)
             app.aboutToQuit.connect(self._mask_auto.shutdown)
-            app.aboutToQuit.connect(self._roi_features.shutdown)
+            app.aboutToQuit.connect(self._feature_map.shutdown)
             app.aboutToQuit.connect(self._array_action.shutdown)
 
         self._redraw_timer = QTimer(self)
@@ -639,9 +642,9 @@ class ImagePanel(QWidget):
         )
 
     @property
-    def roi_features(self) -> RoiFeatureTask:
-        """The ROI features task (the app shell connects it to the task indicator)."""
-        return self._roi_features
+    def feature_map(self) -> FeatureMapTask:
+        """The Feature map task (the app shell connects it to the task indicator)."""
+        return self._feature_map
 
     @property
     def array_action(self) -> ArrayAction:
@@ -968,7 +971,7 @@ class ImagePanel(QWidget):
             self._mask, self._geometry, self._chromatic, self._dataset, self._highlight_range,
             self._mask_scope, self._mask_tint, self, self,
             events=self._mask_pointers, scan=self._transient_scan, auto=self._mask_auto, export=self._mask_export,
-            features=self._roi_features, status=self._on_tool_status, visible_cubes=self._visible_cube_range,
+            features=self._feature_map, status=self._on_tool_status, visible_cubes=self._visible_cube_range,
         )
         self._mask_tab.overlay_visibility_changed.connect(self._tints.on_mask_visibility_changed)
         self._mask_tab.overlay_color_changed.connect(self._tints.on_mask_color_changed)
@@ -1403,11 +1406,10 @@ class ImagePanel(QWidget):
         self._update_chromatic_tab_state()
         self._background.background_model_changed.connect(self._update_background_tab_state)
         self._update_background_tab_state()
-        # What the ROI features tool found describes the picture and the ROIs as they were: any change of them drops it (O(1)).
-        self._geometry.geometry_changed.connect(self._roi_features.forget_result)
-        self._background.background_model_changed.connect(self._roi_features.forget_result)
-        self._chromatic.chromatic_model_changed.connect(self._roi_features.forget_result)
-        self._roi_toolbox.geometry_changed.connect(self._roi_features.forget_result)
+        # The Feature map describes the picture as it was (not the ROIs: moving ROIs keeps it): a new rotation / crop or chromatic
+        # model drops it (O(1)). Background flattening does not touch it (the map takes the shading out itself).
+        self._geometry.geometry_changed.connect(self._feature_map.forget_result)
+        self._chromatic.chromatic_model_changed.connect(self._feature_map.forget_result)
 
         # ROI/selection changes normally only move the overlay, never the pixels, so they take the overlay-only
         # redraw (`_schedule_roi_redraw`, 2026-10-21 - the optimization this comment used to defer "until there is
@@ -1545,7 +1547,7 @@ class ImagePanel(QWidget):
         otherwise go on into the new dataset and install its result in the new session)."""
         self._transient_scan.invalidate()
         self._mask_auto.invalidate()
-        self._roi_features.invalidate()
+        self._feature_map.invalidate()
 
     def _on_dataset_loaded(self, _dataset: object) -> None:
         self._stop_dataset_bound_tasks()

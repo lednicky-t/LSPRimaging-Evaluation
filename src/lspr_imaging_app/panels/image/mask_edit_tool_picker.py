@@ -40,7 +40,7 @@ _TOOL_SPECS: tuple[tuple[MaskEditTool, str, str], ...] = (
     (MaskEditTool.THRESHOLD, "Threshold", "threshold_icon"),
     (MaskEditTool.LOCAL_CONTRAST, "Local contrast", "local_contrast_icon"),
     (MaskEditTool.MORPHOLOGY, "Morphology", "morphology_icon"),
-    (MaskEditTool.ROI_FEATURES, "ROI features", "roi_features_icon"),
+    (MaskEditTool.FEATURE_MAP, "Feature map", "roi_features_icon"),
     (MaskEditTool.DRAW, "Draw", "draw_icon"),
     (MaskEditTool.ERASER, "Eraser", "eraser_icon"),
 )

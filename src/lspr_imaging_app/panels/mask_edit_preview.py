@@ -10,7 +10,7 @@ on the image (`panels/image/edit_preview_layer.py`):
   (`image_tools/mask_candidates.py`) and the tint appears when it is ready.
 - **Morphology**: the pixels the operation under the mouse would change (the ring a dilate / close adds, the rim an erode / open
   strips), with the radius in the ribbon. Hover, no click; a click still applies at once.
-- **ROI features** (2026-10-29): the pixels of the last result of `RoiFeatureTask` (the finder runs on the Process button, 3-16 s,
+- **Feature map** (2026-11-04; was ROI features): the enabled kinds of the last result of `FeatureMapTask` (the map runs on the Process button, ~20-30 s,
   not on every change), shown while the frame on screen is the one it was made for. Nothing is computed here; Apply takes the same
   pixels (`request_candidate` answers at once from the task).
 
@@ -38,7 +38,7 @@ from ..image_tools.mask_candidates import MaskCandidates, Ready
 from .mask_edit_common import resolve_mask_edit_base
 
 if TYPE_CHECKING:
-    from .roi_feature_task import RoiFeatureTask
+    from .feature_map_task import FeatureMapTask
 
 logger = logging.getLogger(__name__)
 
@@ -47,12 +47,12 @@ Frame = tuple[int, float]
 KIND_THRESHOLD = "relative"  # the `MaskSettings` / old-app names of the two image-based tools
 KIND_LOCAL_CONTRAST = "local_contrast"
 KIND_MORPHOLOGY = "morphology"
-KIND_ROI_FEATURES = "roi_features"
+KIND_FEATURE_MAP = "feature_map"
 KIND_LABELS = {
-    KIND_THRESHOLD: "Threshold", KIND_LOCAL_CONTRAST: "Local contrast", KIND_MORPHOLOGY: "Morphology", KIND_ROI_FEATURES: "ROI features",
+    KIND_THRESHOLD: "Threshold", KIND_LOCAL_CONTRAST: "Local contrast", KIND_MORPHOLOGY: "Morphology", KIND_FEATURE_MAP: "Feature map",
 }
 KIND_NOUNS = {  # how a tool's pixels are called in the middle of a sentence ("Added 40 threshold pixels to the mask")
-    KIND_THRESHOLD: "threshold", KIND_LOCAL_CONTRAST: "local contrast", KIND_MORPHOLOGY: "morphology", KIND_ROI_FEATURES: "ROI feature",
+    KIND_THRESHOLD: "threshold", KIND_LOCAL_CONTRAST: "local contrast", KIND_MORPHOLOGY: "morphology", KIND_FEATURE_MAP: "feature map",
 }
 
 _SETTINGS_DELAY_MS = 300  # after the last change of a number: a spin box stepped by the wheel is one request, not ten
@@ -60,7 +60,7 @@ _FRAME_DELAY_MS = 250  # after the last frame change (scrubbing a slider passes 
 _TOOL_KINDS = {
     MaskEditTool.THRESHOLD: KIND_THRESHOLD,
     MaskEditTool.LOCAL_CONTRAST: KIND_LOCAL_CONTRAST,
-    MaskEditTool.ROI_FEATURES: KIND_ROI_FEATURES,
+    MaskEditTool.FEATURE_MAP: KIND_FEATURE_MAP,
 }
 
 
@@ -84,13 +84,13 @@ class MaskEditPreview(QObject):
         candidates: MaskCandidates | None = None,
         parent: QObject | None = None,
         *,
-        features: RoiFeatureTask | None = None,
+        features: FeatureMapTask | None = None,
     ) -> None:
         super().__init__(parent)
         self._mask = mask
         self._chromatic = chromatic
         self._dataset = dataset
-        self._features = features  # the ROI features tool's result (pixels it holds are previewed and merged as they are)
+        self._features = features  # the Feature map tool's result (the enabled kinds' pixels are previewed and merged as they are)
         self._candidates = candidates if candidates is not None else MaskCandidates(self)
         self._shown = True
         self._tab_active = False
@@ -194,7 +194,7 @@ class MaskEditPreview(QObject):
     def request_candidate(self, kind: str, frame: Frame, on_ready: Ready, *, preview: bool = False) -> None:
         """The raw-space pixels Threshold (`KIND_THRESHOLD`) or Local contrast (`KIND_LOCAL_CONTRAST`) select at `frame` with the
         ribbon's numbers now. Cached; computed on a worker thread otherwise; ``None`` when it failed or went stale."""
-        if kind == KIND_ROI_FEATURES:  # nothing to compute: the finder ran on its own button, the task holds what it found
+        if kind == KIND_FEATURE_MAP:  # nothing to compute: the map ran on its own button, the task holds what it found
             on_ready(None if self._features is None else self._features.pixels_for(frame))
             return
         settings = self._mask.settings()
@@ -249,8 +249,8 @@ class MaskEditPreview(QObject):
         self.invalidate()
 
     def _on_features_changed(self) -> None:
-        # A result arrived or went away; only the ROI features tool shows it.
-        if self._wanted() == KIND_ROI_FEATURES or (self._result is not None and self._result.kind == KIND_ROI_FEATURES):
+        # A result arrived or went away, or the enabled kinds changed; only the Feature map tool shows it.
+        if self._wanted() == KIND_FEATURE_MAP or (self._result is not None and self._result.kind == KIND_FEATURE_MAP):
             self._schedule(0)
 
     def _wanted(self) -> str | None:
@@ -286,7 +286,7 @@ class MaskEditPreview(QObject):
         frame = self._frame
         assert frame is not None
         before = self._result
-        if kind == KIND_ROI_FEATURES:  # answered at once, and no status line: "no result yet" is not a failure
+        if kind == KIND_FEATURE_MAP:  # answered at once, and no status line: "no result yet" is not a failure
             pixels = None if self._features is None else self._features.pixels_for(frame)
             self._result = None if pixels is None else PreviewPixels(frame, kind, pixels)
             if before is not None or self._result is not None:
