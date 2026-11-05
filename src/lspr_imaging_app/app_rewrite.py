@@ -1362,6 +1362,24 @@ def _wire_session_carry_prompt(window: QMainWindow, m: _Modules) -> None:
     m.session_carry.carried.connect(_ask)
 
 
+def _wire_roi_table_title(dock: PanelContainer, panel: RoiTablePanel) -> None:
+    """Make the "ROI / Groups" dock title the switch of the table's Groups-only view (2026-10-24): "Groups" highlighted = Groups-only
+    (double-click it); "ROI" = every ROI (click it).
+
+    The title must **start from the panel's real state**. The panel restores its saved Groups-only view before the dock exists, so a
+    title that started on "ROI" while the table was locked would ignore a click on "ROI" (already the current word) and a double
+    click on "Groups" would change nothing (the table is already in that view): the user was stuck (found 2026-11-05)."""
+    dock.set_title_choices(
+        (
+            TitleChoice("ROI", "Show the ROIs of every group (leaves the Groups-only view)."),
+            TitleChoice("Groups", "Double-click: Groups-only view, every group stays collapsed.", on_double_click=True),
+        ),
+        current=1 if panel.group_only() else 0,
+    )
+    dock.title_choice_picked.connect(lambda index: panel.set_group_only(index == 1))
+    panel.group_only_changed.connect(lambda on: dock.set_title_current(1 if on else 0))
+
+
 def _build_dock_layout(
     window: QMainWindow,
     workflow: WorkflowPanel,
@@ -1393,16 +1411,7 @@ def _build_dock_layout(
     image_dock = PanelContainer("Image", image_panel, window)
     histogram_dock = PanelContainer("Histogram", histogram_panel, window)
     roi_table_dock = PanelContainer("ROI / Groups", roi_table_panel, window)
-    # The title is a switch (2026-10-24): "Groups" highlighted = the table's Groups-only view (double-click it); "ROI" = every ROI (click it).
-    roi_table_dock.set_title_choices(
-        (
-            TitleChoice("ROI", "Show the ROIs of every group (leaves the Groups-only view)."),
-            TitleChoice("Groups", "Double-click: Groups-only view, every group stays collapsed.", on_double_click=True),
-        ),
-        current=0,
-    )
-    roi_table_dock.title_choice_picked.connect(lambda index: roi_table_panel.set_group_only(index == 1))
-    roi_table_panel.group_only_changed.connect(lambda on: roi_table_dock.set_title_current(1 if on else 0))
+    _wire_roi_table_title(roi_table_dock, roi_table_panel)
     spectra_dock = PanelContainer("Spectra", spectra_panel, window)
     sensorgram_dock = PanelContainer("Sensorgram", sensorgram_panel, window)
 

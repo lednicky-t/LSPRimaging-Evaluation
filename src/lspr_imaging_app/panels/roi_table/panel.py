@@ -111,10 +111,6 @@ _NOTICE_MS = 8000
 _ERROR_NOTICE_MS = 15000
 NUMERIC_COLUMNS = (COLUMN_X, COLUMN_Y, *DIAMETER_COLUMNS)
 _UNGROUPED_KEY = "__ungrouped__"
-_GROUP_ONLY_TIP = (
-    "Groups-only view: every group stays collapsed, so the table lists the groups. Click again to show the ROIs "
-    "(double-click Groups in the title bar does the same)."
-)
 _RENDER_SIZE = ICON_SIZE * 2  # icons are drawn at twice the size and scaled down, as the ribbon does
 _STROKE_WIDTH = 2.1
 
@@ -229,8 +225,6 @@ class RoiTablePanel(QWidget):
 
         self._group_button = self._tool_button("group-rois", self._group_selected_or_new)
         self._ungroup_button = self._tool_button("ungroup-rois", self._ungroup_selected)
-        self._group_only_button = self._tool_button("folder", self._on_group_only_button, checkable=True)
-        self._group_only_button.setToolTip(_GROUP_ONLY_TIP)
         self._color_button = self._tool_button("droplet", self._color_selected)
         self._up_button = self._tool_button("arrow-up", lambda: self._move_selected(-1))
         self._down_button = self._tool_button("arrow-down", lambda: self._move_selected(1))
@@ -259,7 +253,6 @@ class RoiTablePanel(QWidget):
         self._group_slot.addWidget(self._group_button)
         self._group_slot.addWidget(self._ungroup_button)
         toolbar.addWidget(self._group_slot)
-        toolbar.addWidget(self._group_only_button)
         toolbar.addWidget(self._color_button)
         toolbar.addSpacing(8)
         for button in (self._up_button, self._down_button):
@@ -568,15 +561,10 @@ class RoiTablePanel(QWidget):
             return
         self._group_only = on
         self._tree.setAutoExpandDelay(-1 if on else 500)  # no opening a group by hovering a drag over it
-        self._group_only_button.setChecked(on)
-        self._style_tool_button(self._group_only_button, "folder")
         self._rebuild(lambda: None, reveal=not on)
         if self._store is not None:
             self._store.set(ROI_TABLE_GROUP_ONLY, on)
         self.group_only_changed.emit(on)
-
-    def _on_group_only_button(self) -> None:
-        self.set_group_only(self._group_only_button.isChecked())
 
     def _on_header_clicked(self, column: int) -> None:
         current, descending = self._model.sort_state()
