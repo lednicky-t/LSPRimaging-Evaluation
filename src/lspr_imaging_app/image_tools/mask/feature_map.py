@@ -44,12 +44,15 @@ STRUCTURE_EXTRA = "structure_extra"  # more (or denser) nanostructure: looks dar
 DIRT_FAINT = "dirt_faint"  # dark dirt that dims gently (under `faint_slope` per pixel): faint specks, broad soft shadows of dust out of focus
 _DETECTED = (DIRT_DARK, DIRT_BRIGHT, STRUCTURE_MISSING, STRUCTURE_EXTRA)  # searched for; faint dirt is dark dirt sorted out after
 KINDS = (*_DETECTED, DIRT_FAINT)
+# Named by what the measurement sees, not by a cause (2026-11-05, maintainer's pick "A"): a change that is the same at every
+# wavelength blocks or adds light (it may be dirt, a scratch on the glass, a bubble ...); a change of the disk's plasmon contrast
+# (judged on the disks only) makes the sample's resonance weaker or stronger. The ids above are what is saved: never rename those.
 KIND_LABELS = {
-    DIRT_DARK: "Dirt, dark",
-    DIRT_BRIGHT: "Dirt, bright",
-    STRUCTURE_MISSING: "Nanostructure missing (bright)",
-    STRUCTURE_EXTRA: "Nanostructure extra (dark)",
-    DIRT_FAINT: "Dirt, faint (gentle)",
+    DIRT_DARK: "Light-blocking spots",
+    DIRT_BRIGHT: "Light-adding spots",
+    STRUCTURE_MISSING: "Sample: weaker resonance",
+    STRUCTURE_EXTRA: "Sample: stronger resonance",
+    DIRT_FAINT: "Light-blocking, faint",
 }
 _KIND_MAP = {DIRT_DARK: ("grey", -1), DIRT_BRIGHT: ("grey", +1), STRUCTURE_MISSING: ("structure", -1), STRUCTURE_EXTRA: ("structure", +1), DIRT_FAINT: ("grey", -1)}
 _CROSS4 = ndimage.generate_binary_structure(2, 1)
@@ -114,7 +117,7 @@ class MapFeature:
 class FeatureMap:
     disks: tuple[Disk, ...]
     features: tuple[MapFeature, ...]
-    kind_masks: dict[str, np.ndarray]  # every kind (image-sized, grown), enabled or not
+    kind_masks: dict[str, np.ndarray]  # every kind (image-sized, grown by settings.grow_px: see `grow_mask`), enabled or not
     mask: np.ndarray  # union of the enabled kinds
     grey: np.ndarray = field(repr=False)  # log dirt factor per pixel
     structure: np.ndarray = field(repr=False)  # nanostructure change per pixel (NaN off the disks)
@@ -574,6 +577,16 @@ def _outliers(
     return ndimage.binary_dilation(out, iterations=2)
 
 
+def grow_mask(mask: np.ndarray, valid: np.ndarray, grow_px: int) -> np.ndarray:
+    """`mask` grown by `grow_px` pixels (one 4-neighbour step each, so a diamond), kept inside the data `valid`; `mask` itself when
+    `grow_px` is 0. The one place the margin is applied: `score` uses it for ``settings.grow_px``, and the app keeps the ungrown masks
+    (``grow_px=0``) and grows them again when the user changes the margin, with this same function, so the pixels are exactly
+    those of a run made with that margin (pinned by ``tests/unit/test_lspri_feature_map.py``)."""
+    if grow_px > 0 and mask.any():
+        return ndimage.binary_dilation(mask, structure=_CROSS4, iterations=grow_px) & valid
+    return mask
+
+
 def _boxes_touch(a: "MapFeature", b: "MapFeature", gap: int = 2) -> bool:
     """Whether the pixels of two features come within `gap` px of each other."""
     if a.box[0] - gap >= b.box[1] or b.box[0] - gap >= a.box[1] or a.box[2] - gap >= b.box[3] or b.box[2] - gap >= a.box[3]:
@@ -845,9 +858,7 @@ def score(prepared: Prepared, settings: FeatureMapSettings = FeatureMapSettings(
         for f in features:
             if f.kind == kind:
                 kept[f.box[0] : f.box[1], f.box[2] : f.box[3]] |= f.mask
-        if settings.grow_px > 0 and kept.any():
-            kept = ndimage.binary_dilation(kept, structure=_CROSS4, iterations=settings.grow_px) & valid
-        kind_masks[kind] = kept
+        kind_masks[kind] = grow_mask(kept, valid, settings.grow_px)
     combined = np.zeros(valid.shape, dtype=bool)
     for kind in settings.kinds:
         combined |= kind_masks[kind]

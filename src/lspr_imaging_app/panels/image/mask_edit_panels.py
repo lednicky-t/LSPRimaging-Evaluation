@@ -38,9 +38,10 @@ show the edits".
   `QThreadPool` - see the zarr-crash invariant) and shared by the preview and
   the buttons.
 - **Feature map** (2026-11-04, replaced the ROI features tool of 2026-10-29): `FeatureMapEditPanel`. Not a live preview but a
-  Process button (~20-30 s, worker processes, progress and Cancel in the status bar), a settings popup with the limits, the cubes and
-  one check box per kind, and an Apply button that adds the enabled kinds at the Persistent / Individual scope. No ROIs: the result
-  stays right when ROIs move. Record: `docs/roi_feature_detection_2026-10-29.md` sections 10-11.
+  Process button (~20-30 s, worker processes, progress and Cancel in the status bar), a settings popup with the search limits and the
+  cubes, then (2026-11-05) a kinds popup (one check box per kind) and a margin field that act on the finished map at once, and an
+  Apply button that adds the enabled kinds at the Persistent / Individual scope. No ROIs: the result stays right when ROIs move.
+  Record: `docs/roi_feature_detection_2026-10-29.md` sections 10-11.
 - **Eraser** (2026-10-29): `EraserEditPanel` is only a hint icon; the tool is a click on the image (`panels/mask_grain_eraser.py`,
   routed by `CanvasInteraction`), which removes the connected blob of mask pixels under it.
 - **Draw**: settings-only. The brush-size spinbox is real (same
@@ -83,6 +84,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QToolButton,
+    QVBoxLayout,
     QWidget,
     QWidgetAction,
 )
@@ -93,7 +95,7 @@ from ...dataset import DatasetModule
 from ...image_tools import ChromaticModule, GeometryModule, MaskModule, MaskScopeModule
 from ...image_tools.mask.model import MaskSettings
 from ...image_tools.mask import feature_map as fm
-from ..feature_map_task import DEFAULT_CUBES, FeatureMapResult, FeatureMapSummary, FeatureMapTask
+from ..feature_map_task import DEFAULT_CUBES, FeatureMapResult, FeatureMapSummary, FeatureMapTask, choose_cubes
 from ...selection import HighlightRangeModule
 from ..mask_candidate_editor import MaskCandidateEditor
 from ..mask_edit_common import (
@@ -567,12 +569,12 @@ _STOP_COLOR = "#ef4444"  # the red stop of the Analysis, Tuning and Export tabs'
 
 
 class _FeatureMapPopover(QWidget):
-    """The map's settings, in the popup of the settings button (the ribbon row has no room). The widgets are the panel's own (it reads
-    and remembers them). `numbers_changed` fires for a number (they need Process again: ~2 s with the kept slow part, a full run for
-    another cube count); `kinds_changed` for a kind's check box (instant: every kind of the result is kept)."""
+    """The map's **search** settings, in the popup of the settings button (the ribbon row has no room): what decides which features are
+    found. The widgets are the panel's own (it reads and remembers them). `numbers_changed` fires for a number (they need Process
+    again: ~2 s with the kept slow part, a full run for another cube count). What only picks or grows the features already found, the
+    kinds and the margin, is not here: those are on the ribbon row and act on the map at once (2026-11-05)."""
 
     numbers_changed = pyqtSignal()
-    kinds_changed = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -603,24 +605,15 @@ class _FeatureMapPopover(QWidget):
             "Where a feature ends: where it is still at least this share of its own strongest pixels. A dense particle in a faint "
             "shadow is then the particle, not the shadow. 0 lets features spread down to 60 % of the limits."
         )
-        self.margin_spin = QSpinBox(self)
-        self.margin_spin.setRange(0, 10)
-        self.margin_spin.setSuffix(" px")
-        self.margin_spin.setToolTip("The mask is each feature grown by this much (the optics blur its edge).")
         self.cubes_spin = QSpinBox(self)
         self.cubes_spin.setRange(1, 200)
         self.cubes_spin.setToolTip(
             "How many cubes, from the one on screen on, are averaged before looking (the features are static; more cubes, less noise, "
             "a longer first run: ~1 s per cube for reading)."
         )
-        self.kind_checks: dict[str, QCheckBox] = {}
-        for kind in fm.KINDS:
-            check = QCheckBox(fm.KIND_LABELS[kind], self)
-            check.setToolTip(_KIND_TIPS[kind])
-            self.kind_checks[kind] = check
         self.reset_button = QPushButton("Defaults", self)
-        self.reset_button.setToolTip("Put the numbers and the kinds back to their starting values.")
-        for spin in (self.dirt_spin, self.structure_spin, self.certainty_spin, self.edge_spin, self.margin_spin, self.cubes_spin):
+        self.reset_button.setToolTip("Put the numbers, the kinds and the margin back to their starting values.")
+        for spin in (self.dirt_spin, self.structure_spin, self.certainty_spin, self.edge_spin, self.cubes_spin):
             spin.setKeyboardTracking(False)
         self._set_defaults()
         form = QFormLayout(self)
@@ -630,17 +623,10 @@ class _FeatureMapPopover(QWidget):
         form.addRow("Nanostructure from", self.structure_spin)
         form.addRow("Certainty", self.certainty_spin)
         form.addRow("Feature edge", self.edge_spin)
-        form.addRow("Margin", self.margin_spin)
         form.addRow("Cubes to average", self.cubes_spin)
-        caption = QLabel("Add to the mask:", self)
-        form.addRow(caption)
-        for check in self.kind_checks.values():
-            form.addRow(check)
         form.addRow(self.reset_button)
-        for spin in (self.dirt_spin, self.structure_spin, self.certainty_spin, self.edge_spin, self.margin_spin, self.cubes_spin):
+        for spin in (self.dirt_spin, self.structure_spin, self.certainty_spin, self.edge_spin, self.cubes_spin):
             spin.valueChanged.connect(lambda _v: self.numbers_changed.emit())
-        for check in self.kind_checks.values():
-            check.toggled.connect(lambda _on: self.kinds_changed.emit())
         self.reset_button.clicked.connect(self._set_defaults)
 
     def _set_defaults(self) -> None:
@@ -649,22 +635,15 @@ class _FeatureMapPopover(QWidget):
         self.structure_spin.setValue(int(round(defaults.structure_min * 100.0)))
         self.certainty_spin.setValue(defaults.certainty)
         self.edge_spin.setValue(int(round(defaults.core_share * 100.0)))
-        self.margin_spin.setValue(int(defaults.grow_px))
         self.cubes_spin.setValue(DEFAULT_CUBES)
-        for kind, check in self.kind_checks.items():
-            check.setChecked(kind in defaults.kinds)
-
-    def kinds(self) -> frozenset[str]:
-        return frozenset(kind for kind, check in self.kind_checks.items() if check.isChecked())
 
     def settings(self) -> fm.FeatureMapSettings:
+        """The search settings; the margin and the kinds are the defaults here (the panel sets them from its ribbon controls)."""
         return fm.FeatureMapSettings(
             dirt_min=self.dirt_spin.value() / 100.0,
             structure_min=self.structure_spin.value() / 100.0,
             certainty=float(self.certainty_spin.value()),
             core_share=self.edge_spin.value() / 100.0,
-            grow_px=int(self.margin_spin.value()),
-            kinds=self.kinds(),
         )
 
     def cubes(self) -> int:
@@ -672,40 +651,90 @@ class _FeatureMapPopover(QWidget):
 
 
 _KIND_TIPS = {
-    fm.DIRT_DARK: "Particles, specks, smudges that take light (the same at every wavelength).",
-    fm.DIRT_BRIGHT: "Something that adds light at every wavelength (rare; a bright rim next to a big dark smudge can be one).",
-    fm.STRUCTURE_MISSING: "Less nanostructure than a whole disk: notches at the rim, scratches across a disk. Looks brighter.",
-    fm.STRUCTURE_EXTRA: "More (denser) nanostructure than a whole disk. Looks darker.",
+    fm.DIRT_DARK: (
+        "Spots that take light by the same share at every wavelength (usually dirt: particles, specks, smudges). They are looked for "
+        "anywhere in the image."
+    ),
+    fm.DIRT_BRIGHT: (
+        "Spots that add light at every wavelength (rare; a bright rim next to a big dark smudge can be one). They are looked for "
+        "anywhere in the image."
+    ),
+    fm.STRUCTURE_MISSING: (
+        "A disk's resonance (its plasmon contrast) is weaker than a whole disk's: nanostructure is missing, e.g. a notch at the rim or "
+        "a scratch across it. Looks brighter. Judged on the disks only."
+    ),
+    fm.STRUCTURE_EXTRA: (
+        "A disk's resonance (its plasmon contrast) is stronger than a whole disk's: more, denser nanostructure. Looks darker. Judged on "
+        "the disks only."
+    ),
     fm.DIRT_FAINT: (
-        "Dirt that dims gently (under 1.7 % of the light per pixel): soft shadows of dust out of focus, faint specks. Static and grey, "
-        "it moves no peak; off by default (masking costs good pixels)."
+        "Light-blocking spots that dim gently (under 1.7 % of the light per pixel): soft shadows of dust out of focus, faint specks. "
+        "Static and the same at every wavelength, they move no peak; off by default (masking costs good pixels)."
     ),
 }
 
 
+class _KindsPopover(QWidget):
+    """Which kinds of feature Apply adds, one check box each, in the popup of the ribbon's kinds button (2026-11-05; they were in the
+    settings popup). A kind only picks features the map already holds, so a click acts at once. `kinds_changed` fires on every click."""
+
+    kinds_changed = pyqtSignal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(6)
+        layout.addWidget(QLabel("Add to the mask:", self))
+        self.kind_checks: dict[str, QCheckBox] = {}
+        for kind in fm.KINDS:
+            check = QCheckBox(fm.KIND_LABELS[kind], self)
+            check.setToolTip(_KIND_TIPS[kind])
+            self.kind_checks[kind] = check
+            layout.addWidget(check)
+        self.set_defaults()
+        for check in self.kind_checks.values():
+            check.toggled.connect(lambda _on: self.kinds_changed.emit())
+
+    def set_defaults(self) -> None:
+        defaults = fm.FeatureMapSettings().kinds
+        for kind, check in self.kind_checks.items():
+            check.setChecked(kind in defaults)
+
+    def kinds(self) -> frozenset[str]:
+        return frozenset(kind for kind, check in self.kind_checks.items() if check.isChecked())
+
+
 class FeatureMapEditPanel(QWidget):
-    """The Feature map tool: eye, settings, Process, Apply (2026-11-04; replaces the ROI features tool of 2026-10-29).
+    """The Feature map tool: eye, settings, Process, kinds, margin, Apply (2026-11-04; replaces the ROI features tool of 2026-10-29).
 
-    Screen purpose: map every small feature of the image (dirt, faint dirt, missing or extra nanostructure), without ROIs, look at it
+    Screen purpose: map every small feature of the image (light-blocking spots, light-adding spots, faint light-blocking spots, disks
+    whose resonance is weaker or stronger: `feature_map.KIND_LABELS`, named for what is measured, not for a cause), without ROIs, look at it
     on the image, and add the kinds wanted to the mask. A mask made this way stays right when ROIs are moved or changed.
-    Layout (one row, like the other tools):
+    Layout (one row, like the other tools; the left half makes the map, the right half chooses what of it is added):
 
-        [eye] [settings v] [process] [apply +]
+        [eye] [settings v] [process]  [kinds v] [margin px] [apply +]
 
-    - **eye**: show or hide the pixels Apply would add (the enabled kinds) on the image.
-    - **settings**: the limits (dirt %, nanostructure %, certainty, feature edge, margin), the cubes to average and one check box per
-      kind (popup; its tooltip always shows the numbers). Remembered. A kind's check box acts at once; a number needs Process again
-      (~2 s on the same image and cubes: the slow part is kept).
+    - **eye**: show or hide the pixels Apply would add (the enabled kinds, grown by the margin) on the image.
+    - **settings**: the *search* settings: the limits (dirt %, nanostructure %, certainty, feature edge) and the cubes to average
+      (popup; its tooltip always shows the numbers). Remembered. A number changes which features are found, so it needs Process
+      again (~2 s on the same image and cubes: the slow part is kept; a new cube count is a full run).
     - **process**: map the image on screen from the mean of the cubes (~20-40 s the first time, worker processes; progress in the
       status bar). Changes no mask. A green play when idle; while it runs the same button is a red stop (like the Analysis and Tuning
       tabs' Run / Stop): a click stops the run and changes nothing.
+    - **kinds**: one check box per kind of feature to add (popup). Remembered. Acts at once, on the map already made.
+    - **margin**: how many pixels each feature is grown by in the mask (the optics blur its edge). The Background tab's "Excl.
+      dilatation" look (`ribbon_fields.style_ribbon_number_field`, a bare "n px" field; the row's one caption is "Manual edit", so
+      its tooltip names it, like the Auto mask's feathering field). Remembered. Acts on the map already made, no new Process: the
+      pixels are regrown off the GUI thread (~0.3 s, `FeatureMapTask.set_margin`) and the old ones stay on screen until then.
     - **apply**: add the pixels of the enabled kinds to the mask in effect at this frame, at the scope the State group says
       (Persistent or Individual), in one mask change, cut to the area selection if there is one. Like the other tools' Add it is not
-      on the undo stack. Enabled only while the image on screen is the one the map was made for.
+      on the undo stack. Enabled only while the image on screen is the one the map was made for and no margin is being regrown.
 
-    Important states: no image (Process disabled); running (all but the eye disabled); a result for another frame (Apply disabled,
-    its tooltip says which frame); numbers changed since the run (Process's tooltip says so). Errors: in the status line (no
-    dataset, fewer than 3 wavelengths, no disks found)."""
+    Important states: no image (Process disabled); running (the settings button is disabled; Apply too); a result for another frame
+    (Apply disabled, its tooltip says which frame); a margin being regrown (Apply disabled for ~0.3 s); numbers changed since the run
+    (Process's tooltip says so). Errors: in the status line (no dataset, fewer than 3 wavelengths, no disks found, a margin that
+    could not be applied)."""
 
     def __init__(
         self,
@@ -727,26 +756,32 @@ class FeatureMapEditPanel(QWidget):
 
         self._toggle = EditPreviewToggle(preview, self)
 
-        # The settings are in a popup: the Mask ribbon row is already ~800 px wide.
-        self._pop = _FeatureMapPopover(self)
-        self._settings_button = QToolButton(self)
-        self._settings_button.setAutoRaise(True)
         # Run / Stop in one button, like the Analysis and Tuning tabs: a green play, a red stop while the map runs (a click stops it)
         self._process_button = action_button(self, "player-play", get_active_theme().accent_green, "")
         self._process_button.clicked.connect(self._on_process_clicked)
         self._shows_stop: bool | None = None  # which icon the button shows (set by `_refresh_state`)
-        self._settings_button.setFixedSize(self._process_button.size())
-        self._settings_button.setIconSize(self._process_button.iconSize())
-        self._settings_button.setStyleSheet(self._process_button.styleSheet())
-        self._settings_button.setIcon(disabled_safe_icon("settings", _PLAIN_ICON_COLOR))
-        self._settings_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        menu = QMenu(self._settings_button)
-        action = QWidgetAction(menu)
-        action.setDefaultWidget(self._pop)
-        menu.addAction(action)
-        self._settings_button.setMenu(menu)
+
+        # The search settings and the kinds are in popups: the Mask ribbon row is already ~800 px wide.
+        self._pop = _FeatureMapPopover(self)
+        self._settings_button = self._popup_button("settings", self._pop)
         self._pop.numbers_changed.connect(self._refresh_state)
-        self._pop.kinds_changed.connect(self._on_kinds_changed)
+        self._kinds_pop = _KindsPopover(self)
+        self._kinds_button = self._popup_button("checkbox", self._kinds_pop)
+        self._kinds_pop.kinds_changed.connect(self._on_kinds_changed)
+
+        # The margin: the Background tab's exclusion-dilatation field (frameless, "n px", `ribbon_fields.py`), no arrows.
+        self._margin_spin = QSpinBox(self)
+        self._margin_spin.setRange(0, 10)
+        self._margin_spin.setValue(fm.FeatureMapSettings().grow_px)
+        self._margin_spin.setSuffix(" px")
+        self._margin_spin.setKeyboardTracking(False)
+        style_ribbon_number_field(self._margin_spin, "10 px")
+        self._margin_spin.setToolTip(
+            "Margin: the mask is each feature found, grown by this many pixels (the optics blur its edge). It acts on the map already "
+            "made: no new Process is needed."
+        )
+        self._margin_spin.valueChanged.connect(self._on_margin_changed)
+        self._pop.reset_button.clicked.connect(self._reset_added)  # Defaults also puts the kinds and the margin back
 
         self._apply_button = action_button(self, "square-rounded-plus", ADD_COLOR, "")
         self._apply_button.clicked.connect(self.apply)
@@ -757,11 +792,15 @@ class FeatureMapEditPanel(QWidget):
         layout.addWidget(self._toggle)
         layout.addWidget(self._settings_button)
         layout.addWidget(self._process_button)
+        layout.addSpacing(4)  # the map is made to the left, what of it is added is chosen to the right
+        layout.addWidget(self._kinds_button)
+        layout.addWidget(self._margin_spin)
         layout.addWidget(self._apply_button)
         layout.addStretch(1)
 
         features.running_changed.connect(lambda _running: self._refresh_state())
         features.result_changed.connect(self._refresh_state)
+        features.regrowing_changed.connect(lambda _regrowing: self._refresh_state())
         features.completed.connect(self._on_completed)
         features.failed.connect(status)
         features.cancelled.connect(lambda: status("Feature map cancelled; nothing was changed."))
@@ -770,22 +809,41 @@ class FeatureMapEditPanel(QWidget):
         image_panel.image_cleared.connect(self._on_frame_changed)
         dataset.dataset_loaded.connect(lambda _ds: self._refresh_state())
         dataset.dataset_cleared.connect(self._refresh_state)
-        features.set_kinds(self._pop.kinds())
+        features.set_kinds(self._kinds_pop.kinds())
+        features.set_margin(self._margin_spin.value())
         self._refresh_state()
+
+    def _popup_button(self, icon_name: str, content: QWidget) -> QToolButton:
+        """An icon button the size and look of the Process button that opens `content` as a popup on a click."""
+        button = QToolButton(self)
+        button.setAutoRaise(True)
+        button.setFixedSize(self._process_button.size())
+        button.setIconSize(self._process_button.iconSize())
+        button.setStyleSheet(self._process_button.styleSheet())
+        button.setIcon(disabled_safe_icon(icon_name, _PLAIN_ICON_COLOR))
+        button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        menu = QMenu(button)
+        action = QWidgetAction(menu)
+        action.setDefaultWidget(content)
+        menu.addAction(action)
+        button.setMenu(menu)
+        return button
 
     # -- remembered state ---------------------------------------------------------------------------------
 
     def bind_ui_state(self, store) -> None:
-        """Remember the numbers and the kinds across restarts (`panels/ui_state.py`)."""
+        """Remember the numbers, the margin and the kinds across restarts (`panels/ui_state.py`; the keys are those of before the margin
+        and the kinds moved to the ribbon, so a saved choice carries over)."""
         store.bind("image/feature_map/dirt_percent", self._pop.dirt_spin)
         store.bind("image/feature_map/structure_percent", self._pop.structure_spin)
         store.bind("image/feature_map/certainty", self._pop.certainty_spin)
         store.bind("image/feature_map/edge_percent", self._pop.edge_spin)
-        store.bind("image/feature_map/margin_px", self._pop.margin_spin)
+        store.bind("image/feature_map/margin_px", self._margin_spin)
         store.bind("image/feature_map/cubes", self._pop.cubes_spin)
-        for kind, check in self._pop.kind_checks.items():
+        for kind, check in self._kinds_pop.kind_checks.items():
             store.bind(f"image/feature_map/kind_{kind}", check)
-        self._features.set_kinds(self._pop.kinds())
+        self._features.set_kinds(self._kinds_pop.kinds())
+        self._features.set_margin(self._margin_spin.value())
 
     def refresh_theme(self) -> None:
         self._toggle.refresh_theme()
@@ -793,12 +851,20 @@ class FeatureMapEditPanel(QWidget):
         self._refresh_state()
 
     def settings(self) -> fm.FeatureMapSettings:
-        """The settings the popup holds now."""
-        return self._pop.settings()
+        """The search settings of the popup, with the margin and the kinds of the ribbon controls."""
+        return dataclasses.replace(self._pop.settings(), grow_px=int(self._margin_spin.value()), kinds=self._kinds_pop.kinds())
 
     def popover(self) -> _FeatureMapPopover:
-        """The popup's widgets (tests set them like a user would)."""
+        """The settings popup's widgets (tests set them like a user would)."""
         return self._pop
+
+    def kinds_popover(self) -> _KindsPopover:
+        """The kinds popup's check boxes (tests set them like a user would)."""
+        return self._kinds_pop
+
+    def margin_spin(self) -> QSpinBox:
+        """The margin field of the ribbon row (tests set it like a user would)."""
+        return self._margin_spin
 
     # -- the buttons ----------------------------------------------------------------------------------------
 
@@ -825,16 +891,26 @@ class FeatureMapEditPanel(QWidget):
         self._features.start(frame, self.settings(), self._pop.cubes())
 
     def apply(self) -> None:
-        """Add the pixels of the enabled kinds to the mask (the button's action; also callable by tests)."""
-        if self._features.pixels_for(self._editor.frame()) is None:
+        """Add the pixels of the enabled kinds to the mask (the button's action; also callable by tests). Waits for a margin that is
+        being regrown: until its pixels are in, the ones the task holds are the earlier margin's."""
+        if self._features.is_regrowing() or self._features.pixels_for(self._editor.frame()) is None:
             return
         self._editor.apply(KIND_FEATURE_MAP, subtract=False, done=self._refresh_state)
 
     # -- state ------------------------------------------------------------------------------------------------
 
     def _on_kinds_changed(self) -> None:
-        self._features.set_kinds(self._pop.kinds())
+        self._features.set_kinds(self._kinds_pop.kinds())
         self._refresh_state()
+
+    def _on_margin_changed(self, value: int) -> None:
+        self._features.set_margin(value)  # the pixels follow off the GUI thread; `regrowing_changed` / `result_changed` refresh us
+        self._refresh_state()
+
+    def _reset_added(self) -> None:
+        """The popup's Defaults: the kinds and the margin back to their starting values too (they live on the ribbon row now)."""
+        self._kinds_pop.set_defaults()
+        self._margin_spin.setValue(fm.FeatureMapSettings().grow_px)
 
     def _on_frame_changed(self, *_args: object) -> None:
         """An image was rendered (every step of Play): O(1) unless the answer to "is there an image, and is the result its own" changed
@@ -844,9 +920,14 @@ class FeatureMapEditPanel(QWidget):
             self._refresh_state()
 
     def _numbers_changed_since(self, result: FeatureMapResult) -> bool:
-        now = dataclasses.replace(self.settings(), kinds=frozenset())
-        then = dataclasses.replace(result.settings, kinds=frozenset())
-        return now != then or self._pop.cubes() != len(result.cubes)
+        """Whether a *search* setting differs from the run's. The kinds and the margin act on the map at once, so they never make it stale.
+        The cubes are compared as the cubes a run would average now (from the result's own cube) against the ones it averaged: asking
+        for 12 on a dataset of 2 cubes is the same run as asking for 2 (before 2026-11-05 the number asked was compared with the number
+        used, so the tooltip always called the settings changed on a dataset with fewer cubes than asked)."""
+        now = dataclasses.replace(self.settings(), kinds=frozenset(), grow_px=0)
+        then = dataclasses.replace(result.settings, kinds=frozenset(), grow_px=0)
+        cubes_now = choose_cubes(self._dataset.spectral_cubes(), result.frame[0], self._pop.cubes())
+        return now != then or cubes_now != result.cubes
 
     def _refresh_state(self, *_args: object) -> None:
         frame = self._editor.frame()
@@ -861,18 +942,23 @@ class FeatureMapEditPanel(QWidget):
                 disabled_safe_icon("player-stop", _STOP_COLOR) if running else disabled_safe_icon("player-play", get_active_theme().accent_green)
             )
             self._shows_stop = running
+        regrowing = self._features.is_regrowing()
         self._settings_button.setEnabled(not running)
-        self._apply_button.setEnabled(shown is not None and bool(shown.any()) and not running)
+        self._apply_button.setEnabled(shown is not None and bool(shown.any()) and not running and not regrowing)
         s = self.settings()
-        kinds = ", ".join(fm.KIND_LABELS[k] for k in fm.KINDS if k in s.kinds) or "no kind"
+        kinds = "; ".join(fm.KIND_LABELS[k] for k in fm.KINDS if k in s.kinds) or "no kind"  # ";": a label can hold a comma
         self._settings_button.setToolTip(
-            f"Feature map settings: dirt from {s.dirt_min * 100:.1f} %, nanostructure from {s.structure_min * 100:.0f} %, certainty "
-            f"{s.certainty:.1f}, feature edge {s.core_share * 100:.0f} %, margin {s.grow_px} px, {self._pop.cubes()} cubes. "
-            f"Adds: {kinds}. Click to change."
+            f"Feature map settings (what decides which features are found): dirt from {s.dirt_min * 100:.1f} %, nanostructure from "
+            f"{s.structure_min * 100:.0f} %, certainty {s.certainty:.1f}, feature edge {s.core_share * 100:.0f} %, "
+            f"{self._pop.cubes()} cubes. Click to change; press Process after."
+        )
+        self._kinds_button.setToolTip(
+            f"Kinds of feature added to the mask: {kinds}. Click to choose; it acts on the map already made, no new Process needed."
         )
         process_tip = (
-            "Map every small feature of this image (dirt, faint dirt, missing or extra nanostructure) from the mean of the cubes, "
-            "without ROIs: moving ROIs later keeps the result. It changes no mask; progress and Cancel are in the status bar."
+            "Map every small feature of this image (spots that block or add light, and disks whose resonance is weaker or stronger) "
+            "from the mean of the cubes, without ROIs: moving ROIs later keeps the result. It changes no mask; progress and Cancel are "
+            "in the status bar."
         )
         if running:
             process_tip = "Stop the feature map. Nothing is changed: an earlier result stays, no mask is touched."
@@ -881,12 +967,14 @@ class FeatureMapEditPanel(QWidget):
         elif result is not None and self._numbers_changed_since(result):
             process_tip += "\nThe settings changed since the last run: press to update the result."
         self._process_button.setToolTip(process_tip)
-        if shown is not None:
-            counts = ", ".join(f"{result.counts[k]} {fm.KIND_LABELS[k].lower()}" for k in fm.KINDS if k in self._features.kinds())
+        if shown is not None and regrowing:
+            self._apply_button.setToolTip("The new margin is being applied to the map: a moment, then this button is ready.")
+        elif shown is not None:
+            counts = "; ".join(f"{fm.KIND_LABELS[k]} ({result.counts[k]})" for k in fm.KINDS if k in self._features.kinds())
             self._apply_button.setToolTip(
-                f"Add the {int(shown.sum()):,} pixels of the enabled kinds ({counts or 'none enabled'}) to the mask, at the scope "
-                "chosen under State (Persistent or Individual)."
-                if shown.any() else "Nothing to add: no feature of the enabled kinds (see the settings' check boxes)."
+                f"Add the {int(shown.sum()):,} pixels of the enabled kinds ({counts or 'none enabled'}), each feature grown by "
+                f"{result.margin_px} px, to the mask, at the scope chosen under State (Persistent or Individual)."
+                if shown.any() else "Nothing to add: no feature of the enabled kinds (see the kinds button)."
             )
         elif result is not None:
             cube, wavelength = result.frame
@@ -897,11 +985,11 @@ class FeatureMapEditPanel(QWidget):
             self._apply_button.setToolTip("Nothing to add yet: press Process first.")
 
     def _on_completed(self, summary: FeatureMapSummary) -> None:
-        parts = [f"{summary.counts[k]} {fm.KIND_LABELS[k].lower()}" for k in fm.KINDS if summary.counts[k]]
-        added = ", ".join(fm.KIND_LABELS[k].lower() for k in fm.KINDS if k in self._features.kinds()) or "no kind"
+        parts = [f"{fm.KIND_LABELS[k]} ({summary.counts[k]})" for k in fm.KINDS if summary.counts[k]]
+        added = "; ".join(fm.KIND_LABELS[k] for k in fm.KINDS if k in self._features.kinds()) or "no kind"
         text = (
             f"Feature map ({summary.disks} disks, {summary.cubes} cubes, {summary.seconds:.0f} s"
-            f"{', slow part reused' if summary.kept else ''}): {', '.join(parts) if parts else 'nothing found'}. "
+            f"{', slow part reused' if summary.kept else ''}): {'; '.join(parts) if parts else 'nothing found'}. "
             f"The eye shows the {summary.pixels:,} px of the enabled kinds ({added}); the + button adds them to the mask."
         )
         self._status(text)

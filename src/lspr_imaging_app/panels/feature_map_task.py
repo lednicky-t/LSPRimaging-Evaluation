@@ -17,9 +17,16 @@ maintainer: "map all dirt, so that changing ROIs never needs the mask again; the
    here (~2 s, a short burst like the old tool's scoring);
 4. every kind's mask mapped back to **raw pixels** (`histogram_highlight_mask_to_raw`), the space `MaskModule` stores masks in.
 
-**The result keeps every kind**, so switching a kind on or off in the popup is instant (`set_kinds`: the pixels Apply adds are the
-union of the enabled kinds). **The slow part is kept** too (`Prepared`, ~25 MB): a run on the same image with other limits re-scores
-in ~2 s. The keep is tied to the frame, the cubes, the geometry, the chromatic matrices and the settings `prepare` depends on.
+**The result keeps every kind**, so switching a kind on or off is instant (`set_kinds`: the pixels Apply adds are the union of the
+enabled kinds). **The slow part is kept** too (`Prepared`, ~25 MB): a run on the same image with other limits re-scores in ~2 s. The
+keep is tied to the frame, the cubes, the geometry, the chromatic matrices and the settings `prepare` depends on.
+
+**The margin is not a search setting** (2026-11-05): it only grows the masks of the features already found, as the last step
+(`feature_map.grow_mask`). So the result keeps each kind's *ungrown* mask (``kind_cores``, in the processed picture) next to the
+grown raw pixels (``kind_pixels``), and `set_margin` grows them again, **off the GUI thread** (5 kinds: ~0.15 s of dilation and ~0.17 s
+of mapping to raw pixels, measured 2026-11-05 on 773 x 1287 px with a 1.4 deg rotation): a plain thread, the newest margin wins, the
+old pixels stay on screen until the new ones are ready (`is_regrowing()` is true meanwhile: Apply must wait). No new run, no re-score.
+The pixels are exactly those of a run made with that margin (`grow_mask` is also what `score` uses).
 
 **A result belongs to the picture it was made from**, not to the ROIs: moving or changing ROIs keeps it. It is dropped when the
 geometry or the chromatic model changes (`forget_result`, wired by the Image panel), and a run that was going on meanwhile is refused
@@ -30,10 +37,12 @@ Threads: a plain ``threading.Thread`` (never ``QThreadPool``: the planes may com
 
 from __future__ import annotations
 
+import dataclasses
 import logging
+import threading
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -45,6 +54,7 @@ from ..image_tools import preprocess as pp
 from ..image_tools.background.model import BackgroundSettings
 from ..image_tools.chromatic.affine import invert_affine_matrix
 from ..image_tools.chromatic.module import ChromaticModule
+from ..image_tools.geometry.model import GeometrySettings
 from ..image_tools.geometry.module import GeometryModule
 from ..image_tools.mask import feature_map as fm
 from ..image_tools.mask.feature_map_run import ProcessMapper
@@ -67,10 +77,16 @@ _SCORE_SHARE = 0.08  # scoring and the raw masks at the end
 class FeatureMapResult:
     frame: Frame
     cubes: tuple[int, ...]
-    kind_pixels: dict[str, np.ndarray]  # every kind's mask in raw pixels (bool, read-only: shared with the preview)
+    kind_pixels: dict[str, np.ndarray]  # every kind's mask in raw pixels, grown by `margin_px` (bool, read-only: shared with the preview)
     counts: dict[str, int]  # features per kind
     disks: int
-    settings: fm.FeatureMapSettings
+    settings: fm.FeatureMapSettings  # the search settings; its `grow_px` is always 0: the margin is `margin_px`
+    # what `set_margin` grows again (all read-only, shared with the thread that does it):
+    kind_cores: dict[str, np.ndarray] = field(default_factory=dict, repr=False)  # every kind's ungrown mask, processed picture
+    valid: np.ndarray | None = field(default=None, repr=False)  # the data of that picture (growing stays inside it)
+    raw_shape: tuple[int, int] = (0, 0)
+    geometry: GeometrySettings | None = None
+    margin_px: int = 0  # the margin `kind_pixels` were grown by
 
 
 @dataclass(frozen=True)
@@ -97,6 +113,20 @@ class _Computed:
     keep: _Keep | None
     seconds: float
     kept: bool
+
+
+def grown_raw_pixels(
+    cores: dict[str, np.ndarray], valid: np.ndarray, margin_px: int, raw_shape: tuple[int, int], geometry: GeometrySettings
+) -> dict[str, np.ndarray]:
+    """Every kind's ungrown mask (processed picture) grown by `margin_px` inside `valid` (`feature_map.grow_mask`), then mapped to
+    **raw pixels**, the space `MaskModule` stores masks in. Pure (no Qt, no module): it runs on the run's thread and on the margin's."""
+    out: dict[str, np.ndarray] = {}
+    for kind, core in cores.items():
+        grown = fm.grow_mask(core, valid, margin_px)
+        raw = np.asarray(pp.histogram_highlight_mask_to_raw(grown.astype(np.float32), 0.5, 1.5, raw_shape, geometry), dtype=bool)
+        raw.setflags(write=False)
+        out[kind] = raw
+    return out
 
 
 def choose_cubes(spectral_cubes: Sequence[int], cube: int, count: int) -> tuple[int, ...]:
@@ -167,7 +197,11 @@ class FeatureMapTask(ThreadedTask):
     crash_log = "Feature map failed"
     stopped_message = "stopped: the dataset changed"
 
-    result_changed = pyqtSignal()  # a result was installed or dropped, or the enabled kinds changed (the preview and the buttons follow)
+    result_changed = pyqtSignal()  # a result was installed or dropped, or the enabled kinds / the margin changed (the preview and the buttons follow)
+    regrowing_changed = pyqtSignal(bool)  # the pixels for a new margin are being made (True) / are ready or given up (False)
+
+    # Internal: the margin's thread -> GUI thread hand-off: (the result it grew, the margin, the raw pixels or None, the error or None)
+    _regrown = pyqtSignal(object, int, object, object)
 
     def __init__(
         self,
@@ -190,6 +224,15 @@ class FeatureMapTask(ThreadedTask):
         self._inputs_moved = False
         self._kinds: frozenset[str] = fm.FeatureMapSettings().kinds
         self._union: tuple[tuple, np.ndarray] | None = None  # (frame, kinds) -> the union of their masks
+        self._margin = fm.FeatureMapSettings().grow_px  # the margin wanted (px); the result's own is `margin_px` until its pixels follow
+        self._regrow_thread: threading.Thread | None = None
+        self._regrown.connect(self._on_regrown)
+
+    def shutdown(self) -> None:
+        super().shutdown()
+        thread = self._regrow_thread
+        if thread is not None:  # so it never emits into an object Qt is tearing down
+            thread.join(timeout=5.0)
 
     def set_worker_processes(self, count: int | None) -> None:
         """How many worker processes a run uses: ``None`` lets ``lspr_core.perf`` decide (the app), a number is exact and ``<= 1`` runs
@@ -213,6 +256,62 @@ class FeatureMapTask(ThreadedTask):
             self._union = None
             if self._result is not None:
                 self.result_changed.emit()
+
+    def margin(self) -> int:
+        """The margin (px) the masks are wanted at. The result's pixels may still be at an earlier one (see `is_regrowing`)."""
+        return self._margin
+
+    def set_margin(self, px: int) -> None:
+        """Grow every feature by `px` pixels (the optics blur its edge). Needs no new run: the result keeps each kind's ungrown mask, and
+        the new raw pixels are made on a thread of their own (~0.3 s); `result_changed` fires when they are in, `regrowing_changed`
+        around it. A newer margin that arrives meanwhile is made right after (the newest wins). The old pixels stay until then."""
+        px = max(0, int(px))
+        if px != self._margin:
+            self._margin = px
+            self._regrow_if_needed()
+
+    def is_regrowing(self) -> bool:
+        """The pixels for a new margin are being made: what `pixels_for` returns is still the earlier margin's, so Apply must wait."""
+        return self._regrow_thread is not None
+
+    def _regrow_if_needed(self) -> None:
+        result = self._result
+        if result is None or self._regrow_thread is not None or result.margin_px == self._margin or result.valid is None:
+            return  # nothing to grow, one is going on (it looks again when it ends), or the result already has this margin
+        margin = self._margin
+        cores, valid, raw_shape, geometry = result.kind_cores, result.valid, result.raw_shape, result.geometry
+        assert geometry is not None
+
+        def work() -> None:
+            pixels: dict[str, np.ndarray] | None = None
+            error: BaseException | None = None
+            try:
+                pixels = grown_raw_pixels(cores, valid, margin, raw_shape, geometry)
+            except BaseException as exc:  # noqa: BLE001 - nothing may escape a thread silently
+                error = exc
+            self._regrown.emit(result, margin, pixels, error)
+
+        self._regrow_thread = threading.Thread(target=work, name="mask-feature-map-margin", daemon=True)
+        self._regrow_thread.start()
+        self.regrowing_changed.emit(True)
+
+    def _on_regrown(self, grown: object, margin: int, pixels: object, error: object) -> None:
+        """GUI thread: the margin's thread is done. Install its pixels if the result is still the one it grew."""
+        thread, self._regrow_thread = self._regrow_thread, None
+        if thread is not None:
+            thread.join(timeout=1.0)
+        if isinstance(error, BaseException):
+            self._log.error("Feature map: growing the masks failed", exc_info=error)
+            self.regrowing_changed.emit(False)
+            self.failed.emit(f"Feature map: the margin could not be applied: {error}")
+            return  # the pixels stay at the earlier margin; the next margin change tries again
+        if self._result is grown and isinstance(pixels, dict):
+            self._result = dataclasses.replace(grown, kind_pixels=pixels, margin_px=margin)
+            self._union = None
+            self.result_changed.emit()
+        self._regrow_if_needed()  # the margin may have moved again meanwhile (or the result is a new one)
+        if self._regrow_thread is None:
+            self.regrowing_changed.emit(False)
 
     def pixels_for(self, frame: Frame | None) -> np.ndarray | None:
         """The raw-space pixels of the enabled kinds if the result was made for `frame`, else ``None``."""
@@ -279,6 +378,11 @@ class FeatureMapTask(ThreadedTask):
         keep = self._keep if self._keep is not None and self._keep.key == key else None
         load_plane = self._dataset.load_plane_uncached
         processes = self._processes
+        # The margin is not part of the search: the run scores with 0 and grows the masks after (`grown_raw_pixels`), the same way
+        # `set_margin` does later. `settings.grow_px` is the margin wanted now.
+        margin = max(0, int(settings.grow_px))
+        self._margin = margin
+        search = dataclasses.replace(settings, grow_px=0)
         self._inputs_moved = False
         self._begin_run()
         progress = throttled(self._emit_progress)
@@ -313,24 +417,26 @@ class FeatureMapTask(ThreadedTask):
                 prepare_seconds = time.perf_counter() - started - read_seconds
             progress(1.0 - _SCORE_SHARE, "finding the features")
             score_started = time.perf_counter()
-            result_map = fm.score(prepared, settings)
+            result_map = fm.score(prepared, search)
             if cancelled():
                 raise Cancelled()
-            kind_pixels: dict[str, np.ndarray] = {}
-            for kind, mask in result_map.kind_masks.items():
-                raw = np.asarray(pp.histogram_highlight_mask_to_raw(mask.astype(np.float32), 0.5, 1.5, raw_shape, geometry), dtype=bool)
-                raw.setflags(write=False)
-                kind_pixels[kind] = raw
+            cores = dict(result_map.kind_masks)  # grow_px is 0: not grown yet
+            for core in cores.values():
+                core.setflags(write=False)
+            kind_pixels = grown_raw_pixels(cores, prepared.valid, margin, raw_shape, geometry)
             counts = {kind: sum(f.kind == kind for f in result_map.features) for kind in fm.KINDS}
             seconds = time.perf_counter() - started
             log_event(
                 logger, "mask.feature_map", logging.INFO,
                 cube=cube, wavelength=wavelength, cubes=len(chosen), wavelengths=len(frames), disks=len(prepared.disks),
-                features=len(result_map.features), kept=keep is not None, read_ms=round(read_seconds * 1000.0),
+                features=len(result_map.features), margin_px=margin, kept=keep is not None, read_ms=round(read_seconds * 1000.0),
                 prepare_ms=round(prepare_seconds * 1000.0), score_ms=round((time.perf_counter() - score_started) * 1000.0),
                 total_ms=round(seconds * 1000.0), **{f"n_{k}": v for k, v in counts.items()},
             )
-            result = FeatureMapResult(frame, chosen, kind_pixels, counts, len(prepared.disks), settings)
+            result = FeatureMapResult(
+                frame, chosen, kind_pixels, counts, len(prepared.disks), search,
+                kind_cores=cores, valid=prepared.valid, raw_shape=tuple(raw_shape), geometry=geometry, margin_px=margin,
+            )
             new_keep = keep if keep is not None else _Keep(key, prepared, shape)
             return _Computed(result, new_keep, seconds, keep is not None)
 
@@ -364,4 +470,5 @@ class FeatureMapTask(ThreadedTask):
             kept=result.kept,
         )
         self.result_changed.emit()
+        self._regrow_if_needed()  # the margin was changed while the run went on: its pixels follow the new one
         return f"{sum(summary.counts.values())} features ({summary.disks} disks)", summary

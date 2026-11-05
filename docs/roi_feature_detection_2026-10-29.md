@@ -358,7 +358,8 @@ tool choice still opens it.
   union of the enabled kinds) and the `Prepared` (new limits: ~2 s). Dropped on a new rotation / crop or chromatic model (not on ROI
   or background changes); a change while it runs refuses the result.
 - `FeatureMapEditPanel` (in `panels/image/mask_edit_panels.py`): popup with Dirt from %, Nanostructure from %, Certainty, Feature edge
-  %, Margin px, Cubes to average, five kind check boxes (faint dirt off) and Defaults; all remembered (`image/feature_map/...`).
+  %, Cubes to average and Defaults (the search settings); all remembered (`image/feature_map/...`). The margin and the five kind
+  check boxes (faint dirt off) moved out of it on 2026-11-05, see section 12.
   Process is a Run / Stop button like the Analysis and Tuning tabs' (green `accent_green` play; red `#ef4444` stop while running, a
   click cancels: nothing changes, an earlier result stays).
 
@@ -377,3 +378,50 @@ union in one colour); the result belongs to one frame (Apply only there), though
 findings are in `RoiFeatureTask.result().findings`); the memory limit per worker (`_WORKER_BYTES`, 300 MB) is three times what one
 worker measured here (93 MB), on this machine only; a re-run is not started by itself when a number changes (press Process: 1.4 s); not looked at by eye in the running
 app (the icon, the popup, the +/- widths of the Manual-edit group).
+
+## 12. The margin and the kinds act on the finished map (2026-11-05)
+
+**Why.** Maintainer: which popup settings can be changed *after* a run? Those that do not influence the search belong on the ribbon.
+Sorted by reading `score` (`feature_map.py`): **Dirt from, Nanostructure from, Certainty, Feature edge** decide which pixels are seeds
+and where a feature ends; **Cubes to average** changes the input pictures. Those stay in the settings popup. The **kinds** only pick
+from features already found (instant since 2026-11-04), and the **margin** is the last step of `score` (the dilation of each kind's
+mask, `grow_mask`): the list of features, their counts and their sizes never depend on it. Those two moved to the ribbon row:
+`[eye] [settings v] [process]  [kinds v] [margin px] [apply +]`.
+
+**How.** `feature_map.grow_mask(mask, valid, px)` is the one place the margin is applied; `score` uses it. The task now scores with
+`grow_px=0` and keeps each kind's **ungrown** mask (`FeatureMapResult.kind_cores`, processed picture, ~5 MB) with the data mask
+(`valid`), the raw shape and the geometry. `FeatureMapTask.set_margin(px)` regrows them (`grown_raw_pixels`: `grow_mask` then
+`histogram_highlight_mask_to_raw`, the same mapping as before) on a plain thread; the newest margin wins, the old pixels stay on
+screen until the new ones are installed (`result_changed`, so the preview redraws), `is_regrowing()` is true meanwhile and **Apply
+waits** (a button state and a guard in `apply()`: until then the pixels held are the earlier margin's). A margin changed while a run
+goes on is applied when the run ends. **Measured** (773 x 1287 px processed, 1.4 deg rotation, 5 kinds): dilation 110-140 ms and the
+mapping to raw 170 ms, so ~0.3 s: too long for the GUI thread (hence the thread). **Pinned** (`test_lspri_feature_map_tool.py`):
+the live pixels equal those of a run made with that margin; 0, 1, 3 and back to 1 gives the first pixels again (nothing accumulates);
+`tests/unit/test_lspri_feature_map.py::GrowMaskTest` for the function itself.
+
+**Look.** The margin field is the Background tab's "Excl. dilatation" field: `QSpinBox` + `ribbon_fields.style_ribbon_number_field`
+(frameless, one button high, "n px", no arrows). It has no caption of its own: the row sits under the one "Manual edit" caption, like
+the Morphology radius and the Auto mask feathering field, so its tooltip names it. The kinds are a pick-up button (vendored `checkbox`
+icon) with the five check boxes. **The Feature map row is exactly as wide as the widest tool row** (183 px, the Morphology row; checked
+offscreen with real fonts): one more control there would widen the Mask tab. The saved keys (`image/feature_map/margin_px`,
+`kind_<kind>`) are unchanged, so earlier choices carry over. **Defaults** (in the popup) still puts everything back, the margin and
+the kinds included.
+
+**Fixed the same day (maintainer's go-ahead).** The Process tooltip's "settings changed since the last run" compared the **cubes asked
+for** with the **cubes used** (`FeatureMapEditPanel._numbers_changed_since`), so on a dataset with fewer than 12 cubes (the default
+ask) it always said so. It now compares `choose_cubes(...)` for the count asked now (from the result's own cube) with the cubes the
+result averaged: 12 asked on 2 cubes is the same run as 2; 1 is a different run. Pinned by
+`test_the_cube_count_makes_the_map_stale_only_when_the_cubes_would_differ`.
+
+**Names of the kinds (2026-11-05, maintainer's pick "A").** "Dirt" and "nanostructure" read as causes, and the map cannot tell a
+particle from a scratch on the glass or a bubble: what it measures is how a pixel's change depends on wavelength. The list now says
+that (`feature_map.KIND_LABELS`): `dirt_dark` **Light-blocking spots**, `dirt_bright` **Light-adding spots**, `structure_missing`
+**Sample: weaker resonance**, `structure_extra` **Sample: stronger resonance**, `dirt_faint` **Light-blocking, faint**. "Sample" is
+used for the disk-only pair (judged on the disks), not for the first pair (found anywhere, on a disk or on the substrate). The ids are
+unchanged (they build the saved keys `image/feature_map/kind_<id>`; pinned by `KindLabelsTest`), so nothing saved moves. The tooltips
+of the kinds say what each is and where it is looked for; counts in the status line and the Apply tooltip read "label (n)", joined by
+";" (a label can hold a comma). **Not renamed yet:** the popup rows "Dirt from" and "Nanostructure from" (and their tooltips) still use
+the old words; candidates "Light change from" and "Resonance change from", awaiting the maintainer.
+
+**Open.** (1) Not looked at by eye (the kinds button, the field next to it, the 4 px gap). (2) A cheaper regrow is possible (keep the
+processed -> raw index once: mapping 170 ms -> ~5 ms), not needed at 0.3 s.
