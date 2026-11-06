@@ -1454,6 +1454,11 @@ def _build_dock_layout(
     histogram_dock = PanelContainer("Histogram", histogram_panel, window)
     roi_table_dock = PanelContainer("ROI / Groups", roi_table_panel, window)
     _wire_roi_table_title(roi_table_dock, roi_table_panel)
+    # The counts (ROIs, groups, selected) and the panel's notices are fields of the dock's title bar, like the Image panel's frame
+    # status (2026-11-06, maintainer request: the row under the table is gone). Seeded once: the panel built its first fields before
+    # this connection existed.
+    roi_table_panel.title_columns_changed.connect(roi_table_dock.set_subtitle_columns)
+    roi_table_dock.set_subtitle_columns(roi_table_panel.title_columns())
     spectra_dock = PanelContainer("Spectra", spectra_panel, window)
     sensorgram_dock = PanelContainer("Sensorgram", sensorgram_panel, window)
 

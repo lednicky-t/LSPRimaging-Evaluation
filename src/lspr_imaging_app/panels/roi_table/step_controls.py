@@ -76,7 +76,7 @@ class StepHost:
     rebuild: Callable[..., None]  # (change, *, reveal=...): apply `change` to the model, then put back expansion, scroll position and selection
     group_only: Callable[[], bool]  # the Groups-only view is on
     deferred: Callable[[], bool]  # the panel is hidden: skip work, the panel catches up when shown
-    notice: Callable[..., None]  # (text, *, error=...): a line in the footer and the status bar
+    notice: Callable[..., None]  # (text, *, error=...): a line in the dock's title bar and the status bar
     store: Callable[[], UiStateStore | None]
 
 

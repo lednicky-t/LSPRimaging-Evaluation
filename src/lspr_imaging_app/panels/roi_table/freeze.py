@@ -7,7 +7,7 @@ while the ones before it scroll away would be cut loose from the row it belongs 
 the ones that scroll. A group's name is drawn across the columns after #/ROIs, so a freeze up to #/ROIs alone keeps the chevron, colour and count of a group but little room
 for its name; the tool tip says so.
 **Remembered** like every control: the last frozen column is saved with the other table settings (``ROI_TABLE_FROZEN_UPTO``).
-**Error messages**: a freeze that would fill too much of the panel cannot be applied (`view.py`); the footer says so and the freeze starts working when the panel is wider.
+**Error messages**: a freeze that would fill too much of the panel cannot be applied (`view.py`); the title bar says so and the freeze starts working when the panel is wider.
 
 The painting and mouse mapping that make a column stay are in ``view.py``; this file only asks for them.
 """

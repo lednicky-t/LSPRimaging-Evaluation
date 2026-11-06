@@ -9,7 +9,7 @@ Geometry never brings a hidden column back, and a hidden column the other mode d
 headers stay as they are. A step or comparison column is remembered by what it is (`column_keys.py`), not by its
 number, so it stays hidden when steps are added or removed, and a hidden column of another experiment hides nothing here.
 **Remembered** like every control (``ROI_TABLE_HIDDEN_COLUMNS``). A table sorted by a column that is then hidden goes back to the ``#`` order, as when a view mode hides it.
-**Error messages**: none; hiding a column says in the footer how to bring it back.
+**Error messages**: none; hiding a column says in the title bar how to bring it back.
 
 The view does the hiding (`view.py`: `set_hidden_keys`, `refresh_column_visibility`); this file only asks for it.
 """

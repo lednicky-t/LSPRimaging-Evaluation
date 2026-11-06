@@ -41,7 +41,7 @@ baseline step, worked out from the step numbers; the arrow in their header chang
 
 Bad input (a size below the minimum, a ring with inner >= outer, an empty
 group name) is refused by the toolbox before anything changes, and shown here
-in the footer; it is never silently corrected.
+in the dock's title bar (where the counts normally are, for a few seconds) and the status bar; it is never silently corrected.
 """
 
 from __future__ import annotations
@@ -82,6 +82,7 @@ from ...storage.ui_state_keys import (
 from ..icon_button_style import style_general_icon_button
 from ..panel_task import PanelTask
 from ..ribbon_icon_size import ICON_SIZE
+from ..subtitle_column import SubtitleColumn
 from ..ui_state import UiStateStore
 from ..visibility_gate import HiddenPanelGate
 from ..unit_toggle import UnitToggle
@@ -140,7 +141,10 @@ def _message(exc: Exception) -> str:
 
 class RoiTablePanel(QWidget):
     status_message = pyqtSignal(str)
-    """A one-line result for the app's status bar (also shown in the footer)."""
+    """A one-line result for the app's status bar (also shown in the dock's title bar for a few seconds)."""
+    title_columns_changed = pyqtSignal(object)
+    """The status fields of the dock's title bar changed: a tuple of `SubtitleColumn` (ROI count, group count, selected count; or one
+    field with a notice). `app_rewrite.py` wires it to `PanelContainer.set_subtitle_columns`, as for the Image panel."""
     group_only_changed = pyqtSignal(bool)
     """The Groups-only view was switched on / off (the dock's title highlights ``Groups`` or ``ROI`` to match)."""
 
@@ -179,7 +183,8 @@ class RoiTablePanel(QWidget):
         self._gate = HiddenPanelGate(on_shown=self._schedule_refresh)  # no rebuilding while the dock is hidden
         self._notice_timer = QTimer(self)
         self._notice_timer.setSingleShot(True)
-        self._notice_timer.timeout.connect(self._update_footer)
+        self._notice_timer.timeout.connect(self._show_counts)
+        self._columns: tuple[SubtitleColumn, ...] = ()  # what the dock's title bar shows (`title_columns`)
 
         self._build_ui()
         self._connect()
@@ -296,16 +301,11 @@ class RoiTablePanel(QWidget):
         toolbar.addStretch(1)
         toolbar.addWidget(self._unit_toggle)
 
-        self._footer = QLabel(self)
-        self._footer.setContentsMargins(8, 3, 8, 4)
-        self._footer.setWordWrap(False)
-
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addLayout(toolbar)
-        layout.addWidget(self._stack, 1)
-        layout.addWidget(self._footer)
+        layout.addWidget(self._stack, 1)  # no row under the table: the counts and notices are in the dock's title bar (`title_columns`)
 
     def _tool_button(self, icon_name: str, handler: Callable[[], None] | None, *, checkable: bool = False) -> QToolButton:
         button = QToolButton(self)
@@ -382,7 +382,7 @@ class RoiTablePanel(QWidget):
                 self._style_tool_button(button, str(name))
         self._unit_toggle.refresh_theme()
         self._step_controls.refresh_theme()
-        self._update_footer()
+        self._show_counts()
         self._tree.viewport().update()
 
     def _style_tool_button(self, button: QToolButton, icon_name: str) -> None:
@@ -500,7 +500,7 @@ class RoiTablePanel(QWidget):
         else:
             self._apply_selection_to_view(ids, reveal=reveal)
         self._update_toolbar_state()
-        self._update_footer()
+        self._show_counts()
         self._tree.refresh_column_visibility()  # new step columns come visible: the ones the user hid are hidden again
         self._step_controls.fit_if_auto()  # the content may have changed (rows, numbers that came while the panel was hidden): the step columns follow it
         # The rows on screen may be other rows now (at launch the ROIs and groups arrive after the saved "step columns on" was restored, ~100 ms after the step module
@@ -559,7 +559,7 @@ class RoiTablePanel(QWidget):
             self._syncing = False
         self._model.set_selected_ids(self._selection.selected_roi_ids())
         self._update_toolbar_state()
-        self._update_footer()
+        self._show_counts()
 
     def _on_selection_changed_elsewhere(self, ids: object) -> None:
         """The shared selection changed (a click on the image, a delete that
@@ -569,7 +569,7 @@ class RoiTablePanel(QWidget):
         if not self._syncing:
             self._apply_selection_to_view(ids, reveal=True)  # type: ignore[arg-type]
         self._update_toolbar_state()
-        self._update_footer()
+        self._show_counts()
 
     def _apply_selection_to_view(self, roi_ids: object, *, reveal: bool) -> None:
         indexes = self._model.roi_indexes(roi_ids)  # type: ignore[arg-type]
@@ -684,32 +684,44 @@ class RoiTablePanel(QWidget):
 
     # -- notices ---------------------------------------------------------------------------
 
+    def title_columns(self) -> tuple[SubtitleColumn, ...]:
+        """The status fields the dock's title bar shows now (to seed a dock that connected after the panel was built)."""
+        return self._columns
+
+    def status_text(self) -> str:
+        """The same fields as one line: "5 ROIs  ·  2 groups  ·  2 selected", or the notice that is showing."""
+        return "  ·  ".join(column.text for column in self._columns if column.text)
+
+    def _set_columns(self, columns: tuple[SubtitleColumn, ...]) -> None:
+        if columns != self._columns:
+            self._columns = columns
+            self.title_columns_changed.emit(columns)
+
     def _show_notice(self, text: str, *, error: bool = False) -> None:
+        """A refusal or a hint takes the place of the counts in the title bar for a while (red for an error; the full text is its
+        tool tip, and the status bar gets it too)."""
         theme = get_active_theme()
-        self._footer.setText(text)
-        self._footer.setStyleSheet(f"color: {theme.accent_red if error else theme.text_secondary};")
-        self._footer.setToolTip(text)
+        self._set_columns((SubtitleColumn(text, color=theme.accent_red if error else theme.text_secondary, tooltip=text),))
         self._notice_timer.start(_ERROR_NOTICE_MS if error else _NOTICE_MS)
         self.status_message.emit(text)
 
-    def _update_footer(self) -> None:
-        theme = get_active_theme()
+    def _show_counts(self) -> None:
+        """The counts in the title bar, in fixed places (a group count that appears never shifts the others)."""
         self._notice_timer.stop()
         total = len(self._model.rows())
         chosen = len(self._selection.selected_roi_ids())
-        text = "No ROIs" if total == 0 else f"{total} ROI{'' if total == 1 else 's'}"
         group_count = len(self._toolbox.groups())
-        if group_count:
-            text += f"  ·  {group_count} group{'' if group_count == 1 else 's'}"
-        if chosen:
-            text += f"  ·  {chosen} selected"
-        self._footer.setText(text)
-        self._footer.setToolTip("")
-        self._footer.setStyleSheet(f"color: {theme.text_muted};")
+        self._set_columns(
+            (
+                SubtitleColumn("No ROIs" if total == 0 else f"{total} ROI{'' if total == 1 else 's'}", widest="9999 ROIs"),
+                SubtitleColumn(f"{group_count} group{'' if group_count == 1 else 's'}" if group_count else "", widest="999 groups"),
+                SubtitleColumn(f"{chosen} selected" if chosen else ""),  # no width: takes the rest, so it is the field that gives way
+            )
+        )
 
     def _guarded(self, action: str, command: Callable[[], None]) -> bool:
         """Run a toolbox command; show a refusal (bad value, stale id) in the
-        footer instead of letting it vanish. Returns whether it ran."""
+        title bar instead of letting it vanish. Returns whether it ran."""
         try:
             command()
         except (ValueError, KeyError) as exc:
