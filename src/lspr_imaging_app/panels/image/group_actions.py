@@ -106,8 +106,11 @@ class GroupActions(QObject):
             column_major=column_major,
         )
         noun = "Column" if column_major else "Row"
+        # Zero-padded numbers ("Row 01" ... "Row 12") so that sorting by name keeps the order 1, 2, ... 10, 11
+        # (plain text sorting puts "Row 10" before "Row 2"). Two digits at least; wider only past 99 lines.
+        digits = max(2, len(str(len(lines))))
         try:
-            self._toolbox.group_rois_each([(f"{noun} {n}", line) for n, line in enumerate(lines, start=1)])
+            self._toolbox.group_rois_each([(f"{noun} {n:0{digits}d}", line) for n, line in enumerate(lines, start=1)])
         except (ValueError, KeyError) as error:
             self._refuse(str(error))
             return
