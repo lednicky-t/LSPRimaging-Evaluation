@@ -365,6 +365,15 @@ class RoiTablePanel(QWidget):
             f"QTreeView {{ background: {theme.toolbar_bg}; border: none; outline: none; }}"  # toolbar_bg = the panels' darker interior (window_bg is the lighter gap shade in LSPRi)
             f"QHeaderView::section {{ background: {theme.toolbar_bg}; color: {theme.text_muted}; border: none; "
             f"border-bottom: 1px solid {theme.toolbar_border}; padding: 4px 6px; font-weight: 600; }}"
+            # Slim, round scroll bars for this table only (the app theme's are 14 px with a 10 px handle): an 8 px bar with a 6 px handle whose ends are fully round (radius 3).
+            f"QScrollBar:vertical {{ background: transparent; width: 8px; margin: 2px 1px 2px 1px; }}"
+            f"QScrollBar:horizontal {{ background: transparent; height: 8px; margin: 1px 2px 1px 2px; }}"
+            f"QScrollBar::handle:vertical {{ background: {theme.control_border}; min-height: 24px; border-radius: 3px; }}"
+            f"QScrollBar::handle:horizontal {{ background: {theme.control_border}; min-width: 24px; border-radius: 3px; }}"
+            f"QScrollBar::handle:hover {{ background: {theme.control_border_hover}; }}"
+            f"QScrollBar::handle:pressed {{ background: {theme.control_border_pressed}; }}"
+            "QScrollBar::add-line, QScrollBar::sub-line { width: 0px; height: 0px; background: transparent; border: none; }"  # no arrow buttons
+            "QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }"
         )
         self._hint.setStyleSheet(f"color: {theme.text_dim}; background: {theme.toolbar_bg}; padding: 24px;")
         for button in self.findChildren(QToolButton):
@@ -494,6 +503,9 @@ class RoiTablePanel(QWidget):
         self._update_footer()
         self._tree.refresh_column_visibility()  # new step columns come visible: the ones the user hid are hidden again
         self._step_controls.fit_if_auto()  # the content may have changed (rows, numbers that came while the panel was hidden): the step columns follow it
+        # The rows on screen may be other rows now (at launch the ROIs and groups arrive after the saved "step columns on" was restored, ~100 ms after the step module
+        # last spoke): does every one of them have numbers? Without this the refresh button kept the answer it gave for the blank table ("up to date").
+        self._step_controls.schedule_state()
 
     # -- selection ------------------------------------------------------------------------
 
@@ -708,6 +720,12 @@ class RoiTablePanel(QWidget):
     def cancel(self) -> None:
         """The task indicator's Cancel: stop the calculation of the step columns (what was fitted is kept)."""
         self._step_controls.cancel()
+
+    def calculate_at_startup(self) -> None:
+        """Called once when the app has finished loading after launch: the step columns' rows on screen are calculated (`StepColumnControls.calculate_at_startup`)."""
+        if self._redraw_timer.isActive() and not self._gate.defer():
+            self.refresh_now()  # a change of the rows is still waiting for its rebuild: ask about the rows as they are now
+        self._step_controls.calculate_at_startup()
 
     # -- toolbar state ----------------------------------------------------------------------
 

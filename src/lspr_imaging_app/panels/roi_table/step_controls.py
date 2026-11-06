@@ -406,6 +406,16 @@ class StepColumnControls(QObject):
         rois, groups = self.visible_rows()
         self._steps.recalculate(rois, groups)
 
+    def calculate_at_startup(self) -> None:
+        """The app has finished loading after launch (2026-11-06, maintainer: "recalculate it during the start"): calculate the rows on screen once, as the refresh button would,
+        so the step columns are filled when the user sits down. Quiet where the button would complain or where nobody asked for numbers: step columns off, the table hidden
+        (a hidden panel does no work), no scan or no steps yet, or every row already current. It shows in the status bar's task indicator and can be cancelled there."""
+        if self._steps is None or not self._on or self._host.deferred() or not self._steps.can_calculate():
+            return
+        rois, groups = self.visible_rows()
+        if self._steps.count_not_current(rois, groups):
+            self.recalculate()
+
     def cancel(self) -> None:
         """The task indicator's Cancel: stop the calculation (what was fitted is kept)."""
         if self._steps is not None:

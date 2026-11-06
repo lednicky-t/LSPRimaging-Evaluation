@@ -1265,6 +1265,18 @@ def _build_startup_tracker(
     return tracker
 
 
+def _wire_startup_calculation(startup: StartupTracker, roi_table_panel: RoiTablePanel) -> None:
+    """The ROI / Groups table's step columns are calculated once after a launch that reopened the last dataset (2026-11-06, maintainer's request). The moment is the tracker's
+    "completed": dataset, session (ROIs, groups, plan), first image, scan results and the Spectra / Sensorgram fits are all settled, so the numbers are not out of date as
+    they arrive, and the fits the Sensorgram already made are reused. A failed or cancelled start-up, or a dataset opened later by hand, calculates nothing."""
+
+    def on_finished(_task_id: str, outcome: str, _message: str) -> None:
+        if outcome == "completed":
+            roi_table_panel.calculate_at_startup()
+
+    startup.task_finished.connect(on_finished)
+
+
 def _build_status_bar(
     window: QMainWindow,
     m: _Modules,
@@ -1883,6 +1895,7 @@ def build_main_window(
     edit_menu, view_menu = _build_menu_bar(window)
     attach_to_menu_bar(window.menuBar(), m.dataset)  # dataset path, type / size / cubes, and the Time / Plan checks
     startup = _build_startup_tracker(m, image_panel, spectra_panel, sensorgram_panel)
+    _wire_startup_calculation(startup, roi_table_panel)
     _build_status_bar(window, m, workflow, image_panel, roi_table_panel, spectra_panel, sensorgram_panel, startup)
     _wire_analysis_scan(m, image_panel.analysis_tab, ui_state, startup)
     _wire_roi_tuning(m, image_panel.tuning_tab, ui_state, show_view=image_panel.set_tuning_view)

@@ -369,6 +369,11 @@ class StepTableModule(QObject):
     def is_running(self) -> bool:
         return self._job is not None
 
+    def can_calculate(self) -> bool:
+        """There is a scan and there are experiment steps: a calculation would produce numbers. (`recalculate` says why not, in a notice; this asks without a word, for a
+        calculation the user did not ask for, such as the one after launch.)"""
+        return self._scan.stored() is not None and bool(self._plan.steps())
+
     # -- the Subtract switch and the record of an export -------------------------------------------------------------------------
 
     def baseline_enabled(self) -> bool:
