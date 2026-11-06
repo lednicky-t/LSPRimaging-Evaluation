@@ -37,6 +37,7 @@ from .model import (
 from .rows import (
     COLUMN_COUNT,
     COLUMN_ID,
+    COLUMN_NAME,
     COLUMN_SHAPE,
     DIAMETER_COLUMNS,
     SHAPE_DISK,
@@ -58,6 +59,25 @@ CELL_ROOM = 2 * _CELL_PAD + 4
 _ROW_LINE_ALPHA = 90
 _COLUMN_LINE_ALPHA = 55
 _STALE_TINTED_TEXT_ALPHA = 135  # a number that is out of date, on a coloured step column: the same text colour, fainter (`text_dim` could vanish into the colour)
+LABEL_WASH_ALPHA = 0.5
+"""While #/ROIs is hidden, the colour its dot / chip carried is painted behind the label instead, at this opacity (the same as the plan bar's default for a step colour)."""
+
+
+def first_column_collapsed(view) -> bool:
+    """True while #/ROIs is hidden. It is collapsed to zero width, not hidden for Qt (`RoiTreeView.refresh_column_visibility` says why), so the group headers still get drawn:
+    the chevron, colour chip and count that sit in that column are then left out, and the row's colour is a wash behind the label (`LABEL_WASH_ALPHA`)."""
+    return isinstance(view, QTreeView) and view.columnWidth(COLUMN_ID) <= 0
+
+
+def label_wash_of(color_hex) -> QColor | None:
+    """The colour a label is washed with while #/ROIs is hidden: the row's own colour at `LABEL_WASH_ALPHA`; None for a row with no colour."""
+    if not color_hex:
+        return None
+    wash = QColor(color_hex)
+    if not wash.isValid():
+        return None
+    wash.setAlphaF(LABEL_WASH_ALPHA)
+    return wash
 
 
 def step_tint_of(index: QModelIndex) -> QColor | None:
@@ -113,7 +133,10 @@ class RoiTableDelegate(QStyledItemDelegate):
         # the largest over its columns - so column 0 alone decides it. Not asking
         # the base class (which formats every cell's text again) nor the other
         # columns made `expandAll()` on 1500 ROIs 1.3 s -> 0.2 s (2026-10-07).
-        if index.column() != 0:
+        #
+        # Exception (2026-11-06): while #/ROIs is hidden it has zero width and Qt skips it - it asks the columns from the first one *with width* on - so column 0 alone would
+        # leave every row at height 0 (a table that looked fine until its next rebuild, then showed nothing). The columns Qt does ask answer then.
+        if index.column() != 0 and not first_column_collapsed(option.widget or self.parent()):
             return QSize(0, 0)
         metrics = option.fontMetrics
         height = group_row_height(metrics) if index.data(KIND_ROLE) == "group" else row_height(metrics)
@@ -156,11 +179,14 @@ class RoiTableDelegate(QStyledItemDelegate):
         theme = get_active_theme()
         rect = option.rect
         tint = step_tint_of(index)
+        column = index.column()
         if tint is not None:
             painter.fillRect(rect, tint)  # under the selection / hover tint, which therefore still shows
+        wash = label_wash_of(index.data(COLOR_ROLE)) if column == COLUMN_NAME and first_column_collapsed(option.widget) else None
+        if wash is not None:
+            painter.fillRect(rect, wash)  # the ROI's colour, which its dot would have shown in the hidden #/ROIs column
         self._paint_row_background(painter, option, index, theme)
-        self._paint_cell_borders(painter, rect, index.column(), theme, index.model().columnCount() - 1)
-        column = index.column()
+        self._paint_cell_borders(painter, rect, column, theme, index.model().columnCount() - 1)
         if column == COLUMN_ID and rect.width() <= 0:
             return  # #/ROIs is hidden (collapsed to nothing): its dot would be drawn over the next column
         if column == COLUMN_SHAPE:
@@ -173,7 +199,9 @@ class RoiTableDelegate(QStyledItemDelegate):
             color = QColor(theme.text_dim)  # dim, not italic: italics read as "different kind of value" (a step number that is out of date is dimmed the same way)
         if tint is not None:
             color = tinted_text_color(tint, QColor(theme.toolbar_bg), stale=bool(index.data(STEP_STALE_ROLE)))
-        alignment = index.data(Qt.ItemDataRole.TextAlignmentRole)
+        elif wash is not None:
+            color = tinted_text_color(wash, QColor(theme.toolbar_bg))  # readable on any colour, as on a step colour
+        alignment =index.data(Qt.ItemDataRole.TextAlignmentRole)
         alignment = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter if alignment is None else Qt.AlignmentFlag(alignment)
         if column == COLUMN_ID:
             left = rect.left() + STRIP_WIDTH + 5 + (GROUP_INDENT if index.data(DEPTH_ROLE) else 0)
@@ -240,6 +268,10 @@ class RoiTableDelegate(QStyledItemDelegate):
         rect = option.rect
         painter.fillRect(rect, QColor(theme.toolbar_section_bg))
         self._paint_group_step_tints(painter, option, index)
+        collapsed = first_column_collapsed(option.widget)
+        wash = label_wash_of(index.data(COLOR_ROLE)) if collapsed else None
+        if wash is not None:  # the group's colour, which its chip would have shown in the hidden #/ROIs column, behind the name (and the stretch the name may use)
+            painter.fillRect(QRect(rect.left(), rect.top(), max(0, self._group_label_edge(option, index) - rect.left()), rect.height()), wash)
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
         if selected or index.data(ALL_SELECTED_ROLE):
             painter.fillRect(rect, self._selected_tint(theme))
@@ -250,6 +282,35 @@ class RoiTableDelegate(QStyledItemDelegate):
         painter.setPen(QPen(QColor(theme.toolbar_border), 1))
         painter.drawLine(rect.bottomLeft(), rect.bottomRight())
 
+        ungrouped = index.data(GROUP_ID_ROLE) is None
+        count_text = str(index.data(COUNT_ROLE) or 0)  # sits where a ROI's id sits, under the "#/ROIs" title
+        if not collapsed:
+            self._paint_group_marks(painter, option, index, theme, count_text)
+
+        if self._editing is not None and self._editing == QPersistentModelIndex(index):
+            return  # the editor sits exactly where the name is painted; painting it too would double it
+        metrics = option.fontMetrics
+        font = QFont(option.font)
+        font.setBold(not ungrouped)
+        font.setItalic(ungrouped)
+        painter.setFont(font)
+        if wash is not None:
+            painter.setPen(tinted_text_color(wash, QColor(theme.toolbar_section_bg)))
+        else:
+            painter.setPen(QColor(theme.text_muted if ungrouped else theme.text_primary))
+        name_rect = self._group_name_rect(option, index, count_text)
+        text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
+        painter.drawText(
+            name_rect,
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+            metrics.elidedText(text, Qt.TextElideMode.ElideRight, name_rect.width()),
+        )
+        self._paint_group_steps(painter, option, index, theme)
+
+    @staticmethod
+    def _paint_group_marks(painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex, theme, count_text: str) -> None:
+        """The chevron, the colour chip and the ROI count at the left end of a group header (left out while #/ROIs is hidden: `first_column_collapsed`)."""
+        rect = option.rect
         view = option.widget
         expanded = bool(isinstance(view, QTreeView) and view.isExpanded(index))
         cx, cy = rect.left() + 12.0, rect.center().y() + 0.5
@@ -262,14 +323,11 @@ class RoiTableDelegate(QStyledItemDelegate):
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPolyline(chevron)
 
-        ungrouped = index.data(GROUP_ID_ROLE) is None
         chip = QRectF(rect.left() + CHEVRON_ZONE, cy - 6, 12, 12)
         painter.setPen(QPen(QColor(theme.control_border), 1))
         painter.setBrush(QColor(index.data(COLOR_ROLE) or theme.text_dim))
         painter.drawRoundedRect(chip, 3, 3)
 
-        count_text = str(index.data(COUNT_ROLE) or 0)  # sits where a ROI's id sits, under the "#/ROIs" title
-        metrics = option.fontMetrics
         count_left = int(chip.right()) + 7
         painter.setPen(QColor(theme.text_muted))
         painter.drawText(
@@ -277,22 +335,6 @@ class RoiTableDelegate(QStyledItemDelegate):
             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
             count_text,
         )
-
-        if self._editing is not None and self._editing == QPersistentModelIndex(index):
-            return  # the editor sits exactly where the name is painted; painting it too would double it
-        font = QFont(option.font)
-        font.setBold(not ungrouped)
-        font.setItalic(ungrouped)
-        painter.setFont(font)
-        painter.setPen(QColor(theme.text_muted if ungrouped else theme.text_primary))
-        name_rect = self._group_name_rect(option, index, count_text)
-        text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
-        painter.drawText(
-            name_rect,
-            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-            metrics.elidedText(text, Qt.TextElideMode.ElideRight, name_rect.width()),
-        )
-        self._paint_group_steps(painter, option, index, theme)
 
     @staticmethod
     def _step_columns_of(view, model) -> list[int]:
@@ -344,22 +386,35 @@ class RoiTableDelegate(QStyledItemDelegate):
     @staticmethod
     def _group_name_rect(option: QStyleOptionViewItem, index: QModelIndex, count_text: str) -> QRect:
         """Where a group header's name is painted (and edited): after the chevron, chip and
-        count, but never left of the end of column 0 (the count sits under the "#/ROIs" title).
+        count, but never left of the end of column 0 (the count sits under the "#/ROIs" title). While #/ROIs is hidden none of those is drawn: the name starts where a
+        ROI's label does.
 
         Every x is relative to ``option.rect.left()`` (the left end of the spanned cell), never to the scroll position, so the name is in the same place of the cell wherever the
         cell is drawn. With frozen columns the name stops at their right edge: the rest of the header scrolls away, the name must not."""
         rect = option.rect
         view = option.widget
-        first_column_right = rect.left() + (view.columnWidth(0) if isinstance(view, QTreeView) else 0)
-        name_left = max(CHEVRON_ZONE + rect.left() + 12 + 9 + option.fontMetrics.horizontalAdvance(count_text) + 7, first_column_right + 2)
-        right = rect.right()
+        if first_column_collapsed(view):
+            name_left = rect.left() + _CELL_PAD
+        else:
+            first_column_right = rect.left() + (view.columnWidth(0) if isinstance(view, QTreeView) else 0)
+            name_left = max(CHEVRON_ZONE + rect.left() + 12 + 9 + option.fontMetrics.horizontalAdvance(count_text) + 7, first_column_right + 2)
+        right = RoiTableDelegate._group_label_edge(option, index, pin_inset=4) - 1
+        return QRect(name_left, rect.top(), max(0, right - name_left - 8), rect.height())
+
+    @staticmethod
+    def _group_label_edge(option: QStyleOptionViewItem, index: QModelIndex, *, pin_inset: int = 0) -> int:
+        """The x (one past the last pixel) where the stretch of a group header that holds its name ends: the end of the row, the first step column (the name stops where the
+        step numbers begin) or the frozen columns' right edge (less `pin_inset`), whichever comes first."""
+        rect = option.rect
+        view = option.widget
+        edge = rect.right() + 1
         steps = RoiTableDelegate._step_columns_of(view, index.model())
         if steps:
-            right = min(right, rect.left() + view.header().sectionPosition(steps[0]))  # the name stops where the step numbers begin
+            edge = min(edge, rect.left() + view.header().sectionPosition(steps[0]))
         pinned = view.pinned_width() if hasattr(view, "pinned_width") else 0
         if pinned:
-            right = min(right, rect.left() + pinned - 4)
-        return QRect(name_left, rect.top(), max(0, right - name_left - 8), rect.height())
+            edge = min(edge, rect.left() + pinned - pin_inset)
+        return edge
 
     # -- editing --------------------------------------------------------------------
 

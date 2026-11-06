@@ -24,14 +24,14 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from PyQt6.QtCore import QObject, QPoint, Qt, QTimer
-from PyQt6.QtGui import QAction, QActionGroup
+from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import QFrame, QHBoxLayout, QMenu, QToolButton, QWidget
 
 from lspr_ui import get_active_theme, load_tabler_icon
 
 from ...analysis.export_tables import roi_step_table
 from ...analysis.step_table import OPERATIONS, GroupMembers
-from ...selection.step_table_module import StepTableModule
+from ...selection.step_table_module import StepTableModule, compare_title
 from ...storage.ui_state_keys import ROI_TABLE_COMPARE_COLUMNS, ROI_TABLE_STEP_DISPLAY, ROI_TABLE_STEP_WIDTH_MANUAL, ROI_TABLE_STEPS_SHOWN
 from ..icon_button_style import style_general_icon_button
 from ..plot_export_button import ExportData, PlotExportButton
@@ -44,7 +44,6 @@ from .model import RoiTreeModel
 from .rows import COLUMN_COUNT
 from .step_columns import (
     DISPLAY_BOTH,
-    DISPLAY_LABELS,
     DISPLAY_MEAN,
     DISPLAY_MEAN_SEM,
     DISPLAY_SEM,
@@ -53,6 +52,7 @@ from .step_columns import (
     DISPLAYS,
     OPERATION_LABELS,
     OPERATION_TIPS,
+    title_html,
 )
 from .view import RoiTreeView
 
@@ -107,7 +107,7 @@ class StepColumnControls(QObject):
         self.columns_button.clicked.connect(lambda _checked=False: self.set_shown(self.columns_button.isChecked(), ask=True))
         self.display_pick = PickMenu(panel, name_on_face=False)
         for mode in DISPLAYS:
-            self.display_pick.add_choice(mode, DISPLAY_LABELS[mode], DISPLAY_TIPS[mode], equation_picture(_DISPLAY_HTML[mode]))
+            self.display_pick.add_choice(mode, "", DISPLAY_TIPS[mode], equation_picture(_DISPLAY_HTML[mode]))  # (the symbol says it; the tip, on hover, says it in words)
         self.display_pick.finish()
         self.display_pick.setCurrentIndex(self.display_pick.findData(DISPLAY_BOTH))
         self.display_pick.setToolTip(
@@ -344,27 +344,32 @@ class StepColumnControls(QObject):
             self._steps.remove_compare(uid)
 
     def _show_compare_menu(self, section: int, pos: QPoint) -> None:
-        """The arrow in a comparison column's header: what the column calculates, and removing it."""
+        """The arrow in a comparison column's header: what the column calculates (each choice is the formula with real subscripts, as in the header, and its short name), and
+        removing it. A `PickMenu` that is never shown itself, like the display menu next to the column button: a plain menu entry cannot draw subscripts."""
         columns = self._model.step_columns()
         index = section - COLUMN_COUNT
         if not 0 <= index < len(columns) or columns[index].kind != "compare":
             return
         column = columns[index]
         uid = column.ref[1]  # type: ignore[index]
-        menu = QMenu(self.columns_button)
-        menu.setToolTipsVisible(True)
-        group = QActionGroup(menu)
-        names = {"S": f"S{column.pair}", "B": f"B{column.pair}"}
+        pick = PickMenu(self.columns_button, name_on_face=False)  # (a child of the visible button: it stays hidden, there is no flash of a window)
         for op in OPERATIONS:
-            action = menu.addAction(OPERATION_LABELS[op].format(S=names["S"], B=names["B"]))
-            action.setCheckable(True)
-            action.setChecked(op == column.op)
-            action.setToolTip(OPERATION_TIPS[op])
-            group.addAction(action)
-            action.triggered.connect(lambda _checked=False, op=op: self.set_compare_op(uid, op))
-        menu.addSeparator()
-        menu.addAction("Remove this column", lambda: self.remove_compare(uid))
-        menu.exec(pos)
+            pick.add_choice(op, OPERATION_LABELS[op], OPERATION_TIPS[op], equation_picture(title_html(compare_title(column.pair, op))))
+        remove = QToolButton(pick)
+        remove.setText("Remove this column")
+        remove.setAutoRaise(True)
+        theme = get_active_theme()
+        remove.setStyleSheet(
+            f"QToolButton {{ background: transparent; border: none; padding: 4px 6px; text-align: left; color: {theme.text_primary}; }}"
+            f"QToolButton:hover {{ background: {theme.control_bg_hover}; }}"
+        )
+        pick.add_footer(remove)
+        pick.finish()
+        pick.setCurrentIndex(pick.findData(column.op))
+        pick.currentIndexChanged.connect(lambda _index: self.set_compare_op(uid, str(pick.currentData())))
+        remove.clicked.connect(lambda _checked=False: (pick.close_menu(), self.remove_compare(uid)))
+        pick.popup_at(pos)
+        pick.deleteLater()
 
     # -- the Subtract switch (the Sensorgram's one setting) -------------------------------------------------------------------
 

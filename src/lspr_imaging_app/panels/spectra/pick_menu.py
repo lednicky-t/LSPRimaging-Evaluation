@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from PyQt6.QtCore import QPointF, QRectF, QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap, QTextDocument
 from PyQt6.QtWidgets import QHBoxLayout, QMenu, QToolButton, QWidget, QWidgetAction
 
@@ -361,6 +361,15 @@ class PickMenu(QToolButton):
     def add_footer(self, widget: QWidget) -> None:
         """A widget under the last row (an option that belongs to every choice). Call before ``finish()``."""
         self._footers.append(widget)
+
+    def popup_at(self, global_pos: QPoint) -> None:
+        """Open the menu at a screen position instead of under the button (the button itself is never shown: a menu asked for by something else, like the arrow in a table
+        header). Returns when the menu is closed."""
+        self._menu.exec(global_pos)
+
+    def close_menu(self) -> None:
+        """Close the menu (for a footer widget that does its work and is done)."""
+        self._menu.close()
 
     def count(self) -> int:
         return len(self._choices)

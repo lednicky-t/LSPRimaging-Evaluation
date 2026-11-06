@@ -9,7 +9,9 @@ table, two significant digits of the typical spread that is shown, so every cell
 
 from __future__ import annotations
 
+import html
 import math
+import re
 from collections.abc import Callable, Iterable
 
 from ...selection.step_table_module import CellValue, StepColumn
@@ -17,13 +19,6 @@ from ...plan.stats_table import PLUS_MINUS, choose_decimals
 
 DISPLAY_MEAN, DISPLAY_STD, DISPLAY_BOTH, DISPLAY_SEM, DISPLAY_MEAN_SEM = "mean", "std", "both", "sem", "mean_sem"
 DISPLAYS = (DISPLAY_MEAN, DISPLAY_STD, DISPLAY_BOTH, DISPLAY_SEM, DISPLAY_MEAN_SEM)  # ("both" keeps its old name: it is what earlier sessions saved)
-DISPLAY_LABELS = {
-    DISPLAY_MEAN: "Mean",
-    DISPLAY_STD: "Std",
-    DISPLAY_BOTH: f"Mean {PLUS_MINUS} Std",
-    DISPLAY_SEM: "SEM",
-    DISPLAY_MEAN_SEM: f"Mean {PLUS_MINUS} SEM",
-}
 DISPLAY_TIPS = {
     DISPLAY_MEAN: "Show the mean of each ROI or group in each step. A step column sorts by it.",
     DISPLAY_STD: "Show the standard deviation of each ROI or group in each step. A step column sorts by it.",
@@ -63,14 +58,72 @@ def spread_of(value: CellValue, mode: str) -> float:
     return value.sem if mode in _SEM_MODES else value.sd
 
 
-OPERATION_LABELS = {"difference": "{S} - {B}: shift (difference of the means)", "snr": "({S} - {B}) / noise of {B}: signal to noise"}
-"""The operation menu of a comparison column; `{S}` and `{B}` stand for the pair's names (S1, B1 ...)."""
+OPERATION_LABELS = {"difference": "Shift", "snr": "Signal to noise"}
+"""The name written after the formula in a row of a comparison column's operation menu (the formula is a picture with subscripts, `title_html`; the tip says the rest)."""
+
+_SUBSCRIPT = re.compile(r"_([A-Za-z0-9]+)")
+
+
+def subscript_runs(title: str) -> list[tuple[str, bool]]:
+    """A title split into ``(text, is_subscript)`` runs: ``"μ_S1 − μ_B1"`` -> ``[("μ", False), ("S1", True), (" − μ", False), ("B1", True)]``. An underscore and the letters / digits after it
+    are a subscript; a title with none is one plain run. Only the titles the app writes itself (the comparison columns) are read this way: a step's title is the user's note, in which
+    an underscore is just an underscore."""
+    runs: list[tuple[str, bool]] = []
+    position = 0
+    for match in _SUBSCRIPT.finditer(title):
+        if match.start() > position:
+            runs.append((title[position:match.start()], False))
+        runs.append((match.group(1), True))
+        position = match.end()
+    if position < len(title) or not runs:
+        runs.append((title[position:], False))
+    return runs
+
+
+def title_html(title: str) -> str:
+    """A comparison column's title as HTML with real subscripts (``<sub>``), for a picture of it (`equation_picture`): ``"μ_S1 − μ_B1"`` -> ``"μ<sub>S1</sub> − μ<sub>B1</sub>"``."""
+    return "".join(f"<sub>{html.escape(text)}</sub>" if sub else html.escape(text) for text, sub in subscript_runs(title))
+
+
+def plain_title(title: str) -> str:
+    """A comparison column's title for a place that cannot draw subscripts (a menu entry): ``"μ_S1 − μ_B1"`` -> ``"μS1 − μB1"``. Never for a step's title (the user's note)."""
+    return title.replace("_", "")
+
+
+ELLIPSIS = "…"
+
+
+def elide_runs(runs: list[tuple[str, bool]], advance: Callable[[str, bool], int], width: int) -> list[tuple[str, bool]]:
+    """`runs` (`subscript_runs`) cut at the end, with "…", to fit `width` px; `advance` is (text, is_subscript) -> px. What fits is returned whole; a title that does not fit keeps
+    its subscripts as far as it goes (it is never turned into text with underscores); nothing at all when not even the "…" fits."""
+    if sum(advance(text, sub) for text, sub in runs) <= width:
+        return list(runs)
+    room = width - advance(ELLIPSIS, False)
+    if room <= 0:
+        return []
+    kept: list[tuple[str, bool]] = []
+    for text, sub in runs:
+        used = advance(text, sub)
+        if used <= room:
+            kept.append((text, sub))
+            room -= used
+            continue
+        cut = ""
+        for char in text:
+            if advance(cut + char, sub) > room:
+                break
+            cut += char
+        if cut:
+            kept.append((cut, sub))
+        break
+    kept.append((ELLIPSIS, False))
+    return kept
 OPERATION_TIPS = {
     "difference": (
         "Mean of the signal step minus mean of the baseline step, in nm. The SD is the two steps' SDs added in quadrature; "
         "the SEM is the two steps' SEMs added in quadrature."
     ),
-    "snr": "That difference divided by the noise of the baseline step (its SD about a straight line, so a steady drift is not noise). A pure number; it has no SD or SEM.",
+    "snr": "That difference divided by σ of the baseline step, its noise (its SD about a straight line, so a steady drift is not noise). A pure number; it has no SD or SEM.",
 }
 
 
@@ -113,8 +166,8 @@ def sort_value(value: CellValue | None, mode: str) -> float | None:
 
 def cell_tooltip(row_text: str, column: StepColumn, value: CellValue | None, *, is_group: bool) -> str:
     """The full numbers of one cell and what they mean."""
-    head = f"{row_text} - {column.title}"
     compare = column.kind == "compare"
+    head = f"{row_text} - {plain_title(column.title) if compare else column.title}"  # (a tool tip cannot draw the title's subscripts)
     if value is None:
         if compare:
             return f"{head}\nNo value: the row is not calculated yet (refresh button), or the baseline or signal step of this pair is not set."

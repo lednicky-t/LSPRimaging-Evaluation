@@ -3,7 +3,8 @@
 The stock `QTreeView` would draw its own branch arrows in an indentation gutter
 and expand a group on double-click. Here a group header paints its own
 chevron (`delegate.py`), a click on it toggles the group, and a double-click
-renames. Keyboard: Delete asks to delete, Alt+Up / Alt+Down ask to move.
+renames. Keyboard: Delete asks to delete, Alt+Up / Alt+Down ask to move. While #/ROIs is hidden a group header has no chevron, chip or count and no click zone for them
+(`delegate.first_column_collapsed`); the colour shows as a wash behind the label.
 
 **Frozen columns** (2026-11-06). `QTreeView` cannot hold columns at the left edge while the rest scrolls sideways, so this view does it by painting: after Qt has drawn a row
 (scrolled as usual), the frozen cells are painted again at their unscrolled places over the left of the row, with the same delegate; the header does the same with its
@@ -27,7 +28,7 @@ from lspr_ui import get_active_theme
 from ...shortcuts import matches
 from .column_keys import ColumnKey
 from .column_keys import column_key as key_of_step_column
-from .delegate import CELL_ROOM, CHEVRON_ZONE, CHIP_SIZE, GROUP_INDENT, STRIP_WIDTH, tinted_text_color
+from .delegate import CELL_ROOM, CHEVRON_ZONE, CHIP_SIZE, GROUP_INDENT, STRIP_WIDTH, first_column_collapsed, tinted_text_color
 from .model import COLUMN_KIND_ROLE, DEPTH_ROLE, KIND_ROLE, STEP_TINT_ROLE
 from .rows import (
     COLUMN_COUNT,
@@ -42,7 +43,7 @@ from .rows import (
     COLUMN_Y,
     VIEW_MODE_COLUMNS,
 )
-from .step_columns import MAX_STEP_WIDTH, MIN_STEP_WIDTH, STEP_WIDTH_DEFAULT, widest_text
+from .step_columns import MAX_STEP_WIDTH, MIN_STEP_WIDTH, STEP_WIDTH_DEFAULT, elide_runs, subscript_runs, widest_text
 
 _ARROW_ZONE = 20  # px at the left end of a comparison column's header: the arrow that opens its operation menu
 _SORT_INDICATOR_ROOM = 22
@@ -79,12 +80,19 @@ def title_width(metrics: QFontMetrics, title: str) -> int:
     return metrics.horizontalAdvance(base) + math.ceil(metrics.horizontalAdvance(sub) * _SUBSCRIPT_SCALE)
 
 
+def runs_width(font: QFont, runs: list[tuple[str, bool]]) -> int:
+    """Width in px of a title written as `step_columns.subscript_runs` gives it, in `font` (subscripts in the smaller font `SubscriptHeader` draws them in)."""
+    base, small = QFontMetrics(font), QFontMetrics(_subscript_font(font))
+    return sum((small if sub else base).horizontalAdvance(text) for text, sub in runs)
+
+
 class SubscriptHeader(QHeaderView):
     """Header that draws ``X_y`` titles with a real, readable subscript (Unicode
     subscript letters are far too small). Every other title is drawn as usual.
 
-    A comparison column (S1 - B1 ...) has an arrow at the left end of its header: a click on it asks for the operation menu (`compare_menu_requested`) and is not a sort click;
-    a click anywhere else on the header sorts as for every column."""
+    A comparison column (μ_S1 − μ_B1 ...) has an arrow at the left end of its header: a click on it asks for the operation menu (`compare_menu_requested`) and is not a sort click;
+    a click anywhere else on the header sorts as for every column. Its title is drawn with subscripts (`_paint_math_section`), as many as it has; in a column too narrow for the whole
+    formula it is cut at the end with "..." like any title, still with its subscripts (never written with underscores)."""
 
     compare_menu_requested = pyqtSignal(int, QPoint)
     """(the section, where to open the menu in global coordinates)."""
@@ -246,25 +254,15 @@ class SubscriptHeader(QHeaderView):
         painter.drawText(text_rect, alignment, QFontMetrics(font).elidedText(title, Qt.TextElideMode.ElideRight, text_rect.width()))
         painter.restore()
 
-    def paintSection(self, painter: QPainter, rect: QRect, logicalIndex: int) -> None:  # type: ignore[override]
-        tint = self._tint_of(logicalIndex)
-        if tint is not None:
-            self._paint_tinted_section(painter, rect, logicalIndex, tint)
-            return
-        title = self.model().headerData(logicalIndex, self.orientation(), Qt.ItemDataRole.DisplayRole) if self.model() else None
-        if not isinstance(title, str) or "_" not in title or logicalIndex >= COLUMN_COUNT:  # a step's title is the user's note (30perEG_-_ch2 ...): no subscripts
-            super().paintSection(painter, rect, logicalIndex)
-            if self._is_compare(logicalIndex):
-                self._paint_arrow(painter, rect)
-            return
-        # Let the style draw the background and sort arrow, with the text left out.
+    def _paint_section_background(self, painter: QPainter, rect: QRect, logical_index: int) -> None:
+        """Let the style draw the background and sort arrow of a section, with the text left out (the caller draws it)."""
         option = QStyleOptionHeader()
         self.initStyleOption(option)
         option.rect = rect
-        option.section = logicalIndex
+        option.section = logical_index
         option.text = ""
         option.icon = QIcon()
-        if self.isSortIndicatorShown() and self.sortIndicatorSection() == logicalIndex:
+        if self.isSortIndicatorShown() and self.sortIndicatorSection() == logical_index:
             order = self.sortIndicatorOrder()
             option.sortIndicator = (
                 QStyleOptionHeader.SortIndicator.SortDown if order == Qt.SortOrder.DescendingOrder
@@ -273,6 +271,54 @@ class SubscriptHeader(QHeaderView):
         else:
             option.sortIndicator = QStyleOptionHeader.SortIndicator.None_
         self.style().drawControl(QStyle.ControlElement.CE_Header, option, painter, self)
+
+    def _paint_math_section(self, painter: QPainter, rect: QRect, logical_index: int, title: str) -> bool:
+        """A comparison column's title with real subscripts (``μ_S1 − μ_B1``: μ, then S1 small and low, ...). Placed as the style sheet places the other step titles: right-aligned,
+        `_SECTION_PADDING` from the edge, semi-bold, in the sheet's colour, centred above the line under the header; the arrow stays at the left end. What does not fit between
+        the arrow and the right edge is cut with "..." (`elide_runs`: a column the user made narrow, as all step columns, keeps the start of the formula). Returns False, painting
+        nothing, only when the title has no subscript: the caller then draws it as any title."""
+        runs = subscript_runs(title)
+        if not any(sub for _text, sub in runs):
+            return False
+        font = QFont(self.font())
+        font.setWeight(QFont.Weight.DemiBold)  # the sheet's font-weight: 600
+        metrics, small = QFontMetrics(font), _subscript_font(font)
+        small_metrics = QFontMetrics(small)
+
+        def advance(text: str, sub: bool) -> int:
+            return (small_metrics if sub else metrics).horizontalAdvance(text)
+
+        runs = elide_runs(runs, advance, rect.width() - _SECTION_PADDING - _ARROW_ZONE - 2)
+        right = rect.right() + 1 - _SECTION_PADDING
+        left = right - sum(advance(text, sub) for text, sub in runs)
+        self._paint_section_background(painter, rect, logical_index)
+        baseline = rect.top() + (rect.height() - 1 + metrics.ascent() - metrics.descent()) // 2  # (centred above the 1 px line under the header)
+        drop = round(metrics.height() * _SUBSCRIPT_DROP)
+        painter.save()
+        painter.setPen(QColor(get_active_theme().text_muted))  # the colour panel.py's header stylesheet gives the titles
+        x = left
+        for text, sub in runs:
+            painter.setFont(small if sub else font)
+            painter.drawText(x, baseline + (drop if sub else 0), text)
+            x += advance(text, sub)
+        painter.restore()
+        self._paint_arrow(painter, rect)
+        return True
+
+    def paintSection(self, painter: QPainter, rect: QRect, logicalIndex: int) -> None:  # type: ignore[override]
+        tint = self._tint_of(logicalIndex)
+        if tint is not None:
+            self._paint_tinted_section(painter, rect, logicalIndex, tint)
+            return
+        title = self.model().headerData(logicalIndex, self.orientation(), Qt.ItemDataRole.DisplayRole) if self.model() else None
+        if self._is_compare(logicalIndex) and isinstance(title, str) and self._paint_math_section(painter, rect, logicalIndex, title):
+            return
+        if not isinstance(title, str) or "_" not in title or logicalIndex >= COLUMN_COUNT:  # a step's title is the user's note (30perEG_-_ch2 ...): no subscripts
+            super().paintSection(painter, rect, logicalIndex)
+            if self._is_compare(logicalIndex):
+                self._paint_arrow(painter, rect)
+            return
+        self._paint_section_background(painter, rect, logicalIndex)
         base, sub = _split_title(title)
         font = self.font()
         small = _subscript_font(font)
@@ -382,7 +428,9 @@ class RoiTreeView(QTreeView):
         compare = model.headerData(column, Qt.Orientation.Horizontal, COLUMN_KIND_ROLE) == "compare"
         bold = QFont(self.header().font())
         bold.setWeight(QFont.Weight.DemiBold)  # the header's style sheet: font-weight 600
-        title_room = QFontMetrics(bold).horizontalAdvance(title) + 2 * _SECTION_PADDING + (_ARROW_ZONE if compare else _SORT_ARROW_ROOM)
+        runs = subscript_runs(title) if compare else []  # (a comparison column's title is drawn with subscripts, which are narrower than the underscore text)
+        text_width = runs_width(bold, runs) if any(sub for _text, sub in runs) else QFontMetrics(bold).horizontalAdvance(title)
+        title_room = text_width + 2 * _SECTION_PADDING + (_ARROW_ZONE if compare else _SORT_ARROW_ROOM)
         texts = model.step_texts(column - COLUMN_COUNT)
         if not texts:
             return min(max(title_room, STEP_WIDTH_DEFAULT), MAX_STEP_WIDTH)
@@ -617,7 +665,8 @@ class RoiTreeView(QTreeView):
     def mousePressEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
         if event.button() == Qt.MouseButton.LeftButton:
             index = self.indexAt(event.position().toPoint())
-            if index.isValid() and index.data(KIND_ROLE) == "group" and event.position().x() < CHEVRON_ZONE - 4:
+            # (while #/ROIs is hidden there is no chevron: a group is opened and closed from its right-click menu or with the Right / Left arrow key)
+            if index.isValid() and index.data(KIND_ROLE) == "group" and event.position().x() < CHEVRON_ZONE - 4 and not first_column_collapsed(self):
                 self.setExpanded(index, not self.isExpanded(index))
                 event.accept()
                 return
@@ -636,7 +685,7 @@ class RoiTreeView(QTreeView):
         """Is ``x`` (viewport coordinates) over the colour chip of the row?"""
         left = self.visualRect(index.siblingAtColumn(0)).left()
         if index.data(KIND_ROLE) == "group":
-            return left + CHEVRON_ZONE - 2 <= x <= left + CHEVRON_ZONE + 14
+            return not first_column_collapsed(self) and left + CHEVRON_ZONE - 2 <= x <= left + CHEVRON_ZONE + 14  # (no chip while #/ROIs is hidden)
         if index.column() != COLUMN_ID:
             return False
         start = left + STRIP_WIDTH + 5 + (GROUP_INDENT if index.data(DEPTH_ROLE) else 0)

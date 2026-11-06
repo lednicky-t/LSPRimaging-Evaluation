@@ -25,6 +25,8 @@ from PyQt6.QtWidgets import QMenu, QWidget
 from ...storage.ui_state_keys import ROI_TABLE_HIDDEN_COLUMNS
 from ..ui_state import UiStateStore
 from .column_keys import key_from_payload, key_to_payload
+from .model import COLUMN_KIND_ROLE
+from .step_columns import plain_title
 from .view import RoiTreeView
 
 HIDE_TIP = "Take this column out of the way. Right-click any column header and choose Show hidden column to bring it back."
@@ -60,7 +62,9 @@ class HideColumns(QObject):
         return [(c, self._title(c)) for c in columns]
 
     def _title(self, column: int) -> str:
-        return str(self._tree.model().headerData(column, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole) or "")
+        model = self._tree.model()
+        title = str(model.headerData(column, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole) or "")
+        return plain_title(title) if model.headerData(column, Qt.Orientation.Horizontal, COLUMN_KIND_ROLE) == "compare" else title  # (a menu entry cannot draw subscripts)
 
     def prepare(self, section: int) -> None:
         """Set the entries for a menu opened on the header of `section` (-1: not on a column)."""

@@ -107,6 +107,14 @@ class CompareSpec:
 COMPARE = "cmp"  # the first item of a comparison column's `ref`: ("cmp", uid)
 
 
+def compare_title(pair: int, op: str) -> str:
+    """The title of a comparison column, written as the maths it calculates: ``μ_S1 − μ_B1`` (the mean of the step with the signal role minus the mean of the baseline step) and
+    ``(μ_S1 − μ_B1) / σ_B1`` (that, divided by the noise of the baseline step). The header and the arrow menu draw ``_S1`` as a subscript (`panels/roi_table/step_columns.py`,
+    `subscript_runs`, `title_html`); a place that cannot has `plain_title` or words. This is the one place the title is written."""
+    shift = f"μ_S{pair} − μ_B{pair}"
+    return f"({shift}) / σ_B{pair}" if op == OP_SNR else shift
+
+
 def is_compare_ref(ref: object) -> bool:
     return isinstance(ref, tuple) and len(ref) == 2 and ref[0] == COMPARE
 
@@ -274,14 +282,18 @@ class StepTableModule(QObject):
         lines = [f"Signal step {s_name} ({named(signal)}) compared with baseline step {b_name} ({named(base)})."]
         if base is None or signal is None:
             lines.append(f"Choose the steps of evaluation pair {spec.pair} in the Sensorgram's Experimental plan tab (Evaluation); the column stays empty until both are set.")
+        # The titles are written as the maths they are (μ = the mean of the step with that role, σ = the noise of the baseline step); the header draws "_S1" as a subscript
+        # (`panels/roi_table/view.py`, `step_columns.subscript_runs`; a title never reaches a plain-text place as it is: `step_columns.plain_title`). The tool tip says it in words,
+        # the export labels stay ASCII, "S1 - B1".
+        title = compare_title(spec.pair, spec.op)
         if spec.op == OP_SNR:
-            title, word, unit, decimals, has_sd = f"({s_name} − {b_name}) / noise", "signal-to-noise", "", 1, False
+            word, unit, decimals, has_sd = "signal-to-noise", "", 1, False
             label = f"({s_name} - {b_name}) / noise of {b_name}"
-            lines.append("Value: (mean of the signal step - mean of the baseline step) / noise of the baseline step. The noise is the SD of the baseline step about a straight line through it, so a steady drift is not counted.")
+            lines.append("Value: (mean of the signal step − mean of the baseline step) / σ of the baseline step, its noise. σ is the SD of the baseline step about a straight line through it, so a steady drift is not counted.")
         else:
-            title, word, unit, decimals, has_sd = f"{s_name} − {b_name}", "difference", "nm", None, True
+            word, unit, decimals, has_sd = "difference", "nm", None, True
             label = f"{s_name} - {b_name}"
-            lines.append("Value: mean of the signal step - mean of the baseline step. SD: the two steps' SDs added in quadrature (assumes independent cubes; it does not shrink with more cubes).")
+            lines.append("Value: mean of the signal step − mean of the baseline step. SD: the two steps' SDs added in quadrature (assumes independent cubes; it does not shrink with more cubes).")
         lines.append("Click the arrow in the header to change the calculation or remove the column.")
         return StepColumn((COMPARE, spec.uid), 0, title, "\n".join(lines), (), None, "compare", unit, decimals, word, has_sd, label, spec.op, spec.pair)
 
