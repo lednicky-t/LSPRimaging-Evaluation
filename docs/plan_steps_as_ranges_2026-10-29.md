@@ -126,7 +126,8 @@ the last pair out). Decisions made unasked (change on request):
 - **"-" on a pair with steps set** clears them with the new `ExperimentPlanModule.clear_pair(n)` (`edits.clear_pair`): one undo step, and Ctrl+Z brings the roles back and the rows with them. It asks nothing, because it is undoable.
 - The pop-up stays open while picking (a QMenu does not close for a widget inside it), and grows or shrinks when a pair is added or removed: a QMenu lays itself out again when one of its actions changes, so
   `_rebuild` ends with `QAction.setData(<new tick>)`; pinned by `test_an_open_popup_grows_when_a_pair_is_added...`.
-- `StepOverlays` passes every pair of the plan to the pop-up (`_show_evaluation`) and `role_chosen` now carries the pair number. The right-click menu still sets pair 1 only ("Use as baseline (B1)" / "Use as signal (S1)");
-  pairs 2+ are set from the pop-up. Open: a right-click item per pair.
+- `StepOverlays` passes every pair of the plan to the pop-up (`_show_evaluation`) and `role_chosen` now carries the pair number. The right-click menu used to set pair 1 only ("Use as baseline (B1)" / "Use as signal (S1)").
+  **Changed 2026-11-06:** one "Use as" item with a submenu per pair (Pair n (Bn / Sn) > Baseline (Bn) / Signal (Sn), check marks). It lists the complete pairs (baseline and signal both set) plus one
+  new pair ("New pair n"), so with nothing set it is just pair 1; a pair with any role set is never left out (`plan_actions.pairs_offered`, at most `MAX_PAIRS`). Greyed out for a selection of several steps.
 
 Tests: `tests/integration/test_lspri_evaluation_menu.py` (11, the pop-up on its own), a second-pair test in `test_lspri_plan_bar.py`, `clear_pair` in `test_lspri_plan_structure.py` and `test_lspri_plan_structure_module.py`.

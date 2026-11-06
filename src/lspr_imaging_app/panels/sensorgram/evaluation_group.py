@@ -2,7 +2,7 @@
 
 Screen purpose: say once, in the plan, which stretch of the experiment is the baseline (``B1``) and which is the signal (``S1``) of evaluation pair 1, and the same for further pairs
 (``B2`` / ``S2`` ...). Everything that compares a signal with a baseline (ROI position tuning, the map of which ROI or group gives the best signal) reads these steps from the plan
-module instead of asking for cube numbers. The same choice can be made in a step's right-click menu ("Use as baseline", "Use as signal"; live while this tab is active); the plan bar
+module instead of asking for cube numbers. The same choice can be made in a step's right-click menu ("Use as" > pair > Baseline / Signal; live while this tab is active; it offers the complete pairs plus one new one, `plan_actions.pairs_offered`); the plan bar
 shows the roles as chips (``B1`` / ``S1``) on the steps.
 
 Layout: the ribbon shows ONE icon button. It opens a pop-up (a `QWidgetAction` in a `QMenu`, like the other pick-up menus) with a table of two columns and, under it, two icons::
@@ -50,11 +50,11 @@ BUTTON_TIP = (
 )
 BASELINE_TIP = (
     "The baseline step (B{n}) of pair {n}: the stretch of the experiment taken as the starting level. Everything that compares a signal with a baseline reads it from here. "
-    "The same as 'Use as baseline' in a step's right-click menu."
+    "The same as 'Use as > Pair {n} > Baseline' in a step's right-click menu."
 )
 SIGNAL_TIP = (
     "The signal step (S{n}) of pair {n}: the stretch of the experiment whose level is compared with the baseline. "
-    "The same as 'Use as signal' in a step's right-click menu."
+    "The same as 'Use as > Pair {n} > Signal' in a step's right-click menu."
 )
 ADD_TIP = "Add an evaluation pair: a new baseline and signal row (B{n} + S{n})."
 ADD_FULL_TIP = f"There can be at most {MAX_PAIRS} evaluation pairs."

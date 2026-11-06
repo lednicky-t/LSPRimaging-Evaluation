@@ -15,7 +15,7 @@ It needs to know the plot's axis, so the panel passes a function that returns it
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 import numpy as np
@@ -25,11 +25,23 @@ from PyQt6.QtWidgets import QColorDialog, QMenu, QToolTip
 
 from ...plan.axis_map import AxisMap
 from ...plan.bar_model import boundary_readout
+from ...plan.state import EvalPair
 from ...selection.experiment_plan_module import ExperimentPlanModule
 from ...undo import undo_manager
+from .evaluation_group import MAX_PAIRS
 from .plot import SensorgramPlot
 
 logger = logging.getLogger(__name__)
+
+
+def pairs_offered(pairs: Iterable[EvalPair]) -> int:
+    """How many evaluation pairs the "Use as" menu lists: the number of complete pairs (baseline and signal both set) plus one, so there is always one more to start, and with
+    nothing set just pair 1. A pair that has anything set is never left out, even when pairs before it are empty (a session or an undo can leave such a gap), so a role that is
+    set can always be switched off here. At most `MAX_PAIRS`."""
+    pairs = tuple(pairs)
+    complete = sum(1 for pair in pairs if pair.baseline is not None and pair.signal is not None)
+    highest_set = max((pair.number for pair in pairs if pair.baseline is not None or pair.signal is not None), default=0)
+    return min(max(complete + 1, highest_set), MAX_PAIRS)
 
 
 @dataclass(frozen=True)
@@ -110,7 +122,7 @@ class PlanBarActions(QObject):
 
     def set_structure_tools(self, active: bool) -> None:
         """Whether the menu offers the tools that change which steps exist (Remove step, Add step, Unify selected steps, Restore removed steps) and the evaluation roles (Use as
-        baseline / signal). The owner turns them on while the Experimental plan tab is the active one, so nothing structural happens by accident while working on the traces."""
+        > pair > Baseline / Signal). The owner turns them on while the Experimental plan tab is the active one, so nothing structural happens by accident while working on the traces."""
         self._structure_tools = bool(active)
 
     def structure_tools_active(self) -> bool:
@@ -156,8 +168,7 @@ class PlanBarActions(QObject):
         return menu
 
     def _add_structure_items(self, menu: QMenu, index: int, targets: list[int], many: bool) -> None:
-        """Remove / add / unify steps, restore the removed ones, and name the baseline and signal step of evaluation pair 1 (B1 / S1 on the bar)."""
-        step = self._plan.steps()[index]
+        """Remove / add / unify steps, restore the removed ones, and "Use as" (the baseline and signal step of each evaluation pair, B1 / S1 ... on the bar)."""
         menu.addSeparator()
         remove = menu.addAction("Remove steps" if many else "Remove step")
         remove.triggered.connect(lambda _checked=False: self._plan.remove_steps(targets))
@@ -175,12 +186,25 @@ class PlanBarActions(QObject):
         restore.setEnabled(self._plan.has_removed())
         restore.triggered.connect(lambda _checked=False: self._plan.restore_removed())
         menu.addSeparator()
-        for role, text, chip in (("baseline", "Use as baseline (B1)", "B1"), ("signal", "Use as signal (S1)", "S1")):
-            action = menu.addAction(text)
-            action.setCheckable(True)
-            action.setChecked(chip in step.roles)
-            action.setEnabled(not many)
-            action.triggered.connect(lambda _checked=False, which=role, on=chip in step.roles: self._plan.set_role(which, None if on else index))
+        self._add_use_as(menu, index, many)
+
+    def _add_use_as(self, menu: QMenu, index: int, many: bool) -> None:
+        """"Use as" > one submenu per evaluation pair that is on offer (`pairs_offered`) > Baseline / Signal, each a check mark that is on when this step plays that role.
+        The roles belong to one step, so the whole menu is greyed out while several steps are selected."""
+        step = self._plan.steps()[index]
+        state = self._plan.state()
+        use_as = menu.addMenu("Use as")
+        use_as.setEnabled(not many)
+        for number in range(1, pairs_offered(state.pairs) + 1):
+            word = "Pair" if state.pair(number) is not None else "New pair"  # a pair with nothing set yet is the one this menu would start
+            pair_menu = use_as.addMenu(f"{word} {number} (B{number} / S{number})")
+            for role, name, letter in (("baseline", "Baseline", "B"), ("signal", "Signal", "S")):
+                chip = f"{letter}{number}"
+                on = chip in step.roles
+                action = pair_menu.addAction(f"{name} ({chip})")
+                action.setCheckable(True)
+                action.setChecked(on)
+                action.triggered.connect(lambda _checked=False, which=role, pair=number, was_on=on: self._plan.set_role(which, None if was_on else index, pair))
 
     def _add_step(self, index: int, side: str) -> None:
         context = self._context()
