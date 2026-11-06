@@ -138,6 +138,13 @@ def automatic_colors(notes: Sequence[str], separators: Sequence[str] = DEFAULT_S
     return colors
 
 
+def effective_colors(steps: Sequence[EffectiveStep], separators: Sequence[str] = DEFAULT_SEPARATORS) -> list[str]:
+    """The colour each step is painted with: the user's own (``step.color``), else the automatic one of its solution. One place for the plan bar and for the ROI table's step
+    columns, so the two cannot disagree."""
+    automatic = automatic_colors([step.label for step in steps], separators)
+    return [step.color or automatic[index] for index, step in enumerate(steps)]
+
+
 def _rgb(color: str) -> tuple[float, float, float]:
     text = color.lstrip("#")
     return tuple(int(text[i : i + 2], 16) / 255.0 for i in (0, 2, 4))  # type: ignore[return-value]
@@ -205,14 +212,14 @@ def build_bar_steps(
     time_mode: bool = True,
 ) -> list[PlanBarStep]:
     """The steps on the plot's x axis. `lines`: (x, y) of everything drawn, for the levels of the Data text mode."""
-    automatic = automatic_colors([step.label for step in steps], separators)
+    colors = effective_colors(steps, separators)
     out: list[PlanBarStep] = []
     for index, step in enumerate(steps):
         x_start, x_end = axis.x_at(step.start_unix_ms), axis.x_at(step.end_unix_ms)
         out.append(
             PlanBarStep(
                 index=index, x_start=x_start, x_end=x_end, text=shown_label(step.label, text_mode, separators),
-                color=step.color or automatic[index], tooltip=_tooltip(step, x_start, x_end, time_mode),
+                color=colors[index], tooltip=_tooltip(step, x_start, x_end, time_mode),
                 levels=section_levels(lines, x_start, x_end), edited=step.edited, roles=step.roles, added=step.is_added,
             )
         )

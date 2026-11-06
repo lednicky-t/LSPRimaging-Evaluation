@@ -16,7 +16,9 @@ from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 
 from PyQt6.QtCore import QAbstractItemModel, QMimeData, QModelIndex, Qt, pyqtSignal
+from PyQt6.QtGui import QColor
 
+from ...analysis.step_table_module import StepColumn
 from ...domain.roi_model import AreaRoi, AreaRoiDetectionSettings, AreaRoiGroup
 from ...roi.palette import DEFAULT_ROI_COLOR_HEX
 from .rows import (
@@ -39,12 +41,14 @@ from .rows import (
     LengthUnit,
     RoiRow,
     Section,
+    StepSort,
     build_roi_rows,
     build_sections,
     edit_text,
     format_length,
     sort_rows,
 )
+from .step_columns import DEFAULT_DECIMALS, DISPLAY_BOTH, DISPLAY_MEAN, cell_tooltip, format_cell, sort_value, table_decimals
 
 KIND_ROLE = Qt.ItemDataRole.UserRole + 1
 """``"group"`` or ``"roi"``."""
@@ -61,6 +65,14 @@ DEPTH_ROLE = Qt.ItemDataRole.UserRole + 8
 MASK_ROLE = Qt.ItemDataRole.UserRole + 9
 SHAPE_ROLE = Qt.ItemDataRole.UserRole + 11
 """A ROI row's shape key (``rows.SHAPE_RING`` ...)."""
+STEP_STALE_ROLE = Qt.ItemDataRole.UserRole + 12
+"""A step-column cell with a number that is out of date (the delegate dims it)."""
+COLUMN_KIND_ROLE = Qt.ItemDataRole.UserRole + 13
+"""Header data of a section after the fixed columns: ``"step"`` or ``"compare"`` (a comparison column: its header carries the arrow of the operation menu)."""
+STEP_TINT_ROLE = Qt.ItemDataRole.UserRole + 14
+"""A step column's background, as a ``QColor`` with the plan bar's opacity in its alpha: the same fill the Sensorgram's bar paints that step with. Cells and header; ``None``
+for every other column (and when the bar's opacity is 0)."""
+DEFAULT_TINT_ALPHA = 0.55  # the plan bar's own default (`plan.bar_model.PlanBarSettings.alpha`)
 
 MIME_TYPE = "application/x-lspr-roi-ids"
 """Dragged ROIs: a JSON list of ROI ids."""
@@ -93,7 +105,7 @@ _HEADER_TIPS = {
 
 
 class _Node:
-    __slots__ = ("kind", "parent", "children", "position", "section", "row")
+    __slots__ = ("kind", "parent", "children", "position", "section", "row", "members")
 
     def __init__(self, kind: str, parent: "_Node | None", *, section: Section | None = None, row: RoiRow | None = None) -> None:
         self.kind = kind
@@ -102,6 +114,14 @@ class _Node:
         self.position = 0
         self.section = section
         self.row = row
+        self.members: tuple[int, ...] = tuple(sorted(r.roi_id for r in section.rows)) if section is not None else ()  # a group's ROI ids, canonical order
+
+
+class StepCells:
+    """What the model asks of whoever holds the step numbers (``StepTableModule``): the number of a ROI or a group in a step, or None."""
+
+    def roi_cell(self, roi_id: int, ref: object): ...  # pragma: no cover - interface
+    def group_cell(self, key: str | None, members: Sequence[int], ref: object): ...  # pragma: no cover - interface
 
 
 class RoiTreeModel(QAbstractItemModel):
@@ -127,6 +147,13 @@ class RoiTreeModel(QAbstractItemModel):
         self._default_color_hex = DEFAULT_ROI_COLOR_HEX
         self._selected: frozenset[int] = frozenset()
         self._grouped = False
+        self._step_columns: tuple[StepColumn, ...] = ()
+        self._cells: StepCells | None = None
+        self._display = DISPLAY_BOTH
+        self._decimals = DEFAULT_DECIMALS
+        self._sort_ref: object | None = None  # the step a step column sort is on, by reference: the columns are renumbered when steps change
+        self._tint_alpha = DEFAULT_TINT_ALPHA  # the plan bar's opacity: how strongly a step column is coloured
+        self._tints: tuple[QColor | None, ...] = ()  # one per step column (`_make_tints`), so `data()` does not build a colour per cell
 
     # -- content --------------------------------------------------------------
 
@@ -144,12 +171,139 @@ class RoiTreeModel(QAbstractItemModel):
         self._rebuild()
 
     def set_sort(self, column: int, descending: bool) -> None:
+        if column >= COLUMN_COUNT and column - COLUMN_COUNT >= len(self._step_columns):
+            column, descending = COLUMN_ID, False  # a step column that is not there (any more)
         if (column, descending) != (self._sort_column, self._descending):
             self._sort_column, self._descending = column, descending
+            self._sort_ref = self._step_columns[column - COLUMN_COUNT].ref if column >= COLUMN_COUNT else None
             self._rebuild()
 
     def sort_state(self) -> tuple[int, bool]:
         return self._sort_column, self._descending
+
+    # -- the step columns ----------------------------------------------------------
+
+    def set_step_columns(self, columns: Sequence[StepColumn], cells: StepCells | None) -> None:
+        """Show these steps as columns after the fixed ones (none: no step columns), with `cells` as the source of the numbers. A sort on a step column follows the
+        step (by reference) to its new column, or falls back to the ``#`` order when the step is gone."""
+        self._step_columns = tuple(columns) if cells is not None else ()
+        self._cells = cells
+        self._tints = self._make_tints()
+        if self._sort_ref is not None:
+            refs = [c.ref for c in self._step_columns]
+            if self._sort_ref in refs:
+                self._sort_column = COLUMN_COUNT + refs.index(self._sort_ref)
+            else:
+                self._sort_column, self._descending, self._sort_ref = COLUMN_ID, False, None
+        self._rebuild()
+
+    def step_columns(self) -> tuple[StepColumn, ...]:
+        return self._step_columns
+
+    def step_texts(self, position: int) -> list[str]:
+        """What the cells of step column number `position` (0 = the first step column) show now, for every ROI row and every group header (rows with no number show nothing and
+        are left out): the content the column has to be wide enough for. Collapsed groups count too, so opening one never changes a width."""
+        if self._cells is None or not 0 <= position < len(self._step_columns):
+            return []
+        column = self._step_columns[position]
+        mode = self._mode_of(column)
+        decimals = self._decimals if column.decimals is None else column.decimals
+        texts = [format_cell(self._cells.roi_cell(row.roi_id, column.ref), mode, decimals) for row in self._rows]
+        if self._grouped:
+            texts += [format_cell(self._cells.group_cell(key, sorted(members), column.ref), mode, decimals) for key, members in self._members_by_group().items()]
+        return [text for text in texts if text]
+
+    def set_step_tint_alpha(self, alpha: float) -> None:
+        """How strongly the step columns are coloured: the opacity of the Sensorgram plan bar's fill (0 - 1; 0 = not coloured). Changes no data: the caller repaints."""
+        alpha = min(max(float(alpha), 0.0), 1.0)
+        if alpha != self._tint_alpha:
+            self._tint_alpha = alpha
+            self._tints = self._make_tints()
+
+    def step_tint_alpha(self) -> float:
+        return self._tint_alpha
+
+    def _make_tints(self) -> tuple[QColor | None, ...]:
+        """Each step column's background: its step's colour at the bar's opacity. None where there is no colour (a comparison column) or no opacity."""
+        tints: list[QColor | None] = []
+        for column in self._step_columns:
+            color = QColor(column.color) if column.color and self._tint_alpha > 0 else QColor()
+            if color.isValid():
+                color.setAlphaF(self._tint_alpha)
+                tints.append(color)
+            else:
+                tints.append(None)
+        return tuple(tints)
+
+    def _tint_of(self, column: int) -> QColor | None:
+        """The tint of a model column (None for a fixed one)."""
+        position = column - COLUMN_COUNT
+        return self._tints[position] if 0 <= position < len(self._tints) else None
+
+    def set_step_display(self, mode: str) -> None:
+        """What the step cells show: one of ``step_columns.DISPLAYS`` (mean, SD, SEM, mean ± SD, mean ± SEM)."""
+        if mode != self._display:
+            self._display = mode
+            self.refresh_numbers()
+
+    def step_display(self) -> str:
+        return self._display
+
+    def sorts_by_step(self) -> bool:
+        return self._sort_column >= COLUMN_COUNT
+
+    def refresh_numbers(self) -> None:
+        """The numbers behind the step cells changed (a calculation finished, a row went out of date): format them again, and sort again when a step column sorts."""
+        if self.sorts_by_step():
+            self._rebuild()  # (which also formats again)
+        else:
+            self._refresh_decimals()
+            self._repaint_steps()
+
+    def _repaint_steps(self) -> None:
+        if not self._step_columns:
+            return
+        last = self.columnCount() - 1
+        for node in self._root.children:
+            self.dataChanged.emit(self.createIndex(node.position, COLUMN_COUNT, node), self.createIndex(node.position, last, node))
+            for child in node.children:
+                self.dataChanged.emit(self.createIndex(child.position, COLUMN_COUNT, child), self.createIndex(child.position, last, child))
+
+    def _members_by_group(self) -> dict[str | None, list[int]]:
+        members_of: dict[str | None, list[int]] = {}
+        for row in self._rows:
+            members_of.setdefault(row.group_id, []).append(row.roi_id)
+        return members_of
+
+    def _all_cells(self):
+        if self._cells is None:
+            return
+        members_of = self._members_by_group() if self._grouped else {}
+        for column in self._step_columns:
+            for row in self._rows:
+                yield self._cells.roi_cell(row.roi_id, column.ref)
+            for key, members in members_of.items():
+                yield self._cells.group_cell(key, sorted(members), column.ref)
+
+    def _refresh_decimals(self) -> None:
+        self._decimals = table_decimals(self._all_cells(), self._display)
+
+    def _mode_of(self, column: StepColumn) -> str:
+        """What a column shows: the chosen display, except a column with no spread (signal to noise) which has only its value, whatever is chosen."""
+        return self._display if column.has_sd else DISPLAY_MEAN
+
+    def _step_sort(self) -> StepSort | None:
+        """The values the active step column sorts by, or None when a fixed column sorts."""
+        if self._sort_column < COLUMN_COUNT or self._cells is None:
+            return None
+        column = self._step_columns[self._sort_column - COLUMN_COUNT]
+        ref, mode = column.ref, self._mode_of(column)
+        roi ={row.roi_id: v for row in self._rows if (v := sort_value(self._cells.roi_cell(row.roi_id, ref), mode)) is not None}
+        group = {
+            key: v for key, members in self._members_by_group().items()
+            if (v := sort_value(self._cells.group_cell(key, sorted(members), ref), mode)) is not None
+        }
+        return StepSort(roi, group)
 
     def is_grouped_view(self) -> bool:
         """False whenever there are no groups (a lone "Ungrouped" header over
@@ -163,13 +317,24 @@ class RoiTreeModel(QAbstractItemModel):
         """Every ROI's row, unsorted (the toolbox's order)."""
         return list(self._rows)
 
+    def display_order(self) -> list[tuple[GroupInfo | None, tuple[RoiRow, ...]]]:
+        """The table as it is listed now: ``(group header, its ROI rows)`` in order; without groups one entry ``(None, every row)``. Collapsed groups are included."""
+        if not self._grouped:
+            return [(None, tuple(node.row for node in self._root.children))]
+        return [(node.section.group, node.section.rows) for node in self._root.children]
+
     def _rebuild(self) -> None:
         self._rows = build_roi_rows(self._rois, self._groups, self._defaults, self._default_color_hex)
         self._grouped = bool(self._groups)
+        if self._step_columns:
+            self._refresh_decimals()  # one number of decimals for the rows as they are now
         root = _Node("root", None)
         if self._grouped:
             colors = {group.group_id: group.sample_color_hex for group in self._groups}
-            for section in build_sections(self._rows, self._groups, colors, sort_column=self._sort_column, descending=self._descending, ungrouped_color_hex=self._default_color_hex):
+            for section in build_sections(
+                self._rows, self._groups, colors, sort_column=self._sort_column, descending=self._descending,
+                ungrouped_color_hex=self._default_color_hex, step_sort=self._step_sort(),
+            ):
                 header = _Node("group", root, section=section)
                 header.position = len(root.children)
                 root.children.append(header)
@@ -178,7 +343,7 @@ class RoiTreeModel(QAbstractItemModel):
                     child.position = len(header.children)
                     header.children.append(child)
         else:
-            for row in sort_rows(self._rows, self._sort_column, self._descending):
+            for row in sort_rows(self._rows, self._sort_column, self._descending, self._step_sort()):
                 child = _Node("roi", root, row=row)
                 child.position = len(root.children)
                 root.children.append(child)
@@ -284,9 +449,22 @@ class RoiTreeModel(QAbstractItemModel):
         return len(node.children)
 
     def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
-        return COLUMN_COUNT
+        return COLUMN_COUNT + len(self._step_columns)
 
     def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.ItemDataRole.DisplayRole):
+        if orientation == Qt.Orientation.Horizontal and COLUMN_COUNT <= section < self.columnCount():
+            step = self._step_columns[section - COLUMN_COUNT]
+            if role == Qt.ItemDataRole.DisplayRole:
+                return step.title
+            if role == Qt.ItemDataRole.ToolTipRole:
+                return step.tooltip
+            if role == Qt.ItemDataRole.TextAlignmentRole:
+                return int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            if role == COLUMN_KIND_ROLE:
+                return step.kind
+            if role == STEP_TINT_ROLE:
+                return self._tint_of(section)
+            return None
         if orientation != Qt.Orientation.Horizontal or not 0 <= section < COLUMN_COUNT:
             return None
         if role == Qt.ItemDataRole.DisplayRole:
@@ -339,6 +517,8 @@ class RoiTreeModel(QAbstractItemModel):
         if role == ALL_SELECTED_ROLE:
             members = {row.roi_id for row in node.section.rows}
             return bool(members) and members <= self._selected
+        if column >= COLUMN_COUNT:
+            return self._step_cell(node, column, role)
         if column != 0:
             return None
         if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):
@@ -362,6 +542,8 @@ class RoiTreeModel(QAbstractItemModel):
             return row.shape
         if role == INHERITED_ROLE:
             return (column == COLUMN_RING_IN and row.inner_inherited) or (column == COLUMN_RING_OUT and row.outer_inherited)
+        if column >= COLUMN_COUNT:
+            return self._step_cell(None, column, role, row=row)
         if role == Qt.ItemDataRole.TextAlignmentRole:
             right = column in _NUMERIC_COLUMNS
             return int((Qt.AlignmentFlag.AlignRight if right else Qt.AlignmentFlag.AlignLeft) | Qt.AlignmentFlag.AlignVCenter)
@@ -372,6 +554,30 @@ class RoiTreeModel(QAbstractItemModel):
             return value[0]
         if role == Qt.ItemDataRole.ToolTipRole:
             return self._tooltip(row, column)
+        return None
+
+    def _step_cell(self, node: _Node | None, column: int, role: int, row: RoiRow | None = None):
+        """A step column's cell of a group header (`node`) or of a ROI row (`row`)."""
+        if role == Qt.ItemDataRole.TextAlignmentRole:
+            return int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        if self._cells is None or not 0 <= column - COLUMN_COUNT < len(self._step_columns):
+            return None
+        if role == STEP_TINT_ROLE:
+            return self._tint_of(column)  # asked for on every paint: before the cell's numbers are looked up
+        step = self._step_columns[column - COLUMN_COUNT]
+        if node is not None:
+            group = node.section.group
+            value = self._cells.group_cell(group.group_id, node.members, step.ref)
+            row_text, is_group = group.name, True
+        else:
+            value = self._cells.roi_cell(row.roi_id, step.ref)
+            row_text, is_group = f"ROI {row.roi_id}", False
+        if role == Qt.ItemDataRole.DisplayRole:
+            return format_cell(value, self._mode_of(step), self._decimals if step.decimals is None else step.decimals)
+        if role == Qt.ItemDataRole.ToolTipRole:
+            return cell_tooltip(row_text, step, value, is_group=is_group)
+        if role == STEP_STALE_ROLE:
+            return value is not None and not value.current
         return None
 
     def _cell_value(self, row: RoiRow, column: int) -> tuple[str, str]:

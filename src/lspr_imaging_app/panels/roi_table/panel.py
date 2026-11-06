@@ -31,6 +31,14 @@ toolbox command, so Ctrl+Z undoes it like any other) and it drives the shared
   delete. Delete removes the selected ROIs; a selected group header counts as
   all its ROIs. Ungroup dissolves a group and keeps its ROIs.
 
+**Step columns (2026-11-05).** The toolbar's columns button adds one column per experiment step, titled as the Sensorgram's plan bar titles it, with the mean and / or
+SD (the pick-up next to it) of every ROI and group in that step: the same numbers as the Sensorgram's lines (``analysis/step_table.py``, kept by
+``analysis/step_table_module.py``). A group header shows its own numbers (the average line of all its ROIs) in the same columns. Click a step header to sort by it: the
+groups by their value, the ROIs inside each group by theirs (display only). Nothing is calculated until the refresh button is pressed (it calculates the rows on screen,
+and the fits are kept for the Sensorgram too); when a step, a setting or the scan changes, the numbers stay but are dimmed and the button lights up. The Subtract switch is
+the Sensorgram's (one setting). The add button next to it makes comparison columns (S1 - B1, or divided by the noise of B1: the signal step of an evaluation pair against its
+baseline step, worked out from the step numbers; the arrow in their header changes or removes them). The export button writes the table as CSV. Design record: ``docs/step_table_2026-11-05.md``.
+
 Bad input (a size below the minimum, a ring with inner >= outer, an empty
 group name) is refused by the toolbox before anything changes, and shown here
 in the footer; it is never silently corrected.
@@ -58,6 +66,7 @@ from PyQt6.QtWidgets import (
 
 from lspr_ui import get_active_theme, load_tabler_icon
 
+from ...analysis.step_table_module import StepTableModule
 from ...image_tools import GeometryModule
 from ...roi import RoiToolbox
 from ...roi.display_style import RoiDisplayStyle
@@ -71,12 +80,15 @@ from ...storage.ui_state_keys import (
     ROI_TABLE_VIEW_MODE,
 )
 from ..icon_button_style import style_general_icon_button
+from ..panel_task import PanelTask
 from ..ribbon_icon_size import ICON_SIZE
 from ..ui_state import UiStateStore
 from ..visibility_gate import HiddenPanelGate
 from ..unit_toggle import UnitToggle
 from .delegate import RoiTableDelegate
 from .dialogs import ShiftDialog
+from .freeze import FreezeColumns
+from .hide_columns import HideColumns
 from .model import DropTarget, RoiTreeModel
 from .rows import (
     COLUMN_COUNT,
@@ -103,7 +115,10 @@ from .rows import (
     step_target_index,
     step_text,
 )
+from .step_controls import StepColumnControls, StepHost
 from .view import RoiTreeView, suggested_column_widths
+
+TASK_ID = "roi_table.steps"
 
 _LEGACY_COLUMN_COUNT = 7  # a saved width list from before the Position / Shape / Shape vector columns
 _REDRAW_COALESCE_MS = 100  # sketch §8
@@ -137,8 +152,12 @@ class RoiTablePanel(QWidget):
         parent: QWidget | None = None,
         edit_target: RoiEditTarget | None = None,
         display_style: RoiDisplayStyle | None = None,
+        step_table: StepTableModule | None = None,
     ) -> None:
+        """`step_table`: the owner of the step columns' numbers; without it the table has no step columns and no controls for them."""
         super().__init__(parent)
+        self._steps = step_table
+        self.task = PanelTask(TASK_ID, "ROI / Groups", self)  # the status bar's task indicator shows a long calculation of the step columns
         # The shared ROI display style: its Sample colour is the colour of a ROI with none of its own, the same
         # object the Image overlay draws with (None: the palette default).
         self._display_style = display_style
@@ -202,6 +221,9 @@ class RoiTablePanel(QWidget):
                     continue  # a width saved while this column stretched: keep the default
                 self._widths[column] = max(width, floor) if column == COLUMN_ID else width
             self._apply_widths()
+        self._hide.restore_ui_state(store)
+        self._freeze.restore_ui_state(store)
+        self._step_controls.restore_ui_state(store)
 
     # -- construction -----------------------------------------------------------------
 
@@ -243,8 +265,19 @@ class RoiTablePanel(QWidget):
         self._view_menu.setToolTipsVisible(True)
         self._view_actions[VIEW_GEOMETRY].setToolTip("x, y, shape and the diameters. D = outer, d = inner diameter; s = sample, r = reference.")
         self._view_actions[VIEW_SIMPLE].setToolTip("Only the ID and the group labels.")
+        self._hide = HideColumns(self, self._tree, self._view_menu, self._show_notice, lambda: self._store, self._on_column_hidden)  # after the view choice: Hide / Show hidden columns
+        self._freeze = FreezeColumns(self, self._tree, self._view_menu, self._show_notice, lambda: self._store)  # then: Freeze / Unfreeze columns
         self._tree.header().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._unit_toggle = UnitToggle(self._geometry, self)  # px <-> µm for x, y and the diameters
+
+        # The step columns' controls (after a separator in the toolbar): `step_controls.py`.
+        self._step_controls = StepColumnControls(
+            self, self._steps, self._model, self._tree,
+            StepHost(rebuild=self._rebuild, group_only=lambda: self._group_only, deferred=self._gate.defer, notice=self._show_notice, store=lambda: self._store),
+        )
+        self.export_button = self._step_controls.export_button  # the app gives it the folder to save in, like the plots' buttons
+        self._step_controls.add_menu_entries(self._view_menu)  # after the freeze entries: "Fit step columns to content"
+
 
         toolbar = QHBoxLayout()
         toolbar.setContentsMargins(6, 4, 6, 4)
@@ -259,6 +292,7 @@ class RoiTablePanel(QWidget):
             toolbar.addWidget(button)
         toolbar.addSpacing(8)
         toolbar.addWidget(self._delete_button)
+        self._step_controls.add_to_toolbar(toolbar)
         toolbar.addStretch(1)
         toolbar.addWidget(self._unit_toggle)
 
@@ -307,6 +341,17 @@ class RoiTablePanel(QWidget):
         self._tree.step_requested.connect(self._step_cell)
         self._tree.chip_double_clicked.connect(self._on_chip_double_clicked)
         self._tree.customContextMenuRequested.connect(self._show_context_menu)
+        if self._steps is not None:  # a long calculation of the step columns shows in the status bar (the controls watch the rest)
+            self._steps.started.connect(self.task.begin)
+            self._steps.progress.connect(self.task.update)
+            self._steps.finished.connect(self.task.end)
+
+    def set_step_tint_alpha(self, alpha: float) -> None:
+        """How strongly the step columns are coloured: the opacity of the Sensorgram plan bar's fill (0 - 1; 0 = not coloured), told by the app whenever the bar's opacity changes.
+        Only a repaint: the colours are read from the model when painting."""
+        self._model.set_step_tint_alpha(alpha)
+        self._tree.viewport().update()
+        self._tree.header().viewport().update()
 
     # -- theme ----------------------------------------------------------------------------
 
@@ -317,16 +362,17 @@ class RoiTablePanel(QWidget):
     def _apply_theme(self) -> None:
         theme = get_active_theme()
         self._tree.setStyleSheet(
-            f"QTreeView {{ background: {theme.window_bg}; border: none; outline: none; }}"
+            f"QTreeView {{ background: {theme.toolbar_bg}; border: none; outline: none; }}"  # toolbar_bg = the panels' darker interior (window_bg is the lighter gap shade in LSPRi)
             f"QHeaderView::section {{ background: {theme.toolbar_bg}; color: {theme.text_muted}; border: none; "
             f"border-bottom: 1px solid {theme.toolbar_border}; padding: 4px 6px; font-weight: 600; }}"
         )
-        self._hint.setStyleSheet(f"color: {theme.text_dim}; background: {theme.window_bg}; padding: 24px;")
+        self._hint.setStyleSheet(f"color: {theme.text_dim}; background: {theme.toolbar_bg}; padding: 24px;")
         for button in self.findChildren(QToolButton):
             name = button.property("icon_name")
             if name:  # the unit toggle is not one of these: it styles itself (`UnitToggle.refresh_theme`)
                 self._style_tool_button(button, str(name))
         self._unit_toggle.refresh_theme()
+        self._step_controls.refresh_theme()
         self._update_footer()
         self._tree.viewport().update()
 
@@ -446,6 +492,8 @@ class RoiTablePanel(QWidget):
             self._apply_selection_to_view(ids, reveal=reveal)
         self._update_toolbar_state()
         self._update_footer()
+        self._tree.refresh_column_visibility()  # new step columns come visible: the ones the user hid are hidden again
+        self._step_controls.fit_if_auto()  # the content may have changed (rows, numbers that came while the panel was hidden): the step columns follow it
 
     # -- selection ------------------------------------------------------------------------
 
@@ -540,6 +588,8 @@ class RoiTablePanel(QWidget):
     # -- expansion, sorting, widths, flat/grouped ------------------------------------------
 
     def _on_expansion_changed(self, index: QModelIndex, expanded: bool) -> None:
+        if not self._restoring_view:
+            self._step_controls.schedule_state()  # the rows on screen changed: do they all have numbers?
         if self._restoring_view or not self._model.is_group(index):
             return
         if self._group_only:  # the lock: a group that gets opened (chevron, arrow key, double click) is closed again
@@ -570,10 +620,14 @@ class RoiTablePanel(QWidget):
         current, descending = self._model.sort_state()
         new = (column, not descending) if column == current else (column, False)
         self._rebuild(lambda: self._model.set_sort(*new), reveal=False)  # sorting must not expand collapsed groups
-        if self._store is not None:
+        if self._store is not None and new[0] < COLUMN_COUNT:  # a step column is not remembered: its numbers are not either (they are calculated on request)
             self._store.set(ROI_TABLE_SORT, [new[0], new[1]])
 
     def _on_section_resized(self, column: int, _old: int, new: int) -> None:
+        if column >= COLUMN_COUNT:  # the step columns share one width, or each fits its content
+            if not self._tree.header().in_double_click():  # (a double-click on an edge makes Qt fit that one column; the controls then fit them all: not a drag)
+                self._step_controls.section_resized(new)
+            return
         if new > 0 and not self._tree.isColumnHidden(column):
             self._widths[column] = new
         if self._store is not None:
@@ -584,8 +638,20 @@ class RoiTablePanel(QWidget):
             self._tree.setColumnWidth(column, width)
 
     def _show_header_menu(self, pos: QPoint) -> None:
-        """Right-click on the column headers: choose the table view."""
-        self._view_menu.exec(self._tree.header().mapToGlobal(pos))
+        """Right-click on the column headers: choose the table view, hide or show columns, freeze or unfreeze columns, fit the step columns."""
+        header = self._tree.header()
+        section = header.section_at(pos.x())
+        self._hide.prepare(section)
+        self._freeze.prepare(section)
+        self._step_controls.prepare_menu()
+        self._view_menu.exec(header.mapToGlobal(pos))
+
+    def _on_column_hidden(self, column: int) -> None:
+        """A column was hidden: a table sorted by it goes back to the ``#`` order (a sort the user can no longer see is a puzzle), as when a view mode hides it."""
+        if self._model.sort_state()[0] == column:
+            self._rebuild(lambda: self._model.set_sort(COLUMN_ID, False), reveal=False)
+            if self._store is not None:
+                self._store.set(ROI_TABLE_SORT, [COLUMN_ID, False])
 
     def _on_view_mode_chosen(self, mode: str) -> None:
         self._apply_view_mode(mode)
@@ -599,7 +665,7 @@ class RoiTablePanel(QWidget):
         self._apply_widths()  # a column hidden at start-up never got its saved width
         self._view_actions[mode].setChecked(True)
         self._unit_toggle.setVisible(mode == VIEW_GEOMETRY)  # the unit only matters for the geometry columns
-        if self._model.sort_state()[0] not in VIEW_MODE_COLUMNS[mode]:
+        if self._model.sort_state()[0] not in VIEW_MODE_COLUMNS[mode] and not self._model.sorts_by_step():
             self._rebuild(lambda: self._model.set_sort(COLUMN_ID, False), reveal=False)
             if self._store is not None:
                 self._store.set(ROI_TABLE_SORT, [COLUMN_ID, False])
@@ -638,6 +704,10 @@ class RoiTablePanel(QWidget):
             self._show_notice(f"{action}: {_message(exc)}", error=True)
             return False
         return True
+
+    def cancel(self) -> None:
+        """The task indicator's Cancel: stop the calculation of the step columns (what was fitted is kept)."""
+        self._step_controls.cancel()
 
     # -- toolbar state ----------------------------------------------------------------------
 
@@ -953,7 +1023,7 @@ class RoiTablePanel(QWidget):
         keep their order relative to each other; a block already at the end of
         the list stays there."""
         if self._groups_sorted_by_label():
-            self._show_notice("Groups are sorted by label: sort by # to move them.", error=True)
+            self._show_notice("Groups are sorted by a column: sort by # to move them.", error=True)
             return
         chosen = set(group_ids)
         order = [group.group_id for group in self._toolbox.groups()]
@@ -969,8 +1039,8 @@ class RoiTablePanel(QWidget):
         self._apply_group_order(order, final)
 
     def _groups_sorted_by_label(self) -> bool:
-        """The grouped view lists the groups by label, not in their own order (moving them would show nothing)."""
-        return self._model.is_grouped_view() and self._model.sort_state()[0] == COLUMN_NAME
+        """The grouped view lists the groups by label or by a step's value, not in their own order (moving them would show nothing)."""
+        return self._model.is_grouped_view() and (self._model.sort_state()[0] == COLUMN_NAME or self._model.sorts_by_step())
 
     def _set_groups_expanded(self, indexes: list[QModelIndex], expanded: bool) -> None:
         """Expand or collapse these group headers; one already in that state stays as it is."""
@@ -981,7 +1051,7 @@ class RoiTablePanel(QWidget):
     def _move_groups_to_edge(self, group_ids: list[str], *, top: bool) -> None:
         """Put the groups at the top / bottom of the list, keeping their order relative to each other."""
         if self._groups_sorted_by_label():
-            self._show_notice("Groups are sorted by label: sort by # to move them.", error=True)
+            self._show_notice("Groups are sorted by a column: sort by # to move them.", error=True)
             return
         chosen = set(group_ids)
         order = [group.group_id for group in self._toolbox.groups()]

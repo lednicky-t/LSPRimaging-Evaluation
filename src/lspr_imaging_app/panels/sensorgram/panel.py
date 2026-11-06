@@ -38,6 +38,10 @@ window never mixes two solutions; without steps the whole trace is smoothed. The
 inputs of the request (the pieces to smooth, the cubes of each step); the numbers are computed in the worker with the curves, so they follow smoothing, baseline and spike removal. A moved,
 reset or restored boundary asks for a redraw when either is on (`StepOverlays._on_plan_changed`); a note or colour edit does not. Design and measurements: ``docs/step_statistics_backbone_2026-10-26.md``.
 
+**Shared with the ROI table (2026-11-05).** The fitted traces and the helper process live in a `TraceStore` (``analysis/trace_store.py``) and the x axis, the baseline window and the Subtract
+switch in a `SensorgramAxis` (``analysis/sensorgram_axis.py``); the app gives the same two objects to the ROI / Groups table's step columns (``analysis/step_table_module.py``), so a ROI fitted for
+one is not fitted again for the other and both compute their numbers from the same x and the same baseline. Given none, this panel makes its own trace store (tests) and takes the settings' one axis (`SensorgramAxis.of`).
+
 **Status bar.** A computation that lasts more than a moment (``panel_task.PanelTask``) appears in the app's task indicator ("Sensorgram: fitting
 ROI 3 of 160"), with a Cancel button that stops it between ROIs and clears the plot (the traces already fitted are kept for the next request); a
 quick one leaves no trace.
@@ -74,6 +78,8 @@ from ...analysis.scan_trace import (
     compute_sensorgram,
     trace_key,
 )
+from ...analysis.sensorgram_axis import SensorgramAxis
+from ...analysis.trace_store import TraceStore
 from ...analysis.settings import (
     SENSORGRAM_AGGREGATIONS,
     SENSORGRAM_BANDS,
@@ -115,7 +121,7 @@ from .mask_marks_toggle import MaskMarksToggle
 from .stale_marks_toggle import StaleMarksToggle
 from .stat_icons import band_picture, center_picture, display_picture, smoothing_picture, spikes_icon, subtract_icon, within_steps_icon
 from .step_overlays import StepOverlays
-from .plot import SensorgramPlot, snap_window
+from .plot import SensorgramPlot
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +182,8 @@ class SensorgramPanel(QWidget):
 
     _result_ready = pyqtSignal(object, object, object, object)  # (job, series | None, new traces, error | None) - from the worker thread
     _progress = pyqtSignal(int, int)  # (ROIs done, ROIs to do) - from the worker thread
+    plan_bar_settings_changed = pyqtSignal()
+    """The plan bar's display settings changed (text content and separators among them): the ROI table titles its step columns the same way."""
 
     def __init__(
         self,
@@ -191,11 +199,15 @@ class SensorgramPanel(QWidget):
         trace_in_process: bool = True,
         mask: MaskModule | None = None,
         experiment_plan: ExperimentPlanModule | None = None,
+        trace_store: TraceStore | None = None,
+        axis: SensorgramAxis | None = None,
     ) -> None:
         """`image_busy`: True while the Image panel has a frame in flight; a computation then waits for it (`ImageFirst`). `trace_in_process`: the
         fits run in a helper process (`TracePool`), so they never compete with the window for the interpreter lock; False computes them in the worker
-        thread (tests that spy on the fit, debugging). `mask`: tells which masks are individual (the marks of the View group); without it every mask counts as persistent.
-        `experiment_plan`: the experiment steps for the plan bar; without it the Experimental plan group stays greyed out."""
+        thread (tests that spy on the fit, debugging); it applies only to the store this panel makes for itself. `mask`: tells which masks are individual (the marks of the View group); without it every mask counts as persistent.
+        `experiment_plan`: the experiment steps for the plan bar; without it the Experimental plan group stays greyed out.
+        `trace_store`: the fitted traces and the helper process, shared with the ROI / Groups table's step columns (`analysis/trace_store.py`); without one the panel makes its own and shuts it down itself.
+        `axis`: the x axis and the baseline switch, shared with the same table (`analysis/sensorgram_axis.py`); without one it takes the settings' own (`SensorgramAxis.of`)."""
         super().__init__(parent)
         self._mask = mask
         self._live = live if live is not None else AnalysisLiveModule(self)  # without an owner: always live
@@ -211,11 +223,9 @@ class SensorgramPanel(QWidget):
         self._job: _Job | None = None
         self._pending = False
         self._thread: threading.Thread | None = None
-        self._trace_pool: TracePool | None = TracePool() if trace_in_process else None
-        self._pool_warm_started = False
-        self._cache_key: tuple | None = None
-        self._cache: dict[int, np.ndarray] = {}
-        self._x_cache: tuple[tuple, np.ndarray] | None = None
+        self._owns_traces = trace_store is None
+        self._traces = trace_store if trace_store is not None else TraceStore(scan_results, self, in_process=trace_in_process)
+        self._axis = axis if axis is not None else SensorgramAxis.of(scan_results, dataset, cube_display, analysis_settings)
         self._last: tuple[_Job, list[Series]] | None = None
         self._syncing = False
 
@@ -277,11 +287,13 @@ class SensorgramPanel(QWidget):
         self._status.setWordWrap(True)
         self._status.setStyleSheet(f"color: {get_active_theme().text_dim};")
         self._plot = SensorgramPlot(self)
+        self._axis.set_range_fallback(self._plot.x_range)  # a default baseline window on an axis with fewer than two points goes where the plot is looking
         self._steps = StepOverlays(
             self, experiment_plan=experiment_plan, plot=self._plot, dataset=dataset, settings=analysis_settings, cube_display=cube_display, drawn=self._drawn, x_axis=self._x_axis,
             schedule_redraw=self._schedule_redraw, defer=lambda: self._gate.defer(), on_steps_available=self._on_steps_available,  # the gate is made further down
         )
         self.task = PanelTask(TASK_ID, "Sensorgram", self)  # connected to the status bar's task indicator by app_rewrite
+        self._steps.plan_controls.settings_changed.connect(self.plan_bar_settings_changed)
 
         self._live_toggle = LiveToggle(self)
         self._live_toggle.bind(self._live)
@@ -349,7 +361,7 @@ class SensorgramPanel(QWidget):
         self._settings.settings_changed.connect(lambda _change: self._on_settings_changed())
         self._roi_toolbox.geometry_changed.connect(self._on_roi_changed)
         self._roi_toolbox.cosmetic_changed.connect(lambda _change: self._schedule_redraw())
-        self._cube_display.mode_changed.connect(lambda _mode: self._on_axis_changed())
+        self._axis.axis_changed.connect(self._schedule_redraw)  # Cube / Time: the x values changed (the axis object has carried the baseline window over)
         self._scan.results_changed.connect(self._on_results_changed)
         self._scan.staleness_changed.connect(self._draw_last)
 
@@ -391,6 +403,10 @@ class SensorgramPanel(QWidget):
         """Connected to the dock's ``visibilityChanged``: a hidden panel does no work and catches up once when shown."""
         self._gate.set_visible(visible)
 
+    def plan_bar_settings(self):
+        """The plan bar's display settings as set now (`plan.bar_model.PlanBarSettings`): the text mode and separators decide how a step's note is written in a title."""
+        return self._steps.plan_controls.settings()
+
     def refresh_theme(self) -> None:
         self._live_toggle.refresh_theme()
         self._ribbon.refresh_theme()
@@ -418,8 +434,8 @@ class SensorgramPanel(QWidget):
         thread = self._thread
         if thread is not None:
             thread.join(timeout=_JOIN_SECONDS)
-        if self._trace_pool is not None:
-            self._trace_pool.shutdown()
+        if self._owns_traces:  # a store the app made is shut down by the app (the step table may still be using it)
+            self._traces.shutdown()
 
     # -- controls <-> the statistics settings ---------------------------------------------------------------------------------
 
@@ -453,20 +469,6 @@ class SensorgramPanel(QWidget):
             smoothing_window=self._window.value(), smooth_within_steps=self._within_steps.isChecked(), spike_rejection_enabled=self._spikes.isChecked(),
         ))
 
-    def _default_baseline_window(self) -> tuple[float, float]:
-        x = self._x_axis()[1]
-        finite = x[np.isfinite(x)]
-        if finite.size < 2:
-            low, high = self._plot.x_range()
-        else:
-            low, high = float(finite.min()), float(finite.max())
-        return self._snap_window(low, low + 0.1 * (high - low))
-
-    def _snap_window(self, low: float, high: float) -> tuple[float, float]:
-        """The window with both edges on a data point of the x axis (cube number, or the cube's start time)."""
-        x = self._x_axis()[1]
-        return snap_window(np.unique(x[np.isfinite(x)]), low, high)
-
     def _on_ribbon_tab(self, label: str) -> None:
         """Another control tab is shown: the plan bar's structure tools (remove / add / unify steps, the baseline and signal roles in the right-click menu) are live only on the
         Experimental plan tab, so nothing structural happens by accident while working on the traces."""
@@ -478,20 +480,11 @@ class SensorgramPanel(QWidget):
     def _on_baseline_toggled(self, on: bool) -> None:
         if self._syncing:
             return
-        current = self._settings.statistics_settings()
-        if on:
-            window = (current.baseline_window_start, current.baseline_window_end)
-            if window[0] is None or window[1] is None:
-                window = self._default_baseline_window()
-            self._settings.set_statistics_settings(replace(current, baseline_enabled=True, baseline_window_start=window[0], baseline_window_end=window[1]))
-        else:
-            self._settings.set_statistics_settings(replace(current, baseline_enabled=False))
+        self._axis.set_baseline_enabled(on)
 
     def _on_baseline_dragged(self, low: float, high: float) -> None:
-        """The selector was moved: remember where. Whether the traces are shifted by it is the Subtract switch's business (the selector can be
-        dragged before, or without, subtracting)."""
-        low, high = self._snap_window(low, high)  # a typed value is put on a data point as a dragged one is
-        self._settings.set_statistics_settings(replace(self._settings.statistics_settings(), baseline_window_start=low, baseline_window_end=high))
+        """The selector was moved: remember where (the axis object puts a typed value on a data point as a dragged one is)."""
+        self._axis.set_baseline_window(low, high)
 
     def _range_decimals(self) -> int:
         """Decimals of the baseline range readout: whole cubes, or tenths of a second."""
@@ -530,65 +523,13 @@ class SensorgramPanel(QWidget):
         if self._job is not None:
             self._job.cancel.set()
         self._last = None
-        self._cache.clear()
-        self._cache_key = None
-        self._x_cache = None
-        self._schedule_redraw()
-
-    def _on_axis_changed(self) -> None:
-        """The Cube / Time choice changed: the x values change, and so does the unit of the baseline window. The window keeps its cubes (cubes 2 - 4
-        become the seconds those cubes start at, and back), subtracting or not."""
-        previous = self._x_cache  # (key, x) of the axis the stored window is in
-        self._x_cache = None
-        stats = self._settings.statistics_settings()
-        if stats.baseline_window_start is None or stats.baseline_window_end is None:
-            self._schedule_redraw()
-            return
-        window = self._window_on_new_axis(previous, stats.baseline_window_start, stats.baseline_window_end)
-        if window is None:  # nothing to carry it over from: where Subtract would put it on the new axis
-            window = self._default_baseline_window()
-        self._settings.set_statistics_settings(replace(stats, baseline_window_start=window[0], baseline_window_end=window[1]))  # redraws via settings_changed
-
-    def _window_on_new_axis(self, previous: tuple | None, low: float, high: float) -> tuple[float, float] | None:
-        """The window (low, high), given in the unit of the axis `previous`, put on the cubes' x values of the current axis: the same two cubes, so
-        a round trip Cube -> Time -> Cube gives the window back. Unchanged when the unit did not change. None when it cannot be carried over (no
-        earlier axis, another scan, a cube without a start time)."""
-        if previous is None:
-            return None
-        (stored_id, was_time), old_x = previous
-        new_x = self._x_axis()[1]
-        if stored_id != id(self._scan.stored()) or old_x.size == 0 or old_x.size != new_x.size:
-            return None
-        if was_time == (self._cube_display.effective_mode() == MODE_TIME):
-            return float(low), float(high)
-        finite = np.flatnonzero(np.isfinite(old_x))
-        if finite.size == 0:
-            return None
-        moved = []
-        for edge in (low, high):
-            cube_position = int(finite[int(np.argmin(np.abs(old_x[finite] - edge)))])  # the data point the edge stands on
-            if not np.isfinite(new_x[cube_position]):
-                return None
-            moved.append(float(new_x[cube_position]))
-        return self._snap_window(moved[0], moved[1])
+        self._schedule_redraw()  # the shared trace store and the axis empty themselves on the same signal
 
     # -- the x axis -----------------------------------------------------------------------------------------------------------------
 
     def _x_axis(self) -> tuple[str, np.ndarray]:
-        """(axis label, x per cube of the file): time in seconds, or the cube number. Cached until the file or the mode changes."""
-        stored = self._scan.stored()
-        if stored is None:
-            return "Cube (#)", np.empty(0)
-        use_time = self._cube_display.effective_mode() == MODE_TIME
-        key = (id(stored), use_time)
-        if self._x_cache is None or self._x_cache[0] != key:
-            if use_time:
-                seconds = [self._dataset.cube_start_seconds(c) for c in stored.cube_indices]
-                x = np.array([np.nan if s is None else float(s) for s in seconds])
-            else:
-                x = np.array(stored.cube_indices, dtype=np.float64)
-            self._x_cache = (key, x)
-        return ("Time (s)" if use_time else "Cube (#)"), self._x_cache[1]
+        """(axis label, x per cube of the file): time in seconds, or the cube number. The shared axis object keeps it (``analysis/sensorgram_axis.py``)."""
+        return self._axis.label_and_x()
 
     def _on_plot_clicked(self, x: float) -> None:
         stored = self._scan.stored()
@@ -687,8 +628,7 @@ class SensorgramPanel(QWidget):
         segments, membership = self._steps.step_inputs(stored)
         request = SensorgramRequest(roi_ids, detection.formula_key, metric, self._settings.statistics_settings(), x, groups, self._roi_colors(roi_ids), segments, membership)
         key = trace_key(stored, detection.formula_key, metric)
-        if key != self._cache_key:
-            self._cache, self._cache_key = {}, key  # other formula / fit / metric: the old traces do not apply
+        known = self._traces.known(key)  # the traces fitted so far (any panel's); other formula / fit / metric: the store drops the old ones
         if self._job is not None:
             self._job.cancel.set()  # a running (maybe long) computation is stopped between ROIs; what it finished is kept
             self._pending = True
@@ -698,14 +638,14 @@ class SensorgramPanel(QWidget):
             return
         job = _Job(self._generation, stored, request, key, threading.Event())
         self._job = job
-        missing = sum(1 for r in roi_ids if r not in self._cache)
+        missing = sum(1 for r in roi_ids if r not in known)
         self.task.begin(f"fitting {missing} ROI{'s' if missing != 1 else ''}" if missing else "applying the statistics")
-        self._thread = threading.Thread(target=self._compute, args=(job, dict(self._cache)), name="sensorgram-compute", daemon=True)
+        self._thread = threading.Thread(target=self._compute, args=(job, known), name="sensorgram-compute", daemon=True)
         self._thread.start()
 
     def fit_pool(self) -> TracePool | None:
-        """The helper process the fits run in (None: in the worker thread). Owned here (shut down with this panel); lent to the Spectra panel."""
-        return self._trace_pool
+        """The helper process the fits run in (None: in the worker thread), owned by the shared trace store; lent to the Spectra panel."""
+        return self._traces.pool()
 
     def start_helper_early(self) -> None:
         """The app is about to open a dataset (launch with "reopen the last dataset"): start the helper process now, while the window is still being
@@ -716,10 +656,7 @@ class SensorgramPanel(QWidget):
     def _warm_up_pool(self) -> None:
         """A scan is loaded and this panel is showing: start the helper process now (it imports numpy / scipy, a few seconds), so the first fit
         does not wait for that. Off the GUI thread."""
-        if self._trace_pool is None or self._pool_warm_started:
-            return
-        self._pool_warm_started = True
-        threading.Thread(target=self._trace_pool.warm_up, name="sensorgram-pool-warmup", daemon=True).start()
+        self._traces.warm_up()
 
     def _compute(self, job: _Job, known: dict[int, np.ndarray]) -> None:
         total_missing = sum(1 for r in job.request.roi_ids if r not in known)
@@ -728,7 +665,7 @@ class SensorgramPanel(QWidget):
             with timed(logger, "sensorgram.compute", rois=len(job.request.roi_ids), new=total_missing):
                 series, new = compute_sensorgram(
                     job.stored, job.request, known, cancelled=job.cancel.is_set, progress=report,
-                    runner=None if self._trace_pool is None else self._trace_pool.run,
+                    runner=self._traces.runner(),
                 )
             self._result_ready.emit(job, series, new, None)
         except BaseException as exc:  # nothing may escape a thread silently
@@ -742,8 +679,8 @@ class SensorgramPanel(QWidget):
 
     def _on_result(self, job: _Job, series: object, new: object, error: object) -> None:
         self._job = None
-        if job.key == self._cache_key and isinstance(new, dict):
-            self._cache.update(new)  # a cancelled run's finished traces are kept as well
+        if isinstance(new, dict):
+            self._traces.add(job.key, new)  # a cancelled run's finished traces are kept as well (the store ignores them if the key has moved on)
         if isinstance(error, BaseException):
             self._status.setText(f"The sensorgram could not be computed: {error}")
         elif series and job.generation == self._generation and not job.cancel.is_set():
@@ -802,7 +739,7 @@ class SensorgramPanel(QWidget):
         if stats.baseline_window_start is not None and stats.baseline_window_end is not None:
             window = (stats.baseline_window_start, stats.baseline_window_end)
         else:
-            window = self._default_baseline_window()  # where Subtract would put it; stored only once dragged, typed or subtracted
+            window = self._axis.default_baseline_window()  # where Subtract would put it; stored only once dragged, typed or subtracted
         self._plot.set_baseline_window(window if self._band_visible else None, self._range_decimals())
         self._update_cursor()
         self._steps.refresh()

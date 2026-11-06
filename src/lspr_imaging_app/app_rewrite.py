@@ -36,6 +36,9 @@ from .analysis.live_state import AnalysisLiveModule
 from .analysis.roi_tuning_module import RoiTuningModule, TuningView
 from .analysis.roi_tuning_task import TASK_ID as ROI_TUNING_TASK_ID
 from .analysis.scan_results import ScanResultsModule
+from .analysis.sensorgram_axis import SensorgramAxis
+from .analysis.step_table_module import StepTableModule
+from .analysis.trace_store import TraceStore
 from .storage.session_index import session_dir_for
 from .analysis.scan_store import FILE_NAME as SCAN_FILE_NAME, describe_file as describe_scan_file
 from .analysis.scan_pool import MODE_NORMAL, MODE_PERFORMANCE, MODES
@@ -86,6 +89,7 @@ from .panels.roi_table import RoiTablePanel
 from .panels.image.analysis_tab import AnalysisTab
 from .panels.image.tuning_tab import TuningTab
 from .panels.sensorgram import SensorgramPanel
+from .panels.roi_table.panel import TASK_ID as ROI_TABLE_TASK_ID
 from .panels.sensorgram.panel import TASK_ID as SENSORGRAM_TASK_ID
 from .panels.spectra import SpectraPanel
 from .panels.spectra.panel import TASK_ID as SPECTRA_TASK_ID
@@ -708,6 +712,9 @@ class _Modules:
     analysis_live: AnalysisLiveModule
     session_carry: SessionCarry
     session_load: SessionLoadTask
+    trace_store: TraceStore  # the fitted metric traces and the helper process, shared by the Sensorgram and the ROI table's step columns
+    sensorgram_axis: SensorgramAxis  # the Sensorgram's x axis and Subtract switch, shared with the same table
+    step_table: StepTableModule  # the numbers of the ROI table's step columns
 
 
 class _SettingsWriter:
@@ -827,6 +834,12 @@ def _build_modules() -> _Modules:
         app.aboutToQuit.connect(roi_tuning.task.shutdown)
     dataset.export_finished.connect(session_carry.start)
     dataset.export_failed.connect(lambda _message: session_carry.discard())
+    cube_display = CubeDisplayModule(dataset)
+    trace_store = TraceStore(scan_results)  # shut down after the panels (build_main_window), which may still be fitting
+    sensorgram_axis = SensorgramAxis.of(scan_results, dataset, cube_display, analysis_settings)
+    step_table = StepTableModule(scan_results, roi_toolbox, dataset, analysis_settings, experiment_plan, trace_store, sensorgram_axis)
+    if app is not None:
+        app.aboutToQuit.connect(step_table.shutdown)
     modules = _Modules(
         dataset=dataset, geometry=geometry, active_tool=active_tool, mask=mask, mask_scope=mask_scope,
         chromatic=chromatic, background=background, roi_toolbox=roi_toolbox,
@@ -839,7 +852,8 @@ def _build_modules() -> _Modules:
         reference_auto=ReferenceAutoFind(dataset, selection, reference_frame, frame_roles),
         frame_roles=frame_roles,
         experiment_plan=experiment_plan,
-        cube_display=CubeDisplayModule(dataset),
+        cube_display=cube_display,
+        trace_store=trace_store, sensorgram_axis=sensorgram_axis, step_table=step_table,
     )
     modules_holder.append(modules)
     return modules
@@ -1293,6 +1307,8 @@ def _build_status_bar(
     m.session_carry.task_finished.connect(task_indicator.finish)
     m.session_load.task_progress.connect(task_indicator.report)  # reading the session when a dataset opens
     m.session_load.task_finished.connect(task_indicator.finish)
+    roi_table_panel.task.task_progress.connect(task_indicator.report)  # the ROI table's step columns being calculated (fitting many ROIs)
+    roi_table_panel.task.task_finished.connect(task_indicator.finish)
     spectra_panel.task.task_progress.connect(task_indicator.report)  # a Spectra recompute that lasts (metric, fit, formula)
     spectra_panel.task.task_finished.connect(task_indicator.finish)
     sensorgram_panel.task.task_progress.connect(task_indicator.report)  # a Sensorgram recompute that lasts (fitting many ROIs)
@@ -1303,6 +1319,7 @@ def _build_status_bar(
         STARTUP_TASK_ID: startup.cancel,  # stops the status-bar entry only; loading is not interrupted
         SPECTRA_TASK_ID: spectra_panel.cancel,
         SENSORGRAM_TASK_ID: sensorgram_panel.cancel,
+        ROI_TABLE_TASK_ID: roi_table_panel.cancel,
         SESSION_LOAD_TASK_ID: m.session_load.cancel,
         ZARR_EXPORT_TASK_ID: m.dataset.cancel_export,
         SESSION_CARRY_TASK_ID: m.session_carry.cancel,
@@ -1360,6 +1377,19 @@ def _wire_session_carry_prompt(window: QMainWindow, m: _Modules) -> None:
         box.open()
 
     m.session_carry.carried.connect(_ask)
+
+
+def _follow_plan_bar(sensorgram_panel: SensorgramPanel, step_table: StepTableModule, roi_table_panel: RoiTablePanel) -> None:
+    """The step columns of the ROI table look as the Sensorgram's plan bar looks, now and whenever the user changes it there: the same part of each step's note as the title
+    (whole note or the solution before the separator, and which separators), and the same fill (the step's colour at the bar's opacity)."""
+
+    def apply() -> None:
+        settings = sensorgram_panel.plan_bar_settings()
+        step_table.set_title_style(settings.text_mode, settings.separators)
+        roi_table_panel.set_step_tint_alpha(settings.alpha)
+
+    sensorgram_panel.plan_bar_settings_changed.connect(apply)
+    apply()
 
 
 def _wire_roi_table_title(dock: PanelContainer, panel: RoiTablePanel) -> None:
@@ -1792,16 +1822,20 @@ def build_main_window(
         pass
     m.mask_scope.scope_changed.connect(lambda scope: ui_state.set(MASK_SCOPE.key, scope.value))
     roi_table_panel = RoiTablePanel(m.roi_toolbox, m.selection, m.geometry, edit_target=image_panel.edit_target,
-        display_style=image_panel.roi_display,
+        display_style=image_panel.roi_display, step_table=m.step_table,
     )
     roi_table_panel.restore_ui_state(ui_state)
     spectra_panel = SpectraPanel(m.scan_results, m.roi_toolbox, m.selection, m.analysis_settings, live=m.analysis_live)
     spectra_panel.restore_ui_state(ui_state)
     sensorgram_panel = SensorgramPanel(
         m.scan_results, m.roi_toolbox, m.dataset, m.selection, m.analysis_settings, m.cube_display, image_busy=image_panel.render_pending,
-        live=m.analysis_live, mask=m.mask, experiment_plan=m.experiment_plan,
+        live=m.analysis_live, mask=m.mask, experiment_plan=m.experiment_plan, trace_store=m.trace_store, axis=m.sensorgram_axis,
     )
     sensorgram_panel.restore_ui_state(ui_state)
+    _follow_plan_bar(sensorgram_panel, m.step_table, roi_table_panel)  # the table's step columns are titled and coloured as the Sensorgram's plan bar titles and colours its steps
+    app_instance = QApplication.instance()
+    if app_instance is not None:  # after the panels' own shutdowns (connected in their constructors): nothing may still be fitting when the helper process ends
+        app_instance.aboutToQuit.connect(m.trace_store.shutdown)
     spectra_panel.set_fit_pool(sensorgram_panel.fit_pool())  # Spectra fits in the same helper process (never competing with the window)
 
     def export_context() -> tuple[Path | None, dict[str, object]]:
@@ -1825,7 +1859,7 @@ def build_main_window(
     def remember_export_format(kind: str) -> None:
         ui_state.set(PLOT_EXPORT_FIGURE_FORMAT.key, kind)
 
-    for button in (sensorgram_panel.export_button, spectra_panel.export_button, histogram_panel.export_button()):
+    for button in (sensorgram_panel.export_button, spectra_panel.export_button, histogram_panel.export_button(), roi_table_panel.export_button):
         button.set_context(
             export_context, remember_export_folder, lambda: str(read(ui_state, PLOT_EXPORT_FIGURE_FORMAT)), remember_export_format
         )

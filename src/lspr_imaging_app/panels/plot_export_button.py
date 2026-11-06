@@ -59,7 +59,7 @@ class PlotExportButton(QToolButton):
     def __init__(
         self,
         name: str,
-        plot_item: Callable[[], pg.PlotItem],
+        plot_item: Callable[[], pg.PlotItem] | None,
         data: Callable[[], ExportData | None] | None,
         parent: QWidget | None = None,
         style: Callable[[QToolButton], None] | None = None,
@@ -68,7 +68,8 @@ class PlotExportButton(QToolButton):
         """``name``: the start of the suggested file name and the record's ``plot`` (e.g. "sensorgram"). ``plot_item``: the plot to draw.
         ``data``: the tables of what is drawn now (None: nothing to export); None for a plot with figures only. ``style``: how the button looks
         (default: the ribbons' icon button; the Histogram passes its corner-icon style). ``svg_parts``: the plot's names for its items, for the
-        layers of an SVG (``svg_layers.py``; without it every item is named by its kind)."""
+        layers of an SVG (``svg_layers.py``; without it every item is named by its kind). ``plot_item`` None: a table with no figure (the ROI / Groups
+        table's step columns), the button then offers "Save data" only."""
         super().__init__(parent)
         self._svg_parts = svg_parts
         self._style = style or style_general_icon_button
@@ -80,7 +81,7 @@ class PlotExportButton(QToolButton):
         self._figure_format: Callable[[], str] | None = None
         self._remember_figure_format: Callable[[str], None] | None = None
         self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.setToolTip("Export this plot: save or copy the figure, save the numbers behind it.")
+        self.setToolTip("Export this plot: save or copy the figure, save the numbers behind it." if plot_item is not None else "Save the numbers of this table (CSV).")
         menu = QMenu(self)
         self.save_figure_action = QAction("Save figure (PNG or SVG)...", menu)
         self.copy_figure_action = QAction("Copy figure", menu)
@@ -88,10 +89,12 @@ class PlotExportButton(QToolButton):
         self.save_figure_action.triggered.connect(self._ask_save_figure)
         self.copy_figure_action.triggered.connect(self._copy_with_message)
         self.save_data_action.triggered.connect(self._ask_save_data)
-        menu.addAction(self.save_figure_action)
-        menu.addAction(self.copy_figure_action)
+        if plot_item is not None:
+            menu.addAction(self.save_figure_action)
+            menu.addAction(self.copy_figure_action)
         if data is not None:
-            menu.addSeparator()
+            if plot_item is not None:
+                menu.addSeparator()
             menu.addAction(self.save_data_action)
         self.setMenu(menu)
         self.refresh_theme()
@@ -133,6 +136,8 @@ class PlotExportButton(QToolButton):
     def save_figure(self, path: Path) -> Path:
         """The plot as drawn: ``.svg`` as SVG, anything else as PNG at ``FIGURE_SCALE`` times the screen resolution."""
         path = Path(path)
+        if self._plot_item is None:
+            raise ValueError("This export has no figure.")
         item = self._plot_item()
         if path.suffix.lower() == ".svg":
             write_layered_svg(item, path, self._svg_parts() if self._svg_parts is not None else (), title=path.stem)
@@ -146,6 +151,8 @@ class PlotExportButton(QToolButton):
         return path
 
     def copy_figure(self) -> None:
+        if self._plot_item is None:
+            raise ValueError("This export has no figure.")
         exporter = pg_exporters.ImageExporter(self._plot_item())
         exporter.export(copy=True)
 

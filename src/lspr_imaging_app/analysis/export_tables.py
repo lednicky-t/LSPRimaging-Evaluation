@@ -79,6 +79,49 @@ def step_stats_table(table: object | None) -> Table | None:
     return Table(header, tuple(rows))
 
 
+def roi_step_table(
+    steps: Sequence[tuple[str, str, str, bool]],
+    rows: Sequence[tuple[str, str, int | None, Sequence[tuple[int, float, float] | None], bool | None]],
+    mode: str,
+) -> Table:
+    """The ROI / Groups table's step and comparison columns as they are shown (2026-11-05): one row per group and per ROI, in the order of the table, and per column the value
+    (the mean of a step, the difference or ratio of a comparison) and / or its spread and the number of cubes used. `mode` is the table's display: "mean" (value only), "std"
+    (SD only), "sem" (SEM only), "both" (value and SD) or "mean_sem" (value and SEM). `steps`: per column
+    ``(label, word for the value, unit, has a spread)``, e.g. ``("step 1 (H2O)", "mean", "nm", True)``; the labels are unique so the header is. Each row is
+    ``(kind "group" | "roi", group name, ROI id or None, [(n, value, sd, sem) or None per column], current)``; `current` is True / False for numbers that are / are not up to
+    date and None for a row that was never calculated (its cells are empty). A column without a spread (a signal-to-noise ratio) has only its value, in every mode. Full precision;
+    an empty cell is no number."""
+    spread = "sem" if mode in ("sem", "mean_sem") else "sd"
+    with_value = mode not in ("std", "sem")
+    with_spread = mode != "mean"
+    header: list[str] = ["row", "group", "roi_id"]
+    for label, word, unit, has_sd in steps:
+        unit_text = f" ({unit})" if unit else ""
+        if with_value or not has_sd:
+            header.append(f"{label} {word}{unit_text}")
+        if with_spread and has_sd:
+            header.append(f"{label} {spread}{unit_text}")
+        header.append(f"{label} n")
+    header.append("up_to_date")
+    out: list[tuple[object, ...]] = []
+    for kind, group, roi_id, values, current in rows:
+        cells: list[object] = [kind, group, roi_id]
+        for value, (_label, _word, _unit, has_sd) in zip(values, steps):
+            n, mean, sd, sem = value if value is not None else (None, None, None, None)
+            if with_value or not has_sd:
+                cells.append(mean)
+            if with_spread and has_sd:
+                cells.append(sem if spread == "sem" else sd)
+            cells.append(n)
+        cells.append("" if current is None else ("yes" if current else "no"))
+        out.append(tuple(cells))
+    notes = []
+    stale = sum(1 for row in rows if row[4] is False)
+    if stale:
+        notes.append(f"{stale} row{'s' if stale != 1 else ''} out of date (marked 'no' in the last column): the steps, the statistics or the scan changed after they were calculated.")
+    return Table(tuple(header), tuple(out), tuple(notes))
+
+
 def spectra_table(spectra: Sequence[object], names: Sequence[str], hc_ev_nm: float) -> Table:
     """The spectra drawn on the Spectra plot, long: one row per measured point (``kind`` measured, with its error), per point of the fitted curve
     (``kind`` fit) and per metric marker (``kind`` metric). Wavelength in nm and photon energy in eV side by side. ``spectra`` are

@@ -267,6 +267,7 @@ class LineStepValues:
     mean: np.ndarray
     sd: np.ndarray
     between_rois: bool
+    noise: np.ndarray | None = None  # SD about the straight line through the step (`StepStats.noise`); the signal-to-noise column of the ROI table divides by it
 
 
 def line_step_values(stats: StepStats, members: Sequence[int], *, between_rois: bool) -> LineStepValues:
@@ -276,9 +277,9 @@ def line_step_values(stats: StepStats, members: Sequence[int], *, between_rois: 
         if not members or int(members[0]) not in stats.roi_ids:
             return empty
         row = stats.roi_ids.index(int(members[0]))
-        return LineStepValues(stats.n[row].copy(), stats.mean[row].copy(), stats.std[row].copy(), False)
+        return LineStepValues(stats.n[row].copy(), stats.mean[row].copy(), stats.std[row].copy(), False, stats.noise[row].copy())
     groups = group_statistics(stats, [("", members)])
-    return empty if not groups else LineStepValues(groups[0].n_roi, groups[0].mean, groups[0].std, True)
+    return empty if not groups else LineStepValues(groups[0].n_roi, groups[0].mean, groups[0].std, True, groups[0].noise)
 
 
 def trace_matrix(

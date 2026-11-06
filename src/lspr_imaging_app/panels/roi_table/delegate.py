@@ -13,12 +13,13 @@ is 0 on purpose; child rows are indented here instead).
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QModelIndex, QPersistentModelIndex, QPointF, QRect, QRectF, QSize, Qt
+from PyQt6.QtCore import QEvent, QModelIndex, QPersistentModelIndex, QPointF, QRect, QRectF, QSize, Qt
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QPolygonF
-from PyQt6.QtWidgets import QLineEdit, QStyle, QStyledItemDelegate, QStyleOptionViewItem, QTreeView, QWidget
+from PyQt6.QtWidgets import QLineEdit, QStyle, QStyledItemDelegate, QStyleOptionViewItem, QToolTip, QTreeView, QWidget
 
 from lspr_ui import get_active_theme
 
+from ...plan.bar_model import contrast_text_color
 from ...shortcuts import matches
 from .model import (
     ALL_SELECTED_ROLE,
@@ -30,6 +31,8 @@ from .model import (
     KIND_ROLE,
     MASK_ROLE,
     SHAPE_ROLE,
+    STEP_STALE_ROLE,
+    STEP_TINT_ROLE,
 )
 from .rows import (
     COLUMN_COUNT,
@@ -50,8 +53,26 @@ CHIP_SIZE = 10
 CHEVRON_ZONE = 28
 """Width, from the left edge, of the part of a group header that toggles it."""
 _CELL_PAD = 6
+CELL_ROOM = 2 * _CELL_PAD + 4
+"""Pixels a number needs around its text to show whole: `_CELL_PAD` on both sides, the 2 px more the right side keeps (`_paint_roi`, `_paint_group_steps`), and 2 px of slack."""
 _ROW_LINE_ALPHA = 90
 _COLUMN_LINE_ALPHA = 55
+_STALE_TINTED_TEXT_ALPHA = 135  # a number that is out of date, on a coloured step column: the same text colour, fainter (`text_dim` could vanish into the colour)
+
+
+def step_tint_of(index: QModelIndex) -> QColor | None:
+    """The background of a step column's cell or header (the plan bar's fill of that step), or None for any other column."""
+    tint = index.data(STEP_TINT_ROLE)
+    return tint if isinstance(tint, QColor) and tint.isValid() else None
+
+
+def tinted_text_color(tint: QColor, base: QColor, *, stale: bool = False) -> QColor:
+    """Dark or light text for a cell filled with `tint` over `base`: judged on the blended colour as the bar judges its labels (`contrast_text_color`), so a number stays readable on
+    any step colour and at any opacity."""
+    color = QColor(contrast_text_color(tint.name(), tint.alphaF(), base.name()))
+    if stale:
+        color.setAlpha(_STALE_TINTED_TEXT_ALPHA)
+    return color
 
 
 def row_height(font_metrics) -> int:
@@ -134,8 +155,11 @@ class RoiTableDelegate(QStyledItemDelegate):
     def _paint_roi(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
         theme = get_active_theme()
         rect = option.rect
+        tint = step_tint_of(index)
+        if tint is not None:
+            painter.fillRect(rect, tint)  # under the selection / hover tint, which therefore still shows
         self._paint_row_background(painter, option, index, theme)
-        self._paint_cell_borders(painter, rect, index.column(), theme)
+        self._paint_cell_borders(painter, rect, index.column(), theme, index.model().columnCount() - 1)
         column = index.column()
         if column == COLUMN_SHAPE:
             self._paint_shape(painter, rect, index, theme)
@@ -143,8 +167,10 @@ class RoiTableDelegate(QStyledItemDelegate):
         font = QFont(option.font)
         color = QColor(theme.text_primary)
         text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
-        if index.data(INHERITED_ROLE) or (index.data(MASK_ROLE) and text == "mask"):
-            color = QColor(theme.text_dim)  # dim, not italic: italics read as "different kind of value"
+        if index.data(INHERITED_ROLE) or (index.data(MASK_ROLE) and text == "mask") or index.data(STEP_STALE_ROLE):
+            color = QColor(theme.text_dim)  # dim, not italic: italics read as "different kind of value" (a step number that is out of date is dimmed the same way)
+        if tint is not None:
+            color = tinted_text_color(tint, QColor(theme.toolbar_bg), stale=bool(index.data(STEP_STALE_ROLE)))
         alignment = index.data(Qt.ItemDataRole.TextAlignmentRole)
         alignment = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter if alignment is None else Qt.AlignmentFlag(alignment)
         if column == COLUMN_ID:
@@ -187,7 +213,7 @@ class RoiTableDelegate(QStyledItemDelegate):
             painter.drawText(QRectF(center.x() - 8, rect.top(), 16, rect.height()), int(Qt.AlignmentFlag.AlignCenter), "?")
 
     @staticmethod
-    def _paint_cell_borders(painter: QPainter, rect: QRect, column: int, theme) -> None:
+    def _paint_cell_borders(painter: QPainter, rect: QRect, column: int, theme, last_column: int = COLUMN_COUNT - 1) -> None:
         """Hairlines under the row and between the value columns: faint enough
         to guide the eye along a row and down a column, never a heavy grid."""
         line = QColor(theme.toolbar_border)
@@ -195,7 +221,7 @@ class RoiTableDelegate(QStyledItemDelegate):
         line.setAlpha(_ROW_LINE_ALPHA)
         painter.setPen(QPen(line, 1))
         painter.drawLine(rect.bottomLeft(), rect.bottomRight())
-        if column != COLUMN_COUNT - 1:
+        if column != last_column:
             line.setAlpha(_COLUMN_LINE_ALPHA)
             painter.setPen(QPen(line, 1))
             painter.drawLine(rect.topRight(), rect.bottomRight())
@@ -211,6 +237,7 @@ class RoiTableDelegate(QStyledItemDelegate):
         theme = get_active_theme()
         rect = option.rect
         painter.fillRect(rect, QColor(theme.toolbar_section_bg))
+        self._paint_group_step_tints(painter, option, index)
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
         if selected or index.data(ALL_SELECTED_ROLE):
             painter.fillRect(rect, self._selected_tint(theme))
@@ -263,16 +290,74 @@ class RoiTableDelegate(QStyledItemDelegate):
             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
             metrics.elidedText(text, Qt.TextElideMode.ElideRight, name_rect.width()),
         )
+        self._paint_group_steps(painter, option, index, theme)
+
+    @staticmethod
+    def _step_columns_of(view, model) -> list[int]:
+        return [c for c in range(COLUMN_COUNT, model.columnCount()) if not view.isColumnHidden(c)] if isinstance(view, QTreeView) else []
+
+    def _paint_group_step_tints(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
+        """A group header spans every column, so the background of its step columns is painted here too, before the selection / hover tint goes over it. Like the numbers
+        (`_paint_group_steps`) it is placed relative to the spanned cell, whatever the scroll position."""
+        view = option.widget
+        for column in self._step_columns_of(view, index.model()):
+            tint = step_tint_of(index.siblingAtColumn(column))
+            if tint is not None:
+                left = option.rect.left() + view.header().sectionPosition(column)
+                painter.fillRect(QRect(left, option.rect.top(), view.columnWidth(column), option.rect.height()), tint)
+
+    def _paint_group_steps(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex, theme) -> None:
+        """A group header spans every column, so its numbers in the step columns are painted here, over the spanned cell, at the places the columns have."""
+        view = option.widget
+        painter.setFont(QFont(option.font))
+        for column in self._step_columns_of(view, index.model()):
+            cell = index.siblingAtColumn(column)
+            text = str(cell.data(Qt.ItemDataRole.DisplayRole) or "")
+            if not text:
+                continue
+            tint = step_tint_of(cell)
+            stale = bool(cell.data(STEP_STALE_ROLE))
+            if tint is not None:
+                painter.setPen(tinted_text_color(tint, QColor(theme.toolbar_section_bg), stale=stale))
+            else:
+                painter.setPen(QColor(theme.text_dim if stale else theme.text_primary))
+            # Relative to the spanned cell, not to the scroll position: the same place wherever the cell is drawn (a frozen table draws it again unscrolled, `view.py`).
+            area = QRect(option.rect.left() + view.header().sectionPosition(column) + _CELL_PAD, option.rect.top(), max(0, view.columnWidth(column) - 2 * _CELL_PAD - 2), option.rect.height())
+            painter.drawText(
+                area, int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
+                option.fontMetrics.elidedText(text, Qt.TextElideMode.ElideRight, area.width()),
+            )
+
+    def helpEvent(self, event, view, option, index) -> bool:  # type: ignore[override]
+        """The tool tip of a step number in a group header: the header is one spanned cell, so ask which column the pointer is over."""
+        if event.type() == QEvent.Type.ToolTip and index.isValid() and index.data(KIND_ROLE) == "group" and isinstance(view, QTreeView):
+            column = view.column_at(event.pos().x()) if hasattr(view, "column_at") else view.columnAt(event.pos().x())  # (`column_at` knows about frozen columns)
+            if column >= COLUMN_COUNT:
+                tip = index.siblingAtColumn(column).data(Qt.ItemDataRole.ToolTipRole)
+                if tip:
+                    QToolTip.showText(event.globalPos(), str(tip), view)
+                    return True
+        return super().helpEvent(event, view, option, index)
 
     @staticmethod
     def _group_name_rect(option: QStyleOptionViewItem, index: QModelIndex, count_text: str) -> QRect:
         """Where a group header's name is painted (and edited): after the chevron, chip and
-        count, but never left of the end of column 0 (the count sits under the "#/ROIs" title)."""
+        count, but never left of the end of column 0 (the count sits under the "#/ROIs" title).
+
+        Every x is relative to ``option.rect.left()`` (the left end of the spanned cell), never to the scroll position, so the name is in the same place of the cell wherever the
+        cell is drawn. With frozen columns the name stops at their right edge: the rest of the header scrolls away, the name must not."""
         rect = option.rect
         view = option.widget
         first_column_right = rect.left() + (view.columnWidth(0) if isinstance(view, QTreeView) else 0)
         name_left = max(CHEVRON_ZONE + rect.left() + 12 + 9 + option.fontMetrics.horizontalAdvance(count_text) + 7, first_column_right + 2)
-        return QRect(name_left, rect.top(), max(0, rect.right() - name_left - 8), rect.height())
+        right = rect.right()
+        steps = RoiTableDelegate._step_columns_of(view, index.model())
+        if steps:
+            right = min(right, rect.left() + view.header().sectionPosition(steps[0]))  # the name stops where the step numbers begin
+        pinned = view.pinned_width() if hasattr(view, "pinned_width") else 0
+        if pinned:
+            right = min(right, rect.left() + pinned - 4)
+        return QRect(name_left, rect.top(), max(0, right - name_left - 8), rect.height())
 
     # -- editing --------------------------------------------------------------------
 
@@ -315,6 +400,11 @@ class RoiTableDelegate(QStyledItemDelegate):
             # where the name's text did (1 px border + 4 px padding).
             name_rect = self._group_name_rect(option, index, str(index.data(COUNT_ROLE) or 0))
             left = name_rect.left() - 5
-            editor.setGeometry(left, rect.top() + 3, max(60, rect.right() - 4 - left), rect.height() - 6)
+            right = rect.right()
+            view = option.widget
+            pinned = view.pinned_width() if hasattr(view, "pinned_width") else 0
+            if pinned:  # the editor stays over the frozen columns, where the name is drawn
+                right = min(right, rect.left() + pinned)
+            editor.setGeometry(left, rect.top() + 3, max(60, right - 4 - left), rect.height() - 6)
         else:
             editor.setGeometry(rect.adjusted(2, 2, -2, -2))

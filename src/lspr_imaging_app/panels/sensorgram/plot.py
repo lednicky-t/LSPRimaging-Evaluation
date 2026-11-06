@@ -27,6 +27,7 @@ from lspr_ui import get_active_theme
 from ...analysis.scan_trace import Series
 from ...plan.bar_model import ALIGN_DATA, POSITION_TOP, PlanBarSettings, PlanBarStep, label_headroom_px, reserved_range
 from ...plan.stats_table import StatsTable, StatsTableSettings
+from ...analysis.sensorgram_axis import snap_window  # (snap_to_grid and snap_window moved to the shared axis module, 2026-11-05)
 from ..axis_cursor import AxisCursor
 from ..image.mark_colors import MASK_COLOR, STALE_COLOR, cube_color
 from ..plot_item_pool import PlotItemPool
@@ -59,31 +60,6 @@ def _line_pen(color: QColor) -> QPen:
     pen = pg.mkPen(color, width=LINE_WIDTH)
     pen.setCosmetic(True)
     return pen
-
-
-def snap_to_grid(grid: np.ndarray, value: float) -> float:
-    """The point of ``grid`` (sorted, finite, may be empty) nearest to ``value``; halfway between two points the higher one. An empty grid leaves the value alone."""
-    if grid.size == 0:
-        return float(value)
-    above = int(np.searchsorted(grid, value))
-    if above == 0:
-        return float(grid[0])
-    if above >= grid.size:
-        return float(grid[-1])
-    below_gap, above_gap = value - grid[above - 1], grid[above] - value
-    return float(grid[above] if above_gap <= below_gap else grid[above - 1])
-
-
-def snap_window(grid: np.ndarray, low: float, high: float) -> tuple[float, float]:
-    """Both edges of a window on the grid, in order. Two edges that land on one point are pulled one point apart (a baseline of a single point is no window)."""
-    first, second = sorted((snap_to_grid(grid, low), snap_to_grid(grid, high)))
-    if first == second and grid.size >= 2:
-        index = int(np.searchsorted(grid, first))
-        if index + 1 < grid.size:
-            second = float(grid[index + 1])
-        else:
-            first = float(grid[index - 1])
-    return first, second
 
 
 def _finite_runs(*arrays: np.ndarray) -> list[tuple[int, int]]:

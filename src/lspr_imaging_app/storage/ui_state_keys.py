@@ -217,6 +217,12 @@ ROI_TABLE_GROUP_ONLY = "roi_table/group_only"  # bool: the Groups-only view (eve
 SHORTCUTS_DIALOG_SIZE = "shortcuts_dialog/size"  # [width, height] of Help -> Keyboard shortcuts
 SHORTCUTS_DIALOG_COLLAPSED = "shortcuts_dialog/collapsed"  # sorted section names the user collapsed there
 ROI_TABLE_COLUMN_WIDTHS = "roi_table/column_widths"  # one width per column (10; a list of the old 7 is still read)
+ROI_TABLE_STEPS_SHOWN = "roi_table/steps_shown"  # bool: the step columns (mean / SD per experiment step) are on
+ROI_TABLE_STEP_DISPLAY = "roi_table/step_display"  # "mean" | "std" | "both" (mean ± SD) | "sem" | "mean_sem": what the step cells show
+ROI_TABLE_STEP_WIDTH_MANUAL = "roi_table/step_width_manual"  # int: the width the user gave every step column by dragging an edge; None or absent = each step column fits its content (the old key "roi_table/step_width" was written automatically and is ignored)
+ROI_TABLE_HIDDEN_COLUMNS = "roi_table/hidden_columns"  # list of the columns the user hid (header right-click): a fixed column's number (1-7), a step's reference as a JSON object, or {"compare": [pair, operation]}; see panels/roi_table/column_keys.py
+ROI_TABLE_FROZEN_UPTO ="roi_table/frozen_upto"  # int: the last frozen column (a fixed column's number, 0-7; -1 or absent = none); the columns up to it stay in view when the table scrolls sideways
+ROI_TABLE_COMPARE_COLUMNS = "roi_table/compare_columns"  # [[evaluation pair, "difference" | "snr"], ...]: the comparison columns after the step columns
 
 IMAGE_VIEW_RANGE = "image/view_range"
 """``[[x_min, x_max], [y_min, y_max]]`` in image pixels; replaced the four

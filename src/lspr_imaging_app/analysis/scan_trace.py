@@ -168,6 +168,25 @@ class _PartialCancel(Cancelled):
         self.partial = partial
 
 
+def fit_missing_traces(
+    stored: StoredScan,
+    roi_ids: Sequence[int],
+    formula_key: str,
+    metric: MetricSettings,
+    known: Mapping[int, np.ndarray],
+    *,
+    cancelled: Callable[[], bool] | None = None,
+    progress: Callable[[int, int], None] | None = None,
+    runner: TraceRunner | None = None,
+) -> tuple[dict[int, np.ndarray], bool]:
+    """`compute_traces` for a caller that wants what a cancelled run finished: ``(the traces computed now, whether the run was cancelled before the end)``. The finished
+    traces are returned either way, so a caller can keep them for its next request (the Sensorgram does the same inside `compute_sensorgram`)."""
+    try:
+        return compute_traces(stored, roi_ids, formula_key, metric, known, cancelled=cancelled, progress=progress, runner=runner), False
+    except _PartialCancel as partial:
+        return partial.partial, True
+
+
 def build_series(request: SensorgramRequest, traces: Mapping[int, np.ndarray], display_mode: str, center: str, band: str) -> list[Series]:
     """Statistics per ROI, then the display mode. ``traces`` must hold every ROI of the request.
 

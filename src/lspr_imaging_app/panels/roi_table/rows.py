@@ -9,7 +9,7 @@ ROI inherits, how ROIs are sorted and sectioned by group, and which ROIs a
 from __future__ import annotations
 
 import math
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 
 from ...domain.roi_model import AreaRoi, AreaRoiDetectionSettings, AreaRoiGroup
@@ -18,6 +18,7 @@ from ...roi.palette import DEFAULT_ROI_COLOR_HEX
 COLUMN_ID, COLUMN_NAME, COLUMN_X, COLUMN_Y, COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT = range(7)
 COLUMN_SHAPE = 7
 COLUMN_COUNT = 8
+"""The fixed columns. The step columns (one per experiment step, ``step_columns.py``) follow them in the model: column ``COLUMN_COUNT + i`` is the i-th step."""
 COLUMN_TITLES = ("#/ROIs", "Label", "x", "y", "D_s", "d_r", "D_r", "Shape")
 """Header titles; ``X_y`` is drawn as X with a subscript y (`view.SubscriptHeader`)."""
 EDITABLE_COLUMNS = (COLUMN_X, COLUMN_Y, COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT)
@@ -232,7 +233,30 @@ _SORT_KEYS = {
 }
 
 
-def sort_rows(rows: Sequence[RoiRow], column: int, descending: bool) -> list[RoiRow]:
+@dataclass(frozen=True)
+class StepSort:
+    """The values a step column sorts by (``roi``: per ROI id, ``group``: per group id, ``None`` for "Ungrouped"). A missing or NaN value has no place in the order."""
+
+    roi: Mapping[int, float]
+    group: Mapping[str | None, float]
+
+
+def _has_value(value: float | None) -> bool:
+    return value is not None and not math.isnan(value)
+
+
+def _by_value(items: Sequence, value_of, tie_key, descending: bool) -> list:
+    """`items` ordered by `value_of(item)`, ties by `tie_key(item)` (always ascending); items without a value come last, in `tie_key` order, in either direction."""
+    with_value = [item for item in items if _has_value(value_of(item))]
+    without = [item for item in items if not _has_value(value_of(item))]
+    ordered = sorted(sorted(with_value, key=tie_key), key=value_of, reverse=descending)  # two stable passes: the tie order does not flip with `descending`
+    return ordered + sorted(without, key=tie_key)
+
+
+def sort_rows(rows: Sequence[RoiRow], column: int, descending: bool, step_sort: StepSort | None = None) -> list[RoiRow]:
+    """`rows` sorted by a fixed column, or (`step_sort` given) by their value in a step column."""
+    if step_sort is not None:
+        return _by_value(rows, lambda row: step_sort.roi.get(row.roi_id), lambda row: row.roi_id, descending)
     return sorted(rows, key=_SORT_KEYS.get(column, _SORT_KEYS[COLUMN_ID]), reverse=descending)
 
 
@@ -244,27 +268,35 @@ def build_sections(
     sort_column: int,
     descending: bool,
     ungrouped_color_hex: str = DEFAULT_ROI_COLOR_HEX,
+    step_sort: StepSort | None = None,
 ) -> list[Section]:
     """The grouped view: one section per group in the toolbox's group order
     (that order is the user's, never sorted by a column - except the Label
-    column, which sorts the groups by name, display only), then "Ungrouped"
-    last if any ROI is in no group. Rows are sorted inside each section."""
+    column, which sorts the groups by name, and a step column, which sorts the
+    groups by their value in that step; both display only), then "Ungrouped"
+    last if any ROI is in no group. Rows are sorted inside each section (by their
+    own value, when a step column sorts)."""
     by_group: dict[str | None, list[RoiRow]] = {group.group_id: [] for group in groups}
     by_group[None] = []
     for row in rows:
         by_group.setdefault(row.group_id, by_group[None]).append(row)
-    by_label = sort_column == COLUMN_NAME  # ROIs have no label: this orders the groups (by name), the ROIs stay by #
+    by_label = step_sort is None and sort_column == COLUMN_NAME  # ROIs have no label: this orders the groups (by name), the ROIs stay by #
     row_column, row_descending = (COLUMN_ID, False) if by_label else (sort_column, descending)
-    ordered_groups = sorted(groups, key=lambda group: group.name.casefold(), reverse=descending) if by_label else groups
+    if step_sort is not None:
+        ordered_groups = _by_value(list(groups), lambda group: step_sort.group.get(group.group_id), lambda group: 0, descending)  # equal values keep the user's order
+    elif by_label:
+        ordered_groups = sorted(groups, key=lambda group: group.name.casefold(), reverse=descending)
+    else:
+        ordered_groups = groups
     sections = [
         Section(
             GroupInfo(group.group_id, group.name, group_colors[group.group_id]),
-            tuple(sort_rows(by_group[group.group_id], row_column, row_descending)),
+            tuple(sort_rows(by_group[group.group_id], row_column, row_descending, step_sort)),
         )
         for group in ordered_groups
     ]
     if by_group[None]:
-        sections.append(Section(GroupInfo(None, "Ungrouped", ungrouped_color_hex), tuple(sort_rows(by_group[None], row_column, row_descending))))
+        sections.append(Section(GroupInfo(None, "Ungrouped", ungrouped_color_hex), tuple(sort_rows(by_group[None], row_column, row_descending, step_sort))))
     return sections
 
 
