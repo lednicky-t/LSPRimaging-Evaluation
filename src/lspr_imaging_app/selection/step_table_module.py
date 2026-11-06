@@ -38,13 +38,9 @@ from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from ..applog import log_event
-from ..plan.bar_model import describe_devices, effective_colors
-from ..plan.label_rule import DEFAULT_SEPARATORS, MODE_WHOLE, shown_label
-from .scan_trace import fit_missing_traces, trace_key
-from .sensorgram_axis import SensorgramAxis
-from .step_stats import assign_cubes, membership_segments
-from .step_table import (
+from ..analysis.scan_trace import fit_missing_traces, trace_key
+from ..analysis.step_stats import assign_cubes, membership_segments
+from ..analysis.step_table import (
     OP_DIFFERENCE,
     OP_SNR,
     OPERATIONS,
@@ -56,15 +52,19 @@ from .step_table import (
     numbers_key,
     sem_of,
 )
-from .trace_store import TraceStore
+from ..analysis.trace_store import TraceStore
+from ..applog import log_event
+from ..plan.bar_model import describe_devices, effective_colors
+from ..plan.label_rule import DEFAULT_SEPARATORS, MODE_WHOLE, shown_label
+from .experiment_plan_module import REASON_DATASET, ExperimentPlanModule
+from .sensorgram_axis import SensorgramAxis
 
-if TYPE_CHECKING:  # these packages import the analysis package, so it must not import them at run time
-    from ..dataset import DatasetModule
+if TYPE_CHECKING:  # only used in annotations
+    from ..analysis.scan_results import ScanResultsModule
+    from ..analysis.scan_store import StoredScan
+    from ..analysis.settings_module import AnalysisSettingsModule
+    from ..dataset.module import DatasetModule
     from ..roi import RoiToolbox
-    from ..selection.experiment_plan_module import ExperimentPlanModule
-    from .scan_results import ScanResultsModule
-    from .scan_store import StoredScan
-    from .settings_module import AnalysisSettingsModule
 
 logger = logging.getLogger(__name__)
 
@@ -432,8 +432,6 @@ class StepTableModule(QObject):
             self._invalidate()
 
     def _on_plan_changed(self, reason: str) -> None:
-        from ..selection.experiment_plan_module import REASON_DATASET  # at call time: see the TYPE_CHECKING note
-
         self._columns = None
         if reason == REASON_DATASET:
             self.clear()

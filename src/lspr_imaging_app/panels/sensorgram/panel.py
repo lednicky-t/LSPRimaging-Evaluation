@@ -39,7 +39,7 @@ inputs of the request (the pieces to smooth, the cubes of each step); the number
 reset or restored boundary asks for a redraw when either is on (`StepOverlays._on_plan_changed`); a note or colour edit does not. Design and measurements: ``docs/step_statistics_backbone_2026-10-26.md``.
 
 **Shared with the ROI table (2026-11-05).** The fitted traces and the helper process live in a `TraceStore` (``analysis/trace_store.py``) and the x axis, the baseline window and the Subtract
-switch in a `SensorgramAxis` (``analysis/sensorgram_axis.py``); the app gives the same two objects to the ROI / Groups table's step columns (``analysis/step_table_module.py``), so a ROI fitted for
+switch in a `SensorgramAxis` (``selection/sensorgram_axis.py``); the app gives the same two objects to the ROI / Groups table's step columns (``selection/step_table_module.py``), so a ROI fitted for
 one is not fitted again for the other and both compute their numbers from the same x and the same baseline. Given none, this panel makes its own trace store (tests) and takes the settings' one axis (`SensorgramAxis.of`).
 
 **Status bar.** A computation that lasts more than a moment (``panel_task.PanelTask``) appears in the app's task indicator ("Sensorgram: fitting
@@ -78,7 +78,7 @@ from ...analysis.scan_trace import (
     compute_sensorgram,
     trace_key,
 )
-from ...analysis.sensorgram_axis import SensorgramAxis
+from ...selection.sensorgram_axis import SensorgramAxis
 from ...analysis.trace_store import TraceStore
 from ...analysis.settings import (
     SENSORGRAM_AGGREGATIONS,
@@ -207,7 +207,7 @@ class SensorgramPanel(QWidget):
         thread (tests that spy on the fit, debugging); it applies only to the store this panel makes for itself. `mask`: tells which masks are individual (the marks of the View group); without it every mask counts as persistent.
         `experiment_plan`: the experiment steps for the plan bar; without it the Experimental plan group stays greyed out.
         `trace_store`: the fitted traces and the helper process, shared with the ROI / Groups table's step columns (`analysis/trace_store.py`); without one the panel makes its own and shuts it down itself.
-        `axis`: the x axis and the baseline switch, shared with the same table (`analysis/sensorgram_axis.py`); without one it takes the settings' own (`SensorgramAxis.of`)."""
+        `axis`: the x axis and the baseline switch, shared with the same table (`selection/sensorgram_axis.py`); without one it takes the settings' own (`SensorgramAxis.of`)."""
         super().__init__(parent)
         self._mask = mask
         self._live = live if live is not None else AnalysisLiveModule(self)  # without an owner: always live
@@ -528,7 +528,7 @@ class SensorgramPanel(QWidget):
     # -- the x axis -----------------------------------------------------------------------------------------------------------------
 
     def _x_axis(self) -> tuple[str, np.ndarray]:
-        """(axis label, x per cube of the file): time in seconds, or the cube number. The shared axis object keeps it (``analysis/sensorgram_axis.py``)."""
+        """(axis label, x per cube of the file): time in seconds, or the cube number. The shared axis object keeps it (``selection/sensorgram_axis.py``)."""
         return self._axis.label_and_x()
 
     def _on_plot_clicked(self, x: float) -> None:

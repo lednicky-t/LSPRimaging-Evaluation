@@ -5,7 +5,8 @@
 "Show all hidden columns".
 **Meaning**: hiding is the user's choice on top of the view mode. A column shows when the view mode has it and the user has not hidden it, so switching between Simple and
 Geometry never brings a hidden column back, and a hidden column the other mode does not show is not offered in the list (showing it would change nothing on screen). The
-#/ROIs column cannot be hidden: it carries the rows' dots, the groups' chevrons and names. A step or comparison column is remembered by what it is (`column_keys.py`), not by its
+#/ROIs column can be hidden too, but it stays a column of zero width (`RoiTreeView.refresh_column_visibility` says why): the ROI rows then show no dot or number, the group
+headers stay as they are. A step or comparison column is remembered by what it is (`column_keys.py`), not by its
 number, so it stays hidden when steps are added or removed, and a hidden column of another experiment hides nothing here.
 **Remembered** like every control (``ROI_TABLE_HIDDEN_COLUMNS``). A table sorted by a column that is then hidden goes back to the ``#`` order, as when a view mode hides it.
 **Error messages**: none; hiding a column says in the footer how to bring it back.
@@ -23,12 +24,10 @@ from PyQt6.QtWidgets import QMenu, QWidget
 
 from ...storage.ui_state_keys import ROI_TABLE_HIDDEN_COLUMNS
 from ..ui_state import UiStateStore
-from .column_keys import is_hideable, key_from_payload, key_to_payload
-from .rows import COLUMN_ID
+from .column_keys import key_from_payload, key_to_payload
 from .view import RoiTreeView
 
 HIDE_TIP = "Take this column out of the way. Right-click any column header and choose Show hidden column to bring it back."
-FIRST_COLUMN_TIP = "The #/ROIs column carries the rows' dots, the groups' chevrons and names; it always stays."
 NOTHING_HIDDEN_TIP = "No column is hidden."
 
 
@@ -67,10 +66,9 @@ class HideColumns(QObject):
         """Set the entries for a menu opened on the header of `section` (-1: not on a column)."""
         self._section = section
         key = self._tree.column_key(section) if section >= 0 else None
-        can_hide = key is not None and is_hideable(key)
         self._hide.setText(f"Hide column “{self._title(section)}”" if key is not None else "Hide column")
-        self._hide.setEnabled(can_hide)
-        self._hide.setToolTip(HIDE_TIP if can_hide else FIRST_COLUMN_TIP if section == COLUMN_ID else "Right-click the header of the column to hide.")
+        self._hide.setEnabled(key is not None)
+        self._hide.setToolTip(HIDE_TIP if key is not None else "Right-click the header of the column to hide.")
         hidden = self.hidden_columns()
         self._show_menu.clear()
         for column, title in hidden:
@@ -85,7 +83,7 @@ class HideColumns(QObject):
 
     def _hide_section(self, section: int) -> None:
         key = self._tree.column_key(section)
-        if key is None or not is_hideable(key):
+        if key is None:
             return
         title = self._title(section)
         self._set_hidden(self._tree.hidden_keys() | {key})

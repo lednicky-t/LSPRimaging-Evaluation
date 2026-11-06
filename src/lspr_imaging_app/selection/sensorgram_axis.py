@@ -13,6 +13,9 @@ the ROI / Groups table's step columns, must compute *exactly* the numbers the Se
 
 Everything is written to ``AnalysisSettingsModule`` (the one owner of the statistics settings); this object keeps only the cached x. ``axis_changed`` tells a view that the
 x values changed (the mode switch, after the window has been carried over), so it can redraw even when no setting changed.
+
+It lives in ``selection/`` (it started in ``analysis/``, moved 2026-11-06): it reads the dataset's timing and the app-wide Cube / Time choice, and the import-layer contract
+(``.importlinter``) lets ``analysis`` import neither. Not re-exported from the package, like ``ExperimentPlanModule``.
 """
 
 from __future__ import annotations
@@ -24,11 +27,12 @@ from typing import TYPE_CHECKING
 import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal
 
-if TYPE_CHECKING:  # the analysis package does not import selection / dataset at run time (they import analysis)
-    from ..dataset import DatasetModule
-    from ..selection import CubeDisplayModule
-    from .scan_results import ScanResultsModule
-    from .settings_module import AnalysisSettingsModule
+from .cube_display_module import MODE_TIME, CubeDisplayModule
+
+if TYPE_CHECKING:  # only used in annotations
+    from ..analysis.scan_results import ScanResultsModule
+    from ..analysis.settings_module import AnalysisSettingsModule
+    from ..dataset.module import DatasetModule
 
 
 def snap_to_grid(grid: np.ndarray, value: float) -> float:
@@ -95,8 +99,6 @@ class SensorgramAxis(QObject):
     # -- the x axis -------------------------------------------------------------------------------------------------------------
 
     def uses_time(self) -> bool:
-        from ..selection.cube_display_module import MODE_TIME  # at call time: see the module's TYPE_CHECKING note
-
         return self._cube_display.effective_mode() == MODE_TIME
 
     def label_and_x(self) -> tuple[str, np.ndarray]:

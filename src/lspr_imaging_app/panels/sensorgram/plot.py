@@ -27,7 +27,7 @@ from lspr_ui import get_active_theme
 from ...analysis.scan_trace import Series
 from ...plan.bar_model import ALIGN_DATA, POSITION_TOP, PlanBarSettings, PlanBarStep, label_headroom_px, reserved_range
 from ...plan.stats_table import StatsTable, StatsTableSettings
-from ...analysis.sensorgram_axis import snap_window  # (snap_to_grid and snap_window moved to the shared axis module, 2026-11-05)
+from ...selection.sensorgram_axis import snap_window  # (snap_to_grid and snap_window moved to the shared axis module, 2026-11-05)
 from ..axis_cursor import AxisCursor
 from ..image.mark_colors import MASK_COLOR, STALE_COLOR, cube_color
 from ..plot_item_pool import PlotItemPool

@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import QAbstractItemView, QApplication, QHeaderView, QStyle
 from lspr_ui import get_active_theme
 
 from ...shortcuts import matches
-from .column_keys import ColumnKey, is_hideable
+from .column_keys import ColumnKey
 from .column_keys import column_key as key_of_step_column
 from .delegate import CELL_ROOM, CHEVRON_ZONE, CHIP_SIZE, GROUP_INDENT, STRIP_WIDTH, tinted_text_color
 from .model import COLUMN_KIND_ROLE, DEPTH_ROLE, KIND_ROLE, STEP_TINT_ROLE
@@ -327,6 +327,7 @@ class RoiTreeView(QTreeView):
         self._frozen_upto = -1  # the last frozen column (a logical column number); -1 = nothing frozen
         self._mode_columns: frozenset[int] = frozenset(range(COLUMN_COUNT))  # the fixed columns the view mode shows (`set_view_mode`)
         self._hidden_keys: frozenset = frozenset()  # the columns the user hid, by key (`column_keys.py`)
+        self._first_width = 0  # the width #/ROIs had before it was hidden (collapsed to nothing, see `refresh_column_visibility`); 0 = not known yet
         header = SubscriptHeader(Qt.Orientation.Horizontal, self)
         header.set_pin_source(self.pinned_columns)
         self.setHeader(header)
@@ -365,7 +366,7 @@ class RoiTreeView(QTreeView):
 
     def apply_default_column_widths(self) -> None:
         for column, width in enumerate(suggested_column_widths(self.fontMetrics())):
-            self.setColumnWidth(column, width)
+            self.set_fixed_column_width(column, width)
 
     def apply_step_column_widths(self, width: int) -> None:
         """Every step column gets the same width (the one remembered for them); the fixed columns are not touched."""
@@ -424,7 +425,7 @@ class RoiTreeView(QTreeView):
         return self._hidden_keys
 
     def set_hidden_keys(self, keys) -> None:
-        self._hidden_keys = frozenset(key for key in keys if is_hideable(key))
+        self._hidden_keys = frozenset(keys)
         self.refresh_column_visibility()
 
     def is_in_view(self, column: int) -> bool:
@@ -437,12 +438,40 @@ class RoiTreeView(QTreeView):
 
     def refresh_column_visibility(self) -> None:
         """The one place that decides which columns show: a fixed column when the view mode has it, every step column, and none that the user hid. Cheap; called whenever the
-        mode, the hidden set or the step columns change (a model reset gives new step columns the default, visible)."""
+        mode, the hidden set or the step columns change (a model reset gives new step columns the default, visible).
+
+        **#/ROIs is hidden differently** (2026-11-06): it is collapsed to zero width and stays a column for Qt. A group header is one cell spanning the row that Qt attaches to
+        the first column; with that column really hidden Qt paints no group header at all (no chevron, name or step numbers, nothing to click, rename or drop on). With the
+        column at zero width the header is drawn and answers as before, a ROI row only loses its dot and number (the delegate skips them), and the section cannot be dragged
+        open (fixed size) while it is hidden."""
         model = self.model()
         for column in range(model.columnCount() if model is not None else 0):
+            if column == COLUMN_ID:
+                self._collapse_first_column(self.is_user_hidden(COLUMN_ID))
+                continue
             hidden = (column < COLUMN_COUNT and column not in self._mode_columns) or self.is_user_hidden(column)
             if hidden != self.isColumnHidden(column):
                 self.setColumnHidden(column, hidden)
+
+    def _collapse_first_column(self, collapsed: bool) -> None:
+        header = self.header()
+        if collapsed:
+            if self.columnWidth(COLUMN_ID) > 0:
+                self._first_width = self.columnWidth(COLUMN_ID)  # for when it is shown again
+            header.setSectionResizeMode(COLUMN_ID, QHeaderView.ResizeMode.Fixed)  # the left edge of the next column is also this one's handle: it must not be draggable open
+            if self.columnWidth(COLUMN_ID) != 0:
+                self.setColumnWidth(COLUMN_ID, 0)
+        else:
+            header.setSectionResizeMode(COLUMN_ID, QHeaderView.ResizeMode.Interactive)
+            if self.columnWidth(COLUMN_ID) == 0:
+                self.setColumnWidth(COLUMN_ID, self._first_width or suggested_column_widths(self.fontMetrics())[COLUMN_ID])
+
+    def set_fixed_column_width(self, column: int, width: int) -> None:
+        """Give a fixed column a width (the saved or the suggested one). While #/ROIs is hidden it stays at zero and the width is kept for when it is shown again."""
+        if column == COLUMN_ID and self.is_user_hidden(COLUMN_ID):
+            self._first_width = width
+            return
+        self.setColumnWidth(column, width)
 
     # -- frozen columns (see the module docstring) ------------------------------------------------------------------------------
 

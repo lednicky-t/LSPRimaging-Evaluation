@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Iterable
 
-from ...analysis.step_table_module import CellValue, StepColumn
+from ...selection.step_table_module import CellValue, StepColumn
 from ...plan.stats_table import PLUS_MINUS, choose_decimals
 
 DISPLAY_MEAN, DISPLAY_STD, DISPLAY_BOTH, DISPLAY_SEM, DISPLAY_MEAN_SEM = "mean", "std", "both", "sem", "mean_sem"

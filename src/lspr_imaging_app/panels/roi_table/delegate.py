@@ -161,6 +161,8 @@ class RoiTableDelegate(QStyledItemDelegate):
         self._paint_row_background(painter, option, index, theme)
         self._paint_cell_borders(painter, rect, index.column(), theme, index.model().columnCount() - 1)
         column = index.column()
+        if column == COLUMN_ID and rect.width() <= 0:
+            return  # #/ROIs is hidden (collapsed to nothing): its dot would be drawn over the next column
         if column == COLUMN_SHAPE:
             self._paint_shape(painter, rect, index, theme)
             return

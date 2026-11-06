@@ -33,7 +33,7 @@ toolbox command, so Ctrl+Z undoes it like any other) and it drives the shared
 
 **Step columns (2026-11-05).** The toolbar's columns button adds one column per experiment step, titled as the Sensorgram's plan bar titles it, with the mean and / or
 SD (the pick-up next to it) of every ROI and group in that step: the same numbers as the Sensorgram's lines (``analysis/step_table.py``, kept by
-``analysis/step_table_module.py``). A group header shows its own numbers (the average line of all its ROIs) in the same columns. Click a step header to sort by it: the
+``selection/step_table_module.py``). A group header shows its own numbers (the average line of all its ROIs) in the same columns. Click a step header to sort by it: the
 groups by their value, the ROIs inside each group by theirs (display only). Nothing is calculated until the refresh button is pressed (it calculates the rows on screen,
 and the fits are kept for the Sensorgram too); when a step, a setting or the scan changes, the numbers stay but are dimmed and the button lights up. The Subtract switch is
 the Sensorgram's (one setting). The add button next to it makes comparison columns (S1 - B1, or divided by the noise of B1: the signal step of an evaluation pair against its
@@ -66,7 +66,7 @@ from PyQt6.QtWidgets import (
 
 from lspr_ui import get_active_theme, load_tabler_icon
 
-from ...analysis.step_table_module import StepTableModule
+from ...selection.step_table_module import StepTableModule
 from ...image_tools import GeometryModule
 from ...roi import RoiToolbox
 from ...roi.display_style import RoiDisplayStyle
@@ -118,7 +118,7 @@ from .rows import (
 from .step_controls import StepColumnControls, StepHost
 from .view import RoiTreeView, suggested_column_widths
 
-TASK_ID = "roi_table.steps"
+TASK_ID = "roi_table_steps"
 
 _LEGACY_COLUMN_COUNT = 7  # a saved width list from before the Position / Shape / Shape vector columns
 _REDRAW_COALESCE_MS = 100  # sketch §8
@@ -635,7 +635,7 @@ class RoiTablePanel(QWidget):
 
     def _apply_widths(self) -> None:
         for column, width in enumerate(self._widths):
-            self._tree.setColumnWidth(column, width)
+            self._tree.set_fixed_column_width(column, width)
 
     def _show_header_menu(self, pos: QPoint) -> None:
         """Right-click on the column headers: choose the table view, hide or show columns, freeze or unfreeze columns, fit the step columns."""
@@ -648,7 +648,7 @@ class RoiTablePanel(QWidget):
 
     def _on_column_hidden(self, column: int) -> None:
         """A column was hidden: a table sorted by it goes back to the ``#`` order (a sort the user can no longer see is a puzzle), as when a view mode hides it."""
-        if self._model.sort_state()[0] == column:
+        if column != COLUMN_ID and self._model.sort_state()[0] == column:  # (the # order is the default one: hiding #/ROIs leaves it as it is)
             self._rebuild(lambda: self._model.set_sort(COLUMN_ID, False), reveal=False)
             if self._store is not None:
                 self._store.set(ROI_TABLE_SORT, [COLUMN_ID, False])

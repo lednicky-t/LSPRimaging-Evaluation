@@ -1,6 +1,6 @@
 """``StepColumnControls``: everything the ROI / Groups table does with its step columns, apart from drawing them (split out of ``panel.py`` 2026-11-05).
 
-The table panel shows rows and edits ROIs; the step columns are a second job (mean and SD of every ROI and group in each experiment step, ``analysis/step_table_module.py``).
+The table panel shows rows and edits ROIs; the step columns are a second job (mean and SD of every ROI and group in each experiment step, ``selection/step_table_module.py``).
 This object owns that job's controls and decisions, so the panel only has to give it a place in the toolbar:
 
 - the **buttons** after the toolbar's separator: the columns switch, what the cells show (mean / SD / both), the Sensorgram's Subtract switch, the refresh button, the export button;
@@ -31,7 +31,7 @@ from lspr_ui import get_active_theme, load_tabler_icon
 
 from ...analysis.export_tables import roi_step_table
 from ...analysis.step_table import OPERATIONS, GroupMembers
-from ...analysis.step_table_module import StepTableModule
+from ...selection.step_table_module import StepTableModule
 from ...storage.ui_state_keys import ROI_TABLE_COMPARE_COLUMNS, ROI_TABLE_STEP_DISPLAY, ROI_TABLE_STEP_WIDTH_MANUAL, ROI_TABLE_STEPS_SHOWN
 from ..icon_button_style import style_general_icon_button
 from ..plot_export_button import ExportData, PlotExportButton

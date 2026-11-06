@@ -36,8 +36,8 @@ from .analysis.live_state import AnalysisLiveModule
 from .analysis.roi_tuning_module import RoiTuningModule, TuningView
 from .analysis.roi_tuning_task import TASK_ID as ROI_TUNING_TASK_ID
 from .analysis.scan_results import ScanResultsModule
-from .analysis.sensorgram_axis import SensorgramAxis
-from .analysis.step_table_module import StepTableModule
+from .selection.sensorgram_axis import SensorgramAxis
+from .selection.step_table_module import StepTableModule
 from .analysis.trace_store import TraceStore
 from .storage.session_index import session_dir_for
 from .analysis.scan_store import FILE_NAME as SCAN_FILE_NAME, describe_file as describe_scan_file

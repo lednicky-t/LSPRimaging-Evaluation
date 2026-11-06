@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from PyQt6.QtCore import QAbstractItemModel, QMimeData, QModelIndex, Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 
-from ...analysis.step_table_module import StepColumn
+from ...selection.step_table_module import StepColumn
 from ...domain.roi_model import AreaRoi, AreaRoiDetectionSettings, AreaRoiGroup
 from ...roi.palette import DEFAULT_ROI_COLOR_HEX
 from .rows import (
