@@ -37,6 +37,8 @@ from .analysis.roi_tuning_module import RoiTuningModule, TuningView
 from .analysis.roi_tuning_task import TASK_ID as ROI_TUNING_TASK_ID
 from .analysis.scan_results import ScanResultsModule
 from .selection.sensorgram_axis import SensorgramAxis
+from .selection.data_checks_module import DataChecksModule
+from .selection.image_motion_module import ImageMotionModule
 from .selection.step_table_module import StepTableModule
 from .analysis.trace_store import TraceStore
 from .storage.session_index import session_dir_for
@@ -86,7 +88,10 @@ from .perf_setup import install_runtime as install_perf_runtime
 from .perf_setup import status_text as perf_status_text
 from .perf_setup import write_perf_preferences
 from .panels.roi_table import RoiTablePanel
-from .panels.image.analysis_tab import AnalysisTab
+from .panels.check_report_window import CheckReportWindow
+from .panels.image.analysis_tab import MOTION_WAVELENGTH_KEY, AnalysisTab
+from .panels.image.motion_presenter import MotionPresenter
+from .panels.sensorgram.checks_presenter import ChecksPresenter
 from .panels.image.tuning_tab import TuningTab
 from .panels.sensorgram import SensorgramPanel
 from .panels.roi_table.panel import TASK_ID as ROI_TABLE_TASK_ID
@@ -113,6 +118,11 @@ from .selection.reference_auto_task import TASK_ID as REFERENCE_TASK_ID, Referen
 from .storage.app_settings import AppSettings, load_app_settings, save_app_settings
 from .storage.ui_state_keys import (
     ANALYSIS_MODE,
+    CHECKS_WINDOW_NUMBERS,
+    CHECKS_WINDOW_SIZE,
+    MOTION_WINDOW_NUMBERS,
+    MOTION_WINDOW_SIZE,
+    SENSORGRAM_CHECKS_PAIR,
     PLOT_EXPORT_FIGURE_FORMAT,
     PLOT_EXPORT_FOLDER,
     CHROMATIC_ALL_WAVELENGTHS,
@@ -715,6 +725,8 @@ class _Modules:
     trace_store: TraceStore  # the fitted metric traces and the helper process, shared by the Sensorgram and the ROI table's step columns
     sensorgram_axis: SensorgramAxis  # the Sensorgram's x axis and Subtract switch, shared with the same table
     step_table: StepTableModule  # the numbers of the ROI table's step columns
+    data_checks: DataChecksModule  # the Sensorgram's data-quality checks (report, run, whether it is current)
+    image_motion: ImageMotionModule  # the Image panel's image-motion check
 
 
 class _SettingsWriter:
@@ -838,8 +850,12 @@ def _build_modules() -> _Modules:
     trace_store = TraceStore(scan_results)  # shut down after the panels (build_main_window), which may still be fitting
     sensorgram_axis = SensorgramAxis.of(scan_results, dataset, cube_display, analysis_settings)
     step_table = StepTableModule(scan_results, roi_toolbox, dataset, analysis_settings, experiment_plan, trace_store, sensorgram_axis)
+    data_checks = DataChecksModule(scan_results, roi_toolbox, dataset, analysis_settings, experiment_plan, trace_store)
+    image_motion = ImageMotionModule(dataset, experiment_plan)
     if app is not None:
         app.aboutToQuit.connect(step_table.shutdown)
+        app.aboutToQuit.connect(data_checks.shutdown)
+        app.aboutToQuit.connect(image_motion.shutdown)
     modules = _Modules(
         dataset=dataset, geometry=geometry, active_tool=active_tool, mask=mask, mask_scope=mask_scope,
         chromatic=chromatic, background=background, roi_toolbox=roi_toolbox,
@@ -853,7 +869,7 @@ def _build_modules() -> _Modules:
         frame_roles=frame_roles,
         experiment_plan=experiment_plan,
         cube_display=cube_display,
-        trace_store=trace_store, sensorgram_axis=sensorgram_axis, step_table=step_table,
+        trace_store=trace_store, sensorgram_axis=sensorgram_axis, step_table=step_table, data_checks=data_checks, image_motion=image_motion,
     )
     modules_holder.append(modules)
     return modules
@@ -1145,6 +1161,25 @@ def _wire_analysis_scan(m: _Modules, row: AnalysisTab, ui_state: UiStateStore, s
     show_saved_scan()
 
 
+def _wire_data_checks(window: QMainWindow, m: _Modules, sensorgram_panel: SensorgramPanel, ui_state: UiStateStore) -> ChecksPresenter:
+    """The Sensorgram's "Checks" button, its report window and the data-checks module (2026-11-07): the button opens the window, the window runs the checks. The chosen
+    evaluation pair is remembered. Returns the presenter (the status bar shows its runs)."""
+    report_window = CheckReportWindow(
+        "Data checks", size_key=CHECKS_WINDOW_SIZE, numbers_key=CHECKS_WINDOW_NUMBERS, ui_state=ui_state, with_pairs=True, parent=window,
+    )
+    saved_pair = read(ui_state, SENSORGRAM_CHECKS_PAIR)
+    m.data_checks.set_pair(saved_pair if isinstance(saved_pair, int) else None)
+    m.data_checks.pair_changed.connect(lambda number: ui_state.set(SENSORGRAM_CHECKS_PAIR.key, number))
+    return ChecksPresenter(m.data_checks, sensorgram_panel.checks_controls, report_window, window)
+
+
+def _wire_image_motion(window: QMainWindow, m: _Modules, row: AnalysisTab, ui_state: UiStateStore) -> MotionPresenter:
+    """The Analysis tab's "Motion" group, its report window and the image-motion module (2026-11-07). The wavelength in the box is remembered. Returns the presenter."""
+    ui_state.bind(MOTION_WAVELENGTH_KEY, row.motion_wavelength)
+    report_window = CheckReportWindow("Image motion", size_key=MOTION_WINDOW_SIZE, numbers_key=MOTION_WINDOW_NUMBERS, ui_state=ui_state, parent=window)
+    return MotionPresenter(m.image_motion, row, report_window, window)
+
+
 def _ask_tuning_export_path(parent: QWidget, default: Path) -> Path | None:
     chosen, _filter = QFileDialog.getSaveFileName(parent, "Export the tuning numbers", str(default), "CSV table (*.csv)")
     return Path(chosen) if chosen else None
@@ -1286,7 +1321,9 @@ def _build_status_bar(
     spectra_panel: SpectraPanel,
     sensorgram_panel: SensorgramPanel,
     startup: StartupTracker,
+    check_presenters: tuple = (),
 ) -> None:
+    """`check_presenters`: the data-checks and image-motion presenters (each has a `task` and a `cancel`), whose long runs join the task indicator like the rest."""
     status_bar = QStatusBar(window)
     window.setStatusBar(status_bar)
     # App-wide task indicator (spinner, progress, elapsed/ETA, Cancel). Every
@@ -1325,6 +1362,9 @@ def _build_status_bar(
     spectra_panel.task.task_finished.connect(task_indicator.finish)
     sensorgram_panel.task.task_progress.connect(task_indicator.report)  # a Sensorgram recompute that lasts (fitting many ROIs)
     sensorgram_panel.task.task_finished.connect(task_indicator.finish)
+    for presenter in check_presenters:
+        presenter.task.task_progress.connect(task_indicator.report)
+        presenter.task.task_finished.connect(task_indicator.finish)
     startup.task_progress.connect(task_indicator.report)  # "Starting up": the launch is not finished until the dataset and all that follows is in
     startup.task_finished.connect(task_indicator.finish)
     cancel_by_task = {
@@ -1344,6 +1384,7 @@ def _build_status_bar(
         FEATURE_MAP_TASK_ID: image_panel.feature_map.cancel,
         ARRAY_TASK_ID: image_panel.array_action.cancel,
         REFERENCE_TASK_ID: m.reference_auto.cancel,
+        **{presenter.task.task_id: presenter.cancel for presenter in check_presenters},
     }
     task_indicator.cancel_requested.connect(lambda task_id: cancel_by_task[task_id]())
     # WorkflowPanel.set_status() (state/performance text, no hover-hints -
@@ -1901,7 +1942,11 @@ def build_main_window(
     attach_to_menu_bar(window.menuBar(), m.dataset)  # dataset path, type / size / cubes, and the Time / Plan checks
     startup = _build_startup_tracker(m, image_panel, spectra_panel, sensorgram_panel)
     _wire_startup_calculation(startup, roi_table_panel)
-    _build_status_bar(window, m, workflow, image_panel, roi_table_panel, spectra_panel, sensorgram_panel, startup)
+    check_presenters = (
+        _wire_data_checks(window, m, sensorgram_panel, ui_state),
+        _wire_image_motion(window, m, image_panel.analysis_tab, ui_state),
+    )
+    _build_status_bar(window, m, workflow, image_panel, roi_table_panel, spectra_panel, sensorgram_panel, startup, check_presenters)
     _wire_analysis_scan(m, image_panel.analysis_tab, ui_state, startup)
     _wire_roi_tuning(m, image_panel.tuning_tab, ui_state, show_view=image_panel.set_tuning_view)
     _wire_session_carry_prompt(window, m)

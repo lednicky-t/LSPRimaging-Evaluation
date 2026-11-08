@@ -95,7 +95,7 @@ from ..analysis.provenance import (
     mask_scope_tag,
     persist_mask_snapshot_with_status,
 )
-from ..analysis.settings import MetricSettings, StatisticsSettings
+from ..analysis.settings import LEGACY_METRIC_DEFAULTS, MetricSettings, StatisticsSettings
 from ..applog import timed
 from ..frame_naming import FrameNamingScheme
 from ..image_tools.background.model import BackgroundSettings
@@ -811,7 +811,7 @@ def load_session(
         # Absent in a 1.0 file - `_decode_settings` returns the default,
         # which is the right reading of a session written before these
         # could be configured.
-        metric_settings=_decode_settings(analysis_block.get("metric"), MetricSettings()),
+        metric_settings=_decode_settings(analysis_block.get("metric"), LEGACY_METRIC_DEFAULTS),  # old defaults for missing keys (settings.py)
         statistics_settings=_decode_settings(analysis_block.get("statistics"), StatisticsSettings()),
         rois=tuple(_decode_area_rois(roi_block.get("rois"))),
         groups=tuple(_decode_dataclass_list(roi_block.get("groups"), AreaRoiGroup)),

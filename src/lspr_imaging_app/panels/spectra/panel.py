@@ -115,7 +115,7 @@ FORMULA_TIPS = {
     "ratio": "Sample intensity divided by reference intensity.",
     "relative_change": "Reference minus sample, divided by reference.",
 }
-FIT_LABELS = {"none": "No fit", "polynomial": "Polynomial", "gaussian": "Gaussian", "voigt": "Voigt", "template": "Template shift"}
+FIT_LABELS = {"none": "No fit", "polynomial": "Polynomial", "gaussian": "Gaussian", "voigt": "Voigt", "template": "Template shift", "response": "Response shape"}
 FIT_TIPS = {
     "none": "Show the measured points only.",
     "polynomial": "Fit a polynomial through the points.",
@@ -124,6 +124,9 @@ FIT_TIPS = {
              "where a plasmon's width is symmetric; drawn and read in nm. Slower than the Gaussian.",
     "template": "Move the ROI's reference spectrum (the mean of its reference cubes) sideways until it agrees best with the spectrum, using every point. "
                 "The metric is the reference's peak plus that shift. No fit window, order or maximum / centroid is needed.",
+    "response": "Measure how much of the change seen between the baseline cubes and the signal cubes is in each spectrum, weighting each wavelength by how much "
+                "it responds and how noisy it is (learned per ROI group). Quieter than a shift, because amplitude and width changes count too. Read in "
+                "shift-equivalent nm: a pure 1 nm shift reads 1 nm. Not a peak position; a response shaped unlike the calibration reads less.",
 }
 METRIC_LABELS = {"maximum": "Maximum", "centroid": "Centroid"}
 METRIC_TIPS = {
@@ -180,7 +183,7 @@ _CACHE_MAX = 4000  # spectra kept (one ROI on one cube, ~4 KB each: ~16 MB); old
 def _cache_key(cube: int, roi_id: int, request: SpectraRequest) -> tuple:
     """Everything a spectrum depends on, for one stored scan (the cache is emptied when the scan changes). The metric settings by value (they
     are not hashable): a field that does not matter for the spectra only costs a recompute."""
-    return (int(cube), int(roi_id), request.formula_key, repr(request.metric))
+    return (int(cube), int(roi_id), request.formula_key, repr(request.metric), request.groups if request.metric.uses_response else ())
 
 
 class SpectraPanel(QWidget):
@@ -247,9 +250,26 @@ class SpectraPanel(QWidget):
         ref_line.addWidget(self._ref_first)
         ref_line.addWidget(QLabel("to", self._ref_pair))
         ref_line.addWidget(self._ref_last)
+        self._resp_fields = [QSpinBox(self) for _ in range(4)]  # baseline first, last; signal first, last (response shape)
+        for i, box in enumerate(self._resp_fields):
+            box.setRange(-1 if i >= 2 else 0, 100000)
+            if i >= 2:
+                box.setSpecialValueText("set")  # -1 = the signal range is not set yet
+            box.setKeyboardTracking(False)
+            style_ribbon_number_field(box, "100000")
+            box.setToolTip(("First", "Last", "First", "Last")[i] + (" baseline" if i < 2 else " signal") + " cube of the response-shape calibration "
+                           "(the cube numbers the Image panel shows; last included). The shape is the mean change signal minus baseline, learned per ROI group.")
+        self._resp_pair = QWidget(self)
+        resp_line = QHBoxLayout(self._resp_pair)
+        resp_line.setContentsMargins(0, 0, 0, 0)
+        resp_line.setSpacing(4)
+        for widget in (QLabel("baseline", self._resp_pair), self._resp_fields[0], QLabel("to", self._resp_pair), self._resp_fields[1],
+                       QLabel("signal", self._resp_pair), self._resp_fields[2], QLabel("to", self._resp_pair), self._resp_fields[3]):
+            resp_line.addWidget(widget)
         self._fit = PickMenu(self, name_on_face=False)
+        extras = {"template": self._ref_pair, "response": self._resp_pair}
         for key in FIT_METHODS:
-            self._fit.add_choice(key, FIT_LABELS.get(key, key), FIT_TIPS.get(key, ""), fit_picture(key), self._ref_pair if key == "template" else None)
+            self._fit.add_choice(key, FIT_LABELS.get(key, key), FIT_TIPS.get(key, ""), fit_picture(key), extras.get(key))
         self._fit.finish()
         self._fit.setToolTip("Curve fitted through the points of each ROI's spectrum (inside the fit window, if one is set), or the shift against the ROI's reference spectrum.")
         self._order = OrderPicker(self)  # 1st to 13th, each marked by how well it suits the spectra (order_picker.py); the mouse wheel steps it
@@ -378,6 +398,8 @@ class SpectraPanel(QWidget):
         self._order.valueChanged.connect(self._on_metric_controls_changed)
         self._ref_first.valueChanged.connect(self._on_reference_cubes_changed)
         self._ref_last.valueChanged.connect(self._on_reference_cubes_changed)
+        for box in self._resp_fields:
+            box.valueChanged.connect(self._on_response_cubes_changed)
         self._metric.currentIndexChanged.connect(self._on_metric_controls_changed)
         self._metric_range.currentIndexChanged.connect(self._on_metric_range_chosen)
         for field in (self._top_fraction, self._range_min, self._range_max):
@@ -465,10 +487,14 @@ class SpectraPanel(QWidget):
             first, last = metric.reference_cube_range()
             self._ref_first.setValue(first)
             self._ref_last.setValue(last)
+            (b0, b1), signal = metric.response_ranges()
+            for box, value in zip(self._resp_fields, (b0, b1, *(signal or (-1, -1))), strict=True):
+                box.setValue(int(value))
             self._metric.setCurrentIndex(max(self._metric.findData(metric.metric_key), 0))
-            self._metric.setEnabled(not metric.uses_template)  # the template shift has its own metric: the reference's peak plus the shift
-            self._window_mode.setEnabled(metric.fit_method not in ("none", "template"))
-            self._metric_range.setEnabled(metric.fit_method not in ("none", "template") and metric.metric_key == "centroid")
+            no_curve = ("none", "template", "response")  # no fitted curve with a window: the template and response readouts use every point
+            self._metric.setEnabled(not (metric.uses_template or metric.uses_response))  # both have their own metric: a peak plus a shift
+            self._window_mode.setEnabled(metric.fit_method not in no_curve)
+            self._metric_range.setEnabled(metric.fit_method not in no_curve and metric.metric_key == "centroid")
             self._metric_range.setCurrentIndex(max(self._metric_range.findData(metric.metric_range), 0))
             self._top_fraction.setValue(round(100.0 * float(metric.metric_top_fraction)))
             if metric.metric_range_min is not None:
@@ -510,6 +536,20 @@ class SpectraPanel(QWidget):
         first, last = sorted((self._ref_first.value(), self._ref_last.value()))
         if (first, last) != current.reference_cube_range():
             self._settings.set_metric_settings(replace(current, template_first_cube=first, template_last_cube=last))
+
+    def _on_response_cubes_changed(self, *_args: object) -> None:
+        """A cube field of the response-shape calibration was edited (each range read as first <= last; a signal field on "set" = no signal range)."""
+        if self._syncing:
+            return
+        current = self._settings.metric_settings()
+        b0, b1, s0, s1 = (box.value() for box in self._resp_fields)
+        b0, b1 = sorted((b0, b1))
+        signal = None if min(s0, s1) < 0 else tuple(sorted((s0, s1)))
+        if ((b0, b1), signal) != current.response_ranges():
+            self._settings.set_metric_settings(replace(
+                current, response_base_first=b0, response_base_last=b1,
+                response_signal_first=None if signal is None else signal[0], response_signal_last=None if signal is None else signal[1],
+            ))
 
     def _on_window_mode_chosen(self, _index: int) -> None:
         """A choice in the window menu. Picking a mode turns the window on; "No window" turns it off (a manual range is forgotten, as before)."""
@@ -595,7 +635,8 @@ class SpectraPanel(QWidget):
     def _on_roi_cosmetic(self, change: object) -> None:
         """A colour or a group changed: the spectra are the same, only drawn again (the colours are read at drawing). New ROI numbers or a
         restored session may change which ROI is which: computed again."""
-        if getattr(change, "reason", "") in _RECOMPUTE_COSMETIC_CHANGES:
+        regroup_counts = getattr(change, "reason", "") == "regroup" and self._settings.metric_settings().uses_response  # weights learned per group
+        if getattr(change, "reason", "") in _RECOMPUTE_COSMETIC_CHANGES or regroup_counts:
             self._schedule_redraw()
         else:
             self._draw_last()
@@ -680,7 +721,7 @@ class SpectraPanel(QWidget):
             self._clear_quality()
             return
         request = SpectraRequest(roi_ids, int(self._selection.current_cube()), self._roi_toolbox.detection_settings().formula_key,
-                                 self._settings.metric_settings())
+                                 self._settings.metric_settings(), tuple(tuple(g.area_roi_ids) for g in self._roi_toolbox.groups()))
         self._refresh_quality(stored, roi_ids, request)  # before the busy check: the order menu does not wait for the spectra
         if self._busy:
             self._pending = True  # newest request wins: computed when the running one is back
@@ -856,7 +897,7 @@ class SpectraPanel(QWidget):
         )
         metric = job.request.metric
         manual_min, manual_max = metric.manual_bounds()  # a per-spectrum window is not drawn: the ends of each fitted curve show it
-        has_window = (manual_min is not None or manual_max is not None) and not metric.uses_template  # the template shift uses every point: no window to show
+        has_window = (manual_min is not None or manual_max is not None) and not (metric.uses_template or metric.uses_response)  # these use every point: no window to show
         wavelengths = self._plotted_wavelengths()
         if has_window and wavelengths is not None:
             self._plot.set_fit_window((manual_min if manual_min is not None else wavelengths[0],

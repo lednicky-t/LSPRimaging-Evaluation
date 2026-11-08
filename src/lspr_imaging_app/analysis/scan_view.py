@@ -36,6 +36,7 @@ class SpectraRequest:
     cube: int
     formula_key: str
     metric: MetricSettings
+    groups: tuple[tuple[int, ...], ...] = ()  # the session's ROI groups (member ids): the response shape learns its weights per group
 
 
 @dataclass
@@ -69,7 +70,8 @@ class SpectrumFitJob:
     template: ReferenceTemplate | None
 
 
-TemplateCache = dict  # (roi_id, formula_key, metric.template_key()) -> ReferenceTemplate | None, for one stored scan
+TemplateCache = dict  # (roi_id, formula_key, metric.template_key()) -> ReferenceTemplate | None, for one stored scan; the response shape keeps its
+# traces of every ROI there too, under ("response", formula_key, metric.response_key(), groups) -> {roi id: trace} or the error message
 
 
 def compute_spectra(
@@ -107,6 +109,7 @@ def prepare_spectra(stored: StoredScan, request: SpectraRequest, templates: Temp
     for row, stored_id in enumerate(stored.roi_ids):
         rows.setdefault(stored_id, row)  # the first row of an id, as list.index gave
     out: list[RoiSpectrum | SpectrumFitJob] = []
+    response = _response_traces(stored, request, templates) if metric.uses_response else None
     for roi_id in request.roi_ids:
         row = rows.get(roi_id)
         if row is None:
@@ -130,6 +133,10 @@ def prepare_spectra(stored: StoredScan, request: SpectraRequest, templates: Temp
             request.formula_key,
         )
         result = RoiSpectrum(roi_id, spectrum.wavelengths_nm, spectrum.values, errors, n_missing=n_missing)
+        if response is not None:  # no fit: the readout of this cube, from the traces of every ROI (response_shape.py)
+            _fill_response(result, response, roi_id, cube_row)
+            out.append(result)
+            continue
         template = None
         if metric.uses_template:  # the reference of THIS ROI: the mean of its reference cubes (all cubes of the ROI are needed, not only the one shown)
             from .scan_trace import trace_input  # imported here: scan_trace itself imports this module
@@ -152,6 +159,37 @@ def prepare_spectra(stored: StoredScan, request: SpectraRequest, templates: Temp
                 continue
         out.append(SpectrumFitJob(result, spectrum, template))
     return out
+
+
+def _response_traces(stored: StoredScan, request: SpectraRequest, cache: TemplateCache | None) -> dict[int, np.ndarray] | str:
+    """The response-shape traces of every ROI (or the reason there are none), cached for this stored scan."""
+    from .response_shape import ResponseError
+    from .scan_trace import response_groups, response_traces  # imported here: scan_trace itself imports this module
+
+    key = ("response", request.formula_key, request.metric.response_key(), response_groups(request.groups))
+    if cache is not None and key in cache:
+        return cache[key]
+    try:
+        found: dict[int, np.ndarray] | str = response_traces(stored, request.formula_key, request.metric, request.groups)
+    except ResponseError as exc:
+        found = str(exc)
+    if cache is not None:
+        cache[key] = found
+    return found
+
+
+def _fill_response(result: RoiSpectrum, response: dict[int, np.ndarray] | str, roi_id: int, cube_row: int) -> None:
+    """The response-shape metric of one spectrum: its position (nm) and the height of the measured spectrum there (the marker); a note when there is none."""
+    if isinstance(response, str):
+        result.note = response
+        return
+    trace = response.get(int(roi_id))
+    value = float("nan") if trace is None else float(trace[cube_row])
+    if not np.isfinite(value):
+        result.note = "No response-shape value for this spectrum (a wavelength is missing, or the ROI has no baseline cubes)."
+        return
+    result.metric_wavelength_nm = value
+    result.metric_value = float(np.interp(value, result.wavelengths_nm, result.values))
 
 
 def _batch_solved(jobs: list[SpectrumFitJob], metric: MetricSettings) -> dict[int, np.ndarray | None]:

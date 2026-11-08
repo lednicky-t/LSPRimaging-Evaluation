@@ -32,6 +32,8 @@ from .scan_view import REFERENCE, SAMPLE, _primary_method
 from .settings import MetricSettings, StatisticsSettings
 from .statistics import aggregate_traces, apply_statistics
 from .step_stats import LineStepValues, StepMembership, line_step_values, step_statistics
+from .query import formula_values
+from .response_shape import ResponseCalibration, ResponseError, calibrate, readout
 from .trace_fit import TraceInput, trace_from_input
 
 logger = logging.getLogger(__name__)
@@ -82,13 +84,55 @@ class Series:
     step_values: LineStepValues | None = None  # mean +/- SD of this line in each experiment step (None: no steps were asked for)
 
 
-def trace_key(stored: StoredScan, formula_key: str, metric: MetricSettings) -> tuple:
+def response_groups(groups: Sequence[Sequence[int]]) -> tuple[tuple[int, ...], ...]:
+    """The ROI groups as the response shape uses them (and as its cache key holds them): member ids, sorted, empty groups left out."""
+    return tuple(tuple(sorted({int(r) for r in g})) for g in groups if len(g))
+
+
+def trace_key(stored: StoredScan, formula_key: str, metric: MetricSettings, groups: Sequence[Sequence[int]] = ()) -> tuple:
     """What a metric trace depends on. A cached trace is reused only for an equal key (the stored scan is compared by identity: a
-    reloaded file is a new object)."""
+    reloaded file is a new object). `groups` (the session's ROI groups, member ids) matter only for the response shape, whose weights are learned per group."""
     return (
         id(stored), str(formula_key), metric.fit_method, int(metric.poly_order), metric.window_key(), metric.metric_key, metric.metric_range_key(),
-        metric.template_key(),
+        metric.template_key(), metric.response_key(), response_groups(groups) if metric.uses_response else (),
     )
+
+
+def response_calibration(stored: StoredScan, formula_key: str, metric: MetricSettings, groups: Sequence[Sequence[int]] = ()) -> ResponseCalibration:
+    """The response-shape calibration of every ROI of the scan (`response_shape.calibrate`). Raises `ResponseError` (message for the user)."""
+    base_range, signal_range = metric.response_ranges()
+    if signal_range is None:
+        raise ResponseError("The response shape needs its signal cubes: set them in the Spectra panel (Fit menu).")
+    cubes = np.asarray(stored.cube_indices, dtype=np.int64)
+    values = _scan_values(stored, formula_key)
+    wl = np.asarray(stored.wavelength_nm, dtype=np.float64)
+    order = np.argsort(wl, kind="stable")
+    base = (cubes >= base_range[0]) & (cubes <= base_range[1])
+    signal = (cubes >= signal_range[0]) & (cubes <= signal_range[1])
+    return calibrate(stored.roi_ids, wl[order], values[..., order], base, signal, response_groups(groups))
+
+
+def _scan_values(stored: StoredScan, formula_key: str) -> np.ndarray:
+    """Formula values of every (cube, ROI, wavelength) of the scan, NaN where not usable or never scanned (the rule of `trace_input`)."""
+    mean = stored.values[_primary_method(stored)]
+    sample, reference = mean[..., SAMPLE], mean[..., REFERENCE]
+    usable = np.isfinite(sample) & np.isfinite(reference) & (stored.n_valid[..., SAMPLE] > 0) & (stored.n_valid[..., REFERENCE] > 0)
+    usable &= (np.asarray(stored.cell_hash) != 0)[..., None]
+    with np.errstate(all="ignore"):
+        values = formula_values(sample, reference, formula_key)
+    return np.where(usable, values, np.nan)
+
+
+def response_traces(stored: StoredScan, formula_key: str, metric: MetricSettings, groups: Sequence[Sequence[int]] = ()) -> dict[int, np.ndarray]:
+    """The response-shape trace of every ROI of the scan, ``{roi id: float64 [cube]}`` (first row of an id, as `trace_input`)."""
+    calibration = response_calibration(stored, formula_key, metric, groups)
+    wl = np.asarray(stored.wavelength_nm, dtype=np.float64)
+    order = np.argsort(wl, kind="stable")
+    traces = readout(calibration, _scan_values(stored, formula_key)[..., order])
+    out: dict[int, np.ndarray] = {}
+    for row, roi_id in enumerate(stored.roi_ids):
+        out.setdefault(int(roi_id), traces[row])
+    return out
 
 
 def trace_input(stored: StoredScan, roi_id: int) -> TraceInput | None:
@@ -126,6 +170,7 @@ def compute_traces(
     progress: Callable[[int, int], None] | None = None,
     runner: TraceRunner | None = None,
     stages: dict[str, float] | None = None,
+    groups: Sequence[Sequence[int]] = (),
 ) -> dict[int, np.ndarray]:
     """Compute the metric traces of the ROIs in ``roi_ids`` that are not in ``known`` and return only those (the caller adds them to its
     cache). ``cancelled`` is checked before each ROI; on cancel :class:`_PartialCancel` carries the traces finished so far. ``runner``: do the
@@ -134,6 +179,12 @@ def compute_traces(
     new: dict[int, np.ndarray] = {}
     missing = [r for r in roi_ids if r not in known]
     t0 = time.perf_counter()
+    if metric.uses_response and missing:  # learned from every ROI of its group: all ROIs at once, here (no fit, milliseconds)
+        every = response_traces(stored, formula_key, metric, groups)
+        n_cube = len(stored.cube_indices)
+        if stages is not None:
+            stages["gather_ms"], stages["fits_ms"] = 0.0, (time.perf_counter() - t0) * 1e3
+        return {r: every.get(int(r), np.full(n_cube, np.nan)) for r in missing}
     if runner is not None and missing:
         n_cube = len(stored.cube_indices)
         jobs: list[tuple[int, TraceInput]] = []
@@ -178,11 +229,12 @@ def fit_missing_traces(
     cancelled: Callable[[], bool] | None = None,
     progress: Callable[[int, int], None] | None = None,
     runner: TraceRunner | None = None,
+    groups: Sequence[Sequence[int]] = (),
 ) -> tuple[dict[int, np.ndarray], bool]:
     """`compute_traces` for a caller that wants what a cancelled run finished: ``(the traces computed now, whether the run was cancelled before the end)``. The finished
     traces are returned either way, so a caller can keep them for its next request (the Sensorgram does the same inside `compute_sensorgram`)."""
     try:
-        return compute_traces(stored, roi_ids, formula_key, metric, known, cancelled=cancelled, progress=progress, runner=runner), False
+        return compute_traces(stored, roi_ids, formula_key, metric, known, cancelled=cancelled, progress=progress, runner=runner, groups=groups), False
     except _PartialCancel as partial:
         return partial.partial, True
 
@@ -248,7 +300,8 @@ def compute_sensorgram(
     stages: dict[str, float] = {}
     try:
         new = compute_traces(
-            stored, request.roi_ids, request.formula_key, request.metric, known, cancelled=cancelled, progress=progress, runner=runner, stages=stages
+            stored, request.roi_ids, request.formula_key, request.metric, known, cancelled=cancelled, progress=progress, runner=runner, stages=stages,
+            groups=[g.roi_ids for g in request.groups],
         )
     except _PartialCancel as partial:
         return [], partial.partial

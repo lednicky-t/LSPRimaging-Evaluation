@@ -129,12 +129,30 @@ def _dots(painter: QPainter, color: QColor) -> None:
 
 def fit_picture(kind: str) -> PictureFor:
     """``none``: the measured points alone; ``polynomial``: a wavy line through them; ``gaussian``: a bell through them; ``template``: the reference bell (dashed) and the
-    measured one moved sideways, with an arrow between them (the shift)."""
+    measured one moved sideways, with an arrow between them (the shift); ``response``: the baseline bell (dashed) and a moved, taller one with a small arrow."""
 
     def draw(color: str) -> QPixmap:
         pixmap, painter = _canvas()
         ink = QColor(color)
         painter.setBrush(Qt.BrushStyle.NoBrush)
+        if kind == "response":  # the baseline bell (dashed) and the signal bell, moved AND taller: shift and amplitude both count
+            ghost = QColor(ink)
+            ghost.setAlpha(110)
+            for dx, sy, style, pen_color in ((-2.0, 0.8, Qt.PenStyle.DashLine, ghost), (2.0, 1.0, Qt.PenStyle.SolidLine, ink)):
+                painter.save()
+                painter.translate(10.0 + dx, 17.0)  # scale about the bell's foot (y = 17)
+                painter.scale(0.8, sy)
+                painter.translate(-10.0, -17.0)
+                painter.setPen(QPen(pen_color, 1.6, style, Qt.PenCapStyle.RoundCap))
+                painter.drawPath(_bell_path())
+                painter.restore()
+            gold = QPen(QColor(get_active_theme().accent_gold), 1.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+            painter.setPen(gold)
+            painter.drawLine(QPointF(15.5, 9.0), QPointF(18.5, 6.0))  # a small up-right arrow: "more of the change"
+            painter.drawLine(QPointF(18.5, 6.0), QPointF(16.3, 6.0))
+            painter.drawLine(QPointF(18.5, 6.0), QPointF(18.5, 8.2))
+            painter.end()
+            return pixmap
         if kind == "template":
             ghost = QColor(ink)
             ghost.setAlpha(110)

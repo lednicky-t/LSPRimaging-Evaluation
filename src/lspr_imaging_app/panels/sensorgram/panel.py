@@ -117,6 +117,7 @@ from ..spectra.pick_menu import PickMenu
 from ..spectra.view_menu import IconToggle
 from ..visibility_gate import HiddenPanelGate
 from .baseline_selector_menu import DEFAULT_ALPHA, DEFAULT_COLOR, SPEC as BASELINE_BAND_SPEC, BaselineSelectorMenu, make_font_box, make_height_box
+from .checks_group import ChecksControls
 from .mask_marks_toggle import MaskMarksToggle
 from .stale_marks_toggle import StaleMarksToggle
 from .stat_icons import band_picture, center_picture, display_picture, smoothing_picture, spikes_icon, subtract_icon, within_steps_icon
@@ -312,6 +313,8 @@ class SensorgramPanel(QWidget):
         self._plan_ribbon.add_group("View", *self._steps.plan_controls.widgets())
         self._plan_ribbon.add_group("Evaluation", *self._steps.evaluation.widgets())
         self._plan_ribbon.add_group("Step stats", *self._steps.stats_controls.widgets())
+        self.checks_controls = ChecksControls(self)  # the data-quality checks (2026-11-07): the button only; `checks_presenter.py` is what the app connects to it
+        self._plan_ribbon.add_group("Checks", *self.checks_controls.widgets())
         self._plan_ribbon.add_stretch()
         self._ribbon_tabs = ImageToolRibbon([(PLOT_TAB, self._ribbon), (PLAN_TAB, self._plan_ribbon)], self)
         self._ribbon_drawer = RibbonDrawer(self._ribbon_tabs, "Show the sensorgram controls.", self, handle_alignment=Qt.AlignmentFlag.AlignTop)
@@ -422,6 +425,7 @@ class SensorgramPanel(QWidget):
         self._band_controls.refresh_theme(get_active_theme())
         self._band_menu.refresh_theme(get_active_theme())
         self._steps.refresh_theme()
+        self.checks_controls.refresh_theme()
         self._ribbon_drawer.refresh_theme()
         self._plot.refresh_theme()
         self._status.setStyleSheet(f"color: {get_active_theme().text_dim};")
@@ -627,7 +631,7 @@ class SensorgramPanel(QWidget):
         groups = tuple(GroupSpec(g.name, g.sample_color_hex, tuple(g.area_roi_ids)) for g in self._roi_toolbox.groups())
         segments, membership = self._steps.step_inputs(stored)
         request = SensorgramRequest(roi_ids, detection.formula_key, metric, self._settings.statistics_settings(), x, groups, self._roi_colors(roi_ids), segments, membership)
-        key = trace_key(stored, detection.formula_key, metric)
+        key = trace_key(stored, detection.formula_key, metric, [g.roi_ids for g in groups])
         known = self._traces.known(key)  # the traces fitted so far (any panel's); other formula / fit / metric: the store drops the old ones
         if self._job is not None:
             self._job.cancel.set()  # a running (maybe long) computation is stopped between ROIs; what it finished is kept
@@ -731,6 +735,8 @@ class SensorgramPanel(QWidget):
         y_label = "Centroid position (nm)" if job.request.metric.metric_key == "centroid" else "Peak position (nm)"
         if job.request.metric.uses_template:
             y_label = "Position by template shift (nm)"  # the reference's peak + the shift (analysis/template_shift.py)
+        elif job.request.metric.uses_response:
+            y_label = "Position by response shape (shift-equivalent nm)"  # baseline peak + response in pure-shift nm (analysis/response_shape.py)
         if stats.baseline_enabled:
             y_label = y_label.replace("position", "shift")
         self._plot.set_axis_labels(label, y_label)
@@ -782,6 +788,10 @@ class SensorgramPanel(QWidget):
         elif job.request.metric.uses_template:
             first, last = job.request.metric.reference_cube_range()
             parts.append(f"template shift against the mean of cubes {first}-{last}")
+        elif job.request.metric.uses_response:
+            base, signal = job.request.metric.response_ranges()
+            if signal is not None:
+                parts.append(f"response shape learned per group from cubes {base[0]}-{base[1]} -> {signal[0]}-{signal[1]} (shift-equivalent nm)")
         if stale is not None:
             reason = self._scan.stale_reason()
             parts.append(f"{int(stale.sum())} of {len(stale)} cubes OUT OF DATE (grey diamonds{': ' + reason if reason else ''}); run the scan again")

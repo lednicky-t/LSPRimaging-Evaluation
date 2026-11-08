@@ -6,8 +6,8 @@ Screen purpose: start and stop the scan (step 1 of the analysis: mean / STD / pi
 
 Layout (one ribbon row, captioned groups):
 
-    [play / stop]  |  [skip / stop]  |  [bolt]  |  [folder]
-        Scan          Fast scan         Mode      Scan file
+    [play / stop]  |  [skip / stop]  |  [bolt]  |  [move] [600 nm]  |  [folder]
+        Scan          Fast scan         Mode        Motion              Scan file
 
 - **Scan:** play reads every cube again. While it runs the same button is a red Stop (as the Export tab's), which stops it like the
   Cancel in the status bar's task indicator. Cubes that were finished stay saved.
@@ -16,6 +16,9 @@ Layout (one ribbon row, captioned groups):
   that started it is the Stop and the other one is disabled.
 - **Mode** (2026-10-27): Normal or Performance, a pick-up menu (``analysis_mode_picker.py``). Performance keeps the worker processes ready
   between scans so that a scan starts at once (``analysis/scan_pool.py``); Normal starts them for each scan. Remembered; disabled while a scan runs.
+- **Motion** (2026-11-07): the image-motion check. How far the image moves between the cubes of each experiment step, read from one raw plane per cube at the wavelength in
+  the box (the nearest one the dataset has; remembered). A moving image shifts what the sample and reference ROIs cover, so it adds noise or a trend. The button runs
+  it in the background (while it runs the same button is a red Stop) and the result opens in a report window (``check_report_window.py``).
 - **Scan file:** opens the folder that holds the scan file the Spectra and Sensorgram panels are showing. Visible only while the file exists.
 - **Text:** what the last scan did ("scanned in ...", "up to date", why it could not start) is the "i" icon's text while this tab is open and the
   Scan button's tooltip; a message that must be seen (a refusal, an outcome) also goes to the status bar. Progress and Cancel are the
@@ -32,12 +35,13 @@ import html
 
 from PyQt6.QtCore import QSize, pyqtSignal
 from PyQt6.QtGui import QIcon
-from PyQt6.QtWidgets import QFrame, QHBoxLayout, QToolButton, QWidget
+from PyQt6.QtWidgets import QFrame, QHBoxLayout, QSpinBox, QToolButton, QWidget
 
 from lspr_ui import get_active_theme, load_tabler_icon
 
 from ...analysis.live_state import AnalysisLiveModule
 from ..live_toggle import LiveToggle
+from ..ribbon_fields import style_ribbon_number_field
 from ..ribbon_group import labeled_icon_group, ribbon_separator
 from .analysis_mode_picker import DESCRIPTIONS, LABELS, AnalysisModePicker
 from .general_group import ICON_SIZE, style_general_icon_button
@@ -56,12 +60,24 @@ _FAST_TIP = (
 )
 _STOP_TIP = "Stop the scan. Cubes that are already finished stay saved; scan again to continue."
 _FILE_TIP = "Open the folder of the scan file (analysis/scan.h5 of this session)."
+MOTION_WAVELENGTH_KEY = "analysis/motion_wavelength_nm"  # the box is bound to it (remembered like any control)
+MOTION_RANGE_NM = (200, 1200)
+MOTION_DEFAULT_NM = 600
+_MOTION_COLOR = "#38bdf8"
+_MOTION_TIP = (
+    "Motion: measure how far the image moves between the cubes of each experiment step (phase correlation of one raw plane per cube against the step's first cube). "
+    "A moving image shifts what the sample and reference ROIs cover: jitter adds noise, a drift adds a trend. Runs in the background; the result opens in a report."
+)
+_MOTION_STOP_TIP = "Stop the motion measurement."
+_WAVELENGTH_TIP = "The plane the motion is measured on: the wavelength in nm (the nearest one the dataset has is used). A wavelength where the sample ROIs show sharp, bright features works best."
 
 
 class AnalysisTab(QWidget):
     run_requested = pyqtSignal(bool)  # True = Fast scan (only what is out of date), False = Scan (every cube)
     stop_requested = pyqtSignal()
     open_folder_requested = pyqtSignal()
+    motion_requested = pyqtSignal(float)  # the wavelength in the box (nm)
+    motion_stop_requested = pyqtSignal()
     mode_changed = pyqtSignal(str)  # "normal" | "performance": the user picked a mode (the owner tells the scan task)
     status_message = pyqtSignal(str)  # a message to show on the status bar (see `set_status`)
     info_changed = pyqtSignal()  # the "i" text changed (the panel re-reads it while this tab is open)
@@ -69,6 +85,7 @@ class AnalysisTab(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._running = False
+        self._motion_running = False
         self._running_fast = False  # which of the two run buttons started the scan in progress (it is the Stop button meanwhile)
         self._status = "No scan yet."
         self._icon_cache: dict[tuple[str, str], QIcon] = {}
@@ -78,11 +95,27 @@ class AnalysisTab(QWidget):
         self.fast_run_button = self._icon_button()
         self.mode_picker = AnalysisModePicker(self)
         self.folder_button = self._icon_button(_FILE_TIP)
+        self.motion_button = self._icon_button()
+        self.motion_wavelength = QSpinBox(self)
+        self.motion_wavelength.setRange(*MOTION_RANGE_NM)
+        self.motion_wavelength.setSingleStep(10)
+        self.motion_wavelength.setValue(MOTION_DEFAULT_NM)
+        self.motion_wavelength.setSuffix(" nm")
+        self.motion_wavelength.setKeyboardTracking(False)
+        style_ribbon_number_field(self.motion_wavelength, f"{MOTION_RANGE_NM[1]} nm")
+        self.motion_wavelength.setToolTip(_WAVELENGTH_TIP)
+        motion_row = QWidget(self)
+        motion_layout = QHBoxLayout(motion_row)
+        motion_layout.setContentsMargins(0, 0, 0, 0)
+        motion_layout.setSpacing(2)
+        motion_layout.addWidget(self.motion_button)
+        motion_layout.addWidget(self.motion_wavelength)
 
         live_group, _ = labeled_icon_group(self, self.live_toggle, "Live")
         run_group, self._run_caption = labeled_icon_group(self, self.run_button, "Scan")
         fast_group, self._fast_caption = labeled_icon_group(self, self.fast_run_button, "Fast scan")
         mode_group, _ = labeled_icon_group(self, self.mode_picker, "Mode")
+        motion_group, self._motion_caption = labeled_icon_group(self, motion_row, "Motion")
         self._folder_group, _ = labeled_icon_group(self, self.folder_button, "Scan file")
         self._folder_group.setVisible(False)  # until the owner says the file exists
 
@@ -90,7 +123,7 @@ class AnalysisTab(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
-        for index, group in enumerate((live_group, run_group, fast_group, mode_group, self._folder_group)):
+        for index, group in enumerate((live_group, run_group, fast_group, mode_group, motion_group, self._folder_group)):
             if index:
                 separator = ribbon_separator(self)
                 self._separators.append(separator)
@@ -101,6 +134,7 @@ class AnalysisTab(QWidget):
         self.run_button.clicked.connect(lambda _checked=False: self._clicked(fast=False))
         self.fast_run_button.clicked.connect(lambda _checked=False: self._clicked(fast=True))
         self.folder_button.clicked.connect(lambda _checked=False: self.open_folder_requested.emit())
+        self.motion_button.clicked.connect(lambda _checked=False: self._motion_clicked())
         self.mode_picker.mode_changed.connect(self._on_mode_picked)
         self._refresh_icons()
 
@@ -114,6 +148,14 @@ class AnalysisTab(QWidget):
         self._running = bool(running)
         self.mode_picker.setEnabled(not self._running)  # the workers of a running scan are not changed under it
         self._refresh_icons()
+
+    def set_motion_running(self, running: bool) -> None:
+        """The motion measurement is running (the button is the Stop meanwhile) or not."""
+        self._motion_running = bool(running)
+        self._refresh_icons()
+
+    def is_motion_running(self) -> bool:
+        return self._motion_running
 
     def mode(self) -> str:
         return self.mode_picker.mode()
@@ -158,6 +200,8 @@ class AnalysisTab(QWidget):
             "this session's <i>analysis/scan.h5</i>; the Spectra and Sensorgram panels draw from it. Fast scan (skip): read again only "
             "the cubes whose inputs changed. While a scan runs, the button that started it is Stop (finished cubes stay saved). Folder "
             "icon (when a scan file exists): open its folder."
+            "<br><br><b>Motion</b><br>Measure how far the image moves between the cubes of each experiment step, on the raw plane at the wavelength in the box. "
+            "Opens a report; while it runs the button is Stop."
             f"<br><br><b>Mode</b><br>{html.escape(LABELS[self.mode_picker.mode()])}: {html.escape(DESCRIPTIONS[self.mode_picker.mode()])}."
             f"{('<br>' + html.escape(self.mode_picker.pool_state_line())) if self.mode_picker.pool_state_line() else ''}"
             f"<br><br>{html.escape(self._status).replace(chr(10), '<br>')}"
@@ -165,7 +209,7 @@ class AnalysisTab(QWidget):
 
     def refresh_theme(self) -> None:
         self.live_toggle.refresh_theme()
-        for button in (self.run_button, self.fast_run_button, self.folder_button):
+        for button in (self.run_button, self.fast_run_button, self.folder_button, self.motion_button):
             style_general_icon_button(button)
         self.mode_picker.refresh_theme()
         self._refresh_icons()
@@ -198,6 +242,12 @@ class AnalysisTab(QWidget):
         self.info_changed.emit()
         self.mode_changed.emit(mode)
 
+    def _motion_clicked(self) -> None:
+        if self._motion_running:
+            self.motion_stop_requested.emit()
+        else:
+            self.motion_requested.emit(float(self.motion_wavelength.value()))
+
     def _clicked(self, *, fast: bool) -> None:
         if self._running:  # only the button that started the run is enabled, so a click on it means Stop
             self.stop_requested.emit()
@@ -216,6 +266,14 @@ class AnalysisTab(QWidget):
             icon="player-skip-forward", color=_FAST_COLOR, text="Fast scan", tip=_FAST_TIP,
         )
         self.folder_button.setIcon(self._icon("folder-open", theme.text_dim))
+        if self._motion_running:
+            self.motion_button.setIcon(self._icon("player-stop", _STOP_COLOR))
+            self.motion_button.setToolTip(_MOTION_STOP_TIP)
+            self._motion_caption.setText("Stop")
+        else:
+            self.motion_button.setIcon(self._icon("arrows-move", _MOTION_COLOR))
+            self.motion_button.setToolTip(_MOTION_TIP)
+            self._motion_caption.setText("Motion")
         self._sync_separators()
 
     def _set_run_button(self, button: QToolButton, caption, *, stop: bool, other_busy: bool, icon: str, color: str, text: str, tip: str) -> None:

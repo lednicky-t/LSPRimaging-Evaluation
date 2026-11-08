@@ -21,13 +21,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-FIT_METHODS: tuple[str, ...] = ("none", "polynomial", "gaussian", "voigt", "template")
+FIT_METHODS: tuple[str, ...] = ("none", "polynomial", "gaussian", "voigt", "template", "response")
 """How a ROI's formula spectrum becomes a curve before the metric is read
 off it. ``"none"`` reads the metric straight off the measured points - a
 real option, not a disabled state (see `query.metric_from_spectrum`).
 ``"template"`` (2026-10-25) is not a curve with a top to find: the spectrum is compared, point by point over its whole range, with the reference spectrum
 of the same ROI and the sideways shift that fits best is the metric (`template_shift.py`). It has no fit window, order or maximum / centroid choice.
-``"voigt"`` (2026-11-02): a Voigt peak (Gaussian convolved with Lorentzian) on a flat offset, fitted in photon energy (`voigt_fit.py`)."""
+``"voigt"`` (2026-11-02): a Voigt peak (Gaussian convolved with Lorentzian) on a flat offset, fitted in photon energy (`voigt_fit.py`).
+``"response"`` (2026-11-06): the response shape (`response_shape.py`): each spectrum is projected on the change measured between a baseline and a signal cube
+range, weighted by the noise at each wavelength, learned per ROI group. Not a peak position: a shift-equivalent in nm. No fit window, order or metric choice."""
 
 METRIC_KEYS: tuple[str, ...] = ("maximum", "centroid")
 """Which number a fitted (or unfitted) spectrum collapses to - layer 3's
@@ -93,18 +95,26 @@ class MetricSettings:
     poly_order: int = 3
     fit_wl_min: float | None = None
     fit_wl_max: float | None = None
-    metric_key: str = "maximum"
+    metric_key: str = "centroid"
     window_on: bool = False
     window_mode: str = "manual"
     window_half_width_nm: float = 50.0
     window_fwhm_factor: float = 0.5
     window_same_points: bool = False
-    metric_range: str = "off"
-    metric_top_fraction: float = 0.3
+    metric_range: str = "top_fraction"
+    metric_top_fraction: float = 0.2
     metric_range_min: float | None = None
     metric_range_max: float | None = None
     template_first_cube: int = 0
     template_last_cube: int = 9
+    response_base_first: int = 0
+    response_base_last: int = 9
+    response_signal_first: int | None = None
+    response_signal_last: int | None = None
+
+    # The calibration cubes of the response shape (2026-11-06, ``response_shape.py``): the baseline cubes ``response_base_first`` ..
+    # ``response_base_last`` and the signal cubes ``response_signal_first`` .. ``response_signal_last`` (inclusive, the cube numbers the panels show).
+    # The shape is the mean change signal - baseline. Read only when ``fit_method == "response"``; no signal range = not calibrated (no values).
 
     # The reference cubes of the template shift (2026-10-25): the cubes ``template_first_cube`` .. ``template_last_cube`` (inclusive, the cube numbers the
     # Spectra panel and the Image panel show) whose mean spectrum, per ROI, is the reference the others are compared with. Read only when
@@ -157,6 +167,26 @@ class MetricSettings:
         first, last = int(self.template_first_cube), int(self.template_last_cube)
         return ("template", min(first, last), max(first, last))
 
+    @property
+    def uses_response(self) -> bool:
+        """True when the metric is the response-shape readout (needs the ROI groups and every ROI of the scan, not one ROI alone)."""
+        return str(self.fit_method).strip().lower() == "response"
+
+    def response_ranges(self) -> tuple[tuple[int, int], tuple[int, int] | None]:
+        """(baseline first, last), (signal first, last) or None when the signal range is not set; each in order whatever was typed."""
+        b0, b1 = int(self.response_base_first), int(self.response_base_last)
+        base = (min(b0, b1), max(b0, b1))
+        if self.response_signal_first is None or self.response_signal_last is None:
+            return base, None
+        s0, s1 = int(self.response_signal_first), int(self.response_signal_last)
+        return base, (min(s0, s1), max(s0, s1))
+
+    def response_key(self) -> tuple:
+        """The calibration cubes when they matter (the response shape), else an empty tuple: part of every cache key."""
+        if not self.uses_response:
+            return ()
+        return ("response", *self.response_ranges())
+
     def reference_cube_range(self) -> tuple[int, int]:
         """The reference cubes as (first, last), in order whatever was typed."""
         first, last = int(self.template_first_cube), int(self.template_last_cube)
@@ -169,6 +199,12 @@ class MetricSettings:
             amount = self.window_half_width_nm if self.window_mode == "around_max" else self.window_fwhm_factor
             return (self.window_mode, float(amount), bool(self.window_same_points))
         return ("manual", low, high)
+
+
+# Defaults changed on 2026-11-06 (centroid of the top 20 % instead of the maximum; docs/snr_methods_comparison_2026-11-06.md): same SNR as the all-points
+# centroid, but it reads the full shift. A saved session fills the keys it lacks from these OLD defaults, so a session saved before a key existed
+# gives the numbers it always gave; only a new session gets the new defaults.
+LEGACY_METRIC_DEFAULTS = MetricSettings(metric_key="maximum", metric_range="off", metric_top_fraction=0.3)
 
 
 @dataclass(slots=True)

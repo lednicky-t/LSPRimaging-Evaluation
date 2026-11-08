@@ -383,6 +383,8 @@ def fit_spectrum(
         return None
     if key == "template":  # not a curve fitted to this spectrum alone: it needs the ROI's reference (fit_and_metric); never fall through to the polynomial
         raise ValueError("The template shift needs the reference spectrum of the ROI: use fit_and_metric(..., template=...).")
+    if key == "response":  # learned from every ROI of the group, not from one spectrum (scan_trace.response_traces); never fall through to the polynomial
+        raise ValueError("The response shape is not a fit of one spectrum: it is computed for every ROI at once (scan_trace.response_traces).")
     if key == "gaussian":
         return fit_gaussian(spectrum.wavelengths_nm, spectrum.values, wl_min=wl_min, wl_max=wl_max, fast_first=gaussian_fast_first, solved=solved)
     if key == "voigt":

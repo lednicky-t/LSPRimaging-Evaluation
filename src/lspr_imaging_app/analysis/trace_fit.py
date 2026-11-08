@@ -98,6 +98,8 @@ def traces_from_inputs(
     flat = np.full(int(offsets[-1]), np.nan)  # the traces of all ROIs one after the other; a cube is addressed by offsets[roi] + cube
     outs = [flat[offsets[i] : offsets[i + 1]] for i in range(len(inputs))]
     method = str(metric.fit_method).strip().lower()
+    if metric.uses_response:  # needs every ROI of the group (scan_trace.response_traces); one ROI's inputs cannot give it
+        raise ValueError("The response shape is computed for every ROI at once (scan_trace.response_traces), not per ROI.")
     group_fit = {"gaussian": _gaussian_group, "voigt": _voigt_group, "none": _points_group}.get(method, _polynomial_group)
     min_points = 1 if method == "none" else 2  # read off the points, one point still has a maximum (and a "centroid": itself)
     per_cube = False  # every method is batched (the "no fit" metric too since 2026-11-02: it was one cube at a time, 2 s for 160 ROIs)

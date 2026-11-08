@@ -229,6 +229,8 @@ def compute_traces(
     **this** thread (tests, the lab, a command line - never next to the GUI). Raises :class:`~..progress.Cancelled` if ``runner`` reports a cancel.
 
     A template-shift metric needs its reference cubes among the cubes of the matrix; where they are not, its traces are gaps."""
+    if metric.uses_response:
+        raise TuningError("ROI position tuning cannot use the response shape (it is learned from a whole group, not from one ROI): pick another fit method for tuning.")
     n_points, n_cubes, n_rois = matrix.mean.shape[:3]
     jobs = matrix.trace_inputs()
     out = np.full((n_points, n_rois, n_cubes), np.nan)

@@ -300,6 +300,37 @@ judged. A cube change only looks the colours up; a new selection, formula, fit w
 0.05 nm at the 4th, 0.18 nm at the 12th) and its bias shrinks. Over the whole range no order predicts to the noise (the best is 11 times the noise), a sign to use a window or the template shift (section 7).
 Measured tables and the real-data behaviour: `poly_order_quality_study_2026-10-25.md`. Tests: `tests/unit/test_lspri_analysis_order_quality.py`.
 
+## 8a. The response shape (built 2026-11-06), `analysis/response_shape.py`
+
+Fit choice "Response shape" (`fit_method = "response"`). Not a peak position: how much of a **measured** change is in each spectrum. Research and numbers:
+`snr_methods_comparison_2026-11-06.md`.
+
+**Calibration** (two cube ranges in the Fit menu: baseline `response_base_first..last`, signal `response_signal_first..last`, both inclusive; no signal range = no values).
+Every spectrum `A_c(λ)` is centred first: `Ã_c = A_c − mean_λ(A_c)` (an offset never reads as a response; a cube missing any wavelength is a gap). Per ROI `i`:
+reference `M_i = mean over baseline cubes of Ã`, change `d_i = mean over signal cubes of Ã − M_i`, noise `v_i(λ) = variance of Ã over the baseline cubes`.
+Per ROI, the pool `P(i)` = the ROIs of its group (the union when it is in several; every ROI when it is in none). The weights:
+
+`w_i(λ) = d̄(λ) / v̄(λ)`, with `d̄, v̄` the means over `P(i)`, then scaled by `1 / (w_i · u_i)` where `u_i = −dM̄/dλ` (centred), the change of the pool's mean reference for a +1 nm shift.
+
+**Readout** of cube `c`: `value = peak(mean baseline spectrum of ROI i) + w_i · (Ã_c − M_i)`, in **shift-equivalent nm**: a pure 1 nm shift reads exactly 1 nm; an amplitude or width change
+shaped like the calibration change adds to it (the 0-70 % ethylene-glycol step reads 8.6 nm against 7.1 nm for the template shift). The peak is `template_shift.template_peak_nm`.
+
+**Why it is quieter.** `w = d / v` is the matched filter: the linear readout of a known change with the highest signal-to-noise for independent noise per wavelength. For a pure shift it equals the
+linearised least-squares shift (Cramér-Rao limit, test `test_the_noise_of_a_pure_shift_is_near_the_cramer_rao_floor`); for a real change it also uses the amplitude / width part. Measured: SNR per
+ROI 116-145 against 101-130 for the template on five step pairs; one weight set per group and one for all ROIs differ by < 1 %; a ROI in its own group's weights does not inflate its score (< 1 %).
+
+**Consequences to know.** (1) The values of a ROI depend on the other ROIs of its group: moving, re-masking or regrouping one ROI changes its group-mates slightly. It is therefore always computed
+for every ROI of the scan at once (`scan_trace.response_traces`, ~0.4 s for 160 ROIs x 314 cubes; no helper process) and the cache key holds the groups (`scan_trace.trace_key(..., groups)`); a regroup,
+otherwise a cosmetic change, recomputes it (Sensorgram through the key, Spectra panel and ROI table step columns through `cosmetic_changed` "regroup"). (2) It counts any change shaped like the
+calibration change; a binding response may be shaped differently from a bulk refractive-index step (untested). (3) ROI position tuning refuses it (`roi_tuning_run.compute_traces`), and the per-ROI
+fit paths raise rather than fall back to the polynomial (`query.fit_spectrum`, `trace_fit.traces_from_inputs`). Tests: `tests/unit/test_lspri_analysis_response_shape.py`.
+
+## 8b. Defaults of a new session (changed 2026-11-06)
+
+A new session starts with the polynomial (3rd order), **centroid of the top 20 %** (`metric_range = "top_fraction"`, `metric_top_fraction = 0.2`): the same SNR as the all-points centroid, but it reads
+the full shift (record `snr_methods_comparison_2026-11-06.md`). Before: maximum, no metric range. A saved session fills the keys it lacks from the **old** defaults (`settings.LEGACY_METRIC_DEFAULTS`,
+used by `storage/session.py`), so a session saved before a key existed gives the numbers it always gave.
+
 ## 9. Where to look when a number looks wrong
 
 - A spectrum looks wrong: formula (section 1), then `n_valid` / masks in the scan.
@@ -316,3 +347,6 @@ Measured tables and the real-data behaviour: `poly_order_quality_study_2026-10-2
 - A template-shift trace is empty (all gaps): the reference cubes have no usable data for that ROI (change them), or the scan has fewer than 4 wavelengths; the Spectra panel prints which.
 - A template-shift trace reads a different shift from a fit of the same data: expected (section 7.6: the shift of the whole spectrum is not the position of its top). Compare within one setting.
 - A template-shift trace drifts slowly while the peak does not: look at the tilt (section 7.5, `trace_fit.template_diagnostics`); a baseline that tilts by 0.001 A moves it by 0.1 nm.
+- A response-shape value reads more nm than the template shift: expected when the change also has an amplitude part (section 8a: shift-equivalent nm). Its values moved although only another ROI
+  of the group changed: expected (the weights are learned per group).
+- Something looks systematically off (a noisy step, drift, outlier ROIs): the data-quality checks, `analysis/step_diagnostics.py` (and `image_motion.py` for image drift).

@@ -151,6 +151,7 @@ class _Job:
     membership: object
     roi_stamp: tuple
     cancel: threading.Event
+    response_groups: tuple = ()  # the session's ROI groups (member ids), for the response shape
 
 
 class StepTableModule(QObject):
@@ -209,6 +210,7 @@ class StepTableModule(QObject):
         analysis_settings.settings_changed.connect(lambda _change: self._invalidate())
         experiment_plan.steps_changed.connect(self._on_plan_changed)
         roi_toolbox.geometry_changed.connect(self._on_roi_changed)
+        roi_toolbox.cosmetic_changed.connect(self._on_roi_cosmetic)
         roi_toolbox.roi_ids_renumbered.connect(self._on_renumbered)
         axis.axis_changed.connect(self._invalidate)
 
@@ -420,7 +422,7 @@ class StepTableModule(QObject):
                 steps = tuple((s.ref, s.start_unix_ms, s.end_unix_ms) for s in self._plan.steps())
                 scan = (
                     self._scan_generation, self._renumbering,
-                    trace_key(stored, self._toolbox.detection_settings().formula_key, self._settings.metric_settings()),
+                    trace_key(stored, self._toolbox.detection_settings().formula_key, self._settings.metric_settings(), self._group_members()),
                 )
                 self._base = (scan, steps, self._axis.uses_time(), numbers_key(statistics, group=False), numbers_key(statistics, group=True))
         return self._base  # type: ignore[return-value]
@@ -447,6 +449,15 @@ class StepTableModule(QObject):
     def _on_roi_changed(self, change: object) -> None:
         if getattr(change, "reason", "") in _ROI_REASONS:
             self._invalidate()
+
+    def _on_roi_cosmetic(self, change: object) -> None:
+        """A regroup is cosmetic for every metric but the response shape, whose weights are learned per group (`analysis/response_shape.py`)."""
+        if getattr(change, "reason", "") in ("regroup", "session_restored") and self._settings.metric_settings().uses_response:
+            self._invalidate()
+
+    def _group_members(self) -> tuple[tuple[int, ...], ...]:
+        """The session's ROI groups as member ids (what the response shape learns its weights from)."""
+        return tuple(tuple(g.area_roi_ids) for g in self._toolbox.groups())
 
     def _on_plan_changed(self, reason: str) -> None:
         self._columns = None
@@ -490,7 +501,8 @@ class StepTableModule(QObject):
         membership = assign_cubes(steps, *self._dataset.cube_spans_unix_ms(stored.cube_indices))
         within = statistics.smooth_within_steps and statistics.smoothing_method != "none"
         needed = tuple(dict.fromkeys([*rois, *(r for g in group_rows for r in g.roi_ids)]))
-        key = trace_key(stored, detection.formula_key, metric)
+        group_members = self._group_members()
+        key = trace_key(stored, detection.formula_key, metric, group_members)
         known = self._traces.known(key)
         self._traces.warm_up()
         if self._job is not None:
@@ -500,6 +512,7 @@ class StepTableModule(QObject):
             self._generation, stored, key, rois, group_rows, needed, known, detection.formula_key, metric, self._axis.x(), statistics,
             membership_segments(membership) if within else None, membership,
             self._stamp(group=False, members=None) or (), threading.Event(),  # a group's stamp is made when its numbers arrive (its members are part of it)
+            group_members,
         )
         self._job = job
         missing = sum(1 for r in needed if r not in known)
@@ -527,7 +540,7 @@ class StepTableModule(QObject):
         try:
             new, was_cancelled = fit_missing_traces(
                 job.stored, job.needed, job.formula_key, job.metric, job.known,  # type: ignore[arg-type]
-                cancelled=job.cancel.is_set, progress=report, runner=self._traces.runner(),
+                cancelled=job.cancel.is_set, progress=report, runner=self._traces.runner(), groups=job.response_groups,
             )
             fitted_ms = (time.perf_counter() - t0) * 1e3
             numbers = None
