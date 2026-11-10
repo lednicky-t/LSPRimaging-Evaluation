@@ -28,7 +28,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 from lspr_core import ImagingPlan
 
-from ..analysis.step_stats import assign_cubes
+from ..analysis.step_stats import StepMembership, assign_cubes
 from ..dataset.module import DatasetModule
 from ..diagnostics import instrumented
 from ..plan import edits
@@ -116,6 +116,15 @@ class ExperimentPlanModule(QObject):
         first, last = self._dataset.cube_spans_unix_ms(cubes)
         used = assign_cubes((step,), first, last).used[0]
         return tuple(int(c) for c in np.asarray(cubes)[used])
+
+    def cubes_and_membership(self) -> tuple[tuple[int, ...], StepMembership | None]:
+        """(Every cube of the dataset in file order, which of them lie wholly in which step: `assign_cubes` of all the steps at its default window, the rule
+        of `cubes_of`). The membership is None without steps. For work that needs the steps' cubes outside the Sensorgram (the drift baseline's anchor steps
+        in the ROI position tuning)."""
+        cubes = tuple(int(c) for c in self._dataset.spectral_cubes())
+        if not cubes or not self.has_steps():
+            return cubes, None
+        return cubes, assign_cubes(self.steps(), *self._dataset.cube_spans_unix_ms(cubes))
 
     def axis_map(self, cubes: list[int], x: list[float]) -> AxisMap | None:
         """The time <-> x map of the cubes the Sensorgram plots (`x`: the plot's x of each, same order). None when it cannot be built (no timing)."""

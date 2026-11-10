@@ -39,8 +39,8 @@ apart on the example dataset), so on absolute means it measures that, not the ex
 0.01 - 1 nm.
 
 **Which values go in** (`trace_matrix`): the per-ROI traces exactly as the Sensorgram plots them, i.e. through whatever spike rejection, smoothing and baseline
-correction the user selected (maintainer's choice, 2026-10-26). A baseline correction shifts every mean by a constant per ROI and leaves ``std`` and ``noise``
-alone. Two things about **smoothing** (measured on the example dataset, `docs/step_statistics_backbone_2026-10-26.md`):
+correction the user selected (maintainer's choice, 2026-10-26). The plain baseline (the mean of a range) shifts every mean by a constant per ROI and leaves ``std`` and
+``noise`` alone; a drift *curve* (``baseline_drift``, 2026-11-09) also changes the differences between steps and a step's ``std``. Two things about **smoothing** (measured on the example dataset, `docs/step_statistics_backbone_2026-10-26.md`):
 
 - Smoothing the whole trace and then cutting it into steps lets the first and last cubes of a step carry the neighbouring step's level (a window of 15 cubes is
   about half a step): ``std`` and ``noise`` came out *larger* than unsmoothed (0.09 -> 0.23 nm). So with the "smooth inside steps" switch on (the default) and
@@ -283,15 +283,25 @@ def line_step_values(stats: StepStats, members: Sequence[int], *, between_rois: 
 
 
 def trace_matrix(
-    roi_ids: Sequence[int], traces: Mapping[int, np.ndarray], x: np.ndarray, statistics: StatisticsSettings, segments: np.ndarray | None = None
+    roi_ids: Sequence[int],
+    traces: Mapping[int, np.ndarray],
+    x: np.ndarray,
+    statistics: StatisticsSettings,
+    segments: np.ndarray | None = None,
+    anchors: Mapping[int, Sequence[np.ndarray]] | None = None,
 ) -> np.ndarray:
     """The values the statistics are taken from: ``float64 [roi, cube]``. Each ROI's metric trace goes through the Sensorgram's own post-processing
     (`statistics.apply_statistics`: spike rejection, smoothing, baseline, whatever is selected), so the numbers describe the curve that is plotted.
-    `x`: the Sensorgram's x of each cube (the baseline window is in its units). `segments`: smooth each run of equal labels on its own
-    (`smoothing_segments`); None smooths the whole trace. `traces` must hold every ROI."""
+    `x`: the Sensorgram's x of each cube (the baseline window and the drift curve are in its units). `segments`: smooth each run of equal labels on its
+    own (`smoothing_segments`); None smooths the whole trace. `traces` must hold every ROI.
+
+    `anchors` (2026-11-10): each ROI's anchor regions of the drift baseline, one ``bool [cube]`` per anchor (`baseline_drift.regions_by_roi` /
+    `window_step_regions`, as `scan_trace.build_series` passes them); the curve through them is then taken off, as on the Sensorgram. None: no curve
+    (anchor points: the trace stays uncorrected; Range: the window's mean). The app's caller is the ROI position tuning (`roi_tuning.lattice_objectives`);
+    the Sensorgram and the ROI table's step columns go through `scan_trace.build_series`."""
     if not roi_ids:
         return np.empty((0, len(x)), dtype=np.float64)
-    return np.vstack([apply_statistics(x, traces[r], statistics, segments)[0] for r in roi_ids])
+    return np.vstack([apply_statistics(x, traces[r], statistics, segments, None if anchors is None else anchors.get(int(r), ()))[0] for r in roi_ids])
 
 
 def compute_step_statistics(

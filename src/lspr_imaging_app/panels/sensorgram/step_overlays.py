@@ -22,6 +22,7 @@ import numpy as np
 from PyQt6.QtCore import QObject
 from PyQt6.QtWidgets import QWidget
 
+from ...analysis.baseline_drift import uses_anchor_steps, window_step_regions
 from ...analysis.scan_store import StoredScan
 from ...analysis.scan_trace import Series
 from ...analysis.settings_module import AnalysisSettingsModule
@@ -146,6 +147,27 @@ class StepOverlays(QObject):
         membership = assign_cubes(self._plan.steps(), *self._dataset.cube_spans_unix_ms(stored.cube_indices))
         return (membership_segments(membership) if pieces else None), (membership if numbers else None)
 
+    def anchor_steps_marked(self) -> bool:
+        """The Range baseline has plan steps marked as its anchors (2026-11-09)."""
+        return uses_anchor_steps(self._settings.statistics_settings())
+
+    def baseline_step_regions(self, stored: StoredScan) -> tuple[np.ndarray, ...] | None:
+        """The Range baseline's marked anchor steps as cube regions for the request (`baseline_drift.window_step_regions`): None when none is marked
+        (the window's mean), () when the dataset has no steps to place them on. Cheap, made on every redraw, so a moved boundary is picked up."""
+        if not self.anchor_steps_marked():
+            return None
+        if self._plan is None or not self._plan.has_steps():
+            return ()
+        membership = assign_cubes(self._plan.steps(), *self._dataset.cube_spans_unix_ms(stored.cube_indices))
+        return window_step_regions(membership, self._settings.statistics_settings())
+
+    def anchor_step_indices(self) -> frozenset[int]:
+        """The positions (in `ExperimentPlanModule.steps()`, the bar's `index`) of the steps marked as Range baseline anchors."""
+        if self._plan is None or not self.anchor_steps_marked():
+            return frozenset()
+        refs = set(self._settings.statistics_settings().baseline_anchor_steps)
+        return frozenset(i for i, step in enumerate(self._plan.steps()) if tuple(step.ref) in refs)
+
     # -- reacting to changes ------------------------------------------------------------------------------------------------
 
     def _on_plan_changed(self, reason: str = "") -> None:
@@ -155,8 +177,10 @@ class StepOverlays(QObject):
             self._plot.plan_bar().clear_selection()
         if not self._defer():
             self.refresh()
-        if reason in _STEP_TIME_CHANGES and (self.smoothing_follows_steps() or self.stats_wanted()):
-            self._schedule_redraw()  # the pieces smoothed on their own and the cubes of each step's numbers are the steps: another boundary, other values (the fits are cached)
+        if reason in _STEP_TIME_CHANGES and (self.smoothing_follows_steps() or self.stats_wanted() or self.anchor_steps_marked()):
+            # the pieces smoothed on their own, the cubes of each step's numbers and the Range baseline's anchor steps are the steps: another boundary,
+            # other values (the fits are cached)
+            self._schedule_redraw()
 
     def _on_stats_settings_changed(self) -> None:
         """The table was switched on or off, moved to the other edge or resized. The numbers are computed with the curves, so switching it on asks for a redraw when the
@@ -214,6 +238,7 @@ class StepOverlays(QObject):
             time_mode=self._cube_display.effective_mode() == MODE_TIME,
         )
         self._plot.set_plan(bars, settings)
+        self._plot.plan_bar().set_baseline_anchors(self.anchor_step_indices())  # a small anchor in the lower left corner of each
         self._show_evaluation(steps, [bar.color for bar in bars])
         self.show_stats_table(bars, series, True)
 

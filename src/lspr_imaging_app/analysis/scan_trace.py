@@ -29,8 +29,9 @@ from ..applog import log_event
 from ..progress import Cancelled
 from .scan_store import StoredScan
 from .scan_view import REFERENCE, SAMPLE, _primary_method
+from .baseline_drift import METHOD_ANCHORS, METHOD_WINDOW, DriftFit, regions_by_roi
 from .settings import MetricSettings, StatisticsSettings
-from .statistics import aggregate_traces, apply_statistics
+from .statistics import aggregate_traces, apply_statistics_with_fit
 from .step_stats import LineStepValues, StepMembership, line_step_values, step_statistics
 from .query import formula_values
 from .response_shape import ResponseCalibration, ResponseError, calibrate, readout
@@ -67,6 +68,9 @@ class SensorgramRequest:
     roi_colors: Mapping[int, str] = field(default_factory=dict)
     segments: np.ndarray | None = None  # one label per cube: smooth each run of equal labels on its own (`step_stats.smoothing_segments`); None = the whole trace
     step_membership: StepMembership | None = None  # which cubes belong to which experiment step (`step_stats.assign_cubes`): each line then also gets its `step_values`
+    cube_numbers: np.ndarray | None = None  # the cube number of each position of the trace arrays, for the drift baseline's anchor points; None = no points
+    # the Range method's marked anchor steps as regions (`baseline_drift.step_regions`); None = no step marked (the window's mean); () = marked, none left
+    baseline_step_regions: tuple[np.ndarray, ...] | None = None
 
 
 @dataclass
@@ -82,6 +86,17 @@ class Series:
     baseline: float = float("nan")  # the offset subtracted by the baseline correction (NaN: none)
     member_ids: tuple[int, ...] = ()  # the ROIs this line is made of (one for an individual line); the mask marks look them up
     step_values: LineStepValues | None = None  # mean +/- SD of this line in each experiment step (None: no steps were asked for)
+    # The drift baseline (`baseline_drift`: method "anchors", or method "window" with marked anchor steps): the curve in the trace's own (absolute) units, what is or would be subtracted (an average:
+    # the same combination of its members' curves as the line); None when there is none. `baseline_note`: why a member has no curve ("" = all fine).
+    # `anchor_rms`: what is left at the anchors after correction (an average: the median of its members').
+    baseline_curve: np.ndarray | None = None
+    baseline_note: str = ""
+    anchor_rms: float = float("nan")
+    # The anchors the curve goes through (2026-11-09, drawn as hollow squares): x, the level of the trace there, and the curve's value there. An average
+    # has them only when all its members have anchors at the same x (combined with the line's own centre); None otherwise.
+    anchor_x: np.ndarray | None = None
+    anchor_y: np.ndarray | None = None
+    anchor_base: np.ndarray | None = None
 
 
 def response_groups(groups: Sequence[Sequence[int]]) -> tuple[tuple[int, ...], ...]:
@@ -253,11 +268,68 @@ def build_series(request: SensorgramRequest, traces: Mapping[int, np.ndarray], d
     return series
 
 
+def anchor_regions_for(request: SensorgramRequest) -> dict[int, tuple[np.ndarray, ...]] | None:
+    """Each ROI's anchor regions for the drift baseline, or None when there is no curve to fit (the window's mean applies, or nothing).
+
+    - Method "window" ("Range"): the marked anchor steps (`SensorgramRequest.baseline_step_regions`), the same for every ROI; None when no step is marked.
+    - Method "anchors": the ROI's anchor points (shared + its own); None when the request carries no cube numbers."""
+    stats = request.statistics
+    if stats.baseline_method == METHOD_WINDOW:  # "Range": the marked anchor steps, the same for every ROI; None = the window's mean
+        regions = request.baseline_step_regions
+        return None if regions is None else {int(r): tuple(regions) for r in request.roi_ids}
+    if stats.baseline_method != METHOD_ANCHORS or request.cube_numbers is None:
+        return None
+    return regions_by_roi(request.roi_ids, request.cube_numbers, stats.baseline_anchor_points, stats.baseline_point_halfwidth)
+
+
 def _build_lines(request: SensorgramRequest, traces: Mapping[int, np.ndarray], display_mode: str, center: str, band: str) -> list[Series]:
     x = np.asarray(request.x, dtype=np.float64)
+    stats = request.statistics
+    anchors = anchor_regions_for(request)
     processed: dict[int, tuple[np.ndarray, float]] = {}
+    fits: dict[int, DriftFit] = {}
     for roi_id in request.roi_ids:
-        processed[roi_id] = apply_statistics(x, traces[roi_id], request.statistics, request.segments)
+        trace, value, fit = apply_statistics_with_fit(x, traces[roi_id], stats, request.segments, None if anchors is None else anchors.get(roi_id))
+        processed[roi_id] = (trace, value)
+        if fit is not None:
+            fits[roi_id] = fit
+    lines = _combine(request, processed, display_mode, center, band)
+    if fits:
+        for line in lines:
+            _attach_drift(line, [fits[r] for r in line.member_ids if r in fits], center)
+    return lines
+
+
+def _attach_drift(line: Series, member_fits: list[DriftFit], center: str) -> None:
+    """The line's baseline curve, note and anchor RMS from its members' drift fits (combined as the line's own values are).
+
+    The anchors are attached even when the fit could not be made (too few for the shape), so every placed point is drawn: a point that shows nothing
+    until the second one is placed looks as if it was never added (maintainer, 2026-11-09). Without a fit there is no `anchor_base` and the trace is
+    uncorrected, so the squares sit on the trace."""
+    good = [f for f in member_fits if f.ok]
+    failed = [f.message for f in member_fits if not f.ok]
+    if failed:
+        first = failed[0]
+        line.baseline_note = first if len(member_fits) == 1 else f"{len(failed)} of {len(member_fits)} ROIs: {first}"
+    first_x = member_fits[0].anchors_x if member_fits else np.empty(0)
+    if member_fits and all(f.anchors_x.shape == first_x.shape and np.allclose(f.anchors_x, first_x) for f in member_fits):
+        combine = np.median if str(center).strip().lower() == "median" else np.mean
+        line.anchor_x = np.mean([f.anchors_x for f in member_fits], axis=0)
+        line.anchor_y = combine([f.anchors_y for f in member_fits], axis=0)
+        if len(good) == len(member_fits):  # so y - base is the centre of the members' residuals
+            line.anchor_base = line.anchor_y - combine([f.anchors_y - f.anchors_base for f in good], axis=0)
+    if not good:
+        return
+    if len(member_fits) == 1:
+        line.baseline_curve, line.anchor_rms = good[0].curve, good[0].anchor_rms
+        return
+    line.baseline_curve = aggregate_traces({i: f.curve for i, f in enumerate(good)}, center=center, band="sd")[0]
+    rms = [f.anchor_rms for f in good if np.isfinite(f.anchor_rms)]
+    line.anchor_rms = float(np.median(rms)) if rms else float("nan")
+
+
+def _combine(request: SensorgramRequest, processed: dict[int, tuple[np.ndarray, float]], display_mode: str, center: str, band: str) -> list[Series]:
+    x = np.asarray(request.x, dtype=np.float64)
     if display_mode == DISPLAY_AVERAGE_ALL:
         groups = [("average", f"Average of {len(processed)} ROIs", "#e5e7eb", tuple(processed))]
     elif display_mode == DISPLAY_BY_GROUP:

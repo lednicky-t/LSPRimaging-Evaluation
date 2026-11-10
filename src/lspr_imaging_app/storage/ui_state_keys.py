@@ -132,6 +132,7 @@ PLOT_EXPORT_FIGURE_FORMAT = UiKey("export/figure_format", "png", str)  # the fil
 SPECTRA_X_UNIT = UiKey("spectra/x_unit", "nm", str)  # the Spectra plot's x axis: "nm" (wavelength) | "ev" (photon energy); double-click the axis label
 SPECTRA_LINE_STYLE = UiKey("spectra/line_style", "solid", str)  # the line between the measured points: "solid" | "dash" | "dot" | "dashdot" (View menu)
 SENSORGRAM_RIBBON_TAB = UiKey("sensorgram/ribbon_tab", "Plot", str)  # the tab of the Sensorgram's control row that was shown: "Plot" or "Experimental plan"
+SENSORGRAM_ANCHOR_POINT_SCOPE = UiKey("sensorgram/anchor_point_scope", "all", str)  # whom a new baseline anchor point applies to: "all" ROIs or the lines "shown"
 SENSORGRAM_RIBBON_OPEN = UiKey("sensorgram/ribbon_open", True, bool)  # the Sensorgram panel's control row: rolled down (True) or up
 SENSORGRAM_BASELINE_BAND_VISIBLE = UiKey("sensorgram/baseline_band_visible", True, bool)  # the draggable baseline band (View group)
 SENSORGRAM_BASELINE_BAND_COLOR = UiKey("sensorgram/baseline_band_color", None, str)  # None = the default blue

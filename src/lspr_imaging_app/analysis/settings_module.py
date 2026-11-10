@@ -88,6 +88,16 @@ class AnalysisSettingsModule(QObject):
         self._statistics = new
         self.settings_changed.emit(AnalysisSettingsChange(field="statistics"))
 
+    def remap_roi_ids(self, mapping: dict) -> None:
+        """`RoiToolbox.roi_ids_renumbered`: a ROI's own anchor points of the drift baseline follow it to its new id; a ROI absent from the map is
+        gone and its points with it (empty map = a fresh detection: no ROI survives). A shared point (roi id 0) belongs to no ROI and stays. Not
+        undo-tracked, like every setting here: undoing a delete brings the ROI back with the shared points only."""
+        points = self._statistics.baseline_anchor_points
+        if not any(r for r, _cube in points):
+            return
+        new_points = tuple((r if r == 0 else int(mapping[r]), cube) for r, cube in points if r == 0 or r in mapping)
+        self.set_statistics_settings(replace(self._statistics, baseline_anchor_points=new_points))
+
     # -- session restore ----------------------------------------------------
 
     def restore_state(self, metric: MetricSettings, statistics: StatisticsSettings) -> None:

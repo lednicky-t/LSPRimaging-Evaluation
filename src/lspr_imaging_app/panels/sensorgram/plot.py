@@ -19,7 +19,7 @@ from collections.abc import Mapping, Sequence
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import QPoint, QPointF, QRectF, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFontMetricsF, QPen
+from PyQt6.QtGui import QColor, QCursor, QFont, QFontMetricsF, QGuiApplication, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import QApplication, QGraphicsItem, QVBoxLayout, QWidget
 
 from lspr_ui import get_active_theme
@@ -54,6 +54,7 @@ _READOUT_GAP = 0  # pixels between the bottom edge of the "Baseline [start, end]
 LINE_WIDTH = 1.0  # px, antialiased. Qt paints only 1 px lines fast: 160 lines x 400 cubes took 140 ms at 1.5 px, 30 ms at 1 px antialiased (2026-11-02)
 DOTS_MAX_LINES = 10  # a dot on every point only up to this many lines (with more they merge into the lines and cost ~1 s per redraw at 160 ROIs)
 _Z_BAND, _Z_LINE, _Z_DOTS, _Z_RINGS, _Z_MARKS = -10.0, 0.0, 1.0, 2.0, 3.0  # bands behind the lines, rings and mask marks over the dots
+_ANCHOR_DRAG_TIME_S, _ANCHOR_MOVE_PX = 60.0, 12  # anchor edit: a press is a click unless the mouse moves more than 12 px (held time does not matter)
 
 
 def _line_pen(color: QColor) -> QPen:
@@ -79,6 +80,41 @@ def _finite_runs(*arrays: np.ndarray) -> list[tuple[int, int]]:
     return [(a, b) for a, b in runs if b - a >= 2]
 
 
+_ANCHOR_HIT_PX = 10.0  # anchor edit: a right click this close (screen px) to an anchor square removes it; farther away it opens the anchor menu
+_CURSOR_SIZE, _CURSOR_HOT = 36, 10  # logical px: the anchor cursor's picture and its cross-hair centre (the click point)
+
+
+def _anchor_cursor(needed: int) -> QCursor:
+    """The anchor edit's pointer: a cross-hair, plus a round gold badge with the number of points the shape still needs at its lower right
+    (none once there are enough). Drawn at the screen's pixel ratio so it stays sharp."""
+    if needed <= 0:
+        return QCursor(Qt.CursorShape.CrossCursor)
+    screen = QGuiApplication.primaryScreen()
+    ratio = screen.devicePixelRatio() if screen is not None else 1.0
+    pixmap = QPixmap(round(_CURSOR_SIZE * ratio), round(_CURSOR_SIZE * ratio))
+    pixmap.setDevicePixelRatio(ratio)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    c = _CURSOR_HOT + 0.5
+    for color, width in (("#ffffff", 3.0), ("#000000", 1.0)):  # a white halo keeps the cross visible on dark and light plots
+        painter.setPen(QPen(QColor(color), width))
+        painter.drawLine(QPointF(c, 0.5), QPointF(c, 2 * _CURSOR_HOT + 0.5))
+        painter.drawLine(QPointF(0.5, c), QPointF(2 * _CURSOR_HOT + 0.5, c))
+    badge = QRectF(_CURSOR_HOT + 6.0, _CURSOR_HOT + 6.0, 17.0, 17.0)
+    painter.setPen(QPen(QColor("#000000"), 1.0))
+    painter.setBrush(QColor(get_active_theme().accent_gold))
+    painter.drawEllipse(badge)
+    font = QFont()
+    font.setPixelSize(12)
+    font.setBold(True)
+    painter.setFont(font)
+    painter.setPen(QColor("#000000"))
+    painter.drawText(badge, int(Qt.AlignmentFlag.AlignCenter), str(needed) if needed < 10 else "9+")
+    painter.end()
+    return QCursor(pixmap, _CURSOR_HOT, _CURSOR_HOT)
+
+
 class _MiddlePanViewBox(pg.ViewBox):
     """pyqtgraph pans with the left button by default; here only the middle button pans (the left one is left free for clicking a cube)."""
 
@@ -89,12 +125,17 @@ class _MiddlePanViewBox(pg.ViewBox):
         super().mouseDragEvent(ev, axis)
 
     claim_right_click = None  # set by the plot: a function (scene position) -> bool, True where the plan bar wants the right-click
+    anchor_right_click = None  # set by the plot: a function (scene position) -> bool, True when the anchor-edit mode took the right-click (no menu)
 
     def mouseClickEvent(self, ev):
         """pyqtgraph hands a right-click to the ViewBox before any item and the ViewBox accepts it (its own menu). Over a step of the plan bar the click is declined
-        here, so that the bar (and its menu) gets it."""
+        here, so that the bar (and its menu) gets it. In the anchor-edit mode a right-click elsewhere goes to the anchors (remove the square under it, or the
+        anchor menu) instead of opening the view's menu."""
         if ev.button() == Qt.MouseButton.RightButton and self.claim_right_click is not None and self.claim_right_click(ev.scenePos()):
             ev.ignore()
+            return
+        if ev.button() == Qt.MouseButton.RightButton and self.anchor_right_click is not None and self.anchor_right_click(ev.scenePos(), ev.screenPos()):
+            ev.accept()
             return
         super().mouseClickEvent(ev)
 
@@ -111,6 +152,9 @@ class SensorgramPlot(QWidget):
     plan_text_edit_requested = pyqtSignal(int)
     plan_menu_requested = pyqtSignal(int, QPoint)
     plan_text_committed = pyqtSignal(int, str)  # (step index, new text) from the in-place editor
+    anchor_point_added = pyqtSignal(float)  # anchor-edit mode: a left click on the plot, at this data x (the cube cursor does not move)
+    anchor_point_remove_requested = pyqtSignal(float)  # anchor-edit mode: a right click on an anchor square, at its data x
+    anchor_menu_requested = pyqtSignal(float, QPoint)  # anchor-edit mode: a right click away from every square: data x, screen position for the menu
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -127,6 +171,10 @@ class SensorgramPlot(QWidget):
         self._plan_bar = PlanBarItem()
         self._item.addItem(self._plan_bar, ignoreBounds=True)  # behind the traces; not part of the auto-range
         self._item.getViewBox().claim_right_click = self._plan_bar.claims_scene_pos
+        self._item.getViewBox().anchor_right_click = self._on_anchor_right_click
+        self._anchor_mode = False
+        self._drag_defaults: tuple[float, int] | None = None  # the scene's click-vs-drag limits, restored when the anchor edit ends
+        self._anchors_needed = 0  # anchor points the shape still needs, shown beside the edit mode's cross-hair
         self._stats = StepStatsItem()  # the mean +/- SD of every line in every step, along the same edge as the legend it follows
         self._item.addItem(self._stats, ignoreBounds=True)
         self._stats.set_row_source(self._legend_rows)
@@ -138,6 +186,15 @@ class SensorgramPlot(QWidget):
         self._text_editor = StepTextEditor(self._widget.viewport())  # floats over the plot, like the baseline range box
         self._text_editor.committed.connect(self.plan_text_committed)
         self._room_applied = (0.0, 0.0, 0.0)  # (top, bottom) fractions of the plot height the y range was widened by, and the pixels the x range was widened by on the left
+        # The user's own zoom or pan (wheel, right-drag, middle-drag, an axis) is kept over redraws (2026-11-10): a recomputed sensorgram used to jump
+        # back to the full view. `reset_view` (the corner "A" button, the view menu's "View All") and a change of an axis' quantity end it.
+        self._view_kept = False
+        view_box = self._item.getViewBox()
+        view_box.sigRangeChangedManually.connect(self._on_view_changed_by_user)
+        self._item.autoBtn.clicked.disconnect()  # pyqtgraph's own handler ranges to the data alone, without the room for the plan bar and the table
+        self._item.autoBtn.clicked.connect(self.reset_view)
+        if view_box.menu is not None:
+            view_box.menu.viewAll.triggered.connect(self.reset_view)  # after the menu's own auto-range: the same full view as the "A" button
         self._window = pg.LinearRegionItem(values=(0.0, 1.0), movable=True, span=BASELINE_BAND_SPAN)
         self._window.setZValue(-5)
         self.set_baseline_style(QColor(DEFAULT_COLOR), DEFAULT_ALPHA)
@@ -163,6 +220,7 @@ class SensorgramPlot(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._widget)
+        self._axis_labels: tuple[str, str] = ("", "")
         self.set_axis_labels("Cube (#)", "Peak position (nm)")
         # The cube cursor moves at every frame of Play and Qt repaints what it crosses: the plan bar, the table and the axes were painted
         # again each time (~24 ms of 31 per move, offscreen, 2026-11-02). Qt keeps them as pictures instead and redraws a picture only
@@ -203,8 +261,34 @@ class SensorgramPlot(QWidget):
             axis.setTextPen(pg.mkPen(theme.text_muted))
 
     def set_axis_labels(self, x_label: str, y_label: str) -> None:
+        """Name the axes. A new name means another quantity (cube number <-> time, position <-> shift, another metric): the numbers of a kept zoom
+        would point at nothing, so the next draw shows the full view again."""
+        if (x_label, y_label) != self._axis_labels:
+            self._axis_labels = (x_label, y_label)
+            self._view_kept = False
         self._item.setLabel("bottom", x_label)
         self._item.setLabel("left", y_label)
+
+    # -- the view: full, or the user's own zoom ----------------------------------------------------------------------------------
+
+    def view_is_kept(self) -> bool:
+        """True while the user's own zoom or pan is kept: a redraw then leaves the ranges alone."""
+        return self._view_kept
+
+    def _on_view_changed_by_user(self, *_args: object) -> None:
+        if self._pool.drawn:  # a wheel turn over an empty plot is no zoom on anything: the first lines then get the full view
+            self._view_kept = True
+
+    def reset_view(self, *_args: object) -> None:
+        """Back to the full view: all the data, plus the room the plan bar and the step statistics table need. Ends a kept zoom."""
+        self._view_kept = False
+        self._item.getViewBox().autoRange()
+        self._apply_room()
+        self._item.autoBtn.hide()  # as pyqtgraph does after its own click; it comes back on hover
+
+    def forget_view(self) -> None:
+        """The next draw shows the full view (a new dataset: the old zoom means nothing there)."""
+        self._view_kept = False
 
     # -- drawing -----------------------------------------------------------------------------------------------------------------
 
@@ -219,12 +303,22 @@ class SensorgramPlot(QWidget):
             self._legend.clear()
 
     def show_series(
-        self, series: Sequence[Series], stale: np.ndarray | None = None, mask_marks: Mapping[str, tuple[np.ndarray, np.ndarray]] | None = None
+        self,
+        series: Sequence[Series],
+        stale: np.ndarray | None = None,
+        mask_marks: Mapping[str, tuple[np.ndarray, np.ndarray]] | None = None,
+        baseline_curves: bool = False,
+        anchor_dots: str | None = None,
     ) -> None:
         """``stale``: bool per point (same length as the series' x); those points get a hollow grey diamond on top (a shape and colour of their own, so they are never
         taken for a mask mark, and not in the line's colour): out-of-date results are still drawn. None draws none.
         ``mask_marks``: series key -> (persistent, individual), bool per point; a persistent mask gets a hollow triangle (like a play button),
         an individual one a hollow circle, both in the mask colour (None draws none).
+        ``baseline_curves``: draw each line's drift baseline (`Series.baseline_curve`) as a dashed line in the line's colour; the panel asks for it only while
+        the traces are absolute (Subtract off), where the curve is what Subtract would take off. Out of the auto-range (a curve extrapolated past the
+        anchors must not stretch the view).
+        ``anchor_dots``: mark each line's anchors (`Series.anchor_x`) with a hollow square in the line's colour: ``"absolute"`` at the trace's level there
+        (Subtract off: the curve passes through or near them), ``"subtracted"`` at what is left after correction (Subtract on: on or near zero); None draws none.
 
         Drawing cost (2026-11-02, ``docs/spectra_sensorgram_draw_cost_2026-11-02.md``): the items are reused (`PlotItemPool`), the lines are 1 px
         (Qt's fast path; 1.5 px was 8-11x slower to paint) and the dots on the points are drawn only up to `DOTS_MAX_LINES` lines (64,000 dots
@@ -255,6 +349,17 @@ class SensorgramPlot(QWidget):
             self._svg_parts.append(SvgPart("Lines", s.label, line))
             if named:
                 self._legend.addItem(line, s.label)
+            if baseline_curves and s.baseline_curve is not None:
+                dashed = pool.take("baseline_curve", lambda: pg.PlotCurveItem(antialias=True), ignore_bounds=True, z=_Z_LINE - 0.5)
+                pen = _line_pen(color)
+                pen.setStyle(Qt.PenStyle.DashLine)
+                dashed.setData(s.x, s.baseline_curve, pen=pen, connect="finite", skipFiniteCheck=False)
+                self._svg_parts.append(SvgPart("Baseline curves", s.label, dashed))
+            if anchor_dots is not None and s.anchor_x is not None and s.anchor_y is not None and s.anchor_x.size:
+                ay = s.anchor_y if anchor_dots == "absolute" or s.anchor_base is None else s.anchor_y - s.anchor_base
+                squares = pool.take("anchor_dots", lambda: pg.ScatterPlotItem(), ignore_bounds=True, z=_Z_MARKS)
+                squares.setData(s.anchor_x, ay, symbol="s", size=9, brush=None, pen=pg.mkPen(color, width=1.8))
+                self._svg_parts.append(SvgPart("Baseline anchors", s.label, squares))
             if dots and finite.any():
                 # Out of the auto-range: the dots sit on the line's points (same bounds), and a dot item would also widen the range by its radius.
                 dot_item = pool.take("dots", lambda: pg.ScatterPlotItem(), ignore_bounds=True, z=_Z_DOTS)
@@ -294,8 +399,9 @@ class SensorgramPlot(QWidget):
         self._tighten_legend()
         self._fit_legend(len(series))
         self._place_legend()
-        self._item.getViewBox().autoRange()
-        self._apply_room()
+        if not self._view_kept:  # the user's own zoom stays over a redraw (a recompute, another selection); `reset_view` brings the full view back
+            self._item.getViewBox().autoRange()
+            self._apply_room()
 
     def _tighten_legend(self) -> None:
         """Rows closer together: a legend row is as high as its label (text line + twice the label's document margin, 4 px each by default; the 20 px sample is the floor)."""
@@ -360,8 +466,9 @@ class SensorgramPlot(QWidget):
         return top, bottom, left
 
     def _remake_room_if_changed(self) -> None:
-        """Range the view again, with the room made, when what the bar, its labels and the table need beyond the traces is not what the view was ranged with."""
-        if self._room() != self._room_applied:
+        """Range the view again, with the room made, when what the bar, its labels and the table need beyond the traces is not what the view was ranged with.
+        Not while the user's own zoom is kept: `reset_view` makes the room then."""
+        if not self._view_kept and self._room() != self._room_applied:
             self._item.getViewBox().autoRange()
             self._apply_room()
 
@@ -595,10 +702,91 @@ class SensorgramPlot(QWidget):
             elif self._on_x_label(event.scenePos()):
                 self.x_label_double_clicked.emit()
             return
-        if event.isAccepted():
+        if event.isAccepted() and not isinstance(getattr(event, "currentItem", None), pg.ScatterPlotItem):
+            # Another item handled it (the plan bar, a baseline band). A scatter item (the dots at every cube, the anchor squares, the mask marks)
+            # accepts every left click that lands on one of its points but does nothing with it: such a click is still a click on the plot.
+            # (2026-11-09: before this, clicking on a trace - where an anchor point belongs - was mostly lost.)
             return
         view_box = self._item.getViewBox()
         if not view_box.sceneBoundingRect().contains(event.scenePos()):
             return
+        x = float(view_box.mapSceneToView(event.scenePos()).x())
+        if self._anchor_mode:
+            self.anchor_point_added.emit(x)
+            return
         self._plan_bar.clear_selection()  # a click on the plot, not on a step: no step stays selected
-        self.x_clicked.emit(float(view_box.mapSceneToView(event.scenePos()).x()))
+        self.x_clicked.emit(x)
+
+    # -- the drift baseline's anchor points ----------------------------------------------------------------------------------
+
+    def set_anchor_mode(self, on: bool) -> None:
+        """Anchor-edit mode: a left click adds an anchor point (`anchor_point_added`), a right click on an anchor square removes it
+        (`anchor_point_remove_requested`) and a right click anywhere else asks for the anchor menu (`anchor_menu_requested`); the cube cursor, the plot's own right-click menu and every gesture of the plan bar (select, resize, retype, its menu) wait until it is off. A cross-hair
+        pointer shows the mode."""
+        self._anchor_mode = bool(on)
+        self._plan_bar.set_locked(self._anchor_mode)  # no step edits while anchors are edited: every click is an anchor click
+        if self._anchor_mode:
+            self._plan_bar.clear_selection()
+        self._apply_anchor_cursor()
+        # pyqtgraph turns a press into a drag (and so no click) once the mouse moves 5 px, or moves at all after 0.5 s held. Nothing is dragged with
+        # the left button in the edit mode, so a slow or slightly shaky click still counts; only a real move (> 12 px) is a drag (middle-button pan).
+        scene = self._item.scene()
+        if self._drag_defaults is None:
+            self._drag_defaults = (scene.minDragTime, scene._moveDistance)
+        drag_time, move_distance = (_ANCHOR_DRAG_TIME_S, _ANCHOR_MOVE_PX) if self._anchor_mode else self._drag_defaults
+        scene.minDragTime = drag_time
+        scene.setMoveDistance(move_distance)
+
+    def anchor_mode(self) -> bool:
+        return self._anchor_mode
+
+    def set_anchors_needed(self, needed: int) -> None:
+        """How many more anchor points the chosen shape needs (0 = enough). Shown as a number beside the edit mode's cross-hair, so the count
+        goes 2 -> 1 -> gone as the points of a linear baseline are placed."""
+        needed = max(0, int(needed))
+        if needed != self._anchors_needed:
+            self._anchors_needed = needed
+            self._apply_anchor_cursor()
+
+    def anchors_needed(self) -> int:
+        return self._anchors_needed
+
+    def _apply_anchor_cursor(self) -> None:
+        viewport = self._widget.viewport()
+        if self._anchor_mode:
+            viewport.setCursor(_anchor_cursor(self._anchors_needed))
+        else:
+            viewport.unsetCursor()
+
+    def _on_anchor_right_click(self, scene_pos, screen_pos=None) -> bool:
+        """A right click in the anchor edit: on (within `_ANCHOR_HIT_PX` of) an anchor square it removes that anchor; anywhere else on the plot it
+        asks for the anchor menu (add here, clear all, scope, stop). Either way the view's own menu does not open."""
+        if not self._anchor_mode:
+            return False
+        view_box = self._item.getViewBox()
+        if not view_box.sceneBoundingRect().contains(scene_pos):
+            return False
+        hit = self.anchor_square_at(scene_pos)
+        if hit is not None:
+            self.anchor_point_remove_requested.emit(hit)
+        else:
+            point = screen_pos.toPoint() if screen_pos is not None else QPoint()
+            self.anchor_menu_requested.emit(float(view_box.mapSceneToView(scene_pos).x()), point)
+        return True
+
+    def anchor_square_at(self, scene_pos) -> float | None:
+        """The data x of the anchor square drawn nearest to `scene_pos` if it is within `_ANCHOR_HIT_PX` screen pixels, else None."""
+        view_box = self._item.getViewBox()
+        best, best_x = _ANCHOR_HIT_PX, None
+        for part in self._svg_parts:
+            if part.layer != "Baseline anchors":
+                continue
+            xs, ys = part.item.getData()
+            for x, y in zip(xs, ys):
+                if not (np.isfinite(x) and np.isfinite(y)):
+                    continue
+                at = view_box.mapViewToScene(QPointF(float(x), float(y)))
+                distance = float(np.hypot(at.x() - scene_pos.x(), at.y() - scene_pos.y()))
+                if distance <= best:
+                    best, best_x = distance, float(x)
+        return best_x

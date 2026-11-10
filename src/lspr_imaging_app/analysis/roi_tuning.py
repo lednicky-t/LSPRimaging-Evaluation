@@ -34,7 +34,7 @@ Assumptions worth knowing:
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
 import numpy as np
@@ -232,24 +232,35 @@ def lattice_objectives(
     membership: StepMembership,
     x: np.ndarray,
     statistics: StatisticsSettings,
+    anchors: Mapping[int, Sequence[np.ndarray]] | None = None,
+    segments: np.ndarray | None = None,
 ) -> LatticeObjectives:
     """Reduce the metric traces of every lattice point to the objectives.
 
     ``traces``: ``float64 [point, roi, cube]``, the metric (nm) of each shifted copy at every cube of ``membership`` (NaN = no value there). ``x``: the
-    Sensorgram's x of each cube (the unit of ``statistics``' baseline window; only needed by the post-processing). Each trace goes through the Sensorgram's own
-    post-processing (``step_stats.trace_matrix``); smoothing, when chosen, is done inside each region on its own so it never blends the two."""
+    Sensorgram's x of each cube (the unit of ``statistics``' baseline window and of the drift curve; only needed by the post-processing). Each trace goes
+    through the Sensorgram's own post-processing (``step_stats.trace_matrix``); smoothing, when chosen, is done inside each region on its own so it never
+    blends the two.
+
+    ``anchors`` (2026-11-10): each ROI's anchor regions of the drift baseline (one ``bool [cube]`` per anchor); the curve through them is fitted to every
+    shifted copy's own trace and taken off before the numbers are made, as the Sensorgram would draw that copy. The traces must then hold the anchors'
+    cubes as well as the two regions'. None: no curve. ``segments``: the smoothing pieces to use instead of the two regions' own (one label per cube; needed
+    when the traces hold cubes outside both regions, which would otherwise be smoothed as one stretch)."""
     offsets = np.asarray(offsets, dtype=np.float64)
     traces = np.asarray(traces, dtype=np.float64)
     if traces.ndim != 3 or traces.shape[:2] != (len(offsets), len(roi_ids)) or traces.shape[2] != membership.used.shape[1]:
         raise ValueError("traces must be [point, roi, cube] with one row per offset, one column per roi_id and one entry per cube of the membership")
-    segments = membership_segments(membership) if statistics.smooth_within_steps and statistics.smoothing_method != "none" else None
+    if not (statistics.smooth_within_steps and statistics.smoothing_method != "none"):
+        segments = None
+    elif segments is None:
+        segments = membership_segments(membership)
     shape = (len(offsets), len(roi_ids))
     baseline_mean, signal_mean, noise, signal_noise, baseline_std, signal_std, baseline_sem, signal_sem = (np.full(shape, np.nan) for _ in range(8))
     n_baseline = np.zeros(shape, dtype=np.int64)
     n_signal = np.zeros(shape, dtype=np.int64)
     for point in range(len(offsets)):
         stats: StepStats = step_statistics(
-            roi_ids, trace_matrix(roi_ids, {r: traces[point, i] for i, r in enumerate(roi_ids)}, x, statistics, segments), membership
+            roi_ids, trace_matrix(roi_ids, {r: traces[point, i] for i, r in enumerate(roi_ids)}, x, statistics, segments, anchors), membership
         )
         baseline_mean[point], signal_mean[point] = stats.mean[:, BASELINE], stats.mean[:, SIGNAL]
         noise[point], signal_noise[point] = stats.noise[:, BASELINE], stats.noise[:, SIGNAL]

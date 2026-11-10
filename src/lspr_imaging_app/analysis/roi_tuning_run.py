@@ -26,6 +26,7 @@ import numpy as np
 
 from ..applog import log_event
 from ..progress import Cancelled
+from .baseline_drift import AnchorCubes, regions_from_cubes
 from .roi_tuning import (
     Lattice,
     LatticeObjectives,
@@ -39,6 +40,7 @@ from .scan import scan_cubes
 from .scan_fingerprint import cell_hashes
 from .scan_jobs import ScanPlan
 from .settings import MetricSettings, StatisticsSettings
+from .step_stats import StepMembership, membership_segments
 from .trace_fit import TraceInput, traces_from_inputs
 
 logger = logging.getLogger(__name__)
@@ -256,11 +258,36 @@ def objectives_from_traces(
     first_unix_ms: Sequence[float] | np.ndarray,
     last_unix_ms: Sequence[float] | np.ndarray,
     statistics: StatisticsSettings,
+    drift_anchors: AnchorCubes | None = None,
+    x_is_time: bool = False,
 ) -> LatticeObjectives:
     """The statistical numbers of every (position, ROI) from the metric ``traces`` of ``matrix``: the Sensorgram's own post-processing (``statistics``), then the
     baseline and signal step statistics (``roi_tuning.lattice_objectives``). ``first_unix_ms`` / ``last_unix_ms``: acquisition span of each cube of the matrix
-    (same order as ``matrix.cube_indices``). The baseline switch of ``statistics`` is turned off: subtracting a constant per ROI changes neither the delta nor the
-    noise. Cheap (no scan, no fit): the step that runs again when the user changes the fit, formula or smoothing."""
+    (same order as ``matrix.cube_indices``). Cheap (no scan, no fit): the step that runs again when the user changes the fit, formula or smoothing.
+
+    **The baseline.** Without ``drift_anchors`` the baseline switch of ``statistics`` is turned off: the Range method's mean is one number per ROI, and
+    subtracting it changes neither the delta nor the noise. With them (2026-11-10: the Sensorgram subtracts a drift *curve*, ``baseline_drift.anchor_cubes_by_roi``)
+    the curve is fitted to every shifted copy's trace and taken off first, because a curve does change the delta (by the drift between the two steps) and the
+    scatter (by the drift inside a step). The matrix must then hold every anchor cube (``baseline_drift.cubes_needed``; the caller checks, a missing cube would
+    give an anchor another level than the Sensorgram's). ``x_is_time``: the Sensorgram's x axis is time, so the curve is fitted against the cubes' start times
+    as it is there (the result is the same for any zero and unit of time); else against the cube number."""
     membership = region_membership(regions, matrix.cube_indices, first_unix_ms, last_unix_ms)
-    x = np.asarray(matrix.cube_indices, dtype=np.float64)  # the Sensorgram's x is the cube number
-    return lattice_objectives(matrix.roi_ids, matrix.offsets, traces, membership, x, replace(statistics, baseline_enabled=False))
+    cubes = np.asarray(matrix.cube_indices, dtype=np.int64)
+    if drift_anchors is None:
+        return lattice_objectives(matrix.roi_ids, matrix.offsets, traces, membership, cubes.astype(np.float64), replace(statistics, baseline_enabled=False))
+    first = np.asarray(first_unix_ms, dtype=np.float64)
+    x = (first - np.nanmin(first)) / 1000.0 if x_is_time and np.isfinite(first).any() else cubes.astype(np.float64)
+    return lattice_objectives(
+        matrix.roi_ids, matrix.offsets, traces, membership, x, statistics, regions_from_cubes(cubes, drift_anchors), _smoothing_pieces(membership, cubes)
+    )
+
+
+def _smoothing_pieces(membership: StepMembership, cubes: np.ndarray) -> np.ndarray:
+    """The pieces "smooth inside the steps" works on when the matrix holds anchor cubes beside the two steps': each step is a piece (as without anchors),
+    and the cubes outside both are cut wherever their numbers are not consecutive, so two anchors far apart in the experiment are never smoothed as one
+    stretch. (The Sensorgram cuts at the plan's step boundaries; a run of consecutive anchor cubes that crosses one is the only difference.)"""
+    labels = membership_segments(membership)
+    outside = labels == -1
+    run = np.concatenate(([0], np.cumsum(np.diff(cubes) != 1)))
+    labels[outside] = len(membership.steps) + run[outside]
+    return labels

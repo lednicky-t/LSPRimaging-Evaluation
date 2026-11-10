@@ -545,7 +545,10 @@ class StepTableModule(QObject):
             fitted_ms = (time.perf_counter() - t0) * 1e3
             numbers = None
             if not was_cancelled:
-                numbers = compute_step_numbers(job.rois, job.groups, {**job.known, **new}, job.x, job.statistics, job.segments, job.membership)  # type: ignore[arg-type]
+                numbers = compute_step_numbers(
+                    job.rois, job.groups, {**job.known, **new}, job.x, job.statistics, job.segments, job.membership,  # type: ignore[arg-type]
+                    tuple(job.stored.cube_indices),
+                )
             log_event(
                 logger, "step_table.compute", logging.DEBUG, rois=len(job.rois), groups=len(job.groups), fitted=len(new), fit_ms=round(fitted_ms, 1),
                 total_ms=round((time.perf_counter() - t0) * 1e3, 1), cancelled=was_cancelled,

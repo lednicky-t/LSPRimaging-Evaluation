@@ -112,6 +112,10 @@ class RoiOverlayControls(QWidget):
         """Show or hide, exactly as a click on the toggle does: the change is reported (the View tab's All buttons)."""
         self._toggle_button.setChecked(bool(shown))
 
+    def set_toggle_shown(self, shown: bool) -> None:
+        """Show or hide the visibility toggle itself (the Sensorgram's baseline selector has its show / hide on a pencil button in the ribbon)."""
+        self._toggle_button.setVisible(bool(shown))
+
     def sync_from(self, other: RoiOverlayControls) -> None:
         """Copy another instance's state without emitting anything (the same controls sit on the ROIs and View tabs)."""
         self.set_state(

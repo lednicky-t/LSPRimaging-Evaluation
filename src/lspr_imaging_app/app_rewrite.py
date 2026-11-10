@@ -379,12 +379,16 @@ def analysis_scan_source(m: _Modules) -> ScanSource:
     )
 
 
-def _connect_roi_renumbering(roi_toolbox: RoiToolbox, selection: SelectionModule) -> None:
+def _connect_roi_renumbering(roi_toolbox: RoiToolbox, selection: SelectionModule, analysis_settings: AnalysisSettingsModule | None = None) -> None:
     """Everything that holds a ROI id follows ``RoiToolbox.roi_ids_renumbered``
     (a delete closing the gap, a fresh detection). The selection holds no
     toolbox reference of its own, so this is the one place that connects
-    them. Kept as a function so a test can wire exactly what the app wires."""
+    them. Kept as a function so a test can wire exactly what the app wires.
+    The analysis settings hold a ROI's own anchor points of the drift
+    baseline (2026-11-09)."""
     roi_toolbox.roi_ids_renumbered.connect(selection.remap_roi_ids)
+    if analysis_settings is not None:
+        roi_toolbox.roi_ids_renumbered.connect(analysis_settings.remap_roi_ids)
 
 
 def capture_session(
@@ -785,7 +789,7 @@ def _build_modules() -> _Modules:
     # remap_roi_ids(), so a delete-driven ROI renumber never leaves a stale
     # selected id behind (see roi/toolbox.py's module docstring, "Cross-
     # module consequence", and selection/module.py).
-    _connect_roi_renumbering(roi_toolbox, selection)
+    _connect_roi_renumbering(roi_toolbox, selection, analysis_settings)
 
     # Which session-scoped folder the session autosave points at is
     # `SessionCoordinator`'s job, not a plain
@@ -849,7 +853,10 @@ def _build_modules() -> _Modules:
     cube_display = CubeDisplayModule(dataset)
     trace_store = TraceStore(scan_results)  # shut down after the panels (build_main_window), which may still be fitting
     sensorgram_axis = SensorgramAxis.of(scan_results, dataset, cube_display, analysis_settings)
-    step_table = StepTableModule(scan_results, roi_toolbox, dataset, analysis_settings, experiment_plan, trace_store, sensorgram_axis)
+    # The drift baseline is fitted against the Sensorgram's x (cube number or time); the trial fits it the same way, and redoes it when the axis is switched.
+    roi_tuning.set_x_is_time(sensorgram_axis.uses_time)
+    sensorgram_axis.axis_changed.connect(roi_tuning.refit_for_axis)
+    step_table =StepTableModule(scan_results, roi_toolbox, dataset, analysis_settings, experiment_plan, trace_store, sensorgram_axis)
     data_checks = DataChecksModule(scan_results, roi_toolbox, dataset, analysis_settings, experiment_plan, trace_store)
     image_motion = ImageMotionModule(dataset, experiment_plan)
     if app is not None:

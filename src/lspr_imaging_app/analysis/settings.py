@@ -239,6 +239,29 @@ class StatisticsSettings:
     baseline_enabled: bool = False
     baseline_window_start: float | None = None
     baseline_window_end: float | None = None
+    # The drift baseline (2026-11-09, `baseline_drift.py`). "window" = the mean inside the window above (an offset, the method it always was);
+    # "anchors" = a curve of `baseline_shape` through the anchor points clicked on the plot.
+    baseline_method: str = "window"
+    baseline_shape: str = "linear"
+    # Anchor points: (roi id, cube number) pairs, roi id 0 = every ROI; a ROI's points are the shared ones plus its own (kept in step with ROI
+    # renumbering by `AnalysisSettingsModule.remap_roi_ids`). Each point is the mean of the cubes within `baseline_point_halfwidth` cubes of it (in file
+    # order). Cube numbers, not plot x, so a Cube / Time switch keeps them.
+    baseline_anchor_points: tuple[tuple[int, int], ...] = ()
+    baseline_point_halfwidth: int = 2
+    # The "window" method's anchor steps (shown as "Range", 2026-11-09): plan steps marked as baseline anchors, by `EffectiveStep.ref`
+    # (("m", step, measured start ms, measured label) or ("a", uid)). None marked: the window's mean, as always. Marked: each step minus
+    # `baseline_step_trim` cubes at each border is an anchor, connected by `baseline_shape`.
+    baseline_anchor_steps: tuple[tuple, ...] = ()
+    baseline_step_trim: int = 2
     sensorgram_display_mode: str = "individual"
     sensorgram_aggregation: str = "mean"
     sensorgram_band: str = "sd"
+
+    def __post_init__(self) -> None:
+        if self.baseline_method == "steps":  # the method's name while it also took plan steps (a few test sessions of 2026-11-09)
+            self.baseline_method = "anchors"
+        # A session file holds the pairs as JSON lists: made tuples again, so equal settings compare equal and nothing shares a mutable list.
+        self.baseline_anchor_points = tuple(sorted({(int(roi_id), int(cube)) for roi_id, cube in (self.baseline_anchor_points or ())}))
+        self.baseline_point_halfwidth = max(0, int(self.baseline_point_halfwidth))
+        self.baseline_anchor_steps = tuple(sorted({tuple(ref) for ref in (self.baseline_anchor_steps or ())}, key=repr))
+        self.baseline_step_trim = max(0, int(self.baseline_step_trim))

@@ -27,8 +27,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from PyQt6.QtCore import QPoint, QPointF, QRectF, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen, QTransform
+from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QIcon, QPainter, QPainterPath, QPen, QTransform
 from PyQt6.QtWidgets import QApplication
+
+from lspr_ui import load_tabler_icon
 
 from ...plan.bar_model import (
     ALIGN_DATA,
@@ -47,6 +49,7 @@ Z_VALUE = -20  # below the filled bands of an average (-10), the baseline select
 EDGE_TOLERANCE_PX = 5.0  # how close to a boundary the pointer must be to take hold of it
 _EDGE_ALPHA = 90
 _TEXT_SIDE_MARGIN_PX = 4.0
+_ANCHOR_MARK_PX = 12.0  # the anchor drawn in a Range baseline anchor step's lower left corner
 
 
 @dataclass(frozen=True)
@@ -80,7 +83,10 @@ class PlanBarItem(DeviceSpaceItem):
         self._selected: tuple[int, ...] = ()  # indices of the selected steps (sorted); only their edges can be dragged
         self._anchor: int | None = None  # the step a Shift-click measures its range from
         self._dragging: tuple[int, str] | None = None  # (step index, edge) while a boundary is held
+        self._locked = False  # no pointer gestures (the Sensorgram's anchor-point edit mode): `set_locked`
         self._drag_together = False  # the boundary being held is shared by two selected steps: both move
+        self._baseline_anchors: frozenset[int] = frozenset()  # steps marked as Range baseline anchors: a small anchor in their lower left corner
+        self._anchor_icons: dict[tuple[str, int], QIcon] = {}  # (colour, size in px) -> the anchor mark, made once (a handful: one per step colour)
         self.setZValue(Z_VALUE)
 
     # -- what to draw ---------------------------------------------------------------------------------------------------
@@ -93,6 +99,16 @@ class PlanBarItem(DeviceSpaceItem):
         if any(index not in present for index in self._selected):
             self._set_selection(tuple(i for i in self._selected if i in present), self._anchor if self._anchor in present else None)  # a step is gone (another dataset, no traces)
         self.update()
+
+    def set_baseline_anchors(self, indices: frozenset[int] | set[int]) -> None:
+        """The steps (by index) marked as anchors of the Range baseline (2026-11-09): each gets a small anchor in its lower left corner."""
+        indices = frozenset(int(i) for i in indices)
+        if indices != self._baseline_anchors:
+            self._baseline_anchors = indices
+            self.update()
+
+    def baseline_anchors(self) -> frozenset[int]:
+        return self._baseline_anchors
 
     def set_theme(self, text_color: str, background: str, accent: str | None = None) -> None:
         self._text_color, self._background = text_color, background
@@ -226,9 +242,20 @@ class PlanBarItem(DeviceSpaceItem):
             return None
         return grab_edge(self._steps, self._selected, local.x(), EDGE_TOLERANCE_PX * self._pixel_width())
 
+    def set_locked(self, locked: bool) -> None:
+        """Locked (the Sensorgram's anchor-point edit mode, 2026-11-09): the bar is still drawn but takes no pointer gesture at all (no select, no boundary
+        drag, no text edit, no menu, no resize cursor), so every click goes to the plot underneath."""
+        self._locked = bool(locked)
+        if self._locked:
+            self.setToolTip("")
+            self.unsetCursor()
+
+    def is_locked(self) -> bool:
+        return self._locked
+
     def claims_scene_pos(self, scene_pos: QPointF) -> bool:
         """Whether a click at this scene position is on a step (the plot asks before the ViewBox raises its own menu)."""
-        return self.is_shown() and self.step_at_local(self.mapFromScene(scene_pos)) is not None
+        return not self.is_locked() and self.is_shown() and self.step_at_local(self.mapFromScene(scene_pos)) is not None
 
     def device_rect_of(self, index: int) -> QRectF | None:
         """Where the bar of step `index` is in viewport pixels (None when it is not in view): the in-place editor goes there."""
@@ -239,6 +266,8 @@ class PlanBarItem(DeviceSpaceItem):
 
     def hover_at(self, local: QPointF) -> None:
         """The pointer is over the plot at this point (item coordinates): show the step's tooltip, and a resize cursor over a boundary."""
+        if self.is_locked():
+            return
         step = self.step_at_local(local)
         if step is None:
             self.setToolTip("")
@@ -257,7 +286,7 @@ class PlanBarItem(DeviceSpaceItem):
 
     def mouseDragEvent(self, ev) -> None:
         """Left-drag on a boundary moves it. Anything else is declined, so the plot's own drags (the baseline selector, the cube handle) are untouched."""
-        if ev.button() != Qt.MouseButton.LeftButton or not self.is_shown():
+        if ev.button() != Qt.MouseButton.LeftButton or not self.is_shown() or (self.is_locked() and self._dragging is None):
             ev.ignore()
             return
         if ev.isStart():
@@ -279,7 +308,7 @@ class PlanBarItem(DeviceSpaceItem):
             self.edge_drag_finished.emit()
 
     def mouseClickEvent(self, ev) -> None:
-        step = self.step_at_local(ev.pos()) if self.is_shown() else None
+        step = self.step_at_local(ev.pos()) if self.is_shown() and not self.is_locked() else None
         if step is None:
             ev.ignore()
             return
@@ -396,7 +425,26 @@ class PlanBarItem(DeviceSpaceItem):
                 painter.setPen(QColor(item.text_color))
                 painter.drawText(item.text_rect, int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter), item.text)
         self._paint_role_chips(painter, drawn, area)
+        self._paint_baseline_anchors(painter, drawn)
         painter.restore()
+
+    def _paint_baseline_anchors(self, painter: QPainter, drawn: list[DrawnStep]) -> None:
+        """A small anchor (Tabler's) in the lower left corner of every step marked as a Range baseline anchor, in the colour that reads on the step's fill."""
+        if not self._baseline_anchors:
+            return
+        for item in drawn:
+            if item.step.index not in self._baseline_anchors:
+                continue
+            size = min(_ANCHOR_MARK_PX, item.rect.height() - 2.0, item.rect.width() - 2.0)
+            if size < 6.0:
+                continue  # no room in a very thin or narrow step
+            color = QColor(contrast_text_color(item.step.color, self._settings.alpha, self._background)).name()
+            spot = QRectF(item.rect.left() + 2.0, item.rect.bottom() - 2.0 - size, size, size)
+            key = (color, int(round(size)))
+            icon = self._anchor_icons.get(key)
+            if icon is None:  # kept: the bar is repainted on every pan, zoom and hover, and making the icon parses its SVG each time
+                icon = self._anchor_icons[key] = load_tabler_icon("anchor", color=color, size=key[1])
+            icon.paint(painter, spot.toRect())
 
     def _paint_role_chips(self, painter: QPainter, drawn: list[DrawnStep], area: QRectF) -> None:
         """The evaluation roles of each step (``B1`` baseline of pair 1, ``S1`` signal ...) as small chips hanging from the bar's free edge (inside it when the bar fills the plot),

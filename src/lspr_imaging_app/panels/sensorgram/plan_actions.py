@@ -64,6 +64,9 @@ class PlanBarActions(QObject):
         self._drag_context: PlanAxisContext | None = None
         self._batch_open = False
         self._structure_tools = True  # remove / add / unify steps and the baseline / signal roles in the menu: on until the owner ties them to the Experimental plan tab
+        # (2026-11-09) set by the Sensorgram panel: adds the Range baseline's anchor-step items at the top of a step's right-click menu and returns True
+        # while that edit is on; adds nothing and returns False otherwise
+        self.baseline_menu: Callable[[QMenu, list], bool] | None = None
         plan.notice.connect(self._say)
         plot.plan_edge_drag_started.connect(self._drag_started)
         plot.plan_edge_dragged.connect(self._dragged)
@@ -150,6 +153,8 @@ class PlanBarActions(QObject):
         header = menu.addAction(f"{len(targets)} steps selected" if many else (f"Step {step.order}: {step.label}" if step.label else f"Step {step.order}"))
         header.setEnabled(False)
         menu.addSeparator()
+        if self.baseline_menu is not None and self.baseline_menu(menu, [steps[i] for i in targets]):
+            menu.addSeparator()  # the Range baseline's edit is on: its anchor-step items first, the plan's items below
         menu.addAction("Edit text...").triggered.connect(lambda _checked=False: self._edit_text(index))
         menu.addAction("Colour...").triggered.connect(lambda _checked=False: self._choose_colour(index, targets))
         default = menu.addAction("Default colour")

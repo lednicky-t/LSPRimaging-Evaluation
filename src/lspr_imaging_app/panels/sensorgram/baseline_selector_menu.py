@@ -201,8 +201,8 @@ class BaselineSelectorMenu(QToolButton):
         style_general_icon_button(self)
         self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.setToolTip(
-            "Baseline selector: show or hide the band that marks where the baseline is taken (it spans only the bottom tenth of the plot), "
-            "and choose its colour and transparency."
+            "Baseline selector look: the colour, transparency, height and text size of the band that marks where the baseline is taken "
+            "(show or hide it with the pencil beside this button)."
         )
         panel = QWidget(self)
         grid = QGridLayout(panel)

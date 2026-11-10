@@ -27,10 +27,13 @@ No Qt import allowed in this file (CLAUDE.md testing rule).
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import numpy as np
 from scipy.ndimage import median_filter
 from scipy.signal import savgol_filter
 
+from .baseline_drift import METHOD_ANCHORS, METHOD_WINDOW, DriftFit, fit_drift
 from .settings import StatisticsSettings
 
 
@@ -204,6 +207,7 @@ def apply_statistics(
     y_values: np.ndarray,
     settings: StatisticsSettings,
     segments: np.ndarray | None = None,
+    anchors: Sequence[np.ndarray] | None = None,
 ) -> tuple[np.ndarray, float]:
     """One ROI's trace through the whole of Pillar II, in the fixed order.
 
@@ -227,8 +231,37 @@ def apply_statistics(
     steps" switch and whether the dataset has steps); None smooths the whole
     trace. Spike rejection and the baseline are not affected by it.
 
+    `anchors` (2026-11-09): this ROI's anchor regions, one bool mask per
+    anchor; the drift curve through them is subtracted instead of the
+    window's mean.
+
+    - ``settings.baseline_method == "anchors"``: the regions of the anchor
+      points (`baseline_drift.regions_by_roi`). None or too few anchors for
+      the shape: the trace is returned uncorrected with a NaN baseline, as
+      an empty window is (`baseline_drift.fit_drift` says why).
+    - ``"window"`` ("Range"): the regions of the plan steps marked as
+      anchors (`baseline_drift.window_step_regions`); an empty tuple (steps
+      marked, no cube left) also leaves the trace uncorrected. None = no
+      step marked: the window's mean, as before the drift baseline existed.
+
     Returns (trace, baseline_value); the baseline is NaN when correction is
-    off or the window selected nothing."""
+    off or the window selected nothing. With a drift curve it is the mean
+    level of the anchors."""
+    trace, value, _fit = apply_statistics_with_fit(x_values, y_values, settings, segments, anchors)
+    return trace, value
+
+
+def apply_statistics_with_fit(
+    x_values: np.ndarray,
+    y_values: np.ndarray,
+    settings: StatisticsSettings,
+    segments: np.ndarray | None = None,
+    anchors: Sequence[np.ndarray] | None = None,
+) -> tuple[np.ndarray, float, DriftFit | None]:
+    """`apply_statistics`, plus the drift fit when a curve through anchors is
+    the baseline (see `anchors` there; None otherwise). The fit is made even while the
+    Subtract switch is off, so the Sensorgram can draw the curve it *would*
+    subtract; the trace is corrected only when the switch is on."""
     y = np.asarray(y_values, dtype=np.float64)
 
     if settings.spike_rejection_enabled:
@@ -246,11 +279,21 @@ def apply_statistics(
     elif method == "moving_average":
         y = _smooth_by_runs(y, lambda part: smooth_moving_average(part, settings.smoothing_window), segments)
 
+    # The anchors method, or the window ("Range") method with marked anchor steps (`anchors` then holds the steps' regions; empty when no cube is
+    # left after the border offset). The window method without anchor steps (`anchors` None) is the window's mean, unchanged.
+    if settings.baseline_method == METHOD_ANCHORS or (settings.baseline_method == METHOD_WINDOW and anchors is not None):
+        if not settings.baseline_enabled and anchors is None:
+            return y, float("nan"), None
+        fit = fit_drift(x_values, y, anchors or (), settings.baseline_shape)
+        if not (settings.baseline_enabled and fit.ok):
+            return y, float("nan"), fit
+        return y - fit.curve, fit.level, fit
     if settings.baseline_enabled:
-        return normalize_to_baseline_window(
+        trace, value = normalize_to_baseline_window(
             x_values, y, settings.baseline_window_start, settings.baseline_window_end
         )
-    return y, float("nan")
+        return trace, value, None
+    return y, float("nan"), None
 
 
 def aggregate_traces(

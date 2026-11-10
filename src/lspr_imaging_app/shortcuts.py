@@ -147,6 +147,18 @@ BINDINGS: tuple[Binding, ...] = (
     Binding("mouse.slider.marks", "Mouse: sliders", "Cube strip: hop to the previous / next mark", gesture="Wheel", scope="Cube strip"),
     Binding("mouse.slider.mark_menu", "Mouse: sliders", "Cube strip: open the menu of a mark", gesture="Right-click on a mark", scope="Cube strip"),
     Binding("mouse.play_speed", "Mouse: sliders", "Change the slideshow speed", gesture="Wheel on the speed button", scope="Slideshow controls"),
+    Binding(
+        "mouse.sensorgram.anchor_add", "Mouse: Sensorgram", "Add a baseline anchor point at the nearest cube", gesture="Click",
+        scope="Sensorgram plot, anchor-point edit on",
+    ),
+    Binding(
+        "mouse.sensorgram.anchor_remove", "Mouse: Sensorgram", "Remove a baseline anchor point", gesture="Right-click on its square",
+        scope="Sensorgram plot, anchor-point edit on",
+    ),
+    Binding(
+        "mouse.sensorgram.anchor_menu", "Mouse: Sensorgram", "Anchor menu: add here, remove nearest, scope, clear all, stop editing",
+        gesture="Right-click away from the squares", scope="Sensorgram plot, anchor-point edit on",
+    ),
 )
 
 _BY_ID: dict[str, Binding] = {binding.id: binding for binding in BINDINGS}

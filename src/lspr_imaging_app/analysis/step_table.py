@@ -34,6 +34,7 @@ from .scan_trace import (
     Series,
     build_series,
 )
+from .baseline_drift import window_step_regions
 from .settings import MetricSettings, StatisticsSettings
 from .step_stats import StepMembership
 
@@ -140,10 +141,16 @@ def numbers_key(statistics: StatisticsSettings, *, group: bool) -> StatisticsSet
 
 
 def _request(
-    roi_ids: Sequence[int], groups: Sequence[GroupSpec], x: np.ndarray, statistics: StatisticsSettings, segments: np.ndarray | None, membership: StepMembership
+    roi_ids: Sequence[int], groups: Sequence[GroupSpec], x: np.ndarray, statistics: StatisticsSettings, segments: np.ndarray | None, membership: StepMembership,
+    cube_numbers: np.ndarray | None = None,
 ) -> SensorgramRequest:
     # The formula and the metric are not read by `build_series` (they decided the traces, which are handed in); the defaults stand in.
-    return SensorgramRequest(tuple(roi_ids), "", MetricSettings(), statistics, np.asarray(x, dtype=np.float64), tuple(groups), {}, segments, membership)
+    # `cube_numbers` places the drift baseline's anchor points, as the Sensorgram's does. `membership` is of the whole steps (`assign_cubes` at its
+    # default window), so it also places the Range method's anchor steps the way the Sensorgram does (`window_step_regions`).
+    return SensorgramRequest(
+        tuple(roi_ids), "", MetricSettings(), statistics, np.asarray(x, dtype=np.float64), tuple(groups), {}, segments, membership, cube_numbers=cube_numbers,
+        baseline_step_regions=window_step_regions(membership, statistics),
+    )
 
 
 def _numbers(line: Series, refs: tuple, n_steps: int) -> RowNumbers:
@@ -164,18 +171,20 @@ def compute_step_numbers(
     statistics: StatisticsSettings,
     segments: np.ndarray | None,
     membership: StepMembership,
+    cube_numbers: np.ndarray | None = None,
 ) -> StepTableNumbers:
     """The mean and SD per step of the ROIs `roi_rows` and of the groups `group_rows`.
 
     `traces` must hold the metric trace of every ROI in `roi_rows` and of every member of `group_rows` (`scan_trace.compute_traces`); `x`, `segments` and `membership` are the
     Sensorgram's own (`SensorgramAxis.x`, `step_stats.smoothing_segments` when "smooth inside steps" applies, `step_stats.assign_cubes`). A group with no member is left out
-    (no row to show); a ROI row for a ROI without a trace is an error of the caller."""
+    (no row to show); a ROI row for a ROI without a trace is an error of the caller. `cube_numbers` (the scan's cube number per position) places the drift
+    baseline's anchor points; None = no points."""
     refs = tuple(step.ref for step in membership.steps)
     n_steps = len(refs)
     rois: dict[int, RowNumbers] = {}
     groups: dict[str | None, RowNumbers] = {}
     if roi_rows:
-        lines = build_series(_request(roi_rows, (), x, statistics, segments, membership), traces, DISPLAY_INDIVIDUAL, statistics.sensorgram_aggregation, statistics.sensorgram_band)
+        lines = build_series(_request(roi_rows, (), x, statistics, segments, membership, cube_numbers), traces, DISPLAY_INDIVIDUAL, statistics.sensorgram_aggregation, statistics.sensorgram_band)
         for roi_id, line in zip(roi_rows, lines):  # `build_series` keeps the order of the request in individual mode
             rois[int(roi_id)] = _numbers(line, refs, n_steps)
     for g in group_rows:
@@ -185,7 +194,7 @@ def compute_step_numbers(
         # "group:<name>" (the id stands in for the name); the ROIs of the request that no group claims form its "Ungrouped" line, which is what the Ungrouped row is.
         spec = () if g.key is UNGROUPED else (GroupSpec(str(g.key), "", tuple(g.roi_ids)),)
         wanted = _UNGROUPED_SERIES_KEY if g.key is UNGROUPED else f"group:{g.key}"
-        lines = build_series(_request(g.roi_ids, spec, x, statistics, segments, membership), traces, DISPLAY_BY_GROUP, statistics.sensorgram_aggregation, statistics.sensorgram_band)
+        lines = build_series(_request(g.roi_ids, spec, x, statistics, segments, membership, cube_numbers), traces, DISPLAY_BY_GROUP, statistics.sensorgram_aggregation, statistics.sensorgram_band)
         line = next((ln for ln in lines if ln.key == wanted), None)
         if line is not None:
             groups[g.key] = _numbers(line, refs, n_steps)

@@ -21,6 +21,7 @@ from PyQt6.QtCore import QObject
 
 from ..applog import log_event
 from ..threaded_task import TaskRefused, ThreadedTask
+from .baseline_drift import AnchorCubes
 from .roi_tuning import Lattice, LatticeObjectives, TuningRegions
 from .roi_tuning_accept import SeedReport, seed_scan_file
 from .roi_tuning_objectives import Ranking
@@ -47,7 +48,11 @@ objectives fill the rest."""
 @dataclass(frozen=True)
 class TuningRequest:
     """Everything one tuning run is made from, as plain values (read on the GUI thread; the thread touches no module). ``cubes`` is the union of the two steps'
-    cubes, ascending; ``first_unix_ms`` / ``last_unix_ms`` are the acquisition span of each of them in that order."""
+    cubes and the ``extra_cubes``, ascending; ``first_unix_ms`` / ``last_unix_ms`` are the acquisition span of each of them in that order.
+
+    The drift baseline (2026-11-10): ``drift_anchors`` are the Sensorgram's anchor regions for these ROIs as cube numbers (None: it subtracts no curve);
+    ``extra_cubes`` are the cubes scanned for them beside the two steps'; ``x_is_time``: the Sensorgram's x axis is time (the curve is fitted against it).
+    A refit keeps the ``extra_cubes`` of the scan it refits and takes today's anchors."""
 
     roi_ids: tuple[int, ...]
     lattice: Lattice
@@ -58,10 +63,13 @@ class TuningRequest:
     statistics: StatisticsSettings
     first_unix_ms: np.ndarray
     last_unix_ms: np.ndarray
+    extra_cubes: tuple[int, ...] = ()
+    drift_anchors: AnchorCubes | None = None
+    x_is_time: bool = False
 
     @property
     def cubes(self) -> tuple[int, ...]:
-        return tuple(sorted({*self.baseline_cubes, *self.signal_cubes}))
+        return tuple(sorted({*self.baseline_cubes, *self.signal_cubes, *self.extra_cubes}))
 
     @property
     def regions(self) -> TuningRegions:
@@ -197,11 +205,14 @@ class RoiTuningTask(ThreadedTask):
             matrix, request.formula_key, request.metric, runner=None if self._pool is None else self._pool.run, cancelled=self._cancel_event.is_set,
             progress=lambda finished, total: self._emit_progress(done + (1.0 - done) * 0.9 * finished / max(total, 1), "Fitting the metric"),
         )
-        objectives = objectives_from_traces(matrix, traces, request.regions, request.first_unix_ms, request.last_unix_ms, request.statistics)
+        objectives = objectives_from_traces(
+            matrix, traces, request.regions, request.first_unix_ms, request.last_unix_ms, request.statistics, request.drift_anchors, request.x_is_time
+        )
         seconds = time.perf_counter() - started
         log_event(
             logger, "tuning.fitted", logging.INFO, positions=len(matrix.offsets), rois=len(matrix.roi_ids), cubes=len(matrix.cube_indices),
-            seconds=round(seconds, 2), fit_method=request.metric.fit_method, from_scan=done > 0.0,
+            seconds=round(seconds, 2), fit_method=request.metric.fit_method, from_scan=done > 0.0, drift_baseline=request.drift_anchors is not None,
+            anchor_cubes=len(request.extra_cubes),
         )
         return TuningResult(request, matrix, traces, objectives, seconds)
 

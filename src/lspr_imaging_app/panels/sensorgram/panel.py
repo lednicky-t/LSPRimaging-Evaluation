@@ -58,9 +58,9 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 
 import numpy as np
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor
-from PyQt6.QtWidgets import QApplication, QHBoxLayout, QLabel, QSpinBox, QVBoxLayout, QWidget
+from PyQt6.QtCore import QPoint, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QCursor
+from PyQt6.QtWidgets import QApplication, QHBoxLayout, QLabel, QMenu, QSpinBox, QToolTip, QVBoxLayout, QWidget
 
 from lspr_ui import get_active_theme
 
@@ -98,6 +98,7 @@ from ...storage.ui_state_keys import (
     SENSORGRAM_BASELINE_BAND_ALPHA,
     SENSORGRAM_BASELINE_BAND_COLOR,
     SENSORGRAM_BASELINE_BAND_VISIBLE,
+    SENSORGRAM_ANCHOR_POINT_SCOPE,
     SENSORGRAM_RIBBON_OPEN,
     SENSORGRAM_RIBBON_TAB,
     read,
@@ -116,6 +117,8 @@ from ..ui_state import UiStateStore
 from ..spectra.pick_menu import PickMenu
 from ..spectra.view_menu import IconToggle
 from ..visibility_gate import HiddenPanelGate
+from ...analysis.baseline_drift import METHOD_ANCHORS, METHOD_WINDOW, curve_subtracted, uses_anchor_steps
+from .baseline_controls import DriftBaselineControls, drift_summary, pencil_icon
 from .baseline_selector_menu import DEFAULT_ALPHA, DEFAULT_COLOR, SPEC as BASELINE_BAND_SPEC, BaselineSelectorMenu, make_font_box, make_height_box
 from .checks_group import ChecksControls
 from .mask_marks_toggle import MaskMarksToggle
@@ -267,8 +270,10 @@ class SensorgramPanel(QWidget):
         )
         self._baseline = IconToggle(
             subtract_icon,
-            "Subtract the baseline: the mean of each trace inside the baseline selector is taken off, so every trace reads as a shift from it instead of an absolute position. "
-            "The same switch as a double-click on the y axis label. Show the selector with the baseline button next to this one and drag it.",
+            "Subtract the baseline, so every trace reads as a shift from it instead of an absolute position. With \"Range\" the mean of each trace inside the "
+            "baseline selector is taken off (show the selector with the pencil and drag it), or the curve through the plan steps marked as baseline anchors; with "
+            "\"Anchor points\" the curve through the points clicked on the plot. A curve is drawn dashed while this is off. The same switch as a double-click on "
+            "the y axis label.",
             self,
         )
         self._mask_toggle = MaskMarksToggle(self)
@@ -284,6 +289,20 @@ class SensorgramPanel(QWidget):
         self._band_height = make_height_box(self)
         self._band_font = make_font_box(self)
         self._band_menu = BaselineSelectorMenu(self._band_controls, self._band_height, self._band_font, self)
+        # The Range ("window") method's edit pencil (2026-11-09): shows the baseline selector band to drag or type; it replaces the show / hide toggle
+        # that sat in the band menu (the band's visibility is still the remembered `SENSORGRAM_BASELINE_BAND_VISIBLE`). While it is on, a right-click on
+        # a plan step also offers to make the step a baseline anchor (`_baseline_step_menu`).
+        self._band_controls.set_toggle_shown(False)
+        self._band_edit = IconToggle(
+            pencil_icon,
+            "Edit the baseline range: shows the baseline selector band on the plot, to drag it or its edges, or type its range. While this is on, "
+            "right-click a step of the experimental plan to make it a baseline anchor (the band is then not used and not shown). Off hides the band; "
+            "Subtract still uses the range it marks, or the anchor steps.",
+            self,
+        )
+        self._band_edit.setChecked(self._band_visible)
+        # The drift baseline (2026-11-09): method, shape and the anchor points clicked on the plot.
+        self._drift = DriftBaselineControls(self, analysis_settings, lambda: tuple(sorted(self._selection.selected_roi_ids())), self._cube_axis_now)
         self._status = QLabel("", self)
         self._status.setWordWrap(True)
         self._status.setStyleSheet(f"color: {get_active_theme().text_dim};")
@@ -302,7 +321,7 @@ class SensorgramPanel(QWidget):
         self._ribbon.add_group("Live", self._live_toggle)
         self._ribbon.add_group("Statistic", self._display, self._center, self._band)  # how the ROIs are shown, and how an average is made
         self._ribbon.add_group("Smoothing", self._smoothing, self._window, self._within_steps, self._spikes)
-        self._ribbon.add_group("Baseline", self._baseline, self._band_menu)
+        self._ribbon.add_group("Baseline", self._baseline, *self._drift.widgets(), self._band_edit, self._band_menu)
         self._ribbon.add_group("View", self._mask_toggle, self._stale_toggle)
         self.export_button = PlotExportButton("sensorgram", lambda: self._plot.plot_item(), self._export_data, self, svg_parts=self._plot.export_parts)
         self._ribbon.add_group("Export", self.export_button)
@@ -355,9 +374,19 @@ class SensorgramPanel(QWidget):
         self._band_font.valueChanged.connect(self._plot.set_readout_font_size)
         self._plot.baseline_range_edited.connect(self._on_baseline_dragged)  # typed values are stored exactly as a dragged band's
         self._band_controls.visibility_changed.connect(self._on_band_visibility)
+        self._band_edit.toggled.connect(self._band_controls.set_visible)  # the pencil is the band's show / hide
         self._band_controls.color_changed.connect(self._on_band_color)
         self._band_controls.alpha_changed.connect(self._on_band_alpha)
         self._plot.x_clicked.connect(self._on_plot_clicked)
+        self._drift.edit.toggled.connect(self._plot.set_anchor_mode)
+        self._plot.anchor_point_added.connect(self._drift.add_point_at)
+        self._plot.anchor_point_remove_requested.connect(self._drift.remove_point_at)
+        self._plot.anchor_menu_requested.connect(self._show_anchor_menu)
+        if self._steps.actions is not None:
+            self._steps.actions.baseline_menu = self._baseline_step_menu  # a right-click on a step with the Range pencil on
+        # too few anchor steps for the shape: said at the pointer, the way the plan's notices are (the status row is not shown)
+        self._drift.say = lambda text: QToolTip.showText(QCursor.pos(), text, self)
+        self._drift.steps_in_plan = lambda: len(self._steps.anchor_step_indices())
 
         self._selection.roi_selection_changed.connect(lambda _ids: self._schedule_redraw())
         self._selection.cube_changed.connect(lambda _cube: self._update_cursor())
@@ -366,6 +395,7 @@ class SensorgramPanel(QWidget):
         self._roi_toolbox.cosmetic_changed.connect(lambda _change: self._schedule_redraw())
         self._axis.axis_changed.connect(self._schedule_redraw)  # Cube / Time: the x values changed (the axis object has carried the baseline window over)
         self._scan.results_changed.connect(self._on_results_changed)
+        self._dataset.dataset_loaded.connect(lambda _dataset: self._plot.forget_view())  # a zoom kept over redraws means nothing in another dataset
         self._scan.staleness_changed.connect(self._draw_last)
 
         app = QApplication.instance()
@@ -390,6 +420,7 @@ class SensorgramPanel(QWidget):
         self._band_alpha = min(max(float(read(store, SENSORGRAM_BASELINE_BAND_ALPHA)), 0.0), 1.0)
         # not a widget `bind`: three values behind one control
         self._band_controls.set_state(visible=self._band_visible, color=self._band_color, alpha=self._band_alpha)
+        self._band_edit.setChecked(self._band_visible)
         self._plot.set_baseline_style(self._band_color, self._band_alpha)
         self._band_controls.visibility_changed.connect(lambda on: store.set(SENSORGRAM_BASELINE_BAND_VISIBLE.key, bool(on)))
         self._band_controls.color_changed.connect(lambda color: store.set(SENSORGRAM_BASELINE_BAND_COLOR.key, color.name()))
@@ -401,6 +432,8 @@ class SensorgramPanel(QWidget):
         if isinstance(saved_tab, str) and self._ribbon_tabs.set_category(saved_tab):
             self._on_ribbon_tab(saved_tab)  # a restored tab is not a user change, but the tools of the tab must follow it
         self._ribbon_tabs.category_changed.connect(lambda label: store.set(SENSORGRAM_RIBBON_TAB.key, label))
+        self._drift.set_point_scope(str(read(store, SENSORGRAM_ANCHOR_POINT_SCOPE)))
+        self._drift.scope_changed = lambda scope: store.set(SENSORGRAM_ANCHOR_POINT_SCOPE.key, scope)
 
     def set_panel_visible(self, visible: bool) -> None:
         """Connected to the dock's ``visibilityChanged``: a hidden panel does no work and catches up once when shown."""
@@ -422,7 +455,9 @@ class SensorgramPanel(QWidget):
         self._spikes.refresh_theme()
         self._within_steps.refresh_theme()
         self._baseline.refresh_theme()
+        self._drift.refresh_theme()
         self._band_controls.refresh_theme(get_active_theme())
+        self._band_edit.refresh_theme()
         self._band_menu.refresh_theme(get_active_theme())
         self._steps.refresh_theme()
         self.checks_controls.refresh_theme()
@@ -460,6 +495,9 @@ class SensorgramPanel(QWidget):
             self._within_steps.setVisible(stats.smoothing_method != "none")  # nor does smoothing inside steps
             self._spikes.setChecked(bool(stats.spike_rejection_enabled))
             self._baseline.setChecked(bool(stats.baseline_enabled))
+            self._drift.sync(stats)
+            for widget in (self._band_edit, self._band_menu):
+                widget.setVisible(stats.baseline_method != METHOD_ANCHORS)  # the window selector means nothing to the anchors method
         finally:
             self._syncing = False
 
@@ -477,6 +515,8 @@ class SensorgramPanel(QWidget):
         """Another control tab is shown: the plan bar's structure tools (remove / add / unify steps, the baseline and signal roles in the right-click menu) are live only on the
         Experimental plan tab, so nothing structural happens by accident while working on the traces."""
         self._steps.set_structure_tools(label == PLAN_TAB)
+        if label == PLAN_TAB:
+            self._drift.edit.setChecked(False)  # editing steps and editing anchor points never at the same time
 
     def current_ribbon_tab(self) -> str:
         return self._ribbon_tabs.current_category()
@@ -502,8 +542,33 @@ class SensorgramPanel(QWidget):
         """Double-click on the x axis label: time <-> cube number, for the whole app (the shared cube display mode)."""
         self._cube_display.set_mode(MODE_CUBE if self._cube_display.effective_mode() == MODE_TIME else MODE_TIME)
 
+    def _baseline_step_menu(self, menu: QMenu, steps: list) -> bool:
+        """A right-click on plan steps: while the Range baseline's pencil is on (and not on the Experimental plan tab, where steps are edited), the
+        baseline's items (make / remove anchor steps) go at the top of the step's menu. Returns whether they were added."""
+        stats = self._settings.statistics_settings()
+        if stats.baseline_method != METHOD_WINDOW or not self._band_edit.isChecked() or self.current_ribbon_tab() == PLAN_TAB:
+            return False
+        self._drift.fill_step_menu(menu, steps)
+        return True
+
+    def _show_anchor_menu(self, x: float, screen_pos: QPoint) -> None:
+        """A right click away from every anchor square in the anchor edit: the anchor menu at the pointer (non-blocking)."""
+        menu = QMenu(self)
+        menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._drift.fill_context_menu(menu, x)
+        menu.popup(screen_pos)
+
+    def _cube_axis_now(self) -> tuple[np.ndarray, np.ndarray] | None:
+        """(the plot's x of each cube, the cube number of each) of the scan shown now, None without one: what the anchor points are placed on."""
+        stored = self._scan.stored()
+        if stored is None:
+            return None
+        _label, x = self._x_axis()
+        return np.asarray(x, dtype=np.float64), np.asarray(stored.cube_indices)
+
     def _on_band_visibility(self, on: bool) -> None:
         self._band_visible = bool(on)
+        self._band_edit.setChecked(self._band_visible)
         self._draw_last()
 
     def _on_band_color(self, color: QColor) -> None:
@@ -630,7 +695,11 @@ class SensorgramPanel(QWidget):
         metric = self._settings.metric_settings()
         groups = tuple(GroupSpec(g.name, g.sample_color_hex, tuple(g.area_roi_ids)) for g in self._roi_toolbox.groups())
         segments, membership = self._steps.step_inputs(stored)
-        request = SensorgramRequest(roi_ids, detection.formula_key, metric, self._settings.statistics_settings(), x, groups, self._roi_colors(roi_ids), segments, membership)
+        request = SensorgramRequest(
+            roi_ids, detection.formula_key, metric, self._settings.statistics_settings(), x, groups, self._roi_colors(roi_ids), segments, membership,
+            cube_numbers=np.asarray(stored.cube_indices) if self._settings.statistics_settings().baseline_method == METHOD_ANCHORS else None,
+            baseline_step_regions=self._steps.baseline_step_regions(stored),  # the Range baseline's marked anchor steps (None: the window's mean)
+        )
         key = trace_key(stored, detection.formula_key, metric, [g.roi_ids for g in groups])
         known = self._traces.known(key)  # the traces fitted so far (any panel's); other formula / fit / metric: the store drops the old ones
         if self._job is not None:
@@ -740,13 +809,22 @@ class SensorgramPanel(QWidget):
         if stats.baseline_enabled:
             y_label = y_label.replace("position", "shift")
         self._plot.set_axis_labels(label, y_label)
-        self._plot.show_series(series, stale if self._stale_toggle.isChecked() else None, self._mask_marks(job.stored, series))  # the toggle hides the marks, never the points
+        anchors_method = stats.baseline_method == METHOD_ANCHORS
+        drift_shown = anchors_method or uses_anchor_steps(stats)  # a curve through anchors: anchor points, or the Range method's marked steps
+        self._plot.show_series(  # the toggle hides the marks, never the points
+            series, stale if self._stale_toggle.isChecked() else None, self._mask_marks(job.stored, series),
+            baseline_curves=drift_shown and not stats.baseline_enabled,  # absolute traces: the dashed curve is what Subtract would take off
+            anchor_dots=("subtracted" if stats.baseline_enabled else "absolute") if drift_shown else None,
+        )
         self._stale_toggle.set_note(self._stale_note(stale))
+        uncorrected = next((s.baseline_note for s in series if s.baseline_note), "") if drift_shown else ""
+        self._drift.set_fit_summary(drift_summary(series) if drift_shown else [], uncorrected)
+        self._plot.set_anchors_needed(self._drift.points_needed() if anchors_method else 0)  # the number beside the edit mode's cross-hair
         if stats.baseline_window_start is not None and stats.baseline_window_end is not None:
             window = (stats.baseline_window_start, stats.baseline_window_end)
         else:
             window = self._axis.default_baseline_window()  # where Subtract would put it; stored only once dragged, typed or subtracted
-        self._plot.set_baseline_window(window if self._band_visible else None, self._range_decimals())
+        self._plot.set_baseline_window(window if self._band_visible and not drift_shown else None, self._range_decimals())
         self._update_cursor()
         self._steps.refresh()
         self._status.setText(self._status_line(job, series, stale))
@@ -768,7 +846,14 @@ class SensorgramPanel(QWidget):
             "x_axis": label,
             "roi_ids": [int(r) for r in request.roi_ids],
             "settings": {"formula": request.formula_key, "metric": asdict(request.metric), "statistics": asdict(request.statistics)},
-            "lines": [{"label": s.label, "key": s.key, "members": [int(m) for m in s.member_ids], "baseline_nm": s.baseline} for s in series],
+            "lines": [
+                {
+                    "label": s.label, "key": s.key, "members": [int(m) for m in s.member_ids], "baseline_nm": s.baseline,
+                    **({"anchor_rms_nm": s.anchor_rms, "baseline_note": s.baseline_note}
+                       if request.statistics.baseline_method == METHOD_ANCHORS or uses_anchor_steps(request.statistics) else {}),
+                }
+                for s in series
+            ],
         }
         return ExportData(tables, info)
 
@@ -798,7 +883,11 @@ class SensorgramPanel(QWidget):
         elif self._scan.is_checking() and self._scan.stale_cubes() is None:
             parts.append("checking if the scan is up to date...")
         stats = job.request.statistics
-        if stats.baseline_enabled and series and not any(np.isfinite(s.baseline) for s in series):
+        if curve_subtracted(stats):
+            failed = [s for s in series if s.baseline_note]
+            if failed:
+                parts.append(f"{len(failed)} line{'s' if len(failed) != 1 else ''} not corrected ({failed[0].baseline_note})")
+        elif stats.baseline_enabled and series and not any(np.isfinite(s.baseline) for s in series):
             parts.append("the baseline band holds no points: drag it over some")
         gaps = sum(1 for s in series if not np.isfinite(s.y).any())
         if gaps:

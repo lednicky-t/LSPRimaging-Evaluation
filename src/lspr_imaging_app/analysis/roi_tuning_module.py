@@ -29,6 +29,7 @@ import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from ..applog import log_event
+from .baseline_drift import AnchorCubes, anchor_cubes_by_roi, cubes_needed, curve_subtracted
 from .roi_tuning import Lattice, moved_centre
 from .roi_tuning_accept import SeedReport, accepted_moves
 from .roi_tuning_export import table_rows, write_csv
@@ -94,9 +95,12 @@ class RoiTuningModule(QObject):
         parent: QObject | None = None,
         *,
         helper_process: bool = True,
+        x_is_time: Callable[[], bool] | None = None,
     ) -> None:
         """``plan``: the ``ExperimentPlanModule``; ``selection``: ``selected_roi_ids()``; ``settings``: the ``AnalysisSettingsModule``; ``dataset``:
-        ``cube_spans_unix_ms(cubes)``; ``roi_toolbox``: ``detection_settings()``. All are read on the GUI thread, through their public queries only."""
+        ``cube_spans_unix_ms(cubes)``; ``roi_toolbox``: ``detection_settings()``. All are read on the GUI thread, through their public queries only.
+        ``x_is_time``: whether the Sensorgram's x axis is time (``SensorgramAxis.uses_time``; None = the cube number). Only the drift baseline reads it:
+        its curve is fitted against the Sensorgram's x, and the trial must fit it the same way."""
         super().__init__(parent)
         self._source_factory = source_factory
         self._plan = plan
@@ -104,6 +108,7 @@ class RoiTuningModule(QObject):
         self._settings = settings
         self._dataset = dataset
         self._roi_toolbox = roi_toolbox
+        self._x_is_time = x_is_time
         self._task = RoiTuningTask(self._install, parent=self, helper_process=helper_process, on_seeded=self._on_seeded)
         self._task.running_changed.connect(lambda _running: self.state_changed.emit())
         self._task.task_finished.connect(self._on_task_finished)
@@ -201,9 +206,14 @@ class RoiTuningModule(QObject):
         if isinstance(prepared, _Problem):
             return prepared.message
         request = prepared
+        extra, drift = "", ""
+        if request.drift_anchors is not None:  # said even when no cube is added: the numbers are then those of the drift-corrected traces
+            drift = " The Sensorgram's drift baseline is taken off every trace."
+            if request.extra_cubes:
+                extra = f", {len(request.extra_cubes)} more for the drift baseline's anchors"
         return (
             f"{request.lattice.n_points} positions x {len(request.roi_ids)} ROIs x {len(request.cubes)} cubes "
-            f"(baseline {cubes_text(request.baseline_cubes)}, signal {cubes_text(request.signal_cubes)})."
+            f"(baseline {cubes_text(request.baseline_cubes)}, signal {cubes_text(request.signal_cubes)}{extra}).{drift}"
         )
 
     def objectives(self) -> tuple[tuple[str, str, str], ...]:
@@ -303,19 +313,31 @@ class RoiTuningModule(QObject):
         self._task.invalidate()
         self._drop("")
 
-    def mark_stale(self) -> None:
+    def set_x_is_time(self, x_is_time: Callable[[], bool] | None) -> None:
+        """Whether the Sensorgram's x axis is time, asked whenever a request is made (the app wires ``SensorgramAxis.uses_time``, made after this module)."""
+        self._x_is_time = x_is_time
+
+    def refit_for_axis(self) -> None:
+        """The Sensorgram's x axis was switched (cube number <-> time). Only a drift curve is fitted against x, so nothing is redone without one."""
+        if curve_subtracted(self._settings.statistics_settings()):
+            self.refit()
+
+    def mark_stale(self, message: str = "The ROIs or the image settings changed after the trial; run it again.") -> None:
         """Something the result was made from may have changed (geometry, mask, chromatic, background, ROIs, frame roles): its crosses no longer say where
         the best positions are. The result is kept so the user still sees what was tried, but it is not accepted."""
         if self._result is None or self._stale:
             return
         self._stale = True
-        self._message = "The ROIs or the image settings changed after the trial; run it again."
+        self._message = message
         self.state_changed.emit()
         self.matrix_changed.emit()
 
     def refit(self) -> bool:
-        """Redo the fits and objectives of the result in hand with the current fit, formula and smoothing settings (background; no scan). False when there is
-        nothing to refit; a refit asked while the task is busy runs when it has finished."""
+        """Redo the fits and objectives of the result in hand with the current fit, formula, smoothing and baseline settings (background; no scan). False when
+        there is nothing to refit; a refit asked while the task is busy runs when it has finished.
+
+        A drift baseline whose anchors lie on cubes the trial did not scan cannot be refitted (2026-11-10): the result goes out of date instead, since its
+        numbers no longer describe what the Sensorgram draws, and the next trial scans those cubes."""
         if self._result is None or self._stale:
             return False
         if self._task.is_running():
@@ -323,6 +345,12 @@ class RoiTuningModule(QObject):
             return True
         prepared = self._prepare(for_refit=self._result.request)
         if isinstance(prepared, _Problem):
+            return False
+        unscanned = cubes_needed(prepared.drift_anchors) - set(self._result.matrix.cube_indices)
+        if unscanned:
+            self.mark_stale(
+                f"The Sensorgram's drift baseline now uses {len(unscanned)} cube{'s' if len(unscanned) != 1 else ''} the trial did not scan; run it again."
+            )
             return False
         self._task.refit(self._result.matrix, prepared)
         return True
@@ -368,7 +396,7 @@ class RoiTuningModule(QObject):
         if self._result is None or self._ranking is None:
             return "There is nothing to accept: run a trial first."
         if self._stale:
-            return "The result is out of date (the ROIs or the image settings changed after the trial); run it again."
+            return "The result is out of date (the ROIs, the image settings or the drift baseline changed after the trial); run it again."
         if not self._ranking.moves.any():
             return "No ROI would move: the current centre is already the best."
         if self._roi_toolbox.has_timeline():
@@ -460,6 +488,8 @@ class RoiTuningModule(QObject):
             message += f" {edge} of {total} have their best centre at the edge of the lattice: the peak may lie further out."
         if result.matrix.interacting_pairs:
             message += f" {len(result.matrix.interacting_pairs)} ROI pairs are close enough to affect each other's reference ring: their numbers are approximate."
+        if result.request.drift_anchors is not None:
+            message += " The Sensorgram's drift baseline was taken off every position's trace first."
         return message
 
     def _on_task_finished(self, _task_id: str, outcome: str, message: str) -> None:
@@ -494,10 +524,13 @@ class RoiTuningModule(QObject):
 
     def _prepare(self, for_refit: TuningRequest | None = None) -> TuningRequest | _Problem:
         """The request for a trial now (or, for a refit, the old request with today's fit settings), or the reason there can be none."""
+        statistics = self._settings.statistics_settings()
+        x_is_time = bool(self._x_is_time()) if self._x_is_time is not None else False
         if for_refit is not None:
             return TuningRequest(
                 for_refit.roi_ids, for_refit.lattice, for_refit.baseline_cubes, for_refit.signal_cubes, self._roi_toolbox.detection_settings().formula_key,
-                self._settings.metric_settings(), self._settings.statistics_settings(), for_refit.first_unix_ms, for_refit.last_unix_ms,
+                self._settings.metric_settings(), statistics, for_refit.first_unix_ms, for_refit.last_unix_ms,
+                for_refit.extra_cubes, self._drift_anchors(for_refit.roi_ids, statistics), x_is_time,
             )
         roi_ids = tuple(sorted(int(r) for r in self._selection.selected_roi_ids()))
         if not roi_ids:
@@ -516,9 +549,20 @@ class RoiTuningModule(QObject):
             return _Problem("The baseline and the signal step share cubes.")
         if len(baseline_cubes) < 3:
             return _Problem(f"The baseline step has {len(baseline_cubes)} cubes; a noise needs at least 3.")
-        cubes = tuple(sorted({*baseline_cubes, *signal_cubes}))
+        # The Sensorgram's drift baseline is fitted to every position's own trace, so its anchors' cubes are scanned too (none when it subtracts no curve).
+        anchors = self._drift_anchors(roi_ids, statistics)
+        extra = tuple(sorted(cubes_needed(anchors) - {*baseline_cubes, *signal_cubes}))
+        cubes = tuple(sorted({*baseline_cubes, *signal_cubes, *extra}))
         first, last = self._dataset.cube_spans_unix_ms(cubes)
         return TuningRequest(
             roi_ids, self._lattice, baseline_cubes, signal_cubes, self._roi_toolbox.detection_settings().formula_key, self._settings.metric_settings(),
-            self._settings.statistics_settings(), np.asarray(first, dtype=np.float64), np.asarray(last, dtype=np.float64),
+            statistics, np.asarray(first, dtype=np.float64), np.asarray(last, dtype=np.float64), extra, anchors, x_is_time,
         )
+
+    def _drift_anchors(self, roi_ids: tuple[int, ...], statistics) -> AnchorCubes | None:
+        """The anchor regions of the Sensorgram's drift baseline for these ROIs, as cube numbers (``baseline_drift.anchor_cubes_by_roi``); None when it
+        subtracts no curve (Subtract off, or the Range method without a marked step: one number per ROI, which changes no objective)."""
+        if not curve_subtracted(statistics):
+            return None
+        cubes, membership = self._plan.cubes_and_membership()
+        return anchor_cubes_by_roi(roi_ids, cubes, statistics, membership)
