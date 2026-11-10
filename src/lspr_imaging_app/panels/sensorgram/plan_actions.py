@@ -8,6 +8,9 @@ is the one place that knows both, so the plot stays free of commands and the pan
   label shows where the edge is (seconds, or the cube number).
 - **Double-click a step**: the in-place editor opens over it with the whole note; a changed text becomes `set_label` (empty = back to the measured note).
 - **Right-click a step**: a menu with Edit text, Colour, Default colour, Reset step and Reset all; each is one undo step. The colour dialog is the system one.
+- **The ribbon's Edit group** (2026-11-10): add / remove / merge the steps selected on the bar and restore the removed ones (`add_at_selection`, `remove_selected`, `merge_selected`,
+  `restore_removed`), the menu's Add step, Remove step, Unify and Restore removed steps commands without the pointer; and two commands the menu has not: `add_at_cursor`, a new step
+  that starts at the cube cursor with no step chosen, and `split_at_cursor`, the step the cursor is inside cut in two there.
 
 It needs to know the plot's axis, so the panel passes a function that returns it for the traces being drawn (`PlanAxisContext`), or None when nothing is drawn.
 """
@@ -55,12 +58,15 @@ class PlanAxisContext:
 
 class PlanBarActions(QObject):
     def __init__(
-        self, plan: ExperimentPlanModule, plot: SensorgramPlot, context: Callable[[], PlanAxisContext | None], parent: QObject | None = None
+        self, plan: ExperimentPlanModule, plot: SensorgramPlot, context: Callable[[], PlanAxisContext | None], parent: QObject | None = None,
+        *, cursor: Callable[[], float | None] | None = None,
     ) -> None:
+        """`cursor`: the time (unix ms) of the plot's cube cursor, None when it is not on the plot; without it "add a step at the cursor" is never possible."""
         super().__init__(parent)
         self._plan = plan
         self._plot = plot
         self._context = context
+        self._cursor = cursor
         self._drag_context: PlanAxisContext | None = None
         self._batch_open = False
         self._structure_tools = True  # remove / add / unify steps and the baseline / signal roles in the menu: on until the owner ties them to the Experimental plan tab
@@ -223,6 +229,61 @@ class PlanBarActions(QObject):
     def _unify(self, targets: list[int]) -> None:
         if self._plan.unify_steps(targets):
             self._plot.plan_bar().select(min(targets))  # the step they became
+
+    # -- the ribbon's Edit group (2026-11-10): the right-click menu's commands, applied to the steps selected on the bar ------------------
+
+    def selected_steps(self) -> list[int]:
+        """The indices of the steps selected on the bar that exist in the plan (the bar's selection can briefly name a step that has just gone)."""
+        count = len(self._plan.steps())
+        return [i for i in self._plot.plan_bar().selected_indices() if 0 <= i < count]
+
+    def can_merge_selected(self) -> bool:
+        return self._plan.can_unify(self.selected_steps())
+
+    def add_at_selection(self, side: str) -> None:
+        """A new step in front of (``"before"``) or behind (``"after"``) the selected step; nothing unless exactly one step is selected (as the menu's, it needs the plotted axis)."""
+        selected = self.selected_steps()
+        if len(selected) == 1:
+            self._add_step(selected[0], side)
+
+    def cursor_unix_ms(self) -> float | None:
+        """The time of the cube cursor on the plot, or None when it is not on the plot (nothing drawn, or the cube is not one of the plotted cubes)."""
+        return None if self._cursor is None else self._cursor()
+
+    def add_at_cursor(self) -> None:
+        """A new step that starts at the cursor, with no step chosen (`ExperimentPlanModule.add_step_at`); it is selected afterwards, ready to be dragged into place."""
+        context, at = self._context(), self.cursor_unix_ms()
+        if context is None or at is None:
+            return
+        ref = self._plan.add_step_at(at, context.grid_unix_ms)
+        new = self._plan.step_by_ref(ref) if ref is not None else None
+        if new is not None:
+            self._plot.plan_bar().select(new.order - 1)
+
+    def split_at_cursor(self) -> None:
+        """The step the cursor is inside, cut in two at the cursor (`ExperimentPlanModule.split_step_at`); no step has to be selected. The second part, the new step, is selected
+        afterwards."""
+        context, at = self._context(), self.cursor_unix_ms()
+        if context is None or at is None:
+            return
+        ref = self._plan.split_step_at(at, context.grid_unix_ms)
+        new = self._plan.step_by_ref(ref) if ref is not None else None
+        if new is not None:
+            self._plot.plan_bar().select(new.order - 1)
+
+    def remove_selected(self) -> None:
+        selected = self.selected_steps()
+        if selected:
+            self._plan.remove_steps(selected)
+
+    def merge_selected(self) -> None:
+        selected = self.selected_steps()
+        if self._plan.can_unify(selected):
+            self._unify(selected)
+
+    def restore_removed(self) -> None:
+        if self._plan.has_removed():
+            self._plan.restore_removed()
 
     def _show_menu(self, index: int, position: QPoint) -> None:
         menu = self.build_menu(index)

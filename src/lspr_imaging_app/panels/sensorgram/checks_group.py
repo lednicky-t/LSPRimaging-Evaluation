@@ -3,7 +3,7 @@
 Screen purpose: tell the user when the data behave systematically wrong (a noisy step, a drifting step, a method that wastes signal, ROIs that change pixels ...), without
 asking them to know where to look. The checks themselves are `analysis/step_diagnostics.py`; the report is `panels/check_report_window.py`.
 
-Layout: ONE icon button (a check box) on the Experimental plan tab, after "Step stats", with a small status dot at its lower right corner:
+Layout: ONE icon button (a check box) on the Experimental plan tab, after "Evaluation" (the last group), with a small status dot at its lower right corner:
 
 - grey: not run yet, or out of date (something the checks use changed since the last run);
 - blue: running; green: the last run found nothing to warn about; amber: at least one warning; red: the last run failed.

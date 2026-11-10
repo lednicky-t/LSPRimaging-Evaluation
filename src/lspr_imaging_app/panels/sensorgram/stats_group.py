@@ -1,4 +1,4 @@
-"""The Sensorgram ribbon's "Step stats" group (2026-10-26): the controls of the table of mean +/- SD per experiment step.
+"""The Sensorgram ribbon's "View stats" group (2026-10-26, called "Step stats" until 2026-11-10, and now right of "View steps"): the controls of the table of mean +/- SD per experiment step.
 
 Screen purpose: show or hide, on the plot, the numbers of every line in every step and choose where they go. Display only: nothing here changes a number.
 

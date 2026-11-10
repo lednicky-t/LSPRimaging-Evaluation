@@ -3,16 +3,18 @@ not vendored icon files (``lspr_ui/ICONS.md``), a plot frame with a bar of steps
 
 ``plan_bar_icon`` the toggle: a plot frame with a bar of three steps along its top and a trace under it; ``position_picture`` where the bar sits (top / bottom);
 ``text_content_picture`` the whole note or only the solution before the separator; ``align_picture`` what the text position is measured against (the bar, or the data of the step);
-``evaluation_picture`` the Evaluation menu (a baseline bar and a signal bar over a stepped trace).
+``evaluation_picture`` the Evaluation menu (a baseline bar and a signal bar over a stepped trace); ``add_step_at_cursor_icon`` / ``add_step_before_icon`` / ``add_step_after_icon`` /
+``remove_step_icon`` / ``merge_steps_icon`` / ``split_step_icon`` / ``restore_steps_icon`` the buttons of the Edit group (2026-11-10), each a few outlined boxes standing for steps;
+the step that a command changes is in an accent colour (add green, remove red, restore blue; split has two ink halves and a gold cut line, merge is all ink).
 """
 
 from __future__ import annotations
 
 from PyQt6.QtCore import QPointF, QRectF, Qt
-from PyQt6.QtGui import QColor, QIcon, QPainter
+from PyQt6.QtGui import QColor, QIcon, QPainter, QPainterPath
 
 from ..spectra.pick_menu import PictureFor
-from .stat_icons import _canvas, _pen, _picture, _polyline, _slash, _at, _STROKE
+from .stat_icons import _RENDER_SIZE, _canvas, _pen, _picture, _polyline, _slash, _at, _STROKE
 
 
 def plan_bar_icon(on: bool, off_color: str, on_color: str) -> QIcon:
@@ -35,6 +37,117 @@ def plan_bar_icon(on: bool, off_color: str, on_color: str) -> QIcon:
     _polyline(painter, ((0.20, 0.74), (0.40, 0.70), (0.52, 0.56), (0.68, 0.58), (0.80, 0.50)))
     if not on:
         _slash(painter, color)
+    painter.end()
+    return QIcon(pixmap)
+
+
+def _step_rect(painter: QPainter, color: QColor, left: float, top: float, right: float, bottom: float, *, ghost: bool = False) -> None:
+    """One step of the plan as an outlined box (0..1 of the icon). ``ghost``: a dashed outline, the step that is being made or taken away."""
+    pen = _pen(color, _STROKE * 0.85)
+    if ghost:
+        pen.setDashPattern([1.5, 1.3])  # in pen widths: short dashes, so even a box this small shows several
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawRect(QRectF(_at(left, top), _at(right, bottom)))
+
+
+def _step_and_ghost(color: str, accent: str, symbol, *, ghost_left: bool = False) -> QIcon:
+    """A step in the normal ink beside a dashed one, the step the command is about, drawn with its symbol in ``accent``: the icon has two colours, and the coloured one is the step
+    that changes. ``ghost_left``: the dashed step is on the left (in front of the other one in time) instead of the right. ``symbol(painter)`` draws inside the dashed box with the
+    painter's pen already set to ``accent`` (written for the right-hand box; moved with the box). Greyed by Qt when the button is disabled."""
+    pixmap, painter = _canvas()
+    ink_box, ghost_box = ((0.55, 0.20, 0.95, 0.80), (0.05, 0.20, 0.45, 0.80)) if ghost_left else ((0.05, 0.20, 0.45, 0.80), (0.55, 0.20, 0.95, 0.80))
+    _step_rect(painter, QColor(color), *ink_box)
+    mark = QColor(accent)
+    _step_rect(painter, mark, *ghost_box, ghost=True)
+    painter.setPen(_pen(mark))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    if ghost_left:
+        painter.translate(-0.5 * _RENDER_SIZE, 0.0)  # the symbols are drawn in the right-hand box: the left one is half an icon away
+    symbol(painter)
+    painter.end()
+    return QIcon(pixmap)
+
+
+def _plus(painter: QPainter) -> None:
+    painter.drawLine(_at(0.64, 0.50), _at(0.86, 0.50))
+    painter.drawLine(_at(0.75, 0.39), _at(0.75, 0.61))
+
+
+def _cross(painter: QPainter) -> None:
+    painter.drawLine(_at(0.66, 0.39), _at(0.84, 0.61))
+    painter.drawLine(_at(0.84, 0.39), _at(0.66, 0.61))
+
+
+def _return_arrow(painter: QPainter) -> None:
+    """The usual "back" arrow: its head on the left, the shaft running right and hooking back below."""
+    painter.drawLine(_at(0.72, 0.38), _at(0.66, 0.45))  # the head
+    painter.drawLine(_at(0.66, 0.45), _at(0.72, 0.52))
+    hook = QPainterPath(_at(0.66, 0.45))  # the shaft, then a half turn back below it
+    hook.lineTo(_at(0.80, 0.45))
+    hook.cubicTo(_at(0.88, 0.45), _at(0.88, 0.60), _at(0.80, 0.60))
+    hook.lineTo(_at(0.75, 0.60))
+    painter.drawPath(hook)
+
+
+def add_step_after_icon(color: str, accent: str) -> QIcon:
+    """The Edit group's "add a step behind the selected one" (``accent``: green): the selected step, then a dashed one, the new step, with a plus inside it."""
+    return _step_and_ghost(color, accent, _plus)
+
+
+def add_step_before_icon(color: str, accent: str) -> QIcon:
+    """The Edit group's "add a step in front of the selected one" (``accent``: green): the dashed new step with a plus inside it, then the selected step."""
+    return _step_and_ghost(color, accent, _plus, ghost_left=True)
+
+
+def add_step_at_cursor_icon(color: str, accent: str) -> QIcon:
+    """The Edit group's "add a step at the cursor" (``accent``: green): a vertical cursor line in ink and, starting at it and running right, a dashed new step with a plus inside it.
+    No other step is drawn: none has to be chosen."""
+    pixmap, painter = _canvas()
+    mark = QColor(accent)
+    _step_rect(painter, mark, 0.20, 0.30, 0.95, 0.70, ghost=True)
+    painter.setPen(_pen(mark))
+    painter.drawLine(_at(0.47, 0.50), _at(0.69, 0.50))
+    painter.drawLine(_at(0.58, 0.39), _at(0.58, 0.61))
+    painter.setPen(_pen(QColor(color)))
+    painter.drawLine(_at(0.20, 0.08), _at(0.20, 0.92))  # the cursor, drawn over the dashed box's left edge
+    painter.end()
+    return QIcon(pixmap)
+
+
+def remove_step_icon(color: str, accent: str) -> QIcon:
+    """The Edit group's "remove a step" (``accent``: red): a step next to a dashed one, the step that goes, with a cross inside it."""
+    return _step_and_ghost(color, accent, _cross)
+
+
+def restore_steps_icon(color: str, accent: str) -> QIcon:
+    """The Edit group's "restore removed steps" (``accent``: blue): a step next to a dashed one, the step that was taken away, with a return arrow inside it."""
+    return _step_and_ghost(color, accent, _return_arrow)
+
+
+def split_step_icon(color: str, accent: str) -> QIcon:
+    """The Edit group's "split the step at the cursor" (``accent``: gold): a step cut in two, the halves a little apart, with the cut, a line taller than the step, in ``accent``."""
+    pixmap, painter = _canvas()
+    ink = QColor(color)
+    _step_rect(painter, ink, 0.05, 0.28, 0.44, 0.72)
+    _step_rect(painter, ink, 0.56, 0.28, 0.95, 0.72)
+    painter.setPen(_pen(QColor(accent), _STROKE * 1.1))
+    painter.drawLine(_at(0.50, 0.08), _at(0.50, 0.92))
+    painter.end()
+    return QIcon(pixmap)
+
+
+def merge_steps_icon(color: str) -> QIcon:
+    """The Edit group's "merge steps": two steps side by side, an arrow down and one wide step below (two steps become one)."""
+    pixmap, painter = _canvas()
+    ink = QColor(color)
+    _step_rect(painter, ink, 0.05, 0.08, 0.47, 0.34)
+    _step_rect(painter, ink, 0.53, 0.08, 0.95, 0.34)
+    painter.setPen(_pen(ink))
+    painter.drawLine(_at(0.50, 0.42), _at(0.50, 0.62))
+    painter.drawLine(_at(0.50, 0.62), _at(0.39, 0.51))
+    painter.drawLine(_at(0.50, 0.62), _at(0.61, 0.51))
+    _step_rect(painter, ink, 0.05, 0.70, 0.95, 0.94)
     painter.end()
     return QIcon(pixmap)
 
@@ -136,4 +249,7 @@ def align_picture(kind: str) -> PictureFor:
     return _picture(draw_into)
 
 
-__all__ = ["align_picture", "evaluation_picture", "plan_bar_icon", "position_picture", "text_content_picture"]
+__all__ = [
+    "add_step_after_icon", "add_step_at_cursor_icon", "add_step_before_icon", "align_picture", "evaluation_picture", "merge_steps_icon", "plan_bar_icon", "position_picture",
+    "remove_step_icon", "restore_steps_icon", "split_step_icon", "text_content_picture",
+]

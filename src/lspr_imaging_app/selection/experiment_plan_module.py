@@ -260,16 +260,43 @@ class ExperimentPlanModule(QObject):
     @instrumented("ExperimentPlanModule.add_step")
     def add_step(self, index: int, side: Side, grid_unix_ms: np.ndarray) -> StepRef | None:
         """A new empty step in front of or behind step `index`, snapped to `grid_unix_ms` (`snap_grid_unix_ms`). Returns its reference, or None when there is no room."""
-        steps = self.steps()
         grid = np.asarray(grid_unix_ms, dtype=np.float64)
-        spacing = np.diff(grid) if grid.size > 1 else np.empty(0)
-        min_length = max(edits.MIN_LENGTH_MS, int(np.median(spacing))) if spacing.size else edits.MIN_LENGTH_MS  # a step keeps at least one cube
-        new, ref = edits.add_step(steps, self._state, index, side, grid, min_length_ms=min_length)
+        new, ref = edits.add_step(self.steps(), self._state, index, side, grid, min_length_ms=self._min_step_length(grid))
         if ref is None:
             self.notice.emit("There is no room for a new step there: the step is too short to share.")
             return None
         self._commit("Add step", REASON_STRUCTURE, new)
         return ref
+
+    @instrumented("ExperimentPlanModule.add_step_at")
+    def add_step_at(self, at_unix_ms: float, grid_unix_ms: np.ndarray) -> StepRef | None:
+        """A new empty step that starts at `at_unix_ms` (the cursor, moved to the nearest point of `grid_unix_ms`), with no other step chosen: in free time it runs to the next step
+        or the end of the data, inside a step that step is cut at the cursor and the new step takes the rest of it. Returns its reference, or None when there is no room."""
+        grid = np.asarray(grid_unix_ms, dtype=np.float64)
+        new, ref = edits.add_step_at(self.steps(), self._state, at_unix_ms, grid, min_length_ms=self._min_step_length(grid))
+        if ref is None:
+            self.notice.emit("There is no room for a new step at the cursor: it is on the start of a step or too close to an edge of one. Move the cursor to another cube.")
+            return None
+        self._commit("Add step", REASON_STRUCTURE, new)
+        return ref
+
+    @instrumented("ExperimentPlanModule.split_step_at")
+    def split_step_at(self, at_unix_ms: float, grid_unix_ms: np.ndarray) -> StepRef | None:
+        """The step the cursor is inside, cut in two at `at_unix_ms` (moved to the nearest point of `grid_unix_ms`): the step keeps its first part and everything it has, the second
+        part is a new step with the same note and colour. Returns the new step's reference, or None when there is nothing to split there."""
+        grid = np.asarray(grid_unix_ms, dtype=np.float64)
+        new, ref = edits.split_step(self.steps(), self._state, at_unix_ms, grid, min_length_ms=self._min_step_length(grid))
+        if ref is None:
+            self.notice.emit("There is no step to split at the cursor: it has to be inside a step, not on its first cube and not between steps. Move the cursor to another cube.")
+            return None
+        self._commit("Split step", REASON_STRUCTURE, new)
+        return ref
+
+    @staticmethod
+    def _min_step_length(grid: np.ndarray) -> int:
+        """A step keeps at least one cube: the median spacing of the grid (`snap_grid_unix_ms`)."""
+        spacing = np.diff(grid) if grid.size > 1 else np.empty(0)
+        return max(edits.MIN_LENGTH_MS, int(np.median(spacing))) if spacing.size else edits.MIN_LENGTH_MS
 
     # -- evaluation roles ---------------------------------------------------------------------------------------------------
 

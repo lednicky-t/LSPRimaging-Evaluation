@@ -32,8 +32,8 @@ three remembered). The selector is drawn whether or not the traces are subtracte
 plot. They follow the Cube / Time choice, and are drawn only while traces are (an empty plot has no axis to put them on). The bar's gestures (drag a boundary, double-click to retype a note,
 right-click for colour and reset) are handled by ``plan_actions.PlanBarActions``, which edits the module; everything that hangs on the steps lives in ``step_overlays.StepOverlays`` (split out of this file 2026-10-26); this panel only gives it the plot, the lines last drawn and the x axis.
 
-**Smoothing inside steps and the Step stats group (2026-10-26).** With the "smooth inside steps" toggle on (Smoothing group) and a dataset that has steps, each step is smoothed on its own, so a
-window never mixes two solutions; without steps the whole trace is smoothed. The Step stats group writes mean +/- SD of every line in every step on the plot, level with the legend's rows
+**Smoothing inside steps and the View stats group (2026-10-26; "Step stats" until 2026-11-10).** With the "smooth inside steps" toggle on (Smoothing group) and a dataset that has steps, each step is smoothed on its own, so a
+window never mixes two solutions; without steps the whole trace is smoothed. The View stats group writes mean +/- SD of every line in every step on the plot, level with the legend's rows
 (``stats_group.py`` the controls, ``stats_table.py`` the item, ``plan/stats_table.py`` what is written). Both need the steps and the cube times, which `StepOverlays.step_inputs` turns into the two extra
 inputs of the request (the pieces to smooth, the cubes of each step); the numbers are computed in the worker with the curves, so they follow smoothing, baseline and spike removal. A moved,
 reset or restored boundary asks for a redraw when either is on (`StepOverlays._on_plan_changed`); a note or colour edit does not. Design and measurements: ``docs/step_statistics_backbone_2026-10-26.md``.
@@ -311,6 +311,7 @@ class SensorgramPanel(QWidget):
         self._steps = StepOverlays(
             self, experiment_plan=experiment_plan, plot=self._plot, dataset=dataset, settings=analysis_settings, cube_display=cube_display, drawn=self._drawn, x_axis=self._x_axis,
             schedule_redraw=self._schedule_redraw, defer=lambda: self._gate.defer(), on_steps_available=self._on_steps_available,  # the gate is made further down
+            current_cube=self._selection.current_cube,
         )
         self.task = PanelTask(TASK_ID, "Sensorgram", self)  # connected to the status bar's task indicator by app_rewrite
         self._steps.plan_controls.settings_changed.connect(self.plan_bar_settings_changed)
@@ -327,11 +328,13 @@ class SensorgramPanel(QWidget):
         self._ribbon.add_group("Export", self.export_button)
         self._ribbon.add_stretch()
         # The experimental plan has a tab of its own (2026-10-29): the bar's controls, the baseline / signal steps, the table of numbers per step. The plan bar's structure tools
-        # (remove, add, unify, the roles) are live only while it is the active tab, as the ROI gestures are only live on the Image ribbon's ROIs tab.
+        # (remove, add, unify, the roles in the right-click menu) are live only while it is the active tab, as the ROI gestures are only live on the Image ribbon's ROIs tab.
+        # The Edit group's buttons are on this tab, so they are reachable only here by themselves.
         self._plan_ribbon = RibbonRow(self)
-        self._plan_ribbon.add_group("View", *self._steps.plan_controls.widgets())
+        self._plan_ribbon.add_group("View steps", *self._steps.plan_controls.widgets())
+        self._plan_ribbon.add_group("View stats", *self._steps.stats_controls.widgets())  # was "Step stats", after Evaluation, until 2026-11-10
+        self._plan_ribbon.add_group("Edit", *self._steps.edit_controls.widgets())  # add / remove / merge / restore steps (2026-11-10), right of the two View groups
         self._plan_ribbon.add_group("Evaluation", *self._steps.evaluation.widgets())
-        self._plan_ribbon.add_group("Step stats", *self._steps.stats_controls.widgets())
         self.checks_controls = ChecksControls(self)  # the data-quality checks (2026-11-07): the button only; `checks_presenter.py` is what the app connects to it
         self._plan_ribbon.add_group("Checks", *self.checks_controls.widgets())
         self._plan_ribbon.add_stretch()
@@ -389,7 +392,7 @@ class SensorgramPanel(QWidget):
         self._drift.steps_in_plan = lambda: len(self._steps.anchor_step_indices())
 
         self._selection.roi_selection_changed.connect(lambda _ids: self._schedule_redraw())
-        self._selection.cube_changed.connect(lambda _cube: self._update_cursor())
+        self._selection.cube_changed.connect(lambda _cube: (self._update_cursor(), self._steps.cursor_moved()))
         self._settings.settings_changed.connect(lambda _change: self._on_settings_changed())
         self._roi_toolbox.geometry_changed.connect(self._on_roi_changed)
         self._roi_toolbox.cosmetic_changed.connect(lambda _change: self._schedule_redraw())

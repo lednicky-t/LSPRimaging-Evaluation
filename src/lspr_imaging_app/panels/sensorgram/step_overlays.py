@@ -2,11 +2,14 @@
 
 The steps come from ``ExperimentPlanModule`` (the dataset's measured steps with the user's edits). This object owns what hangs on them:
 
-- the **bar of steps** on the plot and its ribbon group "View" on the Experimental plan tab (`PlanBarControls`), and the bar's gestures (`PlanBarActions`, which edits the module);
-  the bar's structure tools (remove, add, unify, the roles) are offered only while that tab is the active one (`set_structure_tools`);
+- the **bar of steps** on the plot and its ribbon group "View steps" on the Experimental plan tab (`PlanBarControls`), and the bar's gestures (`PlanBarActions`, which edits the module);
+  the bar's structure tools in the right-click menu (remove, add, unify, the roles) are offered only while that tab is the active one (`set_structure_tools`);
+- the group "Edit" (`PlanEditControls`, 2026-11-10): add (at the cursor, in front of / behind the selected step) / remove / merge / split / restore buttons, the same commands as that
+  menu plus add at the cursor and split at the cursor (through `PlanBarActions`); their
+  enabled state follows the selection and the plan (`_update_edit_tools`);
 - the group "Evaluation" (`EvaluationControls`): one icon whose pop-up holds a picker per baseline / signal step of each evaluation pair (B1, S1, B2, S2 ...), which write the plan
   module's roles; taking the last pair out clears its roles in the module;
-- the **table of mean +/- SD per step** and its ribbon group "Step stats" (`StatsTableControls`);
+- the **table of mean +/- SD per step** and its ribbon group "View stats" (`StatsTableControls`);
 - the two inputs the steps add to a Sensorgram request: the **pieces to smooth on their own** ("smooth inside steps") and **which cubes belong to which step** (`step_inputs`).
 
 It converts the steps to the plot's x axis (``plan/axis_map.py``) and hands them to the plot, and it asks the panel for a redraw when a change of the steps changes what the curves are
@@ -41,6 +44,7 @@ from ...plan.stats_table import StatsLine, build_stats_table
 from ...selection import CubeDisplayModule
 from ...selection.cube_display_module import MODE_TIME
 from ..ui_state import UiStateStore
+from .edit_group import PlanEditControls
 from .plan_actions import PlanAxisContext, PlanBarActions
 from .evaluation_group import EvaluationControls
 from .plan_group import PlanBarControls
@@ -68,10 +72,12 @@ class StepOverlays(QObject):
         schedule_redraw: Callable[[], None],
         defer: Callable[[], bool],
         on_steps_available: Callable[[bool], None],
+        current_cube: Callable[[], int] | None = None,
     ) -> None:
         """`drawn`: the scan and lines last drawn, None before the first draw or after a clear. `x_axis`: (label, x per cube of the file). `schedule_redraw`: ask the panel for a
         new request. `defer`: True while the panel is hidden (the overlays then skip drawing; the panel catches up when shown). `on_steps_available`: told, at every refresh, whether the
-        dataset has steps. Without `experiment_plan` the two ribbon groups stay greyed out and nothing is drawn."""
+        dataset has steps. `current_cube`: the cube the cursor stands on (without it no step can be added at the cursor). Without `experiment_plan` the two ribbon groups stay greyed
+        out and nothing is drawn."""
         super().__init__(parent)
         self._plan = experiment_plan
         self._plot = plot
@@ -83,6 +89,9 @@ class StepOverlays(QObject):
         self._schedule_redraw = schedule_redraw
         self._defer = defer
         self._on_steps_available = on_steps_available
+        self._current_cube = current_cube
+        self._edit_has_axis = False  # what the last full update of the Edit group found: traces drawn, so the plan has an axis
+        self._edit_cursor_flags = (False, False)  # (the cursor is on the plot, it is inside a step) as the Edit group last showed them
         self.plan_controls = PlanBarControls(parent)
         self.plan_controls.set_available(False)  # until a dataset with steps is open
         self.stats_controls = StatsTableControls(parent)
@@ -90,7 +99,15 @@ class StepOverlays(QObject):
         self.evaluation = EvaluationControls(parent)
         self.evaluation.role_chosen.connect(self._on_role_chosen)
         self.evaluation.pair_removed.connect(self._on_pair_removed)
-        self.actions = None if experiment_plan is None else PlanBarActions(experiment_plan, plot, self.plan_context, self)
+        self.actions = None if experiment_plan is None else PlanBarActions(experiment_plan, plot, self.plan_context, self, cursor=self.cursor_unix_ms)
+        self.edit_controls = PlanEditControls(parent)  # add / remove / merge steps (2026-11-10): the right-click menu's commands on the steps selected on the bar
+        if self.actions is not None:
+            self.edit_controls.add_requested.connect(self._on_add_requested)
+            self.edit_controls.remove_requested.connect(self.actions.remove_selected)
+            self.edit_controls.merge_requested.connect(self.actions.merge_selected)
+            self.edit_controls.split_requested.connect(self.actions.split_at_cursor)
+            self.edit_controls.restore_requested.connect(self.actions.restore_removed)
+            plot.plan_bar().selection_changed.connect(lambda _indices: self._update_edit_tools())
         self.set_structure_tools(False)  # until the Experimental plan tab is shown
         self.plan_controls.settings_changed.connect(self.refresh)
         self.stats_controls.settings_changed.connect(self._on_stats_settings_changed)
@@ -105,6 +122,7 @@ class StepOverlays(QObject):
         self.evaluation.restore_ui_state(store)
 
     def refresh_theme(self) -> None:
+        self.edit_controls.refresh_theme()
         self.plan_controls.refresh_theme()
         self.stats_controls.refresh_theme()
         self.evaluation.refresh_theme()
@@ -113,6 +131,28 @@ class StepOverlays(QObject):
         """The right-click menu offers remove / add / unify steps and the baseline / signal roles only while the Experimental plan tab is the active one."""
         if self.actions is not None:
             self.actions.set_structure_tools(active)
+
+    def _on_add_requested(self, where: str) -> None:
+        """An Add button of the Edit group: "cursor" starts a new step at the cursor, "before" / "after" put one next to the selected step."""
+        if self.actions is None:
+            return
+        if where == "cursor":
+            self.actions.add_at_cursor()
+        else:
+            self.actions.add_at_selection(where)
+
+    def cursor_unix_ms(self) -> float | None:
+        """The time of the cube cursor (the dashed line the cube slider moves) on the plot, or None when the cursor is not on it: nothing drawn, the cube is not one of the plotted
+        cubes, or it has no timing."""
+        drawn = self._drawn()
+        if drawn is None or self._current_cube is None:
+            return None
+        stored, _series = drawn
+        cube = int(self._current_cube())
+        if cube not in stored.cube_indices:
+            return None
+        start = self._dataset.cube_start_unix_ms(cube)
+        return None if start is None else float(start)
 
     def _on_role_chosen(self, role: str, ref: object, pair: int) -> None:
         """The user picked a step for a pair's baseline or signal in the Evaluation pop-up (or none): the plan module keeps it."""
@@ -225,6 +265,7 @@ class StepOverlays(QObject):
             self._show_evaluation(steps, None)
             self._plot.set_plan((), settings)
             self.show_stats_table((), [], bool(steps))
+            self._update_edit_tools(has_axis=False)
             return
         axis, _cubes = found
         _stored, series = self._drawn()
@@ -241,6 +282,38 @@ class StepOverlays(QObject):
         self._plot.plan_bar().set_baseline_anchors(self.anchor_step_indices())  # a small anchor in the lower left corner of each
         self._show_evaluation(steps, [bar.color for bar in bars])
         self.show_stats_table(bars, series, True)
+        self._update_edit_tools(has_axis=True)
+
+    def _update_edit_tools(self, has_axis: bool | None = None) -> None:
+        """The Edit group: which of add / remove / merge / split / restore can act on the steps selected on the bar and the cursor now. `has_axis`: the traces drawn give the plan an
+        axis (a new boundary snaps to their cubes); None asks. Cheap (a few steps), so it runs at every refresh and every change of the selection."""
+        if self._plan is None or self.actions is None:
+            self.edit_controls.set_state(False, 0, False, False, False)
+            return
+        if has_axis is None:
+            has_axis = self._plan_axis() is not None
+        self._edit_has_axis = has_axis
+        self._edit_cursor_flags = on_plot, inside = self._cursor_flags(has_axis)
+        self.edit_controls.set_state(
+            self._plan.has_steps(), len(self.actions.selected_steps()), has_axis, self.actions.can_merge_selected(), self._plan.has_removed(),
+            can_add_at_cursor=on_plot, can_split=inside,
+        )
+
+    def _cursor_flags(self, has_axis: bool) -> tuple[bool, bool]:
+        """(the cube cursor is on the plot, the cursor is strictly inside a step): what the Add at cursor and Split buttons need. A look-up of one cube and a pass over a few steps."""
+        at = self.cursor_unix_ms() if has_axis else None
+        if at is None or self._plan is None:
+            return False, False
+        return True, any(step.start_unix_ms < at < step.end_unix_ms for step in self._plan.steps())
+
+    def cursor_moved(self) -> None:
+        """The cube cursor moved (slider, a click on the plot, Play). Only whether it is on the plot and whether it is inside a step can change which Edit buttons are on, so the
+        group is updated only when one of those changes: this runs at every slideshow step and must stay O(1) in the size of the dataset (a cube look-up and a few steps; the axis is
+        not rebuilt)."""
+        if self.actions is None:
+            return
+        if self._cursor_flags(self._edit_has_axis) != self._edit_cursor_flags:
+            self._update_edit_tools(has_axis=self._edit_has_axis)
 
     def _show_evaluation(self, steps, colours: list[str] | None) -> None:
         """The Evaluation pop-up: the plan's steps (in the bar's colours when the bar is drawn) and the roles of every pair."""

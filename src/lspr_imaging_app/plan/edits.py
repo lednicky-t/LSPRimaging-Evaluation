@@ -390,9 +390,66 @@ def add_step(
             base, start, end = _updated(state, step, end=middle), middle, step.end_unix_ms
         else:
             base, start, end = _updated(state, step, start=middle), step.start_unix_ms, middle
+    return _with_new_step(base, state, start, end)
+
+
+def _with_new_step(
+    base: PlanEditsState, state: PlanEditsState, start: float, end: float, *, label: str = "", color: str | None = None
+) -> tuple[PlanEditsState, StepRef]:
+    """`base` (`state` with the neighbour already shortened, if it was) plus a new step from `start` to `end` (empty unless a note and a colour are given), and its reference."""
     uid = state.next_uid
-    made = AddedStep(uid=uid, start_unix_ms=int(start), end_unix_ms=int(end))
+    made = AddedStep(uid=uid, start_unix_ms=int(start), end_unix_ms=int(end), label=label, color=color)
     return replace(base, added=base.added + (made,), next_uid=uid + 1), added_ref(uid)  # `base`, not `state`: a shortened added step is in `base.added`
+
+
+def add_step_at(
+    steps: Sequence[EffectiveStep], state: PlanEditsState, at_unix_ms: float, grid_unix_ms: np.ndarray, *, min_length_ms: int = MIN_LENGTH_MS,
+) -> tuple[PlanEditsState, StepRef | None]:
+    """A new, empty step that starts at `at_unix_ms` (the cursor; moved to the nearest point of `grid_unix_ms`) and needs no other step to be chosen. Returns the new state and the
+    new step's reference, or `state` and None when there is no room.
+
+    In free time (no step covers that moment) the new step runs to the next step, or to the end of the data when there is none. Inside a step, that step is cut at the cursor and the
+    new step takes the rest of it, as `add_step` does on joined steps (steps never overlap). Either way the user then drags the new step into place. No room: the cursor is on the
+    start of a step or too close to one of its edges (less than `min_length_ms` from it), or there is no data after it."""
+    grid, at = _snap_to_grid(grid_unix_ms, at_unix_ms)
+    if at is None:
+        return state, None
+    covering = next((step for step in steps if step.start_unix_ms < at < step.end_unix_ms), None)
+    if covering is not None:
+        if at - covering.start_unix_ms < min_length_ms or covering.end_unix_ms - at < min_length_ms:
+            return state, None
+        return _with_new_step(_updated(state, covering, end=int(round(at))), state, round(at), covering.end_unix_ms)
+    next_starts = [float(step.start_unix_ms) for step in steps if step.start_unix_ms >= at]
+    free_to = min(next_starts) if next_starts else float(grid[-1])
+    if free_to - at < min_length_ms:
+        return state, None
+    return _with_new_step(state, state, round(at), round(free_to))
+
+
+def _snap_to_grid(grid_unix_ms: np.ndarray, at_unix_ms: float) -> tuple[np.ndarray, float | None]:
+    """(the grid without NaN and duplicates, `at_unix_ms` moved to its nearest point), or (the grid, None) when there is no grid or no finite `at_unix_ms`."""
+    grid = np.asarray(grid_unix_ms, dtype=np.float64)
+    grid = np.unique(grid[np.isfinite(grid)])
+    if grid.size == 0 or not np.isfinite(at_unix_ms):
+        return grid, None
+    return grid, float(grid[int(np.argmin(np.abs(grid - float(at_unix_ms))))])
+
+
+def split_step(
+    steps: Sequence[EffectiveStep], state: PlanEditsState, at_unix_ms: float, grid_unix_ms: np.ndarray, *, min_length_ms: int = MIN_LENGTH_MS,
+) -> tuple[PlanEditsState, StepRef | None]:
+    """The step that `at_unix_ms` (the cursor; moved to the nearest point of `grid_unix_ms`) is inside, cut in two there. The step keeps its first part and all it has (its reference,
+    note, colour, roles); the second part is a new step with the same note and colour (the same solution goes on, so it is not left empty as `add_step_at` leaves its step). Returns
+    the new state and the new step's reference, or `state` and None when there is nothing to split: the cursor is on the start of a step or between steps, or less than `min_length_ms`
+    from an edge, so one of the two parts would be shorter than a cube."""
+    _grid, at = _snap_to_grid(grid_unix_ms, at_unix_ms)
+    if at is None:
+        return state, None
+    step = next((s for s in steps if s.start_unix_ms < at < s.end_unix_ms), None)
+    if step is None or at - step.start_unix_ms < min_length_ms or step.end_unix_ms - at < min_length_ms:
+        return state, None
+    cut = int(round(at))
+    return _with_new_step(_updated(state, step, end=cut), state, cut, step.end_unix_ms, label=step.label, color=step.color)
 
 
 # -- evaluation pairs ------------------------------------------------------------------------------------------------------------------
