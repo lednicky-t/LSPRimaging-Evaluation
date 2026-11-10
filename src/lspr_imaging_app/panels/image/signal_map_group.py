@@ -27,7 +27,7 @@ import math
 from PyQt6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QLinearGradient, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
-    QComboBox, QDoubleSpinBox, QGridLayout, QHBoxLayout, QLabel, QMenu, QSizePolicy, QToolButton, QWidget, QWidgetAction,
+    QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout, QHBoxLayout, QLabel, QMenu, QSizePolicy, QToolButton, QWidget, QWidgetAction,
 )
 
 from lspr_ui import get_active_theme, load_tabler_icon
@@ -42,6 +42,7 @@ from ...analysis.signal_map import (
     RANGE_FIXED,
     RANGES,
     SCHEMES,
+    SHOW_CUBE,
     SHOW_STEP,
     SHOWS,
     Scheme,
@@ -104,6 +105,7 @@ class SignalMapGroup(QWidget):
     refresh_requested = pyqtSignal()
     legend_toggled = pyqtSignal(bool)
     hover_toggled = pyqtSignal(bool)
+    baseline_toggled = pyqtSignal(bool)  # Subtract baseline, changed by the user (here or in the legend's menu)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -140,6 +142,11 @@ class SignalMapGroup(QWidget):
         self.range_combo = _combo(self, RANGES, DEFAULT_RANGE)
         self.low_spin = self._spin(-1.0, "Fixed range: the value at the low end of the colours.")
         self.high_spin = self._spin(1.0, "Fixed range: the value at the high end of the colours.")
+        self.baseline_check = QCheckBox("Subtract baseline (relative)", self)
+        self.baseline_check.setToolTip(
+            "On: the lines are shifts from the baseline (relative). Off: the positions themselves (absolute).\n"
+            "The same switch as the Sensorgram's Subtract: changing it here changes it there too."
+        )
 
         self._menu = QMenu(self.settings_button)
         self._menu.setToolTipsVisible(True)
@@ -157,7 +164,7 @@ class SignalMapGroup(QWidget):
         fixed_layout.addWidget(self.high_spin)
         for row, (text, control) in enumerate((
             ("Show", self.show_combo), ("Pair", self.pair_combo), ("Step", self.step_picker), ("Per", self.per_combo),
-            ("Colours", self.scheme_combo), ("Range", self.range_combo), ("Fixed", fixed),
+            ("Colours", self.scheme_combo), ("Range", self.range_combo), ("Fixed", fixed), ("Baseline", self.baseline_check),
         )):
             grid.addWidget(QLabel(text, panel), row, 0)
             grid.addWidget(control, row, 1)
@@ -192,6 +199,7 @@ class SignalMapGroup(QWidget):
         self.range_combo.currentIndexChanged.connect(lambda _i: self._on_range())
         self.low_spin.valueChanged.connect(lambda _v: self._on_range())
         self.high_spin.valueChanged.connect(lambda _v: self._on_range())
+        self.baseline_check.clicked.connect(self.baseline_toggled)  # `clicked`: only the user's change, not `set_baseline_checked`
         self._sync_enabled()
         self._refresh()
 
@@ -223,6 +231,10 @@ class SignalMapGroup(QWidget):
         button.setParent(self._content)
         self._content_layout.addWidget(button)
 
+    def set_baseline_checked(self, on: bool) -> None:
+        """Show the Subtract switch as it is now (it may have been changed in the Sensorgram). Emits nothing."""
+        self.baseline_check.setChecked(bool(on))
+
     def set_state(self, status: str, needs_refresh: bool) -> None:
         """What the map shows now (the tooltip of the map button) and whether a Refresh would change it."""
         self._status, self._needs_refresh = status, bool(needs_refresh)
@@ -253,6 +265,11 @@ class SignalMapGroup(QWidget):
         self._add_combo_entries(menu.addMenu("Pair"), self.pair_combo)
         self._add_combo_entries(menu.addMenu("Step"), self.step_picker)
         self._add_combo_entries(menu.addMenu("Per"), self.per_combo)
+        baseline = menu.addAction("Subtract baseline (relative)")
+        baseline.setCheckable(True)
+        baseline.setChecked(self.baseline_check.isChecked())
+        baseline.setToolTip(self.baseline_check.toolTip())
+        baseline.triggered.connect(lambda checked: (self.baseline_check.setChecked(checked), self.baseline_toggled.emit(checked)))
         menu.addSeparator()
         refresh = menu.addAction("Refresh")
         refresh.setEnabled(self.map_button.isChecked() and self._needs_refresh)
@@ -416,7 +433,7 @@ class SignalMapGroup(QWidget):
     def _sync_enabled(self) -> None:
         """Only the controls that mean something for the choices made are live (a greyed control still says what it is in its tooltip)."""
         step_mode = self.show_key() == SHOW_STEP
-        self.pair_combo.setEnabled(not step_mode)
+        self.pair_combo.setEnabled(self.show_key() not in (SHOW_STEP, SHOW_CUBE))  # a pair only for the shift and S/N
         self.step_picker.setEnabled(step_mode)
         fixed = self.range_mode() == RANGE_FIXED
         self.low_spin.setEnabled(fixed)
@@ -425,7 +442,7 @@ class SignalMapGroup(QWidget):
     def _refresh(self) -> None:
         theme = get_active_theme()
         on = self.map_button.isChecked()
-        self.map_button.setIcon(self._icon("color-picker", _ON_COLOR if on else theme.text_dim))
+        self.map_button.setIcon(self._icon("palette",_ON_COLOR if on else theme.text_dim))
         self.map_button.setToolTip(f"{_MAP_TIP}\n\n{self._status}" if self._status else _MAP_TIP)
         self.settings_button.setIcon(self._icon("settings", theme.text_dim))
         live = on and self._needs_refresh

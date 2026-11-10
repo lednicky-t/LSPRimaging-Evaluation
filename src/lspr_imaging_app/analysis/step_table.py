@@ -54,6 +54,7 @@ class RowNumbers:
     mean: np.ndarray
     sd: np.ndarray
     noise: np.ndarray | None = None  # SD about the straight line through the step: what a signal-to-noise column divides by
+    line: np.ndarray | None = None  # the line itself as drawn, one value per scan position (`StoredScan.cube_indices` order): the signal map's "cube signal" reads it
 
     def at(self, ref: object) -> tuple[int, float, float]:
         """``(n, mean, sd)`` in the step named by `ref`; ``(0, NaN, NaN)`` if this row was computed without that step (the steps changed since)."""
@@ -160,7 +161,9 @@ def _numbers(line: Series, refs: tuple, n_steps: int) -> RowNumbers:
     if len(values.mean) != n_steps:
         raise ValueError("the step values do not match the steps of the membership")
     noise = np.asarray(values.noise).copy() if values.noise is not None else np.full(n_steps, np.nan)
-    return RowNumbers(refs, np.asarray(values.n).copy(), np.asarray(values.mean).copy(), np.asarray(values.sd).copy(), noise)
+    return RowNumbers(
+        refs, np.asarray(values.n).copy(), np.asarray(values.mean).copy(), np.asarray(values.sd).copy(), noise, np.asarray(line.y, dtype=np.float64).copy(),
+    )
 
 
 def compute_step_numbers(

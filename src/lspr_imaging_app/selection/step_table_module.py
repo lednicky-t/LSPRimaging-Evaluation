@@ -36,6 +36,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from ..analysis.scan_trace import fit_missing_traces, trace_key
@@ -362,6 +363,32 @@ class StepTableModule(QObject):
             return None
         stamp = self._stamp(group=True, members=tuple(sorted(int(r) for r in members)))
         return row.numbers.value_at(ref), stamp is not None and row.stamp == stamp
+
+    def roi_line(self, roi_id: int) -> tuple[np.ndarray, bool] | None:
+        """The ROI's line as drawn (one value per scan position) and whether it is current; None if the ROI has no row yet."""
+        row = self._rois.get(int(roi_id))
+        if row is None or row.numbers.line is None:
+            return None
+        stamp = self._stamp(group=False, members=None)
+        return row.numbers.line, stamp is not None and row.stamp == stamp
+
+    def group_line(self, key: str | None, members: Sequence[int]) ->tuple[np.ndarray, bool] | None:
+        """The group's averaged line as drawn and whether it is current; None if the group has no row yet."""
+        row = self._groups.get(key)
+        if row is None or row.numbers.line is None:
+            return None
+        stamp = self._stamp(group=True, members=tuple(sorted(int(r) for r in members)))
+        return row.numbers.line, stamp is not None and row.stamp == stamp
+
+    def scan_position(self, cube_index: int) -> int | None:
+        """Where a cube of the dataset is in the scan's lines; None when there is no scan or the cube was not scanned."""
+        stored = self._scan.stored()
+        if stored is None:
+            return None
+        try:
+            return list(stored.cube_indices).index(int(cube_index))
+        except ValueError:
+            return None
 
     def has_numbers(self) -> bool:
         return bool(self._rois or self._groups)

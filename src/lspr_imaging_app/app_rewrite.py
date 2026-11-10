@@ -1263,6 +1263,13 @@ def _wire_signal_map(m: _Modules, image_panel: ImagePanel, ui_state: UiStateStor
         if view is not None:
             group.popup_bound_editor(which, view.low, view.high, view.decimals(), where)
 
+    # Cube signal follows the Image panel's cube; Subtract baseline is the Sensorgram's switch, shown and changed here too.
+    module.set_cube(m.selection.current_cube())
+    m.selection.cube_changed.connect(module.set_cube)
+    group.set_baseline_checked(module.baseline_enabled())
+    m.analysis_settings.settings_changed.connect(lambda _change: group.set_baseline_checked(module.baseline_enabled()))
+    group.baseline_toggled.connect(module.set_baseline_enabled)
+
     display.legend.scheme_clicked.connect(group.popup_scheme_menu)
     display.legend.context_requested.connect(group.popup_context_menu)
     display.legend.bound_clicked.connect(edit_bound)

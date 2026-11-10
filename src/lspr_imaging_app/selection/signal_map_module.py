@@ -28,10 +28,13 @@ from ..analysis.signal_map import (
     DEFAULT_SCHEME,
     DEFAULT_SHOW,
     PER_GROUP,
+    SHOW_CUBE,
     SHOW_SNR,
     SHOW_STEP,
+    RANGE_AUTO,
     SignalMapView,
     colours_for,
+    full_range,
     value_range,
 )
 from ..analysis.step_table import OP_DIFFERENCE, OP_SNR, UNGROUPED, GroupMembers, compare_values
@@ -61,6 +64,8 @@ class SignalMapModule(QObject):
         self._scheme = DEFAULT_SCHEME
         self._range = DEFAULT_RANGE
         self._fixed = (-1.0, 1.0)
+        self._cube = 0  # the cube shown on the Image panel (dataset cube index), for "cube signal"
+        self._range_cache: tuple[tuple, list[np.ndarray], tuple[float, float]] | None = None  # cube signal: the whole-dataset range of the lines it was taken from
         self._view: SignalMapView | None = None
         self._revision = 0
         self._status = "The signal map is off."
@@ -111,6 +116,29 @@ class SignalMapModule(QObject):
             self._range, self._fixed = mode, (float(low), float(high))
             self._rebuild()
 
+    def set_cube(self, cube_index: int) -> None:
+        """The cube shown on the Image panel changed (slider, Play). Only "cube signal" depends on it; a lookup, nothing is calculated."""
+        if int(cube_index) == self._cube:
+            return
+        self._cube = int(cube_index)
+        if self._show == SHOW_CUBE:
+            self._schedule()
+
+    def baseline_enabled(self) -> bool:
+        """Subtract baseline: the Sensorgram's Subtract switch (one setting for the Sensorgram, the table and the map)."""
+        return self._steps.baseline_enabled()
+
+    def set_baseline_enabled(self, on: bool) -> None:
+        """Switch Subtract baseline from the map (relative shift on, absolute position off). It changes the lines, so it is a request: with the map on, the rows are
+        recalculated (the traces are kept, so it costs the statistics only)."""
+        if bool(on) == self.baseline_enabled():
+            return
+        self._steps.set_baseline_enabled(bool(on))
+        if self._enabled:
+            self._rebuild()
+            if self._needs_refresh:
+                self.calculate()
+
     def _set(self, name: str, value: object) -> None:
         if getattr(self, name) != value:
             setattr(self, name, value)
@@ -142,7 +170,8 @@ class SignalMapModule(QObject):
         info = dict(self._steps.export_info())
         view = self._view
         info["signal_map"] = {
-            "show": self._show, "pair": self._pair, "per": self._per, "scheme": self._scheme, "range": self._range,
+            "show": self._show, "pair": self._pair, "per": self._per, "scheme": self._scheme, "range": self._range, "subtract_baseline": self.baseline_enabled(),
+            **({"cube": self._cube} if self._show == SHOW_CUBE else {}),
             "low": view.low if view else None, "high": view.high if view else None, "title": view.title if view else "",
         }
         return info
@@ -197,6 +226,8 @@ class SignalMapModule(QObject):
     def blocked_reason(self) -> str:
         if not self._steps.can_calculate():
             return "Signal map: needs a scan and experiment steps (run the scan in Analysis > Scan)."
+        if self._show == SHOW_CUBE:
+            return ""
         if self._show == SHOW_STEP:
             if self._plan.step_by_ref(self._step_ref) is None:  # type: ignore[arg-type]
                 return "Signal map: choose the step to show (Signal map settings)."
@@ -232,12 +263,16 @@ class SignalMapModule(QObject):
         values: dict[int, float] = {}
         spreads: dict[int, float] = {}
         source: dict[int, str] = {}
+        lines: list[np.ndarray] = []  # cube signal: every line used, for the whole-dataset colour range
         stale = False
         missing = 0
         if self._per == PER_GROUP:
             names = {g.group_id: g.name for g in self._toolbox.groups()}
             for row in self._group_rows():
-                got = read(lambda ref, key=row.key, members=row.roi_ids: self._steps.group_step_value(key, members, ref))
+                got = read(
+                    lambda ref, key=row.key, members=row.roi_ids: self._steps.group_step_value(key, members, ref),
+                    lambda key=row.key, members=row.roi_ids: self._steps.group_line(key, members), lines,
+                )
                 label = "Ungrouped" if row.key is UNGROUPED else f"group {names.get(row.key, row.key)}"
                 for r in row.roi_ids:
                     if r in values:
@@ -249,16 +284,35 @@ class SignalMapModule(QObject):
                     stale = True
         else:
             for r in roi_ids:
-                got = read(lambda ref, r=r: self._steps.roi_step_value(r, ref))
+                got = read(lambda ref, r=r: self._steps.roi_step_value(r, ref), lambda r=r: self._steps.roi_line(r), lines)
                 self._put(r, got, f"ROI {r}", values, spreads, source)
                 if got is None:
                     missing += 1
                 elif not got[2]:
                     stale = True
         self._needs_refresh = bool(missing or stale)
-        view = self._make_view(values, spreads, source, title, unit, stale=stale, missing=missing)
+        notes: tuple[str, ...] = ()
+        span = None
+        if self._show == SHOW_CUBE:
+            span = self._dataset_range(lines)
+            if self._steps.scan_position(self._cube) is None and lines:
+                notes = (f"Cube {self._cube} is not in the scan: no value.",)
+        view = self._make_view(values, spreads, source, title, unit, stale=stale, missing=missing, span=span, notes=notes)
         self._publish(view)
         self._set_status(self._describe(view), self._needs_refresh)
+
+    def _dataset_range(self, lines: list[np.ndarray]) -> tuple[float, float]:
+        """Cube signal: the colour range over every value of every line used (all ROIs or groups, all cubes), so a colour means the same on every cube. Cached:
+        the cube slider and Play only look values up; the range is taken again only when the lines or the range setting change."""
+        key = (self._range, self._fixed)
+        cached = self._range_cache
+        if cached is not None and cached[0] == key and len(cached[1]) == len(lines) and all(a is b for a, b in zip(cached[1], lines)):
+            return cached[2]
+        everything = np.concatenate([np.ravel(a) for a in lines]) if lines else np.empty(0)
+        # Auto = the lines' own min..max (maintainer 2026-11-11: a 0..7 nm response must read 0..7, not -7..7 because some noise dips below zero)
+        span = full_range(everything) if self._range == RANGE_AUTO else value_range(everything, self._range, self._fixed)
+        self._range_cache = (key, list(lines), span)
+        return span
 
     @staticmethod
     def _put(roi_id: int, got: tuple[float, float, bool] | None, label: str, values: dict, spreads: dict, source: dict) -> None:
@@ -267,16 +321,30 @@ class SignalMapModule(QObject):
         source[roi_id] = label
 
     def _reader(self):
-        """``(title, unit, read)``: ``read(lookup)`` turns a row's step values (``lookup(ref)`` = the step module's ``(StepValue, current)`` or None) into
-        ``(value, spread, current)``, or None when the row has no numbers for the steps it needs."""
+        """``(title, unit, read)``: ``read(lookup, line, lines)`` turns a row's numbers into ``(value, spread, current)``, or None when the row has no numbers for
+        what is shown. ``lookup(ref)`` = the step module's ``(StepValue, current)`` in a step, or None; ``line()`` = the row's line as drawn and whether it is
+        current, or None; ``lines`` collects the lines used (cube signal: the colour range is taken over all of them)."""
         pair = self._pair
+        subtract = self._steps.baseline_enabled()
+        if self._show == SHOW_CUBE:
+            position = self._steps.scan_position(self._cube)
+            title = f"Cube {self._cube}, {'shift from baseline' if subtract else 'position'}"
+
+            def read_cube(_lookup, line, lines):
+                got = line()
+                if got is None:
+                    return None
+                lines.append(got[0])
+                value = float(got[0][position]) if position is not None and position < len(got[0]) else math.nan
+                return value, math.nan, got[1]
+
+            return title, "nm", read_cube
         if self._show == SHOW_STEP:
             step = self._plan.step_by_ref(self._step_ref)  # type: ignore[arg-type]
-            subtract = self._steps.baseline_enabled()
             name = f"Step {step.order}" + (f" ({step.label})" if step and step.label else "") if step else "Step"
             title = f"{name} mean, {'shift from baseline' if subtract else 'position'}"
 
-            def read_step(lookup):
+            def read_step(lookup, _line, _lines):
                 got = lookup(self._step_ref)
                 return None if got is None else (got[0].mean, got[0].sd, got[1])
 
@@ -286,7 +354,7 @@ class SignalMapModule(QObject):
         title = f"(S{pair} − B{pair}) / σ_B{pair}" if op == OP_SNR else f"Shift S{pair} − B{pair}"
         unit = "" if op == OP_SNR else "nm"
 
-        def read_pair(lookup):
+        def read_pair(lookup, _line, _lines):
             b, s = lookup(base.ref), lookup(signal.ref)
             if b is None or s is None:
                 return None
@@ -295,12 +363,16 @@ class SignalMapModule(QObject):
 
         return title, unit, read_pair
 
-    def _make_view(self, values: dict, spreads: dict, source: dict, title: str, unit: str, *, stale: bool, missing: int) -> SignalMapView:
+    def _make_view(
+        self, values: dict, spreads: dict, source: dict, title: str, unit: str, *, stale: bool, missing: int,
+        span: tuple[float, float] | None = None, notes: tuple[str, ...] = (),
+    ) -> SignalMapView:
+        """`span`: the colour range when it is not taken from these values (cube signal: over the whole dataset)."""
         ids = sorted(values)
         array = np.asarray([values[r] for r in ids], dtype=np.float64)
-        low, high = value_range(array, self._range, self._fixed)
+        low, high = span if span is not None else value_range(array, self._range, self._fixed)
         colours = colours_for(array, low, high, self._scheme, stale=stale)
-        notes = (f"{missing} ROIs have no number yet.",) if missing else ()
+        notes = (*notes, *((f"{missing} ROIs have no number yet.",) if missing else ()))
         return SignalMapView(
             self._revision, dict(zip(ids, colours)), values, spreads, source, title, unit, self._scheme, low, high, stale, missing, notes,
         )

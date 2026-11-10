@@ -6,7 +6,9 @@ switch); ``selection/signal_map_module.py`` reads them and hands one value per R
 
 * **What is shown** (:data:`SHOWS`): the shift of the signal step from the baseline step of an evaluation pair, ``mean(S) - mean(B)`` (nm, default); that shift divided by
   the noise of the baseline step (S/N); or the mean of one step, which reads as a shift from the baseline when the Sensorgram's Subtract switch is on and as a position
-  when it is off (the numbers are the lines as drawn, so the switch decides; nothing here re-derives it).
+  when it is off (the numbers are the lines as drawn, so the switch decides; nothing here re-derives it); or the value of each line at the cube shown (cube signal,
+  added later on 2026-11-10; its colour range is over all ROIs and all cubes of the dataset, so the colours do not rescale while the cube changes; its Auto range
+  is the lines' true minimum to maximum, :func:`full_range`, not symmetric around zero).
 * **Colour schemes** (:data:`SCHEMES`): two diverging ones (white in the middle: for signed values around zero) and four sequential ones (perceptually even). Each is
   a few RGB stops interpolated linearly, close enough to the published maps for a display (not used for any number).
 * **Range** (:func:`value_range`): the values that map to the two ends of the scheme. Auto = symmetric around zero when the values have both signs, else the 2nd to 98th
@@ -28,10 +30,13 @@ from .export_tables import Table
 SHOW_SHIFT = "shift"
 SHOW_SNR = "snr"
 SHOW_STEP = "step"
+SHOW_CUBE = "cube"
 SHOWS: tuple[tuple[str, str, str], ...] = (
     (SHOW_SHIFT, "Shift S − B", "Mean of the signal step minus mean of the baseline step of the evaluation pair (nm): how far each ROI moved."),
     (SHOW_SNR, "S/N (S − B) / σ_B", "The shift divided by the noise of the baseline step (SD about a straight line through it): how clearly each ROI moved."),
-    (SHOW_STEP, "One step's mean", "Mean of one step. With the Sensorgram's Subtract switch on it is the shift from the baseline; off, the position itself (nm)."),
+    (SHOW_STEP, "One step's mean", "Mean of one step. With Subtract baseline on it is the shift from the baseline; off, the position itself (nm)."),
+    (SHOW_CUBE, "Cube signal", "The value of each ROI's line at the cube shown on the Image panel (follows the cube slider and Play). With Subtract baseline on it is "
+     "the shift from the baseline; off, the position itself (nm). The colour range is taken over all ROIs and all cubes, so a colour means the same on every cube."),
 )
 DEFAULT_SHOW = SHOW_SHIFT
 
@@ -124,6 +129,16 @@ def value_range(values: np.ndarray, mode: str = DEFAULT_RANGE, fixed: tuple[floa
         m = max(abs(p_low), abs(p_high))
         return _widen(-m, m)
     return _widen(p_low, p_high)
+
+
+def full_range(values: np.ndarray) -> tuple[float, float]:
+    """``(min, max)`` of the finite values (widened if equal); ``(nan, nan)`` if none. The cube-signal map's Auto range: the lines' own extent over the whole
+    dataset, as the Sensorgram's y axis shows it (a line from about 0 to 7 nm gives 0..7, not -7..7 because of a little noise below zero)."""
+    finite = np.asarray(values, dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return math.nan, math.nan
+    return _widen(float(finite.min()), float(finite.max()))
 
 
 def _widen(low: float, high: float) -> tuple[float, float]:

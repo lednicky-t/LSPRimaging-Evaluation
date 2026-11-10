@@ -48,3 +48,10 @@ signs, else 2–98 %), Around zero, Data 2–98 %, Fixed. Grey = no number; fade
 - The legend on the image is clickable (`SignalMapLegendItem.mouseClickEvent`, `part_at`): left click on title/bar = colour schemes, left click on the low/high number = type a value (range becomes Fixed, the other end keeps the shown value; `SignalMapGroup.set_fixed_bound`), right click = menu (Auto scale, Range, Colours, Show, Pair, Step, Per, Refresh, Legend, Hover values, Turn off).
 - The menus are built by `SignalMapGroup` from its own controls, so a choice made on the legend is remembered and shown on the ribbon. The legend only reports where it was clicked; `_wire_signal_map` connects the two.
 - The legend's bounding box is the chip only, and `SignalMapDisplay.owns_click` stops a legend click from also selecting/clearing ROIs (`ImagePanel._on_scene_clicked`).
+
+## Current cube + Subtract baseline on the map (2026-11-10, evening)
+
+- Show "Cube signal" (first called "Current cube"): each ROI's (or group's) line as drawn, at the cube shown on the Image panel (`SelectionModule.cube_changed` -> `SignalMapModule.set_cube`). No calculation on a cube change: a lookup in `RowNumbers.line` (new field: the line's y per scan position, kept by `step_table._numbers`; position = index in `StoredScan.cube_indices`, as the Sensorgram cursor does).
+- Its colour range is taken over all ROIs (or groups) and all cubes of the dataset (maintainer's wish), cached by the identity of the line arrays (`_dataset_range`), so colours do not rescale while the slider or Play moves.
+- "Subtract baseline (relative)" check box in the settings and the legend's right-click menu = the Sensorgram's Subtract switch (one setting). Changing it from the map is a request: the rows are recalculated (traces kept, statistics only).
+- Why it was missing in the first version: "or just some step high" was read as one step's mean, and "both, depending on the selection in sensogram" as following the Sensorgram's switch rather than a switch on the map. Neither was asked back.
