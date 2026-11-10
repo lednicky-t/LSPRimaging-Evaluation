@@ -21,11 +21,20 @@ each marked step minus a border offset (cubes at each end) is an anchor region, 
 **Shapes** (`SHAPES`) and how many anchors each needs (`MIN_ANCHORS`). A shape is never swapped for a simpler one when there are too few anchors: the
 trace is then left uncorrected and the reason is returned (the controls mean the same for every selection).
 
-- ``constant``: the mean of the anchor levels (1 anchor).
-- ``linear`` / ``quadratic`` / ``cubic``: least-squares polynomial through the anchors (2 / 3 / 4 anchors; with exactly that many it passes through
-  each). Extrapolated beyond the first and last anchor, as the polynomial says.
-- ``pchip``: a smooth curve through every anchor that never overshoots between them (shape-preserving piecewise cubic; with two anchors a straight
-  line). Held flat beyond the first and last anchor, because a piecewise curve has nothing to say there.
+**What is fitted (2026-11-10, maintainer's decision: "replace the original").** The curve of ``constant`` / ``linear`` / ``quadratic`` / ``cubic`` is
+fitted through *every cube* of the anchors (each cube once, equal weight), not through one averaged point per anchor. So it follows the trend inside an
+anchor step too: with one mean per step a slope inside a step was thrown away, and a line through two steps could not see that the buffer was already
+creeping. Consequences, all deliberate: a longer anchor counts more (it has more cubes); two anchors are enough for any polynomial degree, as far as
+the data go (cubes at degree + 1 different x); with only two anchors a quadratic or cubic takes its curvature from the trends inside them, which is
+noisy, so check the result. A step still has to be baseline for the whole of its length: the border offset cuts off the relaxation after a solution
+change, which would otherwise read as drift. The anchor *marks* on the plot and `DriftFit.anchors_*` stay one point per anchor (its mean x and y).
+
+- ``constant``: the mean of every anchor cube (1 anchor).
+- ``linear`` / ``quadratic`` / ``cubic``: least-squares polynomial through every anchor cube (2 anchors each). Extrapolated beyond the first and last
+  anchor, as the polynomial says. One anchor alone is not enough for these: a trend in one stretch would be carried over the whole experiment.
+- ``pchip``: a smooth curve through the mean of every anchor that never overshoots between them (shape-preserving piecewise cubic; with two anchors a
+  straight line). Held flat beyond the first and last anchor, because a piecewise curve has nothing to say there. It stays on the anchor means: an
+  interpolating curve cannot follow a trend inside an anchor.
 
 The fit is made in the units of the plot's x axis (seconds, or cube number when the axis is cubes), the same axis the "window" method uses. A cube
 whose x is NaN (no timing on a time axis) gets no baseline and so no corrected value.
@@ -44,7 +53,7 @@ import numpy as np
 
 METHOD_WINDOW, METHOD_ANCHORS = "window", "anchors"
 SHAPES = ("constant", "linear", "quadratic", "cubic", "pchip")
-MIN_ANCHORS = {"constant": 1, "linear": 2, "quadratic": 3, "cubic": 4, "pchip": 2}
+MIN_ANCHORS = {"constant": 1, "linear": 2, "quadratic": 2, "cubic": 2, "pchip": 2}  # anchors (steps / points), not cubes: see "What is fitted"
 _POLY_DEGREE = {"linear": 1, "quadratic": 2, "cubic": 3}
 ALL_ROIS = 0  # the roi id of an anchor point every ROI shares
 TRIM_RANGE = (0, 500)  # cubes left out at each border of an anchor step (the Range method)
@@ -53,8 +62,9 @@ TRIM_RANGE = (0, 500)  # cubes left out at each border of an anchor step (the Ra
 @dataclass(frozen=True)
 class DriftFit:
     """One trace's drift baseline. ``curve`` is ``float64 [cube]`` (NaN where there is none: too few anchors, or no x); ``anchors_x`` / ``anchors_y``
-    are the anchor points used; ``anchors_base`` the curve's value at each anchor's x (so ``anchors_y - anchors_base`` is where an anchor sits after
-    correction); ``level`` is the mean of the anchor levels (what `Series.baseline` reports); ``message`` says why there is no curve."""
+    are one point per anchor (the mean x and y of its cubes: what is drawn as the anchor's mark); ``anchors_base`` the curve's value at each anchor's
+    x (so ``anchors_y - anchors_base`` is where an anchor sits after correction); ``level`` is the mean of every anchor cube (what `Series.baseline`
+    reports); ``message`` says why there is no curve."""
 
     curve: np.ndarray
     anchors_x: np.ndarray
@@ -99,11 +109,13 @@ def fit_drift(x_values: np.ndarray, y_values: np.ndarray, regions: Sequence[np.n
         return _failed(n, ax, ay, f"{shape} needs {need} anchor{'s' if need != 1 else ''} with values, found {ax.size}")
     order = np.argsort(ax, kind="stable")
     ax, ay = ax[order], ay[order]
+    cx, cy = x[used], y[used]  # every cube of the anchors, each once (regions may overlap): what the constant and the polynomials are fitted through
+    level = float(np.mean(cy))
     curve = np.full(n, np.nan)
     xs = x[np.isfinite(x)]
     if shape == "constant":
-        values = np.full(xs.size, float(np.mean(ay)))
-        at_anchors = np.full(ax.size, float(np.mean(ay)))
+        values = np.full(xs.size, level)
+        at_anchors = np.full(ax.size, level)
     elif shape == "pchip":
         if np.unique(ax).size < 2:
             return _failed(n, ax, ay, "pchip needs anchors at two different x")
@@ -116,9 +128,9 @@ def fit_drift(x_values: np.ndarray, y_values: np.ndarray, regions: Sequence[np.n
         at_anchors = model(ax)
     else:
         degree = _POLY_DEGREE[shape]
-        if np.unique(ax).size <= degree:
-            return _failed(n, ax, ay, f"{shape} needs anchors at {degree + 1} different x")
-        model = np.polynomial.Polynomial.fit(ax, ay, degree)  # fitted on a scaled domain: well conditioned for x in seconds
+        if np.unique(cx).size <= degree:
+            return _failed(n, ax, ay, f"{shape} needs cubes at {degree + 1} different x in the anchors")
+        model = np.polynomial.Polynomial.fit(cx, cy, degree)  # least squares over every anchor cube; scaled domain: well conditioned for x in seconds
         values = model(xs)
         at_anchors = model(ax)
     curve[np.isfinite(x)] = values
@@ -126,7 +138,7 @@ def fit_drift(x_values: np.ndarray, y_values: np.ndarray, regions: Sequence[np.n
         residual = y[used] - curve[used]
     residual = residual[np.isfinite(residual)]
     rms = float(np.sqrt(np.mean(residual**2))) if residual.size else float("nan")
-    return DriftFit(curve, ax, ay, float(np.mean(ay)), rms, anchors_base=np.asarray(at_anchors, dtype=np.float64))
+    return DriftFit(curve, ax, ay, level, rms, anchors_base=np.asarray(at_anchors, dtype=np.float64))
 
 
 class StepMembership(Protocol):

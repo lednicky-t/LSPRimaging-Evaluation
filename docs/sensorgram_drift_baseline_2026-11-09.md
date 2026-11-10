@@ -188,9 +188,41 @@ method only. Now `DriftBaselineControls.steps_note` is shown
 
 The count is of marked steps the plan still has (`steps_in_plan`), so a mark left behind by a removed step does not count.
 
+## 2026-11-10: the curve is fitted through every cube of the anchors (maintainer: "replace the original")
+
+The maintainer asked why two marked steps still got "needs more anchors", and whether the fit should use all the points of a step (minus the
+borders). Until then each anchor was collapsed to one point (mean x, mean y) and the shape was fitted through those points, so a trend *inside* a step
+was lost, and a Quadratic / Cubic needed 3 / 4 steps.
+
+- **Now** (`baseline_drift.fit_drift`): Constant / Linear / Quadratic / Cubic are least-squares fits through **every cube of the anchors**, each cube
+  once (overlapping regions are a union), equal weight. `MIN_ANCHORS` is `constant 1`, every other shape `2`: two anchors are enough for any degree as
+  far as the data go (the fit needs cubes at degree + 1 different x, else "needs cubes at N different x in the anchors"). One anchor alone is still
+  refused for the lines and curves, so a trend in one stretch is never carried over the whole experiment (and no shape is swapped for a simpler one).
+- **PCHIP stays on the anchor means** (it interpolates; it cannot follow a trend inside an anchor). Said in its tool tip.
+- **The anchor marks** and `DriftFit.anchors_x / anchors_y / anchors_base` stay one point per anchor (its mean x and y), so the plot, the group
+  averaging in `scan_trace._attach_drift` and the "where an anchor sits after correction" look are as before. `DriftFit.level` (what
+  `Series.baseline` reports) is now the mean of every anchor cube, not the mean of the anchor means (same number when the anchors are equally long).
+- **Longer anchors count more** (more cubes): a consequence of the equal weight per cube, deliberate.
+- **Measured** on a simulated run (5 steps of 40 cubes, anchors = first and last H2O step, 2 cubes trimmed per border, 300 noise seeds; script
+  `compare_fit.py` in the session scratchpad, not kept; **not real data**):
+  - *Linear drift*: Linear is **unchanged** (identical to 4 decimals, old vs new). Quadratic / Cubic give the same bias but about **twice the spread**
+    of the middle steps' means (0.0042 vs 0.0020 nm at 0.01 nm noise): extra freedom costs noise.
+  - *Curved drift* (0.3 nm of bend over the run): Linear leaves a bias of -0.040 nm in the middle steps (old and new alike); the new Quadratic / Cubic
+    remove it (bias 0.000, rms error of every cube 0.035 -> 0.010 nm at noise 0.01). **This is where the change pays.**
+  - *Exponential settling at the start* (tau 300 s, trim 2 cubes): Linear +0.085 nm, new Quadratic -0.035, new Cubic -0.035 with a spread half of the
+    Quadratic's. A longer border offset matters more now.
+  - *Why Linear did not change:* the two anchors are far apart and short, so the line is set almost entirely by the difference between the two
+    levels; the slopes inside a step hardly weigh in. Only the curved shapes use the within-step trend.
+  - Cost: a quadratic fit through 3 anchors of 188 cubes, 0.37 -> 0.40 ms per ROI.
+- Pinned by `tests/unit/test_lspri_baseline_drift.py` (`test_the_curve_follows_the_trend_inside_the_anchors`, `test_a_longer_anchor_counts_more...`,
+  `test_a_cube_in_two_overlapping_anchors_counts_once`, `test_pchip_stays_on_the_anchor_means`, `test_too_few_anchors...`).
+- **The ROI position tuning is unaffected** in how it scans (it still scans exactly the anchors' cubes, and the curve depends only on them); a test
+  pins that a trace cut to some cubes gets the same correction as the whole trace.
+
 ## Open
 
-- Before/after check on a real dataset with repeated buffer steps (not done yet, for either method, nor for the tuning).
+- Before/after check on a real dataset with repeated buffer steps (not done yet, for either method, nor for the tuning; the numbers above are
+  simulated).
 - **A removed step keeps its mark.** Its ref stays in `baseline_anchor_steps` and matches nothing. If it was the only marked step, the method still
   counts as "steps marked": the range band stays hidden and the lines are uncorrected with "no anchors ...". The way out is "Clear all anchor steps"
   on any step's menu. Dropping such refs when the plan changes would be simple, but then undoing the step's removal would not bring the mark back.

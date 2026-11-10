@@ -55,11 +55,15 @@ METHOD_TIPS = {
 }
 SHAPE_LABELS = {"constant": "Constant", "linear": "Linear", "quadratic": "Quadratic", "cubic": "Cubic", "pchip": "PCHIP (smooth, through every anchor)"}
 SHAPE_TIPS = {  # "anchors": anchor points, or the Range method's anchor steps
-    "constant": "The mean level of the anchors (needs 1 anchor).",
-    "linear": "A straight line fitted through the anchors (needs 2). With only one anchor in the start and one in the end buffer this is the most the data can support.",
-    "quadratic": "A parabola fitted through the anchors (needs 3). Extrapolated beyond the first and last anchor.",
-    "cubic": "A cubic fitted through the anchors (needs 4). Extrapolated beyond the first and last anchor.",
-    "pchip": "A smooth curve through every anchor that never overshoots between them (needs 2). Held flat beyond the first and last anchor.",
+    "constant": "The mean level of every cube in the anchors (needs 1 anchor).",
+    "linear": "A straight line fitted through every cube of the anchors (needs 2 anchors), so it follows the trend inside them too. Extrapolated beyond "
+    "the first and last anchor.",
+    "quadratic": "A parabola fitted through every cube of the anchors (needs 2 anchors). With only two, its curvature comes from the trends inside "
+    "them, which is noisy: check the result. Extrapolated beyond the first and last anchor.",
+    "cubic": "A cubic fitted through every cube of the anchors (needs 2 anchors). With only two, its shape comes from the trends inside them, which is "
+    "noisy: check the result. Extrapolated beyond the first and last anchor.",
+    "pchip": "A smooth curve through the mean of each anchor that never overshoots between them (needs 2). Held flat beyond the first and last "
+    "anchor. It stays on the means: it does not follow a trend inside an anchor.",
 }
 SHAPE_NAMES = {key: label.split(" (")[0] for key, label in SHAPE_LABELS.items()}  # the label without its explanation: "PCHIP"
 SHAPE_BUTTON_TIP = (
