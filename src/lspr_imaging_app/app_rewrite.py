@@ -89,7 +89,7 @@ from .perf_setup import status_text as perf_status_text
 from .perf_setup import write_perf_preferences
 from .panels.roi_table import RoiTablePanel
 from .panels.check_report_window import CheckReportWindow
-from .panels.image.analysis_tab import MOTION_WAVELENGTH_KEY, AnalysisTab
+from .panels.image.analysis_tab import AnalysisTab
 from .panels.image.motion_presenter import MotionPresenter
 from .panels.sensorgram.checks_presenter import ChecksPresenter
 from .panels.image.tuning_tab import TuningTab
@@ -1181,10 +1181,12 @@ def _wire_data_checks(window: QMainWindow, m: _Modules, sensorgram_panel: Sensor
 
 
 def _wire_image_motion(window: QMainWindow, m: _Modules, row: AnalysisTab, ui_state: UiStateStore) -> MotionPresenter:
-    """The Analysis tab's "Motion" group, its report window and the image-motion module (2026-11-07). The wavelength in the box is remembered. Returns the presenter."""
-    ui_state.bind(MOTION_WAVELENGTH_KEY, row.motion_wavelength)
-    report_window = CheckReportWindow("Image motion", size_key=MOTION_WINDOW_SIZE, numbers_key=MOTION_WINDOW_NUMBERS, ui_state=ui_state, parent=window)
-    return MotionPresenter(m.image_motion, row, report_window, window)
+    """The Analysis tab's "Motion" button, its compact report window and the image-motion module (2026-11-07; 2026-11-10: no wavelength box, the plane of the image on screen
+    is measured; the window opens only when a step moves). Returns the presenter."""
+    report_window = CheckReportWindow(
+        "Image motion", size_key=MOTION_WINDOW_SIZE, numbers_key=MOTION_WINDOW_NUMBERS, ui_state=ui_state, compact=True, parent=window,
+    )
+    return MotionPresenter(m.image_motion, row, report_window, m.selection.current_wavelength, window)
 
 
 def _ask_tuning_export_path(parent: QWidget, default: Path) -> Path | None:

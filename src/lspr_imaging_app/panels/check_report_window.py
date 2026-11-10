@@ -17,6 +17,9 @@ text by the extension chosen, on a thread of its own. The window changes no resu
 `image/motion_presenter.py`) tells it what to show with `set_state` and `set_progress`, and hears `run_requested`, `cancel_requested` and `pair_chosen`.
 
 The size and whether the table is unfolded are remembered (``ui_state``).
+
+**Compact** (``compact=True``, the Image panel's Motion, 2026-11-10): the window only opens when a step moves, so it has no Run / Cancel button (the ribbon's Motion button
+runs it and the status bar shows progress), tighter margins and a smaller default size.
 """
 
 from __future__ import annotations
@@ -56,6 +59,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SIZE = (860, 620)
 _MIN_SIZE = (460, 300)
+COMPACT_SIZE = (520, 300)
+_COMPACT_MIN_SIZE = (340, 200)
 _COPIED_MS = 1500
 _ORDER = {WARN: 0, INFO: 1, OK: 2}  # warnings first
 RUN_TIP = "Check the data now. The checks run in the background; progress is in the status bar."
@@ -87,12 +92,15 @@ class CheckReportWindow(QDialog):
         numbers_key: str,
         ui_state: UiStateStore | None = None,
         with_pairs: bool = False,
+        compact: bool = False,
         choose_path: PathChooser = _ask_save_path,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setModal(False)
+        self._compact = compact
+        self._default_size, self._min_size = (COMPACT_SIZE, _COMPACT_MIN_SIZE) if compact else (DEFAULT_SIZE, _MIN_SIZE)
         self._store = ui_state
         self._size_key, self._numbers_key = size_key, numbers_key
         self._choose_path = choose_path
@@ -139,6 +147,10 @@ class CheckReportWindow(QDialog):
         bottom.addStretch(1)
         bottom.addWidget(self.close_button)
         layout = QVBoxLayout(self)
+        if compact:
+            layout.setContentsMargins(8, 8, 8, 8)
+            layout.setSpacing(4)
+            self.run_button.hide()
         layout.addLayout(top)
         layout.addWidget(self.status_label)
         layout.addWidget(self.browser, 2)
@@ -337,10 +349,10 @@ class CheckReportWindow(QDialog):
         if (
             isinstance(saved, list) and len(saved) == 2
             and all(isinstance(value, int) and not isinstance(value, bool) for value in saved)
-            and saved[0] >= _MIN_SIZE[0] and saved[1] >= _MIN_SIZE[1]
+            and saved[0] >= self._min_size[0] and saved[1] >= self._min_size[1]
         ):
             return int(saved[0]), int(saved[1])
-        return DEFAULT_SIZE
+        return self._default_size
 
     def hideEvent(self, event: QHideEvent) -> None:
         if self._store is not None:

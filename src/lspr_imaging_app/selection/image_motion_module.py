@@ -118,10 +118,8 @@ class ImageMotionModule(QObject):
                 todo.append((label, in_step))
             else:
                 skipped.append(label)
-        subtitle = (
-            f"Raw plane at {wanted:g} nm (the nearest to the {wavelength_nm:g} nm asked for), one per cube, against the first cube of each step. "
-            f"Checked at {datetime.now():%H:%M}."
-        )
+        nearest_note = f" (the nearest to the {wavelength_nm:g} nm asked for)" if abs(wanted - wavelength_nm) > 0.05 else ""
+        subtitle = f"Raw plane at {wanted:g} nm{nearest_note}, one per cube, against the first cube of each step. Checked at {datetime.now():%H:%M}."
         self._failure = None
         self._run.start(self._work(todo, skipped, plane_of, wanted, subtitle))
         self.started.emit("measuring the image motion")

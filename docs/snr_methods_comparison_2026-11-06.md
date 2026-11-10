@@ -73,10 +73,14 @@ Built (uncommitted, LSPRi submodule + umbrella tests):
   `checks_presenter.py` connects the three and owns the status-bar task ("Data checks", with Cancel).
 - **Evaluation pair**: the checks compare the first complete pair, or the one picked in the window (a picker appears when there are several; remembered, `sensorgram/checks_pair`).
   Picking another runs the checks for it. Without a pair only the step checks are made, and the window says so.
-- **Image panel, Analysis tab, group "Motion"** (check 7): a button and a wavelength box (remembered, `analysis/motion_wavelength_nm`, default 600 nm; the nearest wavelength the dataset has is
-  read and named in the report). Runs `selection/image_motion_module.py` off the GUI thread (one raw plane per cube, read one at a time, never held: a 100-cube step would otherwise need
-  200 MB); the button is a red Stop meanwhile; the result opens in the same report window class (title "Image motion"; jitter and drift per step, flagged ones as warnings with the reason).
-- **Deviations from the description**: the pair picker is in the report window, not on the ribbon (the ribbon stays one button wide); the Motion wavelength box defaults to 600 nm, the
-  wavelength of the measurement above, instead of the wavelength shown in the Image panel.
+- **Image panel, Analysis tab, group "Motion"** (check 7): one button. Runs `selection/image_motion_module.py` off the GUI thread (one raw plane per cube, read one at a time, never held:
+  a 100-cube step would otherwise need 200 MB); the button is a red Stop meanwhile. **Reworked 2026-11-10 (maintainer request):** the wavelength box is gone, the plane measured is the
+  wavelength of the image on screen (the Selection's current wavelength, read when the button is pressed; the nearest one the dataset has, named in the report). Nothing opens while
+  it runs; the result is one sentence on the status bar (`CheckReport.summary`, built by `check_report.motion_summary`): "No image motion over the limits at 600 nm in 12 steps: jitter up
+  to ... px (limit 0.05 px), drift up to ... px (limit 0.1 px)", or which steps move. Only when a step moves does the report window open, in its **compact** form (`compact=True`: about
+  520 x 300 px, no Run / Cancel button, tighter margins; jitter and drift per step as warnings, the reason once in a note, the table folded). A refusal, a failure and a stop are status-bar
+  sentences too. The size key is `motion_window/compact_size` (the old `motion_window/size` is ignored); the old `analysis/motion_wavelength_nm` is no longer read.
+- **Deviations from the description**: the pair picker is in the report window, not on the ribbon (the ribbon stays one button wide). The first version had a Motion wavelength box that
+  defaulted to 600 nm; since 2026-11-10 the plane on screen is used, as the description said.
 - Tests: `tests/unit/test_lspri_analysis_check_report.py` (report, text / CSV / JSON, streaming motion), `tests/integration/test_lspri_data_checks.py` (thread helper, both modules,
   window, button, presenters, wiring; real modules on the small plan-bar dataset). The pure files are in the Qt-free list of `.importlinter`.

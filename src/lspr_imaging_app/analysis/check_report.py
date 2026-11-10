@@ -41,6 +41,8 @@ class CheckReport:
     subtitle: str
     findings: tuple[Finding, ...]
     table: ReportTable | None = None
+    summary: str = ""
+    """One sentence for the status bar (the motion check writes it; empty for the others). Not part of the copied / saved report."""
 
     @property
     def warnings(self) -> int:
@@ -89,15 +91,38 @@ def diagnostics_report(report: DiagnosticsReport, subtitle: str) -> CheckReport:
 MOTION_WHY = "A sample ROI and its reference ROI sit at fixed pixels, so a moving image shifts what they cover: jitter adds noise, a drift adds a trend."
 
 
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def motion_summary(motions: Sequence[StepMotion], skipped: Sequence[str], wavelength_nm: float) -> str:
+    """The one sentence the status bar shows after a motion run: nothing over the limits (with the worst numbers), which steps move, or why nothing was measured."""
+    left_out = f" {_plural(len(skipped), 'step')} with fewer than 3 cubes not measured." if skipped and motions else ""
+    if not motions:
+        return f"Image motion not measured: {_plural(len(skipped), 'step')} with fewer than 3 cubes." if skipped else "Image motion: there are no experiment steps to measure."
+    moving = [m.label for m in motions if m.flagged]
+    if moving:
+        shown = ", ".join(moving[:3]) + (f" and {len(moving) - 3} more" if len(moving) > 3 else "")
+        return f"Image motion over the limits in {len(moving)} of {_plural(len(motions), 'step')} at {wavelength_nm:g} nm: {shown}. See the report.{left_out}"
+    worst_jitter = max(max(m.jitter_px) for m in motions)
+    worst_range = max(max(m.range_px) for m in motions)
+    return (
+        f"No image motion over the limits at {wavelength_nm:g} nm in {_plural(len(motions), 'step')}: jitter up to {worst_jitter:.3f} px (limit {JITTER_LIMIT_PX} px), "
+        f"drift up to {worst_range:.2f} px (limit {DRIFT_LIMIT_PX} px).{left_out}"
+    )
+
+
 def motion_report(motions: Sequence[StepMotion], skipped: Sequence[str], wavelength_nm: float, subtitle: str) -> CheckReport:
     """Image motion per step. ``skipped``: labels of the steps that have too few cubes to measure."""
     findings: list[Finding] = []
     for m in motions:
         if m.flagged:
             findings.append(Finding(
-                "motion", WARN, f"{m.label}: the image moves", f"{'; '.join(m.flagged)}. {MOTION_WHY}",
+                "motion", WARN, f"{m.label}: the image moves", f"{'; '.join(m.flagged)}.",
                 {"step": m.label, "jitter_px": list(m.jitter_px), "range_px": list(m.range_px)},
             ))
+    if findings:  # said once, not under every step
+        findings.append(Finding("motion", INFO, "Why it matters", MOTION_WHY))
     if motions and not findings:
         worst_jitter = max(max(m.jitter_px) for m in motions)
         worst_range = max(max(m.range_px) for m in motions)
@@ -117,7 +142,7 @@ def motion_report(motions: Sequence[StepMotion], skipped: Sequence[str], wavelen
         f"Image motion at {wavelength_nm:g} nm (against the first cube of each step)",
         ("Step", "Cubes", "Jitter x (px)", "Jitter y (px)", "Range x (px)", "Range y (px)", "Result"), rows,
     ) if motions else None
-    return CheckReport("Image motion", subtitle, tuple(findings), table)
+    return CheckReport("Image motion", subtitle, tuple(findings), table, motion_summary(motions, skipped, wavelength_nm))
 
 
 # -- copying and saving ------------------------------------------------------------------------------------------------------------
