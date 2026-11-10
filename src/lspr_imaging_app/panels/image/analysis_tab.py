@@ -6,8 +6,8 @@ Screen purpose: start and stop the scan (step 1 of the analysis: mean / STD / pi
 
 Layout (one ribbon row, captioned groups):
 
-    [play / stop]  |  [skip / stop]  |  [bolt]  |  [move]  |  [folder]
-        Scan          Fast scan         Mode     Motion      Scan file
+    [play / stop]  |  [skip / stop]  |  [bolt]  |  [move]  |  [map gear refresh legend hover export]  |  [folder]
+        Scan          Fast scan         Mode     Motion                 Signal map                       Scan file
 
 - **Scan:** play reads every cube again. While it runs the same button is a red Stop (as the Export tab's), which stops it like the
   Cancel in the status bar's task indicator. Cubes that were finished stay saved.
@@ -20,6 +20,7 @@ Layout (one ribbon row, captioned groups):
   the image on screen (since 2026-11-10 there is no wavelength box: the presenter reads the current wavelength when the button is pressed). A moving image shifts what the
   sample and reference ROIs cover, so it adds noise or a trend. The button runs it in the background (while it runs the same button is a red Stop). The result is one
   sentence on the status bar (``announce``); only when a step moves over the limits does a compact report window open (``check_report_window.py``).
+- **Signal map** (2026-11-10): every ROI coloured by its response; its own widget and docstring, ``signal_map_group.py``.
 - **Scan file:** opens the folder that holds the scan file the Spectra and Sensorgram panels are showing. Visible only while the file exists.
 - **Text:** what the last scan did ("scanned in ...", "up to date", why it could not start) is the "i" icon's text while this tab is open and the
   Scan button's tooltip; a message that must be seen (a refusal, an outcome) also goes to the status bar. Progress and Cancel are the
@@ -45,6 +46,7 @@ from ..live_toggle import LiveToggle
 from ..ribbon_group import labeled_icon_group, ribbon_separator
 from .analysis_mode_picker import DESCRIPTIONS, LABELS, AnalysisModePicker
 from .general_group import ICON_SIZE, style_general_icon_button
+from .signal_map_group import SignalMapGroup
 
 _RENDER_SIZE = ICON_SIZE * 2
 _STROKE_WIDTH = 2.1
@@ -99,6 +101,7 @@ class AnalysisTab(QWidget):
         fast_group, self._fast_caption = labeled_icon_group(self, self.fast_run_button, "Fast scan")
         mode_group, _ = labeled_icon_group(self, self.mode_picker, "Mode")
         motion_group, self._motion_caption = labeled_icon_group(self, self.motion_button, "Motion")
+        self.signal_map = SignalMapGroup(self)  # ROIs coloured by their response (2026-11-10, `signal_map_group.py`); wired by `app_rewrite._wire_signal_map`
         self._folder_group, _ = labeled_icon_group(self, self.folder_button, "Scan file")
         self._folder_group.setVisible(False)  # until the owner says the file exists
 
@@ -106,7 +109,7 @@ class AnalysisTab(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
-        for index, group in enumerate((live_group, run_group, fast_group, mode_group, motion_group, self._folder_group)):
+        for index, group in enumerate((live_group, run_group, fast_group, mode_group, motion_group, self.signal_map, self._folder_group)):
             if index:
                 separator = ribbon_separator(self)
                 self._separators.append(separator)
@@ -190,6 +193,10 @@ class AnalysisTab(QWidget):
             "icon (when a scan file exists): open its folder."
             "<br><br><b>Motion</b><br>Measure how far the image moves between the cubes of each experiment step, on the raw plane at the wavelength of the image on screen. "
             "The status bar says the result; a report opens only if a step moves over the limits. While it runs the button is Stop."
+            "<br><br><b>Signal map</b><br>Colour every ROI by how much it changed: the shift S − B of an evaluation pair (default), S/N, or one step's mean, "
+            "each ROI or by group, in a colour scheme and range of your choice (gear). The numbers are the Sensorgram's lines as drawn (the ROI / Groups table's step numbers). "
+            "Refresh (amber) calculates missing or out-of-date numbers; legend and hover values have their own switches; export saves the figure or the values."
+            f"<br>{html.escape(self.signal_map.status_text())}"
             f"<br><br><b>Mode</b><br>{html.escape(LABELS[self.mode_picker.mode()])}: {html.escape(DESCRIPTIONS[self.mode_picker.mode()])}."
             f"{('<br>' + html.escape(self.mode_picker.pool_state_line())) if self.mode_picker.pool_state_line() else ''}"
             f"<br><br>{html.escape(self._status).replace(chr(10), '<br>')}"
@@ -200,6 +207,7 @@ class AnalysisTab(QWidget):
         for button in (self.run_button, self.fast_run_button, self.folder_button, self.motion_button):
             style_general_icon_button(button)
         self.mode_picker.refresh_theme()
+        self.signal_map.refresh_theme()
         self._refresh_icons()
         for separator in self._separators:
             separator.setStyleSheet(f"color: {get_active_theme().control_border};")

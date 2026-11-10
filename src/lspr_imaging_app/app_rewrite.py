@@ -22,7 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QByteArray, QTimer, QUrl
+from PyQt6.QtCore import Qt, QByteArray, QPoint, QTimer, QUrl
 from PyQt6.QtGui import QAction, QActionGroup, QDesktopServices
 from PyQt6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMenu, QMessageBox, QStatusBar, QWidget
 
@@ -39,6 +39,7 @@ from .analysis.scan_results import ScanResultsModule
 from .selection.sensorgram_axis import SensorgramAxis
 from .selection.data_checks_module import DataChecksModule
 from .selection.image_motion_module import ImageMotionModule
+from .selection.signal_map_module import SignalMapModule
 from .selection.step_table_module import StepTableModule
 from .analysis.trace_store import TraceStore
 from .storage.session_index import session_dir_for
@@ -76,6 +77,8 @@ from .panels.dock_container import PanelContainer, TitleChoice
 from .panels.histogram import HistogramPanel
 from .panels.log import LogPanel
 from .panels.image import ImagePanel
+from .panels.plot_export_button import ExportData, PlotExportButton
+from .analysis.signal_map import signal_map_table
 from .panels.image.overlay_cache import environment_budget_mb
 from .panels.image.overlay_style import OverlayStyle
 from .panels.layout_presets import LayoutPresetManager, wire_view_menu
@@ -731,6 +734,7 @@ class _Modules:
     step_table: StepTableModule  # the numbers of the ROI table's step columns
     data_checks: DataChecksModule  # the Sensorgram's data-quality checks (report, run, whether it is current)
     image_motion: ImageMotionModule  # the Image panel's image-motion check
+    signal_map: SignalMapModule  # the Image panel's signal map (ROIs coloured by the step table's numbers)
 
 
 class _SettingsWriter:
@@ -877,6 +881,7 @@ def _build_modules() -> _Modules:
         experiment_plan=experiment_plan,
         cube_display=cube_display,
         trace_store=trace_store, sensorgram_axis=sensorgram_axis, step_table=step_table, data_checks=data_checks, image_motion=image_motion,
+        signal_map=SignalMapModule(step_table, roi_toolbox, experiment_plan),
     )
     modules_holder.append(modules)
     return modules
@@ -1192,6 +1197,85 @@ def _wire_image_motion(window: QMainWindow, m: _Modules, row: AnalysisTab, ui_st
 def _ask_tuning_export_path(parent: QWidget, default: Path) -> Path | None:
     chosen, _filter = QFileDialog.getSaveFileName(parent, "Export the tuning numbers", str(default), "CSV table (*.csv)")
     return Path(chosen) if chosen else None
+
+
+def _wire_signal_map(m: _Modules, image_panel: ImagePanel, ui_state: UiStateStore) -> PlotExportButton:
+    """The Analysis tab's Signal map group, the `SignalMapModule` and the Image panel's drawing of it (2026-11-10). Restores the remembered controls (and hands
+    them to the module), passes the user's choices on, hands the module's view to the panel, and makes the group's export button (the Image plot as a figure, the
+    map's values as CSV), which is returned so it gets the same export context as the other plots.
+
+    The on / off switch itself is **not** remembered: switching the map on calculates, and the app calculates only when asked (the analysis rule)."""
+    module, group, display = m.signal_map, image_panel.analysis_tab.signal_map, image_panel.signal_map
+    tab = image_panel.analysis_tab
+    for key, widget in (
+        ("signal_map/show", group.show_combo), ("signal_map/pair", group.pair_combo), ("signal_map/per", group.per_combo),
+        ("signal_map/scheme", group.scheme_combo), ("signal_map/range", group.range_combo), ("signal_map/low", group.low_spin),
+        ("signal_map/high", group.high_spin), ("signal_map/legend", group.legend_button), ("signal_map/hover", group.hover_button),
+    ):
+        ui_state.bind(key, widget)
+    module.set_show(group.show_key())
+    module.set_pair(group.pair())
+    module.set_per(group.per())
+    module.set_scheme(group.scheme())
+    module.set_range(group.range_mode(), *group.fixed_range())
+    display.set_legend_visible(group.legend_button.isChecked())
+    display.set_hover_enabled(group.hover_button.isChecked())
+
+    def refresh_steps(*_args: object) -> None:
+        group.step_picker.set_steps(m.experiment_plan.steps(), None, group.step_picker.current_ref())
+
+    def announce_if_blocked() -> None:
+        reason = module.blocked_reason()
+        if reason:
+            tab.status_message.emit(reason)
+
+    def enabled(on: bool) -> None:
+        module.set_enabled(on)
+        if on:
+            announce_if_blocked()
+
+    def refresh() -> None:
+        if not module.calculate():
+            tab.status_message.emit(module.status())
+
+    def state(*_args: object) -> None:
+        group.set_state(module.status(), module.needs_refresh())
+        tab.info_changed.emit()
+
+    refresh_steps()
+    m.experiment_plan.steps_changed.connect(refresh_steps)
+    group.enabled_toggled.connect(enabled)
+    group.show_changed.connect(module.set_show)
+    group.pair_changed.connect(module.set_pair)
+    group.step_changed.connect(module.set_step)
+    group.per_changed.connect(module.set_per)
+    group.scheme_changed.connect(module.set_scheme)
+    group.range_changed.connect(module.set_range)
+    group.refresh_requested.connect(refresh)
+    group.legend_toggled.connect(display.set_legend_visible)
+    group.hover_toggled.connect(display.set_hover_enabled)
+    module.view_changed.connect(display.set_view)
+    module.status_changed.connect(state)
+    state()
+
+    def edit_bound(which: str, where: QPoint) -> None:  # a click on a legend number: the other end keeps the value shown now
+        view = module.view()
+        if view is not None:
+            group.popup_bound_editor(which, view.low, view.high, view.decimals(), where)
+
+    display.legend.scheme_clicked.connect(group.popup_scheme_menu)
+    display.legend.context_requested.connect(group.popup_context_menu)
+    display.legend.bound_clicked.connect(edit_bound)
+
+    def data() -> ExportData | None:
+        view = module.view()
+        if view is None:
+            return None
+        return ExportData({"signal_map": signal_map_table(view, module.roi_ids())}, module.export_info())
+
+    button = PlotExportButton("signal_map", display.plot, data, group)
+    group.set_export_button(button)
+    return button
 
 
 def _wire_roi_tuning(
@@ -1926,7 +2010,8 @@ def build_main_window(
     def remember_export_format(kind: str) -> None:
         ui_state.set(PLOT_EXPORT_FIGURE_FORMAT.key, kind)
 
-    for button in (sensorgram_panel.export_button, spectra_panel.export_button, histogram_panel.export_button(), roi_table_panel.export_button):
+    signal_map_export = _wire_signal_map(m, image_panel, ui_state)
+    for button in (sensorgram_panel.export_button, spectra_panel.export_button, histogram_panel.export_button(), roi_table_panel.export_button, signal_map_export):
         button.set_context(
             export_context, remember_export_folder, lambda: str(read(ui_state, PLOT_EXPORT_FIGURE_FORMAT)), remember_export_format
         )

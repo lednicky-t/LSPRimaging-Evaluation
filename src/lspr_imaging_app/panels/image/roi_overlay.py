@@ -20,7 +20,7 @@ wavelength step of the slideshow. The geometry itself is `roi/overlay_geometry.p
 
 from __future__ import annotations
 
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 
 import numpy as np
 import pyqtgraph as pg
@@ -256,8 +256,12 @@ class RoiOverlay:
         default_inner_diameter_px: float,
         default_outer_diameter_px: float,
         groups: Sequence[AreaRoiGroup] = (),
+        color_override: Mapping[int, str] | None = None,
     ) -> None:
         """Draw every ROI's sample circle, reference rings and (if on) label.
+
+        `color_override` (the signal map, 2026-11-10): one ``'#rrggbb'`` per ROI id drawn instead of the ROI's own colour (a ROI missing from it keeps its own).
+        Display only: the stored colours are not touched.
 
         Everything is vectorized over the ROIs (`roi/overlay_geometry.py`): the
         old per-ROI loop cost ~0.27 ms per ROI per redraw. The circles are
@@ -278,6 +282,8 @@ class RoiOverlay:
             sample_colors: list[str] = []
             for roi in rois:
                 key = roi.sample_color_hex
+                if color_override is not None:
+                    key = color_override.get(roi.area_roi_id, key)
                 if key not in resolved:
                     resolved[key] = roi_overlay_color(key, self.sample.color)
                 sample_colors.append(resolved[key])

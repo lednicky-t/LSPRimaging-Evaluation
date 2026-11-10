@@ -178,6 +178,7 @@ from .rotate_line_tool import RotateLineTool
 from .display_range_controls import FULL_16BIT_RANGE
 from .view_tab import ViewTab
 from .analysis_tab import AnalysisTab
+from .signal_map_display import SignalMapDisplay
 from .tuning_overlay import TuningOverlay
 from .tuning_tab import TuningTab
 from .export_tab import ExportTab
@@ -749,6 +750,8 @@ class ImagePanel(QWidget):
         # ROI position tuning (2026-10-29): the crosses of the tried centres, and the ROIs drawn at their best centres (`set_tuning_view`).
         self._tuning_overlay = TuningOverlay(self._plot)
         self._tuning_view: TuningView | None = None
+        # The signal map (2026-11-10): ROIs coloured by their response, its legend and hover text (`signal_map_display.py`); the owner calls `signal_map.set_view`.
+        self.signal_map = SignalMapDisplay(self._plot, self, lambda: self._draw_roi_overlay() if self._last_image_shape is not None else None, self.roi_at)
         self._chunk_grid_curve = self._add_curve(_CHUNK_GRID_COLOR, width=1.0, dashed=True)
         self._source_grid_curve = self._add_curve(_SOURCE_GRID_COLOR, width=1.0, dashed=True)
         # Chromatic landmark overlay (2026-10-04): crosses = *estimated* (tracked
@@ -2207,6 +2210,7 @@ class ImagePanel(QWidget):
         )
         epoch = (
             self._roi_revision, frozenset(self._selection.selected_roi_ids()), self._roi_overlay.appearance_key(), self._tuning_best_key(),
+            self.signal_map.revision(),
         )
         key = (state, epoch)
         if only_if_changed and key == self._roi_draw_key:
@@ -2238,6 +2242,7 @@ class ImagePanel(QWidget):
             detection.reference_inner_diameter_px,
             detection.reference_outer_diameter_px,
             self._roi_toolbox.groups(),
+            color_override=self.signal_map.colors(),
         )
         self._roi_overlay.layers.mark_drawn(state)
 
@@ -2582,10 +2587,13 @@ class ImagePanel(QWidget):
     # -- canvas interaction: routed by `CanvasInteraction` (interaction.py) ---------------
 
     def _on_scene_clicked(self, event: object) -> None:
+        if self.signal_map.owns_click(event):  # a click on the signal map's legend opens its menus, nothing else
+            return
         self._interaction.on_scene_clicked(event)
 
     def _on_scene_moved(self, scene_pos: object) -> None:
         self._interaction.on_scene_moved(scene_pos)
+        self.signal_map.hover(scene_pos)  # the value of the ROI under the cursor, while the map is on
 
     def _on_left_drag_event(self, ev: object) -> bool:
         return self._interaction.on_left_drag(ev)

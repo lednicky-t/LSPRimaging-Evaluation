@@ -47,6 +47,7 @@ from ..analysis.step_table import (
     GroupMembers,
     RowNumbers,
     StepTableNumbers,
+    StepValue,
     compare_values,
     compute_step_numbers,
     numbers_key,
@@ -344,6 +345,23 @@ class StepTableModule(QObject):
             return None
         n, mean, sd = row.numbers.at(ref)
         return CellValue(n, mean, sd, current=stamp is not None and row.stamp == stamp, sem=sem_of(n, sd))
+
+    def roi_step_value(self, roi_id: int, ref: object) -> tuple[StepValue, bool] | None:
+        """Everything a ROI row has in one step (n, mean, SD, noise) and whether it is current; None if the row has no numbers for that step. For a reader
+        that combines steps itself (the signal map, `selection/signal_map_module.py`)."""
+        row = self._rois.get(int(roi_id))
+        if row is None or ref not in row.numbers.refs:
+            return None
+        stamp = self._stamp(group=False, members=None)
+        return row.numbers.value_at(ref), stamp is not None and row.stamp == stamp
+
+    def group_step_value(self, key: str | None, members: Sequence[int], ref: object) -> tuple[StepValue, bool] | None:
+        """As `roi_step_value`, for a group row (`members`: the group's ROI ids, which are part of what makes it current)."""
+        row = self._groups.get(key)
+        if row is None or ref not in row.numbers.refs:
+            return None
+        stamp = self._stamp(group=True, members=tuple(sorted(int(r) for r in members)))
+        return row.numbers.value_at(ref), stamp is not None and row.stamp == stamp
 
     def has_numbers(self) -> bool:
         return bool(self._rois or self._groups)
