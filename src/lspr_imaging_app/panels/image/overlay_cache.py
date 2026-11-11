@@ -311,6 +311,20 @@ class OverlayLayers:
                 self.clear()
         return hit
 
+    def repeat(self, epoch: Hashable, state: Hashable) -> None:
+        """The caller shows the same overlay as at its last frame and skipped `begin` (Play through cubes at one wavelength: the
+        overlay never changes). Without this the picture was never kept: `begin` ran once, before the epoch had held for a frame,
+        so all 160 ROIs and their labels were painted again at every frame (~25 % of the GUI thread, py-spy 2026-11-11).
+        A repeat of the announced state says the epoch held: the picture may be kept now. A state the cache was not told about
+        (after `invalidate`, i.e. a forced redraw) is announced first, and is kept from the repeat after."""
+        if not self.enabled or self._paused:
+            return
+        if epoch != self._epoch or state != self._shown_state:
+            self.begin(epoch, state)
+            return
+        for effect in self._effects:
+            effect.admit = True
+
     def clear(self) -> None:
         for effect in self._effects:
             effect.clear()

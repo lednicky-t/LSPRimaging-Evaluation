@@ -327,6 +327,11 @@ class PanelContainer(QDockWidget):
         self._min_width = min_width
         self._width_before_collapse: int | None = None
         self._restore_tries_left = 0
+        theme = get_active_theme()
+        # Style sheets BEFORE setWidget (2026-11-11): a style sheet set on a widget makes Qt re-style every widget inside it, ~0.14 ms
+        # each. Set after setWidget, the container's own sheet walked the whole panel once more (the Image panel has ~880 widgets:
+        # 116 ms). The result is the same either way: the sheets cascade when the panel is put in.
+        self._apply_frame_style(theme)
         self.setWidget(content)
         if self._min_width is not None:
             self.setMinimumWidth(self._min_width)
@@ -349,8 +354,6 @@ class PanelContainer(QDockWidget):
         self._maximized = False
         self._pre_maximize_geometry: QRect | None = None
 
-        theme = get_active_theme()
-        self._apply_frame_style(theme)
         # QDockWidget's built-in close/float buttons hard-code their icon's
         # pixel size in Qt's C++ paint code; a custom title bar with real
         # QToolButtons is the only way to make the glyphs bigger.
@@ -698,7 +701,10 @@ class PanelContainer(QDockWidget):
             for sized in shape:
                 label = QLabel(host) if sized else _ElidedLabel(host)
                 label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-                layout.addWidget(label, 0 if sized else 1)
+                if sized:  # fixed height too (below): centred in the row, where a full-height label puts its text
+                    layout.addWidget(label, 0, Qt.AlignmentFlag.AlignVCenter)
+                else:
+                    layout.addWidget(label, 1)
                 self._subtitle_column_labels.append(label)
                 self._subtitle_column_keys.append(("", None, ""))
         for index, (label, column) in enumerate(zip(self._subtitle_column_labels, columns)):
@@ -710,6 +716,10 @@ class PanelContainer(QDockWidget):
                 )
                 if column.widest:
                     label.setFixedWidth(_widest_text_width(label, column.widest))
+                    # Width AND height fixed: Qt then skips the layout request a new text sends. With only the width fixed,
+                    # every Play frame (new cube / time text) re-laid out the dock and the main window, and the window was
+                    # repainted whole (2 x 2.5 Mpx per frame, `playback.paints`, 2026-11-11).
+                    label.setFixedHeight(label.sizeHint().height())
             if isinstance(label, _ElidedLabel):
                 label.set_full_text(column.text, column.tooltip)
             else:

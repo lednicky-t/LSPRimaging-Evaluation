@@ -9,6 +9,7 @@ file the steps are still built from the notes, just without device settings.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 from lspr_core import ImagingAcquisitionMetadata, build_imaging_plan, end_of_data_unix_ms
@@ -29,11 +30,18 @@ def find_pump_plan_csv(dataset_folder: Path) -> Path | None:
     candidate = dataset_folder
     for _ in range(_MAX_LEVELS_UP + 1):
         if candidate.is_dir():
-            found = sorted(
-                entry
-                for entry in candidate.iterdir()
-                if entry.is_file() and entry.suffix.lower() in _PLAN_SUFFIXES and is_pump_plan_csv(entry)
-            )
+            # A folder next to an image stack can hold thousands of entries (8497 on the test dataset: 0.8 s with
+            # Path.iterdir + is_file per entry, several seconds while the GUI holds the interpreter lock at launch).
+            # os.scandir gives the names without building Path objects, the suffix test is plain string work, and
+            # DirEntry.is_file() needs no extra disk call on Windows.
+            with os.scandir(candidate) as entries:
+                found = sorted(
+                    Path(entry.path)
+                    for entry in entries
+                    if os.path.splitext(entry.name)[1].lower() in _PLAN_SUFFIXES
+                    and entry.is_file()
+                    and is_pump_plan_csv(Path(entry.path))
+                )
             named_like_folder = [entry for entry in found if entry.stem.casefold() == candidate.name.casefold()]
             if len(named_like_folder) == 1:
                 return named_like_folder[0]

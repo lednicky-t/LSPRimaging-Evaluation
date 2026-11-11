@@ -238,6 +238,7 @@ class SlideshowController(QObject):
         self._playing = False
         self._awaiting_since: float | None = None  # a step was made and its image is not on screen yet
         self._step_due = False  # the timer fired while a frame was still on its way: step the moment it is shown
+        self._before_step: Callable[[], None] | None = None  # `set_before_step`
         self._timer = QTimer(self)
         # Single-shot, re-armed after each step: a slow render delays the next
         # step instead of letting steps queue up behind it.
@@ -349,6 +350,23 @@ class SlideshowController(QObject):
     """Step the moment a frame has been handed to Qt (and render the next one while Qt paints this one),
     instead of polling every 10 ms and only after the paint. Off = the earlier, strictly serial behaviour."""
 
+    hold_frame_s = 0.020
+    """A frame that arrives at most this long before the next step is held and shown *at* that step, together with it (2026-11-11).
+    Otherwise the step's widgets (sliders, frame buttons, Sensorgram cursor) and the image reach the screen in two separate
+    window repaints, and with the OpenGL Image view each repaint hands the whole window to the screen: Play measured every step
+    coming from the timer (587 of 587) and 2-3 repaints per frame. A slow show (a step far away) is not held: no added delay."""
+
+    def set_before_step(self, show_held: Callable[[], None] | None) -> None:
+        """`show_held()` is called at each timer step before stepping: the panel shows a frame it held for this moment (its
+        `frame_displayed()` then steps at once, in the same repaint)."""
+        self._before_step = show_held
+
+    def seconds_to_next_step(self) -> float | None:
+        """While Play counts down to its next step: the seconds left. None when not playing or a step is already due."""
+        if not self._playing or self._step_due or not self._timer.isActive():
+            return None
+        return max(self._timer.remainingTime(), 0) / 1000.0
+
     def frame_displayed(self) -> None:
         """The panel put an image on screen: the next step may go ahead. With `pipelined` a step that was
         already due runs *now*, inside the call, i.e. before Qt gets to paint the image just set: the
@@ -364,6 +382,12 @@ class SlideshowController(QObject):
         been shown (or MAX_WAIT_FOR_FRAME_S passed). Without it a GUI that needs 200 ms per frame
         was fed a step every 67 ms and the screen ran 16 s behind (measured 2026-10-14); with it
         the frame rate drops to what the machine can show and the lag stays about one frame."""
+        if self._before_step is not None:
+            self._step_due = True  # a frame shown now steps at once (`frame_displayed`)
+            self._before_step()
+            if not self._playing or not self._step_due:
+                return  # the held frame was shown and the step made with it (or Play stopped meanwhile)
+            self._step_due = False
         if self._awaiting_since is not None and time.perf_counter() - self._awaiting_since < MAX_WAIT_FOR_FRAME_S:
             if self.pipelined:
                 # No polling: `frame_displayed` steps as soon as the frame is shown. The timer stays as a watchdog

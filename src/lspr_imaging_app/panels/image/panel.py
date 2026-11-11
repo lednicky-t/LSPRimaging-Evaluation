@@ -151,6 +151,7 @@ from .data_axis_slider import DataAxisSlider
 from .frame_tools import FrameToolsState, FrameToolsWidget
 from .general_group import AreaSelectionPicker, style_general_icon_button
 from .gpu_view import apply_gpu_drawing
+from .paint_census import PaintCensus
 from .image_controls import ImageViewBox, controls_text
 from .interaction import CanvasInteraction
 from .edit_preview_layer import EditPreviewLayer
@@ -305,6 +306,10 @@ class ImagePanel(QWidget):
     playback_changed = pyqtSignal(bool)  # the slideshow started (True) or stopped (False); other panels lighten their live updates
     calm_histogram_changed = pyqtSignal(bool)  # Play is running with "calm histogram" on (True), or not (False)
     display_range_changed = pyqtSignal(bool, float, float)  # the user changed the View tab's Display range: (fixed, black, white)
+    play_frame_showing = pyqtSignal(int)
+    """While Play runs: the cube of the frame about to be put on screen, emitted FIRST, before anything of it is drawn (2026-11-11).
+    A plot that marks the cube (the Sensorgram cursor) moves its mark here: its plot scene then queues its repaint ahead of the
+    window's, and the whole frame reaches the screen in one repaint instead of two (~12 ms of GUI time per frame)."""
     image_rendered = pyqtSignal(np.ndarray, int, float)
     # Companion to `image_rendered` - the Histogram panel's other half of
     # "read Image, don't read Dataset directly" (sketch §7): without this,
@@ -1068,6 +1073,9 @@ class ImagePanel(QWidget):
     ) -> None:
         self._top_bar = QWidget(self)
         self._top_bar.setObjectName("imageTopBar")
+        # Style sheet while the bar is still empty (2026-11-11): set after the ribbon was added it re-styled every widget in it
+        # (~150 ms at launch) for a rule that matches only the bar.
+        self._refresh_top_bar_theme()
         top_bar_layout = QHBoxLayout(self._top_bar)
         top_bar_layout.setContentsMargins(4, 2, 6, 2)
         top_bar_layout.setSpacing(6)
@@ -1174,8 +1182,6 @@ class ImagePanel(QWidget):
         self._refresh_tool_info(None)
         top_bar_layout.addWidget(self._tool_info)
         self._top_drawer.expanded_changed.connect(self._tool_info.setVisible)  # rolled up: only the handle is left
-
-        self._refresh_top_bar_theme()
 
     def _show_current_tab(self) -> None:
         """Scroll the tool ribbon (it scrolls when the panel is narrower than its row) so the chosen tab is fully visible."""
@@ -1356,8 +1362,13 @@ class ImagePanel(QWidget):
         self._slider_ribbon.settings_changed.connect(self._apply_play_outline)
         self._slider_ribbon.settings_changed.connect(self._on_slideshow_speed_for_stats)  # after set_settings: new interval
         self._slideshow.playing_changed.connect(self._slider_ribbon.set_playing)
+        # A Play frame that arrives just before the next step waits for it: image and step reach the screen in one repaint
+        # (`SlideshowController.hold_frame_s`).
+        self._held_result: RenderResult | None = None
+        self._slideshow.set_before_step(self._show_held_frame)
         # Where the time goes while Play runs (status bar + one log line at the end).
         self._playback_stats = PlaybackStats()
+        self._paint_census = PaintCensus()  # which widgets repaint during Play (`playback.paints` in the log)
         self._slideshow.playing_changed.connect(self._on_playback_changed)
         self._slideshow.step_made.connect(lambda handlers_s: self._playback_stats.note_step(time.perf_counter(), handlers_s))
         self._slideshow.step_made.connect(self._flush_redraw_for_step)
@@ -1375,8 +1386,8 @@ class ImagePanel(QWidget):
         # differ.
         self._controls_bar = QWidget(self)
         self._controls_bar.setObjectName("imageNavigationBar")
+        self._refresh_controls_bar_theme()  # before its children arrive: same result, no re-styling of them (see the top bar)
         self._controls_bar.setLayout(controls)
-        self._refresh_controls_bar_theme()
 
     def _add_curve(self, color_hex: str, *, width: float, dashed: bool = False) -> pg.PlotDataItem:
         return add_curve(self._plot, color_hex, width=width, dashed=dashed)
@@ -1577,9 +1588,7 @@ class ImagePanel(QWidget):
         self._tints.clear()
         self._current_display_image = None
         self._roi_overlay.clear()
-        self._chunk_grid_curve.clear()
-        self._source_grid_curve.clear()
-        self._crop_outline_curve.clear()
+        self._decorations.clear_lines()
         self._last_image_shape = None
         self._area_tool.set_image_shape(None)
         self._refresh_navigation_ranges()
@@ -1947,10 +1956,13 @@ class ImagePanel(QWidget):
         self._redraw_timer.setInterval(_REDRAW_COALESCE_PLAYING_MS if playing else _REDRAW_COALESCE_MS)
         if playing:
             stats.start(time.perf_counter(), self._slideshow.interval_seconds())
+            self._paint_census.start()
             self._view.paint_listener = lambda s: stats.note_detail("paint_view", s)
             self._view.paint_cpu_listener = lambda s: stats.note_detail("paint_view_cpu", s)  # paint_view minus this = waiting
             self._image_item.paint_listener = lambda s: stats.note_detail("paint_image", s)
             return
+        self._paint_census.stop()
+        self._held_result = None  # the frame Play stopped on is rendered again, exactly, just below
         self._view.paint_listener = None
         self._view.paint_cpu_listener = None
         self._image_item.paint_listener = None
@@ -1970,7 +1982,25 @@ class ImagePanel(QWidget):
         drawn. Other panels use it to let the image come first (`panels/image_first.py`). Always False without a dataset."""
         return self._redraw_timer.isActive() or self._latest_serial != self._last_shown_serial
 
-    def _on_rendered(self, result: RenderResult) -> None:
+    def _show_held_frame(self) -> None:
+        """The slideshow's next step is due: show the frame held for it (if any); its `frame_displayed()` steps right after."""
+        held, self._held_result = self._held_result, None
+        if held is not None:
+            self._on_rendered(held, held_for_step=True)
+
+    def _hold_for_next_step(self, result: RenderResult) -> bool:
+        """Hold a Play frame that arrived shortly before the next step (`SlideshowController.hold_frame_s`), to be shown with it."""
+        if result.error is not None or result.request.serial != self._latest_serial or not self._slideshow.pipelined:
+            return False
+        due = self._slideshow.seconds_to_next_step()
+        if due is None or due <= 0.0 or due > self._slideshow.hold_frame_s:
+            return False
+        self._held_result = result
+        return True
+
+    def _on_rendered(self, result: RenderResult, held_for_step: bool = False) -> None:
+        if not held_for_step and self._hold_for_next_step(result):
+            return
         arrived = time.perf_counter()
         serial = result.request.serial
         if serial != self._latest_serial and not (
@@ -1998,6 +2028,8 @@ class ImagePanel(QWidget):
             if serial == self._latest_serial:
                 self._slideshow.frame_displayed()
             return
+        if self._slideshow.is_playing():
+            self.play_frame_showing.emit(int(result.request.cube_index))  # before anything else is drawn: see the signal
         image = np.asarray(result.image, dtype=np.float32)
         listeners_s = 0.0
         showing_estimate = result.request.show_background
@@ -2089,17 +2121,15 @@ class ImagePanel(QWidget):
                 finished_at=result.finished_at, blocked_by_prefetch=result.request.submitted_while_prefetching,
             )
             if line is not None:
-                log_event(
-                    logger, "playback.window", logging.DEBUG,
-                    **self._playback_stats.last_window_fields(), **self._play_config_fields(),
-                )
+                window = self._playback_stats.last_window_fields()
+                log_event(logger, "playback.window", logging.DEBUG, **window, **self._play_config_fields())
+                log_event(logger, "playback.paints", logging.DEBUG, **self._paint_census.window_fields(int(window["shown"])))
                 self._on_tool_status(line)
         if serial == self._latest_serial:
             # Only the newest request releases the brake: an older result shown while a newer request is
             # still in flight must not let the slideshow run further ahead. With a pipelined show this
             # call runs the next step right here (last, so this frame's stats are complete).
             self._slideshow.frame_displayed()
-
     def _request_prefetch(self, cube_index: int, wavelength_nm: float) -> None:
         """Have the render thread read the planes the user is likely to open
         next into the plane cache (`prefetch.py`) once it is idle."""
@@ -2213,9 +2243,10 @@ class ImagePanel(QWidget):
             self.signal_map.revision(),
         )
         key = (state, epoch)
-        if only_if_changed and key == self._roi_draw_key:
-            return
         layers = self._roi_overlay.layers
+        if only_if_changed and key == self._roi_draw_key:
+            layers.repeat(epoch, state)  # the same overlay again (Play through cubes): the cache may keep its picture now
+            return
         if only_if_changed:
             if layers.begin(epoch, state):  # a picture of this very state exists: the items need not be re-drawn
                 self._roi_draw_key = key

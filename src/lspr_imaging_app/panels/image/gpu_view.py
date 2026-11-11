@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QGuiApplication, QOpenGLContext
 from PyQt6.QtWidgets import QGraphicsView, QWidget
 
@@ -45,12 +46,34 @@ def apply_gpu_drawing(view: QGraphicsView, on: bool) -> bool:
         if on:
             from PyQt6.QtOpenGLWidgets import QOpenGLWidget  # imported only when used
 
-            view.setViewport(QOpenGLWidget())
+            gl_viewport = QOpenGLWidget()
+            # Opaque: the view paints every pixel of it (its background brush first). Without this Qt treated it as see-through and
+            # painted every widget underneath at each repaint, all hidden afterwards: the dock's card, the panel and the main window,
+            # 1.3-1.6 Mpx each per Play frame (`playback.paints`, 2026-11-11). Qt's plain viewport is opaque already (it fills itself).
+            gl_viewport.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+            replace_viewport(view, gl_viewport)
         else:
-            view.setViewport(QWidget())
+            replace_viewport(view, QWidget())
         view.setViewportUpdateMode(mode)  # a new viewport keeps the view's mode, set again to be sure
         log_event(logger, "image.gpu_drawing", logging.INFO, on=on)
     return on
+
+
+def replace_viewport(view: QGraphicsView, new_viewport: QWidget) -> None:
+    """`view.setViewport(new_viewport)`, keeping the widgets that float on the old viewport (crop size fields, measure calibration,
+    cursor readout). Qt deletes the old viewport together with its children, so they are moved to the new one first, with their
+    place and visibility (found 2026-11-11: with GPU drawing on, those three widgets were gone and every pan/zoom logged a
+    "wrapped C/C++ object ... has been deleted" error)."""
+    old = view.viewport()
+    kept = []
+    if old is not None:
+        for child in old.findChildren(QWidget, options=Qt.FindChildOption.FindDirectChildrenOnly):
+            kept.append((child, child.isVisibleTo(old), child.geometry()))
+            child.setParent(new_viewport)
+    view.setViewport(new_viewport)
+    for child, visible, geometry in kept:
+        child.setGeometry(geometry)
+        child.setVisible(visible)
 
 
 def _offscreen() -> bool:

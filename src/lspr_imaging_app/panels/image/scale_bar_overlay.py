@@ -96,6 +96,7 @@ class ScaleBarItem(pg.GraphicsObject):
         self._color = QColor(255, 255, 255)
         self._bar_px = 0.0  # length on screen
         self._label = ""
+        self._layout_key: tuple | None = None  # (bar length, label, view box rectangle) last laid out: `update_view` skips a repeat
         self._font = QFont()
         self._font.setPointSizeF(9.5)
         self._font.setBold(True)
@@ -117,8 +118,15 @@ class ScaleBarItem(pg.GraphicsObject):
             self.setVisible(False)
             return
         length_image_px, label = choose_bar(visible_width, um_per_px)
+        bar_px = length_image_px * screen_width / visible_width
+        layout_key = (bar_px, label, self._vb.boundingRect())
+        if self.isVisible() and layout_key == self._layout_key:
+            # Nothing to lay out again. Called at every Play frame: the needless update() used to make Qt repaint the whole Image
+            # view a second time per frame, ~10 ms with the OpenGL view (2026-11-11).
+            return
+        self._layout_key = layout_key
         self.prepareGeometryChange()
-        self._bar_px = length_image_px * screen_width / visible_width
+        self._bar_px = bar_px
         self._label = label
         self.setVisible(True)
         self.update()

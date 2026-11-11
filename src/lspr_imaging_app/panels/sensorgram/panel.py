@@ -392,7 +392,11 @@ class SensorgramPanel(QWidget):
         self._drift.steps_in_plan = lambda: len(self._steps.anchor_step_indices())
 
         self._selection.roi_selection_changed.connect(lambda _ids: self._schedule_redraw())
-        self._selection.cube_changed.connect(lambda _cube: (self._update_cursor(), self._steps.cursor_moved()))
+        self._following_play = False  # `follow_play`: the cursor follows the frame on screen, not the slider
+        self._play_cube: int | None = None
+        self._selection.cube_changed.connect(
+            lambda _cube: (None if self._following_play else self._update_cursor(), self._steps.cursor_moved())
+        )
         self._settings.settings_changed.connect(lambda _change: self._on_settings_changed())
         self._roi_toolbox.geometry_changed.connect(self._on_roi_changed)
         self._roi_toolbox.cosmetic_changed.connect(lambda _change: self._schedule_redraw())
@@ -614,15 +618,30 @@ class SensorgramPanel(QWidget):
         nearest = finite[int(np.argmin(np.abs(axis[finite] - x)))]
         self._selection.set_cube(int(stored.cube_indices[nearest]))
 
+    def follow_play(self, playing: bool) -> None:
+        """While the slideshow plays, the cursor follows the frame on screen (`show_play_frame`) instead of the cube slider, which is
+        one step ahead of it. Back to the slider when Play stops."""
+        self._play_cube = None
+        self._following_play = playing
+        if not playing:
+            self._update_cursor()
+
+    def show_play_frame(self, cube: int) -> None:
+        """The Image panel is about to show this cube's frame during Play (`ImagePanel.play_frame_showing`): the cursor moves now, so its
+        repaint goes to the screen with the image's, in one window repaint (2026-11-11: it used to take a second repaint every frame)."""
+        if self._following_play:
+            self._play_cube = int(cube)
+            self._update_cursor()
+
     def _update_cursor(self) -> None:
-        """The dashed line follows the cube slider without recomputing anything."""
+        """The dashed line follows the cube slider (during Play: the frame on screen) without recomputing anything."""
         if self._gate.defer():
             return
         stored = self._scan.stored()
         if stored is None or self._last is None:
             self._plot.set_current_x(None)
             return
-        cube = int(self._selection.current_cube())
+        cube = int(self._selection.current_cube()) if self._play_cube is None else self._play_cube
         if cube not in stored.cube_indices:
             self._plot.set_current_x(None)
             return

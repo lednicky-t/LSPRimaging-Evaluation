@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QByteArray, QPoint, QTimer, QUrl
-from PyQt6.QtGui import QAction, QActionGroup, QDesktopServices
+from PyQt6.QtGui import QAction, QActionGroup, QDesktopServices, QPixmapCache
 from PyQt6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMenu, QMessageBox, QStatusBar, QWidget
 
 from lspr_core import ACKNOWLEDGEMENT_REQUEST, DISCLAIMER_POINTS, LICENSE_NAME, NOTICE_URL, citation_text
@@ -44,13 +44,14 @@ from .selection.step_table_module import StepTableModule
 from .analysis.trace_store import TraceStore
 from .storage.session_index import session_dir_for
 from .analysis.scan_store import FILE_NAME as SCAN_FILE_NAME, describe_file as describe_scan_file
-from .analysis.scan_pool import MODE_NORMAL, MODE_PERFORMANCE, MODES
+from .analysis.scan_pool import MODE_NORMAL, MODES
 from .analysis.scan_task import TASK_ID as ANALYSIS_SCAN_TASK_ID, ScanTask
 from .applog import LogSystem, RingBufferHandler, configure_logging, log_event
 from .applog import current as current_log_system
 from .frame_naming import FrameNamingScheme
 from .dataset import DatasetModule
 from .gil_tuning import apply_switch_interval
+from .opengl_surface import configure_opengl_surface
 from .gui.app_theme import LSPRI_BRIGHT_THEME, LSPRI_DARK_THEME, apply_app_theme
 from .gui.windows_titlebar import apply_windows_titlebar_color
 from .image_tools.mask_scope import MaskScope
@@ -1093,10 +1094,8 @@ def _wire_analysis_scan(m: _Modules, row: AnalysisTab, ui_state: UiStateStore, s
 
     row.mode_changed.connect(mode_picked)
     m.analysis_scan.pool_state_changed.connect(row.set_pool_state)  # a bound method of the tab: delivered on the GUI thread
-    if mode == MODE_PERFORMANCE:
-        if startup is not None:
-            startup.task_finished.connect(lambda *_args: m.analysis_scan.start_pool())
-        QTimer.singleShot(LAUNCH_POOL_FALLBACK_MS, m.analysis_scan.start_pool)  # idempotent; for a launch that opens no dataset
+    # A remembered Performance mode's workers are started by `_wire_startup_calculation`: after the start-up calculation of the ROI / Groups
+    # table, which they used to slow down tenfold (2026-11-11).
 
     def scan_file() -> Path | None:
         home, session_id = m.dataset.dataset_home(), m.session_coordinator.active_session_id()
@@ -1400,16 +1399,27 @@ def _build_startup_tracker(
     return tracker
 
 
-def _wire_startup_calculation(startup: StartupTracker, roi_table_panel: RoiTablePanel) -> None:
+def _wire_startup_calculation(startup: StartupTracker, roi_table_panel: RoiTablePanel, start_pool: Callable[[], None]) -> None:
     """The ROI / Groups table's step columns are calculated once after a launch that reopened the last dataset (2026-11-06, maintainer's request). The moment is the tracker's
     "completed": dataset, session (ROIs, groups, plan), first image, scan results and the Spectra / Sensorgram fits are all settled, so the numbers are not out of date as
-    they arrive, and the fits the Sensorgram already made are reused. A failed or cancelled start-up, or a dataset opened later by hand, calculates nothing."""
+    they arrive, and the fits the Sensorgram already made are reused. A failed or cancelled start-up, or a dataset opened later by hand, calculates nothing.
+
+    `start_pool` (the analysis scan's Performance-mode workers; does nothing in Normal mode or when they run) is called only once that calculation has ended, or at once
+    when there is none: seven worker processes starting (~1,000 imports each, ~8 s) took the CPU from the fit helper, which runs at low priority, and the calculation
+    took 11 s instead of ~1.2 s (2026-11-11). The 20 s fallback for a launch that opens no dataset waits in the same way."""
+
+    def start_pool_when_free() -> None:
+        if not roi_table_panel.task.is_active():  # otherwise the calculation's `ended` calls this again
+            start_pool()
 
     def on_finished(_task_id: str, outcome: str, _message: str) -> None:
         if outcome == "completed":
             roi_table_panel.calculate_at_startup()
+        start_pool_when_free()
 
     startup.task_finished.connect(on_finished)
+    roi_table_panel.task.ended.connect(lambda _outcome: start_pool_when_free())
+    QTimer.singleShot(LAUNCH_POOL_FALLBACK_MS, start_pool_when_free)
 
 
 def _build_status_bar(
@@ -1503,6 +1513,8 @@ def _build_status_bar(
     # the *static* controls; the *live* per-gesture text belongs here, on
     # the same bar every other panel's transient status already uses.
     image_panel.tool_status_changed.connect(status_bar.showMessage)
+    # Play shows its live fps on the bar; a finished task's result (kept until dismissed) would cover it (2026-11-11).
+    image_panel.playback_changed.connect(lambda playing: task_indicator.dismiss_result() if playing else None)
 
 
 def _wire_session_carry_prompt(window: QMainWindow, m: _Modules) -> None:
@@ -1990,6 +2002,9 @@ def build_main_window(
         live=m.analysis_live, mask=m.mask, experiment_plan=m.experiment_plan, trace_store=m.trace_store, axis=m.sensorgram_axis,
     )
     sensorgram_panel.restore_ui_state(ui_state)
+    # During Play the Sensorgram cursor marks the frame on screen and moves first, so image and cursor reach the screen in one repaint.
+    image_panel.playback_changed.connect(sensorgram_panel.follow_play)
+    image_panel.play_frame_showing.connect(sensorgram_panel.show_play_frame)
     _follow_plan_bar(sensorgram_panel, m.step_table, roi_table_panel)  # the table's step columns are titled and coloured as the Sensorgram's plan bar titles and colours its steps
     app_instance = QApplication.instance()
     if app_instance is not None:  # after the panels' own shutdowns (connected in their constructors): nothing may still be fitting when the helper process ends
@@ -2042,7 +2057,7 @@ def build_main_window(
     edit_menu, view_menu = _build_menu_bar(window)
     attach_to_menu_bar(window.menuBar(), m.dataset)  # dataset path, type / size / cubes, and the Time / Plan checks
     startup = _build_startup_tracker(m, image_panel, spectra_panel, sensorgram_panel)
-    _wire_startup_calculation(startup, roi_table_panel)
+    _wire_startup_calculation(startup, roi_table_panel, m.analysis_scan.start_pool)
     check_presenters = (
         _wire_data_checks(window, m, sensorgram_panel, ui_state),
         _wire_image_motion(window, m, image_panel.analysis_tab, ui_state),
@@ -2210,6 +2225,12 @@ def _wire_preferences(
 
 _GC_SUMMARY_MS = 5000
 
+# Qt keeps the plots' cached items (axes with their grid, the Sensorgram's plan bar and step table) as screen-sized pictures
+# in one shared pixmap cache, 10 MB by default. One axis of a 2400 x 1000 px plot is ~9 MB, so on a large screen the pictures
+# pushed each other out at every frame of Play and were all drawn again (91 vs 10 ms per cursor move, offscreen, 2026-11-11;
+# ~26 % of the GUI thread in Play). A limit, not an allocation: memory is used only by pictures actually cached.
+_PIXMAP_CACHE_KB = 256 * 1024
+
 
 def main(app: QApplication | None = None, splash: LaunchSplash | None = None) -> None:
     """`app` / `splash`: `src/main.py` creates the QApplication and the launch screen first, so the screen is up while the
@@ -2218,7 +2239,9 @@ def main(app: QApplication | None = None, splash: LaunchSplash | None = None) ->
     apply_switch_interval()  # before any worker thread exists; see gil_tuning.py
     if app is None:
         set_windows_app_user_model_id(APP_ID_LSPRI_EVALUATION)  # before any window; `src/main.py` does it for the launch-screen start
+        configure_opengl_surface()  # before the QApplication, as `src/main.py` does (opengl_surface.py)
         app = QApplication(sys.argv)
+    QPixmapCache.setCacheLimit(max(QPixmapCache.cacheLimit(), _PIXMAP_CACHE_KB))
     if splash is not None:
         splash.show("Starting...")
     log_event(

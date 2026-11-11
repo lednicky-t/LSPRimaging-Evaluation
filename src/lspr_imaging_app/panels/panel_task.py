@@ -21,6 +21,7 @@ SHOW_AFTER_MS = 400
 class PanelTask(QObject):
     task_progress = pyqtSignal(str, str, float, str)  # (task_id, label, fraction (< 0: unknown), message)
     task_finished = pyqtSignal(str, str, str)  # (task_id, "completed" | "failed" | "cancelled", message)
+    ended = pyqtSignal(str)  # outcome; at the end of EVERY run, also one too short to be shown (`task_finished` is only for the shown ones)
 
     def __init__(self, task_id: str, label: str, parent: QObject | None = None, show_after_ms: int = SHOW_AFTER_MS) -> None:
         super().__init__(parent)
@@ -60,11 +61,13 @@ class PanelTask(QObject):
 
     def end(self, outcome: str = "completed", message: str = "") -> None:
         """The run is over. Does nothing for a run that never became visible, or that was ended already."""
-        was_shown = self._shown
+        was_active, was_shown = self._active, self._shown
         self._timer.stop()
         self._active = self._shown = False
         if was_shown:
             self.task_finished.emit(self.task_id, outcome, message)
+        if was_active:
+            self.ended.emit(outcome)
 
     def _show(self) -> None:
         if self._active:

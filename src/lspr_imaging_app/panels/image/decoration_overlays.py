@@ -21,6 +21,13 @@ from .landmark_overlay import draw_landmarks
 from .scale_bar_overlay import ScaleBarItem
 
 
+def _same_lines(a: tuple[list[float], list[float]] | None, b: tuple[list[float], list[float]] | None) -> bool:
+    """Two polylines are the same (NaN, the break between grid lines, counts as equal to NaN)."""
+    if a is None or b is None:
+        return a is b
+    return all(np.array_equal(np.asarray(p, dtype=float), np.asarray(q, dtype=float), equal_nan=True) for p, q in zip(a, b))
+
+
 class DecorationOverlays:
     def __init__(
         self,
@@ -56,6 +63,9 @@ class DecorationOverlays:
         self._chunk_grid_curve = chunk_grid_curve
         self._source_grid_curve = source_grid_curve
         self._crop_outline_curve = crop_outline_curve
+        # What the three line curves show now (None: nothing), so an unchanged frame leaves them alone (`draw_crop_outline`, `_show_grid`).
+        self._crop_outline_drawn: tuple[list[float], list[float]] | None = None
+        self._grid_drawn: dict[str, tuple[list[float], list[float]] | None] = {"chunk": None, "source": None}
         self._landmark_line_item = landmark_line_item
         self._landmark_observed_item = landmark_observed_item
         self._landmark_fitted_item = landmark_fitted_item
@@ -128,6 +138,13 @@ class DecorationOverlays:
             all_wavelengths=self.landmarks_all_wavelengths,
         )
 
+    def clear_lines(self) -> None:
+        """Remove the crop outline and both chunk grids (the dataset went away)."""
+        for curve in (self._chunk_grid_curve, self._source_grid_curve, self._crop_outline_curve):
+            curve.clear()
+        self._crop_outline_drawn = None
+        self._grid_drawn = {"chunk": None, "source": None}
+
     def draw_crop_outline(self) -> None:
         """The existing crop as a dashed rectangle over the uncropped
         preview - only while a preview tool is active. Crop coordinates are
@@ -135,11 +152,18 @@ class DecorationOverlays:
         preview shows (transform order: rotate -> flip -> crop)."""
         crop = self._geometry.settings().crop
         if not self._preview_tool_active() or not crop.enabled or crop.width <= 0 or crop.height <= 0:
+            outline = None
+        else:
+            x0, y0 = float(crop.x), float(crop.y)
+            x1, y1 = x0 + float(crop.width), y0 + float(crop.height)
+            outline = ([x0, x1, x1, x0, x0], [y0, y0, y1, y1, y0])
+        if outline == self._crop_outline_drawn:
+            return  # unchanged (every Play frame): touching the curve made Qt repaint the whole Image view again (2026-11-11)
+        self._crop_outline_drawn = outline
+        if outline is None:
             self._crop_outline_curve.clear()
-            return
-        x0, y0 = float(crop.x), float(crop.y)
-        x1, y1 = x0 + float(crop.width), y0 + float(crop.height)
-        self._crop_outline_curve.setData([x0, x1, x1, x0, x0], [y0, y0, y1, y1, y0])
+        else:
+            self._crop_outline_curve.setData(*outline)
 
     def update_chunk_grid(self) -> None:
         """Draw (or clear) the Export section's chunk-grid preview - lines
@@ -161,18 +185,28 @@ class DecorationOverlays:
         else:
             raw_shape = self._dataset.raw_plane_shape() if preview.enabled else None
         if not preview.enabled or raw_shape is None or preview.chunk_w <= 0 or preview.chunk_h <= 0:
-            self._chunk_grid_curve.clear()
-            # Nothing else re-renders on a toggle, so without this the removed lines stay painted until the mouse
-            # moves over the image.
-            self._view.viewport().update()
+            lines = None
+        else:
+            to_display = (
+                np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+                if preview.processed
+                else raw_to_processed_affine_xy((int(raw_shape[0]), int(raw_shape[1])), self._geometry.settings())
+            )
+            lines = self.grid_polyline(raw_shape, to_display, preview.chunk_w, preview.chunk_h, preview.offset_x, preview.offset_y)
+        self._show_grid(self._chunk_grid_curve, "chunk", lines)
+
+    def _show_grid(self, curve, which: str, lines: tuple[list[float], list[float]] | None) -> None:
+        """Put `lines` (None: nothing) on a grid curve and repaint the view - only when they differ from what it shows. Both grids are
+        updated at every frame shown; an unconditional clear + repaint made Qt repaint the whole Image view a second time per Play
+        frame, grids off or not (2026-11-11)."""
+        if _same_lines(lines, self._grid_drawn[which]):
             return
-        to_display = (
-            np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
-            if preview.processed
-            else raw_to_processed_affine_xy((int(raw_shape[0]), int(raw_shape[1])), self._geometry.settings())
-        )
-        xs, ys = self.grid_polyline(raw_shape, to_display, preview.chunk_w, preview.chunk_h, preview.offset_x, preview.offset_y)
-        self._chunk_grid_curve.setData(xs, ys)
+        self._grid_drawn[which] = lines
+        if lines is None:
+            curve.clear()
+        else:
+            curve.setData(*lines)
+        # Nothing else re-renders on a toggle, so without this the removed / moved lines stay painted until the mouse moves over the image.
         self._view.viewport().update()
 
     def update_source_grid(self) -> None:
@@ -183,13 +217,11 @@ class DecorationOverlays:
         chunk = module.source_chunk_shape() if module.source_chunk_grid_visible() else None
         raw_shape = module.raw_plane_shape() if chunk is not None else None
         if chunk is None or raw_shape is None or chunk[0] <= 0 or chunk[1] <= 0:
-            self._source_grid_curve.clear()
-            self._view.viewport().update()  # nothing else re-renders on a toggle (see `update_chunk_grid`)
-            return
-        to_display = raw_to_processed_affine_xy((int(raw_shape[0]), int(raw_shape[1])), self._geometry.settings())
-        xs, ys = self.grid_polyline(raw_shape, to_display, chunk[1], chunk[0], 0, 0)
-        self._source_grid_curve.setData(xs, ys)
-        self._view.viewport().update()
+            lines = None
+        else:
+            to_display = raw_to_processed_affine_xy((int(raw_shape[0]), int(raw_shape[1])), self._geometry.settings())
+            lines = self.grid_polyline(raw_shape, to_display, chunk[1], chunk[0], 0, 0)
+        self._show_grid(self._source_grid_curve, "source", lines)
 
     @staticmethod
     def grid_polyline(

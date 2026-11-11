@@ -10,6 +10,9 @@ def run() -> None:
 
     # The taskbar identity must be set before any window exists (the launch screen is one); the Suite's Start-menu shortcut carries the same id.
     set_windows_app_user_model_id(APP_ID_LSPRI_EVALUATION)
+    from lspr_imaging_app.opengl_surface import configure_opengl_surface
+
+    configure_opengl_surface()  # before the QApplication: Play no longer waits for the screen refresh (opengl_surface.py)
     app = QApplication(sys.argv)
     splash = LaunchSplash()
     splash.show("Loading modules...")

@@ -374,6 +374,11 @@ class TaskIndicator(QWidget):
             self.cancel_requested.emit(next(iter(self._running)))
 
     def _on_dismiss_clicked(self) -> None:
+        self.dismiss_result()
+
+    def dismiss_result(self) -> None:
+        """Drop the finished result shown on the row (it stays in History), as the dismiss button does. Running tasks stay.
+        Called when the slideshow starts (2026-11-11, maintainer): the result took the bar's free width and hid the live fps line."""
         self._last = None
         self._refresh()
 
