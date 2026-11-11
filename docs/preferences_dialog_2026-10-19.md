@@ -13,9 +13,11 @@ The dialog holds the **app-wide** settings that belong to no panel: startup, lay
 | Reopen the last dataset on launch | `AppSettings.auto_reopen_last_dataset` | settings writer |
 | Arrange the panels when the Workflow stage changes | `AppSettings.auto_apply_preset_on_stage_change`, live on `LayoutPresetManager.auto_apply` | `wire_view_menu` reads `manager.auto_apply` |
 | ROI overlay cache size (Off / 128 / 256 / 512 / 1024 MB) | `ui_state` key `image/overlay_cache_mb` | `ImagePanel.set_overlay_cache_mb` (at once) |
-| Draw the image with the graphics card | `ui_state` key `image/gpu_drawing` | `ImagePanel.set_gpu_drawing` (at once) |
-| Screen resolution (Full / Standard; 2026-11-11) | `ui_state` key `display/resolution` | `display_options.apply_saved_resolution`, before the QApplication: **next start** |
-| Show the image in a window of its own (experimental; 2026-11-11) | `ui_state` key `image/own_window` | `ImagePanel` start-up (`gpu_view.apply_gpu_drawing(own_window=)`): **next start** |
+| Draw the image with the graphics card (**off by default since 2026-11-11**) | `ui_state` key `image/gpu_drawing` | `ImagePanel.set_gpu_drawing` (at once; switching it off is complete only after a restart) |
+
+"Screen resolution" (Full / Standard) and "Show the image in a window of its own" existed on 2026-11-11 only and were removed the same day:
+a processor-drawn window at full resolution plays at the cap at 4K, faster than either (`play_diagnosis_2026-11-11.md` sections 6b-6d).
+Their old keys (`display/resolution`, `image/own_window`) may remain in a settings file; nothing reads them.
 
 `LSPR_OVERLAY_CACHE_MB` still wins at start-up; the dialog says so when it is set and lists a size that is not one of the choices instead of replacing it.
 

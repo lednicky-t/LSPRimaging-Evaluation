@@ -7,6 +7,8 @@ MODE: gl        a QOpenGLWidget "picture" (60 % of the window) + plain widgets (
       glview    the app's arrangement: the QOpenGLWidget is the viewport of a QGraphicsView
       glviewnative  as glview, with WA_NativeWindow on that viewport
       glcontainer  picture = QOpenGLWindow inside createWindowContainer (own HWND, top window stays plain)
+      img       no OpenGL; picture = a 1275x799 image scaled at paint time (smooth), like a CPU-drawn image view
+      imgpre    no OpenGL; the same image already scaled to the widget's real pixels (paint = plain copy)
 Prints ms per iteration for: strip (only a thin cursor strip updated), frame (strip + whole picture updated), full (everything).
 """
 
@@ -105,6 +107,43 @@ def main() -> None:
 
         glwin = GLWin()
         pic = QWidget.createWindowContainer(glwin)
+    elif mode in ("img", "imgpre"):
+        import numpy as np
+        from PyQt6.QtGui import QImage
+
+        rng = np.random.default_rng(0)
+        frames_rgb = [
+            np.ascontiguousarray(np.dstack([rng.integers(0, 255, (799, 1275), dtype=np.uint8)] * 3 + [np.full((799, 1275), 255, np.uint8)]))
+            for _ in range(4)
+        ]
+
+        class ImgPic(QWidget):
+            n = 0
+            cache: dict = {}
+
+            def paintEvent(self, ev) -> None:
+                paints["pic"] += 1
+                arr = frames_rgb[self.n % len(frames_rgb)]
+                img = QImage(arr.data, 1275, 799, 1275 * 4, QImage.Format.Format_RGB32)
+                p = QPainter(self)
+                if mode == "img":
+                    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+                    p.drawImage(self.rect(), img)
+                else:
+                    # stands in for scaling on a worker thread: done outside the timed paint, keyed per frame
+                    dpr = self.devicePixelRatioF()
+                    key = (self.n % len(frames_rgb), self.width(), self.height())
+                    pre = self.cache.get(key)
+                    if pre is None:
+                        pre = img.scaled(int(self.width() * dpr), int(self.height() * dpr), Qt.AspectRatioMode.IgnoreAspectRatio,
+                                         Qt.TransformationMode.SmoothTransformation)
+                        pre.setDevicePixelRatio(dpr)
+                        self.cache[key] = pre
+                    p.drawImage(0, 0, pre)
+                p.end()
+
+        pic = ImgPic()
+        pic.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
     else:
         pic = PlainPic()
     lay.addWidget(pic, 6)
@@ -153,6 +192,11 @@ def main() -> None:
                 # let the window's own repaint request run (update requests are posted)
                 app.sendPostedEvents(None, int(QEvent.Type.UpdateRequest))
                 app.processEvents()
+                if kind in ("frame", "full") and mode == "glcontainer":
+                    # a separate QWindow repaints on a short platform timer: wait until it really painted (fair count)
+                    wait_until = time.perf_counter() + 0.1
+                    while paints["pic"] < i + 1 and time.perf_counter() < wait_until:
+                        app.processEvents()
             elapsed = time.perf_counter() - started
         counts[kind] = paints["pic"] / frames
         return 1000.0 * elapsed / frames

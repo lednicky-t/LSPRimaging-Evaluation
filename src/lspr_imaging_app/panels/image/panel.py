@@ -150,7 +150,7 @@ from .crop_tool import CropTool
 from .data_axis_slider import DataAxisSlider
 from .frame_tools import FrameToolsState, FrameToolsWidget
 from .general_group import AreaSelectionPicker, style_general_icon_button
-from .gpu_view import apply_gpu_drawing, is_own_window
+from .gpu_view import apply_gpu_drawing
 from .paint_census import PaintCensus
 from .play_repaint import PlayRepaint
 from .image_controls import ImageViewBox, controls_text
@@ -190,7 +190,6 @@ from ...storage.ui_state_keys import (
     IMAGE_MASK_EDIT_TOOL,
     IMAGE_GPU_DRAWING,
     IMAGE_OVERLAY_CACHE_MB,
-    IMAGE_OWN_WINDOW,
     IMAGE_ROI_LABELS,
     IMAGE_SCALE_BAR_COLOR,
     MASK_ROWS_VISIBLE,
@@ -583,9 +582,8 @@ class ImagePanel(QWidget):
         env_mb = environment_budget_mb()  # LSPR_OVERLAY_CACHE_MB, if set, wins over the saved choice for this run
         cache_mb = env_mb if env_mb is not None else int(read(store, IMAGE_OVERLAY_CACHE_MB))
         self._roi_overlay.layers.set_budget_bytes(int(max(cache_mb, 0) * 1024 * 1024))
-        self._own_window = bool(read(store, IMAGE_OWN_WINDOW))  # Preferences (experimental); only meaningful at this first start of the viewport
-        if read(store, IMAGE_GPU_DRAWING) is not False:  # on unless turned off in Preferences
-            apply_gpu_drawing(self._view, True, own_window=self._own_window)
+        if read(store, IMAGE_GPU_DRAWING) is True:  # off unless turned on in Preferences (default off since 2026-11-11, gpu_view.py)
+            apply_gpu_drawing(self._view, True)
         self._restore_slideshow_settings(store)
         self._slider_marks.set_roi_row(read(store, ROI_ROW_VISIBLE) is not False, read(store, ROI_ROW_SELECTED_ONLY) is True)
         self._slider_ribbon.roi_row_toggled.connect(lambda on: store.set(ROI_ROW_VISIBLE.key, bool(on)))
@@ -2385,16 +2383,9 @@ class ImagePanel(QWidget):
         """The canvas is painted through OpenGL (Preferences; `gpu_view.py`)."""
         return type(self._view.viewport()).__name__ == "QOpenGLWidget"
 
-    _own_window = False
-
-    @property
-    def own_window(self) -> bool:
-        """The OpenGL canvas is a window of its own (Preferences, experimental; `gpu_view.py`): set when the panel started, not changeable at run time."""
-        return self.gpu_drawing and is_own_window(self._view)
-
     def set_gpu_drawing(self, on: bool) -> bool:
         """Preferences: draw the canvas with the graphics card (remembered). Returns what is in effect (False if OpenGL is not available)."""
-        applied = apply_gpu_drawing(self._view, bool(on), own_window=self._own_window)
+        applied = apply_gpu_drawing(self._view, bool(on))
         if self._roi_overlay_store is not None:
             self._roi_overlay_store.set(IMAGE_GPU_DRAWING.key, applied)
         return applied

@@ -13,9 +13,6 @@ def run() -> None:
     from lspr_imaging_app.opengl_surface import configure_opengl_surface
 
     configure_opengl_surface()  # before the QApplication: Play no longer waits for the screen refresh (opengl_surface.py)
-    from lspr_imaging_app.display_options import apply_saved_resolution
-
-    apply_saved_resolution()  # before the QApplication: Preferences -> Performance -> Screen resolution (display_options.py)
     app = QApplication(sys.argv)
     splash = LaunchSplash()
     splash.show("Loading modules...")

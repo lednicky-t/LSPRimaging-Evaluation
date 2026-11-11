@@ -125,10 +125,53 @@ the image (~3-7 ms in the standalone test). It would matter again if the Sensorg
 cheap to carry, but not recommended; the risks Qt lists for native child windows (flicker while resizing or docking, they cover overlapping
 siblings, widgets floating over the image: crop fields, measure calibration, cursor readout) have **not been checked by eye**.
 
+## 6c. Full resolution without the whole-window cost: what the standalone bench says (2026-11-11, evening)
+
+Question (maintainer): can 4K be fast without lowering resolution, given the Sensorgram cursor is one line? Two modes added to
+`tools/present_bench.py`: `img` (no OpenGL, a 1275 x 799 picture scaled at paint time) and `imgpre` (the same picture already scaled to
+the widget's real pixels); `glcontainer` (a `QOpenGLWindow` inside `QWidget.createWindowContainer`: the picture has its own swap chain and
+the **top window stays a plain, non-OpenGL window**) was in the tool but never recorded, and its loop now waits until the picture really
+painted (a separate window repaints on a short platform timer; without the wait it painted only 45 % of iterations). 4K window, ms per iteration:
+
+| Mode | strip only | picture + strip |
+|---|---|---|
+| `gl` (QOpenGLWidget in the window, what the app does) | 12.9-15.5 | 21.8-22.5 |
+| `glview` (the app's QGraphicsView arrangement) | 12.7 | 20.8 |
+| **`glcontainer`** (picture in its own OpenGL window) | **0.8** | **6.5-6.8** |
+| `plain` (no OpenGL, colour fill) | 0.6 | 10.0-10.6 |
+| `img` (no OpenGL, picture scaled while painting) | 0.8 | 14.3 |
+| `imgpre` (no OpenGL, picture pre-scaled) | 0.8 | 9.6 |
+
+Reading: the cost is not the cursor and not the resolution of the picture; it is that **any `QOpenGLWidget` makes Qt compose and swap the
+whole top window through OpenGL for every change**. Without one, a change costs what it covers (strip 0.6-0.8 ms; picture area ~10 ms
+by plain Windows copy; 4 ms more if the picture is scaled while painting). A `glcontainer` picture costs ~6.6 ms at full resolution.
+`glnative` (section 6, 20.2 ms) does not get this because the top window is still OpenGL-composed.
+
+### 6d. The real app with the current code (commit b9bde6b), 4K, your layout, idle PC
+
+`tools/play_bench.py` with `PLAY_BENCH_TIMING=1`, two runs each, in both orders (image view 1642 x 666 logical, ROI/Groups + Sensorgram shown):
+
+| Launch | fps (2 runs) | cycle ms | Image paint ms | window pass ms | passes / frame | GUI busy |
+|---|---|---|---|---|---|---|
+| graphics card on (default) | 24.5, 24.7 | 41 | 3.4 | 33-34 | 1.0 | 78-84 % |
+| **graphics card off from launch** (`PLAY_BENCH_GPU=cold0`) | **30.6, 30.0** (the cap) | 33 | 9-10 | 26-27 | 1.0 | 84-86 % |
+
+So the "gap" of section 6c is gone: section 4's CPU-only 22.6 fps was measured with 1.5 passes per frame, before the later commits; with one
+pass per frame the CPU-only launch is **at the cap at full 4K resolution**. The graphics card now only costs: it makes painting the image
+~6 ms cheaper but every window hand-over ~7 ms dearer, and the hand-over is what is left. On the laptop screen every mode is at the cap (section 1).
+Consequences: the "Standard" screen resolution (28 fps, softer) and the own-window experiment (no reliable gain) are beaten by a plain
+CPU-only launch at full resolution. The Preferences tool tip ("15-20 % faster", "takes effect at once") is out of date: a run-time switch
+gives the hybrid of section 4, only a restart gives the CPU-only window. Headroom in CPU mode: GUI 84 % busy; pre-scaling the picture on
+the render thread (section 6c, `imgpre`) could save ~4 ms of the 9-10 ms paint if ever needed.
+
+**Done (maintainer's go-ahead, same evening):** "Draw the image with the graphics card" is **off by default**; its tool tip says why and
+that switching it off needs a restart; "Screen resolution" and "Show the image in a window of its own" were **removed** (module
+`display_options.py`, keys `display/resolution` and `image/own_window`, the `own_window` argument of `gpu_view.apply_gpu_drawing`).
+`tools/play_bench.py`: `PLAY_BENCH_GPU=1` now starts with the card on (the saved choice is used otherwise).
+
 ## 7. Open
 
-- 25 fps at 4K is not reached (20.0 default, 22.6 CPU-only): every whole-window pass costs ~20-40 ms on this Intel UHD at 3840 x 2080.
-  Options, none built: the Sensorgram cursor every second frame (~+3 fps, visible); a CPU-only default (a Preferences decision);
-  `display_picture` in Qt's native pixel order so CPU painting skips a conversion (Image paint 13 -> ?).
+- Superseded by 6d: the CPU-only default reaches the cap at 4K. Left as headroom ideas: pre-scale the picture on the render thread
+  (paint 9-10 ms -> ~5); `display_picture` in Qt's native pixel order.
 - On the laptop screen or any window under ~2 M real pixels Play is at its cap.
 - The bench's own residue: it started the Sensorgram's helper processes; an aborted run can leave one (`parent_pid` of a dead run): safe to end.

@@ -113,12 +113,9 @@ ROI_OVERLAY_KEYS = {
     for kind in ("sample", "reference")
 }
 IMAGE_OVERLAY_CACHE_MB = UiKey("image/overlay_cache_mb", 256, int)  # Edit -> Preferences: ROI overlay cache size in MB; 0 = off
-IMAGE_GPU_DRAWING = UiKey("image/gpu_drawing", True, bool)  # Edit -> Preferences: draw the image view with the graphics card (OpenGL viewport)
-# Edit -> Preferences, Performance (display_options.py): how sharp the window is drawn. "full" | "standard" (Windows draws a 96-dpi window and
-# stretches it: much faster on a 4K screen, softer text). Read before the QApplication exists; applied at the next start.
-DISPLAY_RESOLUTION = UiKey("display/resolution", "full", str)
-# Edit -> Preferences, Performance: the Image view as a window of its own (experimental; image/gpu_view.py). Applied at the next start.
-IMAGE_OWN_WINDOW = UiKey("image/own_window", False, bool)
+# Edit -> Preferences: draw the image view with the graphics card (OpenGL viewport). Off by default since 2026-11-11 (faster Play at 4K:
+# docs/play_diagnosis_2026-11-11.md section 6d). The removed keys "display/resolution" and "image/own_window" may linger in old settings: unread.
+IMAGE_GPU_DRAWING = UiKey("image/gpu_drawing", False, bool)
 # Edit -> Preferences: parallel work (lspr_core.perf; read by perf_setup.py). Mode "standard" (default) | "auto" (tune) | "manual";
 # 0 workers = not chosen.
 PERF_MODE = UiKey("perf/mode", "standard", str)
@@ -199,7 +196,7 @@ ARRAY_KEYS = {  # ROIs tab, "Array" group (panels/image/array_controls.py); leng
 HAND_WIRED_KEYS: tuple[UiKey, ...] = (
     HISTOGRAM_CURSOR_READOUT, HISTOGRAM_CURVE_STYLES, IMAGE_CURSOR_READOUT, IMAGE_MASK_EDIT_TOOL, IMAGE_MASK_EDIT_PREVIEW,
     IMAGE_SCALE_BAR_COLOR, IMAGE_ROI_LABELS,
-    IMAGE_OVERLAY_CACHE_MB, IMAGE_GPU_DRAWING, DISPLAY_RESOLUTION, IMAGE_OWN_WINDOW, PERF_MODE, PERF_MANUAL_WORKERS, PERF_RESERVED_CORES, PERF_LOW_PRIORITY, ANALYSIS_MODE,
+    IMAGE_OVERLAY_CACHE_MB, IMAGE_GPU_DRAWING, PERF_MODE, PERF_MANUAL_WORKERS, PERF_RESERVED_CORES, PERF_LOW_PRIORITY, ANALYSIS_MODE,
     *(key for keys_for_kind in ROI_OVERLAY_KEYS.values() for key in keys_for_kind.values()),
     CUBE_DISPLAY_MODE, MASK_SCOPE, ROI_SCOPE, ROI_ROW_VISIBLE, ROI_ROW_SELECTED_ONLY, MASK_ROWS_VISIBLE, EXPORT_SHARD,
     *ARRAY_KEYS.values(), *SLIDER_COLOR_KEYS.values(),
