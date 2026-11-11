@@ -623,8 +623,16 @@ class SensorgramPanel(QWidget):
         one step ahead of it. Back to the slider when Play stops."""
         self._play_cube = None
         self._following_play = playing
-        if not playing:
+        if playing:
+            self._plot.begin_play_repaints()
+        else:
+            self._plot.end_play_repaints()
             self._update_cursor()
+
+    def repaint_after_play_frame(self) -> None:
+        """A Play frame is shown (`ImagePanel.play_frame_shown`, before the image view repaints): the cursor's strip is repainted with it."""
+        if self._following_play:
+            self._plot.repaint_play_cursor()
 
     def show_play_frame(self, cube: int) -> None:
         """The Image panel is about to show this cube's frame during Play (`ImagePanel.play_frame_showing`): the cursor moves now, so its

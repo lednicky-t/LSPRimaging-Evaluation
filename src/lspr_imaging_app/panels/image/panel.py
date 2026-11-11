@@ -152,6 +152,7 @@ from .frame_tools import FrameToolsState, FrameToolsWidget
 from .general_group import AreaSelectionPicker, style_general_icon_button
 from .gpu_view import apply_gpu_drawing
 from .paint_census import PaintCensus
+from .play_repaint import PlayRepaint
 from .image_controls import ImageViewBox, controls_text
 from .interaction import CanvasInteraction
 from .edit_preview_layer import EditPreviewLayer
@@ -310,6 +311,9 @@ class ImagePanel(QWidget):
     """While Play runs: the cube of the frame about to be put on screen, emitted FIRST, before anything of it is drawn (2026-11-11).
     A plot that marks the cube (the Sensorgram cursor) moves its mark here: its plot scene then queues its repaint ahead of the
     window's, and the whole frame reaches the screen in one repaint instead of two (~12 ms of GUI time per frame)."""
+    play_frame_shown = pyqtSignal()
+    """While Play runs: a frame and the step it released are set, emitted just before this panel repaints its own view (`play_repaint.py`).
+    A plot with a moved mark (the Sensorgram cursor) marks its dirty strip now, so one window repaint draws the whole frame."""
     image_rendered = pyqtSignal(np.ndarray, int, float)
     # Companion to `image_rendered` - the Histogram panel's other half of
     # "read Image, don't read Dataset directly" (sketch §7): without this,
@@ -1369,6 +1373,7 @@ class ImagePanel(QWidget):
         # Where the time goes while Play runs (status bar + one log line at the end).
         self._playback_stats = PlaybackStats()
         self._paint_census = PaintCensus()  # which widgets repaint during Play (`playback.paints` in the log)
+        self._play_repaint = PlayRepaint(self._view, self)  # one repaint of the canvas per frame while Play runs (`play_repaint.py`)
         self._slideshow.playing_changed.connect(self._on_playback_changed)
         self._slideshow.step_made.connect(lambda handlers_s: self._playback_stats.note_step(time.perf_counter(), handlers_s))
         self._slideshow.step_made.connect(self._flush_redraw_for_step)
@@ -1957,11 +1962,13 @@ class ImagePanel(QWidget):
         if playing:
             stats.start(time.perf_counter(), self._slideshow.interval_seconds())
             self._paint_census.start()
+            self._play_repaint.start()
             self._view.paint_listener = lambda s: stats.note_detail("paint_view", s)
             self._view.paint_cpu_listener = lambda s: stats.note_detail("paint_view_cpu", s)  # paint_view minus this = waiting
             self._image_item.paint_listener = lambda s: stats.note_detail("paint_image", s)
             return
         self._paint_census.stop()
+        self._play_repaint.stop()
         self._held_result = None  # the frame Play stopped on is rendered again, exactly, just below
         self._view.paint_listener = None
         self._view.paint_cpu_listener = None
@@ -2130,6 +2137,9 @@ class ImagePanel(QWidget):
             # still in flight must not let the slideshow run further ahead. With a pipelined show this
             # call runs the next step right here (last, so this frame's stats are complete).
             self._slideshow.frame_displayed()
+        if self._play_repaint.active:
+            self.play_frame_shown.emit()  # the Sensorgram marks its cursor strip ...
+            self._play_repaint.frame_shown()  # ... then this view repaints, and one window repaint draws everything
     def _request_prefetch(self, cube_index: int, wavelength_nm: float) -> None:
         """Have the render thread read the planes the user is likely to open
         next into the plane cache (`prefetch.py`) once it is idle."""

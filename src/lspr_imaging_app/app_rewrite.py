@@ -2005,6 +2005,7 @@ def build_main_window(
     # During Play the Sensorgram cursor marks the frame on screen and moves first, so image and cursor reach the screen in one repaint.
     image_panel.playback_changed.connect(sensorgram_panel.follow_play)
     image_panel.play_frame_showing.connect(sensorgram_panel.show_play_frame)
+    image_panel.play_frame_shown.connect(sensorgram_panel.repaint_after_play_frame)  # the cursor strip, just before the image view repaints
     _follow_plan_bar(sensorgram_panel, m.step_table, roi_table_panel)  # the table's step columns are titled and coloured as the Sensorgram's plan bar titles and colours its steps
     app_instance = QApplication.instance()
     if app_instance is not None:  # after the panels' own shutdowns (connected in their constructors): nothing may still be fitting when the helper process ends

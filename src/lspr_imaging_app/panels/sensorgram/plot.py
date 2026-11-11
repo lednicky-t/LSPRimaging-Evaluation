@@ -35,6 +35,7 @@ from ..svg_layers import SvgPart
 from .baseline_selector_menu import DEFAULT_ALPHA, DEFAULT_COLOR, BaselineRangeReadout
 from .plan_bar import PlanBarItem
 from .plan_text_editor import StepTextEditor
+from .play_repaint import PlayCursorRepaint
 from .stats_table import LegendRows, StepStatsItem
 
 MAX_LEGEND_SERIES = 6  # up to this many lines always have a legend
@@ -168,6 +169,8 @@ class SensorgramPlot(QWidget):
         self._axis_cursor = AxisCursor(self._item, cube_color(), self)
         self._axis_cursor.dragged.connect(self.x_clicked)
         self._cursor = self._axis_cursor.line
+        # While Play runs only the cursor strip is repainted, once per frame, together with the image (`play_repaint.py`).
+        self._play_repaint = PlayCursorRepaint(self._widget, self._item.scene(), (self._axis_cursor.line, self._axis_cursor.handle), self)
         self._plan_bar = PlanBarItem()
         self._item.addItem(self._plan_bar, ignoreBounds=True)  # behind the traces; not part of the auto-range
         self._item.getViewBox().claim_right_click = self._plan_bar.claims_scene_pos
@@ -570,6 +573,18 @@ class SensorgramPlot(QWidget):
     def set_current_x(self, x: float | None) -> None:
         """The dashed line and the slider-style circle at the current cube (None hides them)."""
         self._axis_cursor.set_x(x)
+
+    def begin_play_repaints(self) -> None:
+        """Play started: from now on the plot repaints the cursor strip once per frame (`repaint_play_cursor`), not on every scene change."""
+        self._play_repaint.start()
+
+    def end_play_repaints(self) -> None:
+        """Play stopped: the plot repaints on scene changes again."""
+        self._play_repaint.stop()
+
+    def repaint_play_cursor(self) -> None:
+        """The cursor has moved for the frame about to be shown: its old and new place are repainted with the window's next repaint."""
+        self._play_repaint.frame_shown()
 
     def set_baseline_window(self, window: tuple[float, float] | None, decimals: int = 0) -> None:
         """Show the baseline window (low, high) in x units, or hide it (None). Setting it here never emits ``baseline_window_changed``.
