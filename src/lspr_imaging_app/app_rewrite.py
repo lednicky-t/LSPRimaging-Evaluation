@@ -91,7 +91,7 @@ from .panels.plot_export_button import ExportData, PlotExportButton
 from .analysis.signal_map import signal_map_table
 from .panels.image.overlay_cache import environment_budget_mb
 from .panels.image.overlay_style import OverlayStyle
-from .panels.layout_presets import LayoutPresetManager, wire_view_menu
+from .panels.layout_presets import wire_view_menu
 from .panels.panel_visibility import ensure_floating_panels_on_screen, wire_panel_visibility_menu
 from .panels.preferences_dialog import Preferences, PreferencesDialog
 from .panels.shortcuts_dialog import ShortcutsDialog
@@ -115,8 +115,8 @@ from .launch import LaunchSplash, StageClock
 from .panels.task_indicator import TaskIndicator
 from .startup_tracker import STARTUP_TASK_ID, StartupStep, StartupTracker
 from .panels.ui_state import UiStateStore
-from .panels.workflow import WorkflowPanel, WorkflowStage
-from .panels.workflow.collapsible_section import CollapsibleSection
+from .panels.dataset_manager import DatasetManagerDialog
+from .panels.file_menu import FileMenu
 from .roi import RoiToolbox
 from .roi_geometry_sync import RoiGeometrySync
 from .selection import (
@@ -213,41 +213,32 @@ logger = logging.getLogger(__name__)
 # mis-mapping described above, so it is rejected instead. Cost, once: a window
 # layout and any custom layout presets saved before this are dropped (the
 # default layout is built, and a preset falls back to showing/hiding panels).
-_DOCK_LAYOUT_STATE_VERSION = 4
+# Bumped to 5 (2026-11-11): the Workflow dock was removed (its actions are in the File
+# menu, its displays in File -> Dataset Manager). A version-4 blob still holds a column
+# for it; same one-time cost as above.
+_DOCK_LAYOUT_STATE_VERSION = 5
 
 LAUNCH_POOL_FALLBACK_MS = 20_000
 """A remembered Performance mode starts its worker processes when the startup tracker says the app has loaded, or this long after launch if
 nothing was being loaded (analysis/scan_pool.py): seven processes importing at once would slow down the dataset that is still opening."""
 
-# Workflow dock widths (2026-10-18): where a fresh layout starts it, and the floor
-# below which it cannot be dragged. The floor is what the widest stage needs, as
-# measured with all its sections open (Dataset: the page wants 213 px, plus 6 px of
-# dock frame and ~15 px if a vertical scroll bar shows), not a guess; the ROI table's
-# own floor is 212 px. Below it nothing is clipped, the panel scrolls sideways instead.
-_WORKFLOW_DEFAULT_WIDTH_PX = 340
-_WORKFLOW_MIN_WIDTH_PX = 240
-# What the ROI table column is expected to take on a fresh layout; used only to size Image's share
-# in the starting `resizeDocks` call (Qt ends up giving the ROI table its own share anyway).
-_ROI_TABLE_START_WIDTH_PX = 300
-
-
-def _build_menu_bar(window: QMainWindow) -> tuple[QMenu, QMenu]:
+def _build_menu_bar(window: QMainWindow) -> tuple[QMenu, QMenu, QMenu]:
     """Standard File/Edit/View/Help menus
-    (``docs/rewrite_gui_shell_design_2026-09.md`` §2). File->Exit is real;
+    (``docs/rewrite_gui_shell_design_2026-09.md`` §2). File gets the dataset,
+    session and metadata actions and Exit (`panels/file_menu.py`, 2026-11-11);
     View gets the panel toggles, layout presets and theme switching, Edit gets
     undo/redo (`_wire_edit_menu`) and Preferences (`_wire_preferences`), Help
     holds the Log Console and, last, About. (The Options menu was replaced by Edit ->
     Preferences on 2026-10-19.)
 
-    Returns (Edit menu, View menu) so the caller can add the actions once the
+    Returns (File menu, Edit menu, View menu) so the caller can add the actions once the
     things they act on exist."""
     menu_bar = window.menuBar()
     file_menu = menu_bar.addMenu("&File")
-    file_menu.addAction("E&xit", window.close)
     edit_menu = menu_bar.addMenu("&Edit")
     view_menu = menu_bar.addMenu("&View")
     menu_bar.addMenu("&Help")
-    return edit_menu, view_menu
+    return file_menu, edit_menu, view_menu
 
 
 def _wire_edit_menu(
@@ -339,9 +330,6 @@ def _wire_theme_menu(
        real plot widgets exist (currently still ``NotImplementedError``
        stubs - see the build log) - ``getattr(..., None)`` guards each one
        so this doesn't have to change when they do.
-    4. Every ``CollapsibleSection`` inside the Workflow panel's stage tabs
-       (2026-09-24, design doc §4a) - same reason as #2: baked-in
-       stylesheets, not QSS.
     """
     view_menu.addSeparator()
     theme_menu = view_menu.addMenu("Theme")
@@ -374,8 +362,6 @@ def _wire_theme_menu(
             sensorgram.refresh_theme()
         for dock in window.findChildren(PanelContainer):
             dock.refresh_theme()
-        for section in window.findChildren(CollapsibleSection):
-            section.refresh_theme()
         apply_windows_titlebar_color(window, theme)
         if on_theme_changed is not None:
             on_theme_changed(name)
@@ -750,7 +736,7 @@ class _Modules:
 
 class _SettingsWriter:
     """The one write path into `AppSettings` for app-level state (last
-    dataset, theme, window and dock layout, open Workflow section). Everything
+    dataset, theme, window and dock layout). Everything
     a panel's controls change goes through the `UiStateStore` instead
     (`panels/ui_state.py`), which batches its own writes."""
 
@@ -1042,48 +1028,13 @@ def _build_histogram_panel(m: _Modules, image_panel: ImagePanel, ui_state: UiSta
     return histogram_panel
 
 
-def _build_workflow_panel(m: _Modules, writer: _SettingsWriter, ui_state: UiStateStore) -> WorkflowPanel:
-    settings = writer.settings
-    # `WorkflowStage[...]` raises KeyError/TypeError for anything that isn't
-    # a live member name - a settings file from a build with different stage
-    # names, hand-edited JSON, or simply no saved value yet (`None`) all fall
-    # back the same way: `initial_stage=None`, which makes WorkflowPanel use
-    # its own hardcoded default (Dataset open) exactly as before this field
-    # existed.
-    try:
-        initial_stage: WorkflowStage | None = (
-            WorkflowStage[settings.active_workflow_stage] if settings.active_workflow_stage else None
-        )
-    except KeyError:
-        initial_stage = None
-    # The Workflow panel's "Transforms"/"Mask" subsections were removed
-    # (2026-10-02, maintainer request: fully covered by the Image panel's own
-    # ribbon now), so `WorkflowPanel` no longer needs the modules that only
-    # backed those two - see `panels/workflow/panel.py`'s
-    # `_build_image_tools_section` docstring.
-    workflow = WorkflowPanel(
-        m.dataset,
-        m.selection,
-        m.reference_frame,
-        m.session_coordinator,
-        initial_stage=initial_stage,
-        initial_subsections=settings.expanded_subsections,
-        cube_display=m.cube_display,
-        frame_roles=m.frame_roles,
+def _wire_file_menu(file_menu: QMenu, window: QMainWindow, m: _Modules, ui_state: UiStateStore) -> FileMenu:
+    """File menu + the Dataset Manager window (2026-11-11; they replace the Workflow panel). The manager is built now,
+    hidden, so it hears the first `dataset_loaded` (`panels/dataset_manager/dialog.py`)."""
+    manager = DatasetManagerDialog(
+        m.dataset, m.selection, m.session_coordinator, cube_display=m.cube_display, ui_state=ui_state, parent=window
     )
-    # Immediate persist-on-change, same pattern as theme/auto_apply - switching
-    # the open stage is a deliberate, occasional click, not a continuous drag
-    # (unlike window geometry, which is batched to quit instead - see
-    # `_wire_quit_persistence`).
-    workflow.stage_changed.connect(lambda stage: writer.persist(active_workflow_stage=stage.name))
-
-    def _persist_subsection(key: str, expanded: bool) -> None:
-        updated = dict(settings.expanded_subsections)
-        updated[key] = expanded
-        writer.persist(expanded_subsections=updated)
-
-    workflow.subsection_expanded_changed.connect(_persist_subsection)
-    return workflow
+    return FileMenu(file_menu, window, m.dataset, m.session_coordinator, manager)
 
 
 def _wire_analysis_scan(m: _Modules, row: AnalysisTab, ui_state: UiStateStore, startup: StartupTracker | None = None) -> None:
@@ -1435,7 +1386,7 @@ def _wire_startup_calculation(startup: StartupTracker, roi_table_panel: RoiTable
 def _build_status_bar(
     window: QMainWindow,
     m: _Modules,
-    workflow: WorkflowPanel,
+    file_actions: FileMenu,
     image_panel: ImagePanel,
     roi_table_panel: RoiTablePanel,
     spectra_panel: SpectraPanel,
@@ -1507,11 +1458,10 @@ def _build_status_bar(
         **{presenter.task.task_id: presenter.cancel for presenter in check_presenters},
     }
     task_indicator.cancel_requested.connect(lambda task_id: cancel_by_task[task_id]())
-    # WorkflowPanel.set_status() (state/performance text, no hover-hints -
-    # design doc §2) shows as a transient message on the bar's left side;
-    # the reminder above is permanent, on the right, so neither covers the
-    # other.
-    workflow.status_requested.connect(status_bar.showMessage)
+    # The File menu's state text ("Loading dataset from ...") shows as a transient
+    # message on the bar's left side; the task indicator above is permanent, on the
+    # right, so neither covers the other.
+    file_actions.status_message.connect(status_bar.showMessage)
     m.roi_geometry_sync.status_changed.connect(status_bar.showMessage)
     roi_table_panel.status_message.connect(status_bar.showMessage)
     # A failed session write must reach the user, not only the log (30 s: long enough to be seen,
@@ -1587,7 +1537,6 @@ def _wire_roi_table_title(dock: PanelContainer, panel: RoiTablePanel) -> None:
 
 def _build_dock_layout(
     window: QMainWindow,
-    workflow: WorkflowPanel,
     image_panel: ImagePanel,
     histogram_panel: HistogramPanel,
     roi_table_panel: RoiTablePanel,
@@ -1603,16 +1552,8 @@ def _build_dock_layout(
     app already docks every panel. This default arrangement is just a
     starting point, not a preset: named, user-editable presets (design doc
     §5) are applied on top of it.
-    Workflow is, since 2026-10-18 (maintainer decision), freely
-    resizable like every other panel: it starts at `_WORKFLOW_DEFAULT_WIDTH_PX`
-    (the stable app's own workflow_panel width, layout_builder.py:1744) and
-    cannot be dragged below `_WORKFLOW_MIN_WIDTH_PX`. A row that needs more room
-    than the dock has gets a horizontal scroll bar inside the Workflow panel, so
-    narrowing it hides nothing. It still starts as the only panel of the left
-    area, i.e. full height; the user can dock it anywhere, like the others."""
-    workflow_dock = PanelContainer(
-        "Workflow", workflow, window, min_width=_WORKFLOW_MIN_WIDTH_PX
-    )
+    (The Workflow dock, the left column until 2026-11-11, was retired: its
+    actions are in the File menu, its displays in File -> Dataset Manager.)"""
     image_dock = PanelContainer("Image", image_panel, window)
     histogram_dock = PanelContainer("Histogram", histogram_panel, window)
     roi_table_dock = PanelContainer("ROI / Groups", roi_table_panel, window)
@@ -1637,27 +1578,12 @@ def _build_dock_layout(
     image_panel.frame_columns_changed.connect(image_dock.set_subtitle_columns)
     image_dock.set_subtitle_columns(image_panel.frame_columns())
 
-    # Every panel, Workflow included, lives in ONE nested split tree inside
-    # RightDockWidgetArea (changed 2026-10-18, maintainer: Workflow is "as the
-    # other panels", no longer fixed in place). Until then Workflow was the
-    # only occupant of LeftDockWidgetArea - which kept it full height through
-    # `setCorner`, but made Qt hand 100% of any extra window width to that
-    # area once Workflow was no longer clamped to 340 px (measured: a 1900 px
-    # window gave Workflow 798 px, and every further px of widening went to it),
-    # and made `resizeDocks` on it a no-op. Inside the tree, a window resize is
-    # shared out with Image first, `resizeDocks` is exact, and the separator
-    # next to Workflow drags like every other.
-    #
-    # Workflow is the first column, split off *before* Spectra so that, by
-    # default, it still runs the full window height (Spectra/Sensorgram sit
-    # beside it, under Image/ROI table). Dragging it elsewhere is up to the user.
-    #
-    # Found 2026-09-24 (when Workflow still had its own area): adding both
-    # workflow_dock and image_dock to the *same area* with `addDockWidget` and
-    # no split between them makes Qt stack them vertically instead of side by
-    # side - hence the explicit `splitDockWidget(..., Horizontal)` below.
-    window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, workflow_dock)
-    window.splitDockWidget(workflow_dock, image_dock, Qt.Orientation.Horizontal)
+    # Every panel lives in ONE nested split tree inside RightDockWidgetArea
+    # (2026-10-18): inside the tree, a window resize is shared out among the
+    # panels, `resizeDocks` is exact, and every separator drags. A panel that
+    # owned an area of its own got 100% of any extra window width (measured
+    # with the old Workflow dock: a 1900 px window gave it 798 px).
+    window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, image_dock)
     # Split order matters here, found 2026-09-27 debugging a "can't resize
     # the docks' height" report: this establishes the top-row/Spectra
     # split *before* subdividing the top row into columns, not after.
@@ -1700,27 +1626,11 @@ def _build_dock_layout(
     # rather than only showing one at a time (maintainer's explicit choice
     # over rebuilding this as one merged panel with a custom tab strip).
     window.splitDockWidget(spectra_dock, sensorgram_dock, Qt.Orientation.Vertical)
-    # (A `setCorner(BottomLeft, Left)` call used to follow, to keep Workflow's
-    # own left area full height; with Workflow in the shared tree it has
-    # nothing to do and was removed, 2026-10-18.)
 
-    # Only a starting width (a restored layout overrides it). Naming Image
-    # as well is what makes Qt move the separator between the two, instead of
-    # ignoring the request. Until 2026-10-18 Workflow was clamped to a fixed
-    # 340 px and the separator beside it was made inert by an event filter
-    # (`FixedWidthSeparatorGuard`, deleted; see git history).
-    window.resizeDocks(
-        [workflow_dock, image_dock],
-        [_WORKFLOW_DEFAULT_WIDTH_PX, window.width() - _WORKFLOW_DEFAULT_WIDTH_PX - _ROI_TABLE_START_WIDTH_PX],
-        Qt.Orientation.Horizontal,
-    )
-
-    # Order here fixes each panel's place in the View menu and its Ctrl+1..6
+    # Order here fixes each panel's place in the View menu and its Ctrl+1..5
     # shortcut (2026-10-19, maintainer: ROI / Groups sits right under
-    # Histogram, so Spectra and Sensorgram moved down to Ctrl+5 / Ctrl+6;
-    # this no longer matches the stable app's Ctrl+1..5).
+    # Histogram; 2026-11-11: Workflow, Ctrl+1 until then, was retired).
     return {
-        "Workflow": workflow_dock,
         "Image": image_dock,
         "Histogram": histogram_dock,
         "ROI / Groups": roi_table_dock,
@@ -1783,7 +1693,7 @@ def _wire_quit_persistence(
     def _persist_on_quit() -> None:
         ui_state.flush()
         # Window geometry/state and layout-preset blobs only make sense
-        # to capture here, at quit - unlike theme/last-dataset/auto-apply
+        # to capture here, at quit - unlike theme/last-dataset
         # above, there is no single "the user just changed this" moment
         # to write on; every dock drag would otherwise mean a write.
         writer.persist(
@@ -2048,9 +1958,7 @@ def build_main_window(
         button.set_context(
             export_context, remember_export_folder, lambda: str(read(ui_state, PLOT_EXPORT_FIGURE_FORMAT)), remember_export_format
         )
-    stages.done("ROI table, Spectra and Sensorgram panels")
-    workflow = _build_workflow_panel(m, writer, ui_state)
-    stages.done("Workflow panel", "Assembling the window...")
+    stages.done("ROI table, Spectra and Sensorgram panels", "Assembling the window...")
 
     window = QMainWindow()
     window.setWindowTitle(version_string())
@@ -2065,7 +1973,8 @@ def build_main_window(
     # AllowTabbedDocks out means dropping a panel onto another's center now
     # simply isn't offered as a target - only the split zones are.
     window.setDockOptions(QMainWindow.DockOption.AnimatedDocks | QMainWindow.DockOption.AllowNestedDocks)
-    edit_menu, view_menu = _build_menu_bar(window)
+    file_menu, edit_menu, view_menu = _build_menu_bar(window)
+    file_actions = _wire_file_menu(file_menu, window, m, ui_state)
     attach_to_menu_bar(window.menuBar(), m.dataset)  # dataset path, type / size / cubes, and the Time / Plan checks
     startup = _build_startup_tracker(m, image_panel, spectra_panel, sensorgram_panel)
     _wire_startup_calculation(startup, roi_table_panel, m.analysis_scan.start_pool)
@@ -2073,14 +1982,14 @@ def build_main_window(
         _wire_data_checks(window, m, sensorgram_panel, ui_state),
         _wire_image_motion(window, m, image_panel.analysis_tab, ui_state),
     )
-    _build_status_bar(window, m, workflow, image_panel, roi_table_panel, spectra_panel, sensorgram_panel, startup, check_presenters)
+    _build_status_bar(window, m, file_actions, image_panel, roi_table_panel, spectra_panel, sensorgram_panel, startup, check_presenters)
     _wire_analysis_scan(m, image_panel.analysis_tab, ui_state, startup)
     _wire_roi_tuning(m, image_panel.tuning_tab, ui_state, show_view=image_panel.set_tuning_view)
     _wire_session_carry_prompt(window, m)
     _wire_edit_menu(edit_menu, window)
     stages.done("menus and status bar")
     panel_docks = _build_dock_layout(
-        window, workflow, image_panel, histogram_panel, roi_table_panel, spectra_panel, sensorgram_panel
+        window, image_panel, histogram_panel, roi_table_panel, spectra_panel, sensorgram_panel
     )
     stages.done("dock layout")
     _wire_shortcuts_dialog(window, ui_state)
@@ -2094,39 +2003,27 @@ def build_main_window(
         panel_docks[dock_name].visibilityChanged.connect(hidden_aware_panel.set_panel_visible)
 
     # View menu, top to bottom (the order of these calls is the menu order):
-    # Show/Hide all + one checkable, Ctrl+1..6-shortcut toggleViewAction()
+    # Show/Hide all + one checkable, Ctrl+1..5-shortcut toggleViewAction()
     # per dock (panels/panel_visibility.py) - the recovery path a
     # closed-and-lost panel had no way back from before this (found
-    # 2026-09-27: undocking Workflow, then losing it, had no fix short of
+    # 2026-09-27: an undocked panel, once lost, had no fix short of
     # restarting) - then Panel Presets (wire_view_menu below), then Theme.
     # Until 2026-10-19 the panels sat in a "Panels" submenu under Theme.
     wire_panel_visibility_menu(view_menu, panel_docks)
 
     # Named panel presets (design doc §5). A never-customized preset is
-    # still not applied here at startup - every dock stays visible until the
-    # user explicitly picks one, or the auto-apply toggle (now itself
-    # persisted, see below) reacts to a stage change. Forcing a preset at
-    # launch while that toggle happens to be off would contradict "manual
-    # application always available, auto-apply is opt-in" (§5). A preset
-    # slot that *was* customized and saved does get its real geometry back,
-    # but only via the raw `window.restoreState()` call in
+    # not applied at startup - every dock stays visible until the user picks
+    # one. A preset slot that *was* customized and saved does get its real
+    # geometry back, but only via the raw `window.restoreState()` call in
     # `_restore_window_state` (the most recent on-screen arrangement,
     # whichever preset produced it) - not by re-`apply()`-ing the preset
     # itself, which would restore that slot's own blob from whenever it was
-    # last explicitly saved, possibly older.
+    # last explicitly saved, possibly older. (Applying a preset when the
+    # Workflow stage changed went with the Workflow panel, 2026-11-11.)
     layout_preset_manager = wire_view_menu(
         view_menu,
         window,
-        workflow,
-        panel_docks["Workflow"],
-        {
-            "Image": panel_docks["Image"],
-            "Histogram": panel_docks["Histogram"],
-            "ROI / Groups": panel_docks["ROI / Groups"],
-            "Spectra": panel_docks["Spectra"],
-            "Sensorgram": panel_docks["Sensorgram"],
-        },
-        initial_auto_apply=settings.auto_apply_preset_on_stage_change,
+        dict(panel_docks),
         state_version=_DOCK_LAYOUT_STATE_VERSION,
     )
     _wire_theme_menu(
@@ -2139,9 +2036,9 @@ def build_main_window(
     ensure_floating_panels_on_screen({"Log": log_dock}, window)
     stages.done("saved window layout")
 
-    # Edit -> Preferences...: reopen-last-dataset, the preset auto-apply toggle and the overlay cache size (2026-10-19;
+    # Edit -> Preferences...: reopen-last-dataset, the overlay cache size and the rest of the app-wide settings (2026-10-19;
     # they were in the Options menu, which is gone).
-    _wire_preferences(edit_menu, window, image_panel, writer, layout_preset_manager, ui_state)
+    _wire_preferences(edit_menu, window, image_panel, writer, ui_state)
 
     _wire_quit_persistence(window, m, writer, ui_state, layout_preset_manager)
     stages.done("preferences and quit wiring", "Opening the last dataset...")
@@ -2174,15 +2071,14 @@ def _wire_preferences(
     window: QMainWindow,
     image_panel: ImagePanel,
     writer: _SettingsWriter,
-    layout_preset_manager: LayoutPresetManager,
     ui_state: UiStateStore,
 ) -> QAction:
     """Edit -> Preferences... (Ctrl+, anywhere in the app): the app-wide settings that belong to no panel
     (`panels/preferences_dialog.py`; replaced the Options menu on 2026-10-19).
 
     - The dialog is shown with `open()` (window-modal, does not block the event loop) and applies nothing until OK. OK
-      applies only what changed, through the setters the Options menu used: `AppSettings` via the writer (reopen last dataset;
-      the preset auto-apply toggle, also kept on `LayoutPresetManager.auto_apply`, which `wire_view_menu` reads) and
+      applies only what changed, through the setters the Options menu used: `AppSettings` via the writer (reopen last
+      dataset; the "arrange panels when the Workflow stage changes" toggle went with the Workflow panel, 2026-11-11) and
       `ImagePanel.set_overlay_cache_mb` (applied at once, saved with the other UI state). The parallel-work choices
       (2026-10-22) go to the `lspr_core.perf` runtime, which the next export or scan reads, and into the UI-state store.
     - A second press of Ctrl+, while the dialog is open just brings it forward."""
@@ -2193,7 +2089,6 @@ def _wire_preferences(
     def current() -> Preferences:
         return Preferences(
             reopen_last_dataset=bool(writer.settings.auto_reopen_last_dataset),
-            auto_apply_layout_preset=layout_preset_manager.auto_apply,
             overlay_cache_mb=image_panel.overlay_cache_mb,
             gpu_drawing=image_panel.gpu_drawing,
             screen_resolution=str(read(ui_state, DISPLAY_RESOLUTION)),  # the saved choice (applied at the next start)
@@ -2205,10 +2100,6 @@ def _wire_preferences(
         if new.reopen_last_dataset != old.reopen_last_dataset:
             writer.persist(auto_reopen_last_dataset=new.reopen_last_dataset)
             changed.append("reopen_last_dataset")
-        if new.auto_apply_layout_preset != old.auto_apply_layout_preset:
-            layout_preset_manager.auto_apply = new.auto_apply_layout_preset
-            writer.persist(auto_apply_preset_on_stage_change=new.auto_apply_layout_preset)
-            changed.append("auto_apply_layout_preset")
         if new.overlay_cache_mb != old.overlay_cache_mb:
             image_panel.set_overlay_cache_mb(new.overlay_cache_mb)
             changed.append("overlay_cache_mb")

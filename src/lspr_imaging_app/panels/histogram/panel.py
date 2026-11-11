@@ -115,7 +115,7 @@ class HistogramPanel(QWidget):
     # four, since `app_rewrite.py`'s only use for it is writing all four
     # back to `AppSettings` together (2026-09-30, same "app-level setting is
     # one field plus one wiring line" mechanism `AppSettings`'s own
-    # docstring describes for `active_workflow_stage`/`theme`/etc). `y_mode`
+    # docstring describes for `theme`/etc). `y_mode`
     # is one of `settings_dialog.Y_MODES` ("percent"/"counts"/"normalized"),
     # not a bool - widened 2026-09-30 to add the "Normalized (peak = 1)"
     # mode (maintainer's spec: "normalization would be towards highest

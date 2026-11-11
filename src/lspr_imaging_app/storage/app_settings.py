@@ -70,23 +70,9 @@ class AppSettings:
     main_window_state: str | None = None
     active_layout_preset: str | None = None
     layout_presets: dict[str, str] = field(default_factory=dict)
-    auto_apply_preset_on_stage_change: bool = False
-    # `WorkflowStage.name` (e.g. "IMAGE_TOOLS") of the top-level Workflow
-    # accordion section left open at last quit - see
-    # `panels/workflow/panel.py:WorkflowPanel`. A plain string, not the enum
-    # itself, so this file stays Qt/app-free; `None` means "no saved stage
-    # yet", which the reader falls back to each section's own hardcoded
-    # default for (currently: Dataset starts open).
-    active_workflow_stage: str | None = None
-    # Expand/collapse state of *nested* Workflow sections (e.g. "Transforms"
-    # under Image tools), keyed by `"<WorkflowStage.name>:<section title>"`
-    # (see `panels/workflow/panel.py`'s `_subsection_key`). Unlike the single
-    # top-level stage above, several nested sections can be open at once, so
-    # this needs a dict rather than one string. A key missing from this dict
-    # (first-ever launch, or a section title/stage that no longer exists)
-    # falls back to that section's own hardcoded `expanded=` default, the
-    # same graceful-degradation `active_workflow_stage` already relies on.
-    expanded_subsections: dict[str, bool] = field(default_factory=dict)
+    # (Removed 2026-11-11 with the Workflow panel: `auto_apply_preset_on_stage_change`,
+    # `active_workflow_stage`, `expanded_subsections`. A settings file that still has
+    # them loads fine: `_decode` ignores keys it does not know.)
     # Everything a user can change in a control (Export options, toggles, picks,
     # the Histogram's display options, the Image panel's view and overlays, the
     # Chromatic tab's values, the highlight range...), as "area/name" -> JSON
@@ -100,8 +86,6 @@ def _decode(payload: dict) -> AppSettings:
     kwargs = {key: value for key, value in payload.items() if key in known}
     if not isinstance(kwargs.get("layout_presets"), dict):
         kwargs.pop("layout_presets", None)
-    if not isinstance(kwargs.get("expanded_subsections"), dict):
-        kwargs.pop("expanded_subsections", None)
     if not isinstance(kwargs.get("ui_state"), dict):
         kwargs.pop("ui_state", None)
     # Settings written before 2026-10-07 keep per-panel values as top-level fields.

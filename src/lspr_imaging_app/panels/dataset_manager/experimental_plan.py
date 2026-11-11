@@ -1,11 +1,13 @@
-"""Dataset stage - "Experimental plan" section (renamed from "Metadata",
-2026-09-25, maintainer request) - the acquisition metadata (camera/
+"""Dataset Manager -> "Experiment plan" page - the acquisition metadata (camera/
 illumination settings, per-image timing, operator notes, pump-plan/comment
-log) attached to the loaded dataset.
+log) attached to the loaded dataset. Was the Workflow panel's "Experimental
+plan" section until that panel was retired (2026-11-11).
 
-**Real import/export this time**, unlike the read-only first pass
-(`dataset_metadata.py`, since removed): a file-path field + Import/Export
-icon buttons in one row, matching the maintainer's spec. Ported from the
+**Import and export are plain functions** (`import_metadata_dialog`,
+`export_metadata_dialog`), called both by File -> Import / Export
+(`panels/file_menu.py`) and by this page's two buttons, so there is one copy
+of each. The page keeps a file-path field + Import/Export icon buttons in
+one row. Ported from the
 stable app's `MetadataController` (`gui/metadata_controller.py`):
 `import_metadata_files` (`io/metadata_import.py` - a pure, Qt-free
 classify-then-import function, reused as-is, no GUI dependency to strip)
@@ -164,12 +166,9 @@ class ExperimentalPlanSection(QWidget):
     """File path + Import/Export row, the existing read-only summary, and
     a live current-frame comment/step preview.
 
-    `header_stats_label` (2026-09-27, maintainer request) is a separate,
-    public `QLabel` - not part of this widget's own layout, meant to be
-    re-parented into the owning `CollapsibleSection`'s title row
-    (`header_extra=`), same relationship `DatasetSummarySection.
-    header_stats_label` has to the "Summary" section. Two independent
-    completeness signals, shown together when both apply
+    `header_stats_label` (2026-09-27, maintainer request; the Workflow
+    section's title row until 2026-11-11, now the line under the file
+    row). Two independent completeness signals, shown together when both apply
     (`_experimental_data_file_counts`'s docstring explains why only
     `Experimental_data/` gets a file-count ratio at all):
 
@@ -198,7 +197,7 @@ class ExperimentalPlanSection(QWidget):
         self._cube_display = cube_display
         theme = get_active_theme()
 
-        self.header_stats_label = QLabel("", parent)
+        self.header_stats_label = QLabel("", self)  # a line of this page since the Workflow panel was retired (it was a section title)
         self.header_stats_label.setStyleSheet(f"color: {theme.text_dim};")
 
         self._path_edit = QLineEdit(self)
@@ -245,8 +244,10 @@ class ExperimentalPlanSection(QWidget):
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(6)
         layout.addLayout(path_row)
+        layout.addWidget(self.header_stats_label)
         layout.addWidget(self._status_label)
         layout.addWidget(self._current_frame_label)
+        layout.addStretch(1)
 
         self._dataset_module.dataset_loaded.connect(self._on_dataset_loaded)
         self._dataset_module.dataset_cleared.connect(self._on_dataset_cleared)
@@ -342,49 +343,69 @@ class ExperimentalPlanSection(QWidget):
 
     # -- import/export --------------------------------------------------------
 
-    def _on_import_clicked(self) -> None:
-        start_dir = self._dataset_module.dataset_home()
-        paths_str, _ = QFileDialog.getOpenFileNames(
-            self,
-            "Import acquisition metadata",
-            str(start_dir) if start_dir is not None else "",
-            "Metadata files (*.csv *.txt *.h5 *.hdf5 *.json);;All files (*)",
-        )
-        if not paths_str:
-            return
-        paths = [Path(p) for p in paths_str]
-        try:
-            # The loaded metadata (with its per-image times) lets a pump-plan file be attached on its own.
-            result = import_metadata_files(paths, base_metadata=self._dataset_module.rehydrated_acquisition_metadata())
-        except Exception as exc:  # noqa: BLE001 - reported via dialog, not re-raised
-            QMessageBox.critical(self, "Metadata import failed", str(exc))
-            return
-        try:
-            self._dataset_module.set_acquisition_metadata(result.metadata)
-        except RuntimeError as exc:
-            QMessageBox.critical(self, "Metadata import failed", str(exc))
-            return
+    def show_files(self, paths: list[Path]) -> None:
+        """Show which file(s) the last import or export used (File menu or this page's buttons)."""
         self._path_edit.setText("; ".join(path.name for path in paths))
-        QMessageBox.information(
-            self, "Metadata imported", "\n".join(result.notes) if result.notes else "Metadata imported."
-        )
+
+    def _on_import_clicked(self) -> None:
+        paths = import_metadata_dialog(self, self._dataset_module)
+        if paths:
+            self.show_files(paths)
 
     def _on_export_clicked(self) -> None:
-        metadata = self._dataset_module.rehydrated_acquisition_metadata()
-        if metadata is None:
-            QMessageBox.information(self, "Nothing to export", "No acquisition metadata is currently loaded.")
-            return
-        start_dir = self._dataset_module.dataset_home()
-        default_dir = (start_dir / "analysis") if start_dir is not None else Path.home()
-        path_str, _ = QFileDialog.getSaveFileName(
-            self, "Export acquisition metadata", str(default_dir / "acquisition_metadata.json"), "JSON Files (*.json)"
-        )
-        if not path_str:
-            return
-        path = Path(path_str)
-        try:
-            save_acquisition_metadata_sidecar(path, metadata)
-        except OSError as exc:
-            QMessageBox.critical(self, "Metadata export failed", str(exc))
-            return
-        self._path_edit.setText(path.name)
+        path = export_metadata_dialog(self, self._dataset_module)
+        if path is not None:
+            self.show_files([path])
+
+
+def import_metadata_dialog(parent: QWidget | None, dataset: DatasetModule) -> list[Path] | None:
+    """Ask for metadata files and attach them to the loaded dataset. Returns the files, or None when cancelled or failed
+    (a failure is shown in a message box, never swallowed)."""
+    if dataset.dataset_home() is None:
+        QMessageBox.information(parent, "No dataset", "Open a dataset first: the metadata is attached to it.")
+        return None
+    start_dir = dataset.dataset_home()
+    paths_str, _ = QFileDialog.getOpenFileNames(
+        parent,
+        "Import experiment plan / acquisition metadata",
+        str(start_dir) if start_dir is not None else "",
+        "Metadata files (*.csv *.txt *.h5 *.hdf5 *.json);;All files (*)",
+    )
+    if not paths_str:
+        return None
+    paths = [Path(p) for p in paths_str]
+    try:
+        # The loaded metadata (with its per-image times) lets a pump-plan file be attached on its own.
+        result = import_metadata_files(paths, base_metadata=dataset.rehydrated_acquisition_metadata())
+    except Exception as exc:  # noqa: BLE001 - reported via dialog, not re-raised
+        QMessageBox.critical(parent, "Metadata import failed", str(exc))
+        return None
+    try:
+        dataset.set_acquisition_metadata(result.metadata)
+    except RuntimeError as exc:
+        QMessageBox.critical(parent, "Metadata import failed", str(exc))
+        return None
+    QMessageBox.information(parent, "Metadata imported", "\n".join(result.notes) if result.notes else "Metadata imported.")
+    return paths
+
+
+def export_metadata_dialog(parent: QWidget | None, dataset: DatasetModule) -> Path | None:
+    """Ask where to save the loaded acquisition metadata as JSON and write it. Returns the file, or None."""
+    metadata = dataset.rehydrated_acquisition_metadata()
+    if metadata is None:
+        QMessageBox.information(parent, "Nothing to export", "No acquisition metadata is currently loaded.")
+        return None
+    start_dir = dataset.dataset_home()
+    default_dir = (start_dir / "analysis") if start_dir is not None else Path.home()
+    path_str, _ = QFileDialog.getSaveFileName(
+        parent, "Export acquisition metadata", str(default_dir / "acquisition_metadata.json"), "JSON Files (*.json)"
+    )
+    if not path_str:
+        return None
+    path = Path(path_str)
+    try:
+        save_acquisition_metadata_sidecar(path, metadata)
+    except OSError as exc:
+        QMessageBox.critical(parent, "Metadata export failed", str(exc))
+        return None
+    return path

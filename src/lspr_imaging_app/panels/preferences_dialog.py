@@ -10,7 +10,8 @@ separate tasks, see `docs/preferences_dialog_2026-10-19.md`.
 One page, no categories: three settings do not need a sidebar. The dialog is display only: it is given the
 current values, and `values()` returns what the user chose; `app_rewrite._wire_preferences` compares the two and
 applies the differences through the same setters the menu used (`image_panel.set_overlay_cache_mb`, the
-settings writer, `LayoutPresetManager.auto_apply`). Nothing is applied before OK; Cancel changes nothing.
+settings writer). Nothing is applied before OK; Cancel changes nothing. (The "arrange the panels when the Workflow
+stage changes" option was removed with the Workflow panel, 2026-11-11.)
 """
 
 from __future__ import annotations
@@ -41,7 +42,6 @@ class Preferences:
     """The values the dialog edits. The defaults are the app's own (pinned against `AppSettings` in the tests)."""
 
     reopen_last_dataset: bool = True
-    auto_apply_layout_preset: bool = False
     overlay_cache_mb: int = DEFAULT_BUDGET_MB
     gpu_drawing: bool = False
     """Draw the Image panel's canvas with the graphics card (OpenGL viewport; `image/gpu_view.py`). Off by default since 2026-11-11:
@@ -86,14 +86,8 @@ class PreferencesDialog(QDialog):
         general = QGroupBox("General", self)
         self.reopen_check = QCheckBox("Reopen the last dataset on launch", general)
         self.reopen_check.setToolTip("When the app starts, load the dataset that was open when it was last closed.")
-        self.auto_apply_check = QCheckBox("Arrange the panels when the Workflow stage changes", general)
-        self.auto_apply_check.setToolTip(
-            "Switching to another stage in the Workflow panel applies that stage's panel preset "
-            "(View -> Panel Presets). Off: the panels stay where you put them."
-        )
         general_layout = QVBoxLayout(general)
         general_layout.addWidget(self.reopen_check)
-        general_layout.addWidget(self.auto_apply_check)
 
         memory = QGroupBox("Performance and memory", self)
         self.cache_combo = QComboBox(memory)
@@ -237,7 +231,6 @@ class PreferencesDialog(QDialog):
         """What the dialog shows now (what OK would apply)."""
         return Preferences(
             reopen_last_dataset=self.reopen_check.isChecked(),
-            auto_apply_layout_preset=self.auto_apply_check.isChecked(),
             overlay_cache_mb=int(self.cache_combo.currentData()),
             gpu_drawing=self.gpu_check.isChecked(),
             screen_resolution=str(self.resolution_combo.currentData()),
@@ -266,7 +259,6 @@ class PreferencesDialog(QDialog):
 
     def _show(self, preferences: Preferences) -> None:
         self.reopen_check.setChecked(preferences.reopen_last_dataset)
-        self.auto_apply_check.setChecked(preferences.auto_apply_layout_preset)
         index = self.cache_combo.findData(int(preferences.overlay_cache_mb))
         if index >= 0:
             self.cache_combo.setCurrentIndex(index)

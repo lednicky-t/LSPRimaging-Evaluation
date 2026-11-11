@@ -6,11 +6,11 @@ Layout (one line, in the menu bar, right of File / Edit / View / Help):
 
 - **Path**: the folder the dataset was opened from, shortened in the middle with an ellipsis when the window is narrow
   (the full path is the tooltip).
-- **Stats**: the same type / size / cubes-per-wavelengths text as the Dataset section's title row.
+- **Stats**: type / size / cubes-per-wavelengths (the details are in File -> Dataset Manager).
 - **Time** (green ✓ / grey ✗ / amber ✓ when only some images are timed): the images have acquisition times, which is
   what makes Time mode for cubes work.
-- **Plan** (green ✓ / grey ✗): the acquisition metadata holds comment events, the pump-plan steps shown in the
-  Experimental plan section.
+- **Plan** (green ✓ / grey ✗): the acquisition metadata holds comment events, the pump-plan steps shown on the
+  Dataset Manager's Experiment plan page.
 
 Display only: everything comes from `DatasetModule`, which also re-emits `dataset_loaded` after a metadata import, so
 the checks follow an import. Placed by `attach_to_menu_bar`, which keeps the row as wide as the free space right of the
@@ -27,7 +27,7 @@ from lspr_ui import get_active_theme
 
 from ..dataset import DatasetModule
 from ..dataset.model import ImageDataset
-from .workflow.dataset_summary import _format_bytes
+from .dataset_manager.summary import format_bytes
 
 _GAP_PX = 12
 _RIGHT_MARGIN_PX = 8
@@ -130,7 +130,7 @@ class DatasetInfoBar(QWidget):
 
     def _stats_text(self, loaded: ImageDataset) -> str:
         stats = self._dataset.dataset_file_stats(loaded)
-        size_text = _format_bytes(stats[0]) if stats is not None else "..."  # None: still being counted in the background
+        size_text = format_bytes(stats[0]) if stats is not None else "..."  # None: still being counted in the background
         type_text = "OME-Zarr" if loaded.is_ome_zarr else "TIFF Stack"
         return f"{type_text} · {size_text} · C/WL: {len(loaded.spectral_cube_indices)}/{len(loaded.wavelengths_nm)}"
 

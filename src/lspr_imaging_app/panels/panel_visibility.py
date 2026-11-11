@@ -13,10 +13,9 @@ closed or buried-behind-the-main-window panel had no way back short of
 restarting the app. Ported from the stable app's proven pattern
 (``gui/main_window_icons.py``'s ``Ctrl+1``-``Ctrl+5`` + "Panels" submenu,
 ``gui/layout_state_controller.py``'s ``ensure_floating_panels_on_screen``) -
-scaled down to this app's much simpler fixed six-panel shell, not the
-stable app's full per-section layout-reset machinery (no accordion-section
-defaults to restore here; ``WorkflowPanel``'s own single-open-accordion
-state isn't part of this).
+scaled down to this app's much simpler fixed five-panel shell (six until
+the Workflow panel was retired, 2026-11-11), not the stable app's full
+per-section layout-reset machinery.
 
 **Not the same bug as "closed" vs. "floating off-screen"** - both read as
 "I can't see it" to the maintainer, but need different fixes: a closed

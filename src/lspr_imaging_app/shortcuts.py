@@ -43,8 +43,8 @@ class Binding:
 
 
 # Panels, in the order of the View menu (the dock titles are the keys: ``app_rewrite._build_dock_layout``).
+# (The Workflow panel, Ctrl+1 until then, was retired 2026-11-11: Image moved up to Ctrl+1, the others by one.)
 PANEL_TOGGLE_IDS: dict[str, str] = {
-    "Workflow": "panels.workflow",
     "Image": "panels.image",
     "Histogram": "panels.histogram",
     "ROI / Groups": "panels.roi_groups",
@@ -69,6 +69,8 @@ _ARROWS = ("Left", "Right", "Up", "Down")
 
 BINDINGS: tuple[Binding, ...] = (
     # -- menu actions ----------------------------------------------------------------------------
+    Binding("file.open_dataset", "File", "Open a dataset folder", keys=("Ctrl+O",)),
+    Binding("file.dataset_manager", "File", "Open the Dataset Manager (overview, experiment plan, sessions)", keys=("Ctrl+I",)),
     # Undo / Redo / Copy / Paste: the keys Qt's ``StandardKey`` gives on Windows, written out (a ``StandardKey`` lookup needs a running
     # application, and this table must import without one). Not carried over: the dedicated Undo / Redo / Copy / Paste hardware keys.
     Binding("edit.undo", "Edit", "Undo the last edit", keys=("Ctrl+Z", "Alt+Backspace")),

@@ -2,8 +2,8 @@
 (``docs/rewrite_gui_shell_design_2026-09.md`` §5).
 
 Four built-in presets, each naming which of the five display docks it
-shows (Workflow is outside this - always visible across every preset,
-independent of preset choice, per the design doc §4). Ported *as an idea*,
+shows. (The Workflow dock, which stayed visible across every preset and
+whose stage changes could apply a preset, was retired 2026-11-11.) Ported *as an idea*,
 not as code, from singleLSPR Acquisition's ``gui/main_window_state.py``
 (named slots, each save-current-layout-editable, reset-to-default) - that
 app's actual snapshot format (a hand-rolled per-field dict: splitter sizes,
@@ -41,7 +41,6 @@ from PyQt6.QtWidgets import QMainWindow, QMenu
 
 from ..shortcuts import PRESET_IDS, bind_action
 from .dock_container import PanelContainer
-from .workflow import WorkflowStage
 
 logger = logging.getLogger(__name__)
 
@@ -55,23 +54,6 @@ PRESET_PANELS: dict[str, frozenset[str]] = {
 }
 PRESET_NAMES: tuple[str, ...] = tuple(PRESET_PANELS)
 
-# Renamed from "Results" 2026-09-24 (design doc §4a/§5) - that name now
-# belongs to the Outputs Workflow stage below, an unrelated concept (export/
-# visualization *settings*, not a panel arrangement); keeping both named
-# "Results" would have collided in the View menu.
-
-# Every workflow stage maps to a preset - Dataset intentionally reuses
-# Image Tools' preset (maintainer's own call: browsing/loading a dataset
-# doesn't need a different arrangement than Image Tools work does), and
-# Outputs reuses Visualization (viewing/formatting results before export is
-# the same display arrangement as viewing them for analysis).
-STAGE_TO_PRESET: dict[WorkflowStage, str] = {
-    WorkflowStage.DATASET: "Image Tools",
-    WorkflowStage.IMAGE_TOOLS: "Image Tools",
-    WorkflowStage.ANALYSIS: "Analysis",
-    WorkflowStage.OUTPUTS: "Visualization",
-}
-
 
 class LayoutPresetManager:
     """Applies/saves/resets the four named presets against one
@@ -82,20 +64,15 @@ class LayoutPresetManager:
     def __init__(
         self,
         window: QMainWindow,
-        workflow_dock: PanelContainer,
         docks_by_name: dict[str, PanelContainer],
         *,
         state_version: int = 0,
     ) -> None:
         self._window = window
-        self._workflow_dock = workflow_dock
         self._docks = docks_by_name
         self._custom_blobs: dict[str, QByteArray] = {}
         self._current: str | None = None
         self._on_applied: list = []
-        self.auto_apply = False
-        """Apply a stage's preset whenever the Workflow stage changes (Edit -> Preferences; `wire_view_menu` acts on it).
-        Plain state: persisting it is the caller's job."""
         # Passed through to every saveState()/restoreState() call below - a
         # saved preset blob is exactly as vulnerable to a dock-topology
         # change as the plain main-window layout state is (see
@@ -122,12 +99,7 @@ class LayoutPresetManager:
             logger.warning("Layout preset %r was saved with an older panel arrangement; resetting it", name)
             del self._custom_blobs[name]
             blob = None
-        if blob is not None:
-            # restoreState() restores whatever visibility the blob was
-            # saved with - re-assert Workflow visible regardless, since
-            # it's meant to survive independently of preset choice (§4).
-            self._workflow_dock.setVisible(True)
-        else:
+        if blob is None:  # a saved blob restores its own visibility; a never-customized preset only shows / hides
             wanted = PRESET_PANELS[name]
             for panel_name, dock in self._docks.items():
                 dock.setVisible(panel_name in wanted)
@@ -155,8 +127,8 @@ class LayoutPresetManager:
 
     def on_applied(self, callback) -> None:
         """Register a callback(name: str) run after every apply() - used by
-        wire_view_menu to keep the menu's checked action in sync, including
-        when auto-apply (not a menu click) is what triggered it."""
+        wire_view_menu to keep the menu's checked action in sync, also when
+        the preset was applied by its shortcut rather than a menu click."""
         self._on_applied.append(callback)
 
     def custom_blobs(self) -> dict[str, QByteArray]:
@@ -178,23 +150,15 @@ class LayoutPresetManager:
 def wire_view_menu(
     view_menu: QMenu,
     window: QMainWindow,
-    workflow_panel,
-    workflow_dock: PanelContainer,
     docks_by_name: dict[str, PanelContainer],
     *,
-    initial_auto_apply: bool = False,
     state_version: int = 0,
 ) -> LayoutPresetManager:
-    """Builds View -> Panel Presets (apply/save/reset, Ctrl+Shift+1-4) and
-    acts on the auto-apply-on-stage-change toggle (design doc §5).
+    """Builds View -> Panel Presets (apply/save/reset, Ctrl+Shift+1-4) (design doc §5).
 
-    The toggle is `LayoutPresetManager.auto_apply`; the user changes it in
-    Edit -> Preferences (until 2026-10-19: the Options menu), and the caller
-    (`app_rewrite.py`) saves it in `storage/app_settings.py`. This function
-    owns no persistence itself, same "chrome, not storage" split every other
-    module here follows. `initial_auto_apply` is the saved value."""
-    manager = LayoutPresetManager(window, workflow_dock, docks_by_name, state_version=state_version)
-    manager.auto_apply = initial_auto_apply
+    This function owns no persistence itself, same "chrome, not storage" split every other
+    module here follows: the caller (`app_rewrite.py`) saves the preset blobs."""
+    manager = LayoutPresetManager(window, docks_by_name, state_version=state_version)
 
     presets_menu = view_menu.addMenu("Panel Presets")
     group = QActionGroup(window)
@@ -220,16 +184,4 @@ def wire_view_menu(
             action.setChecked(True)
 
     manager.on_applied(sync_checked_action)
-
-    # Off by default on a truly fresh settings file (design doc §5) - never
-    # surprises a new user; a returning one gets back whatever they last set.
-    def on_stage_changed(stage: WorkflowStage) -> None:
-        if not manager.auto_apply:
-            return
-        preset_name = STAGE_TO_PRESET.get(stage)
-        if preset_name is not None:
-            manager.apply(preset_name)
-
-    workflow_panel.stage_changed.connect(on_stage_changed)
-
     return manager
