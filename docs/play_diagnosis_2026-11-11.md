@@ -264,7 +264,7 @@ screen it was already at its cap. All numbers are interleaved A/B runs of `tools
    profile at the Python level with `py-spy record --nonblocking -p <child pid>` (the venv's `python.exe` is a launcher: use the child's pid).
 
 **Ideas for later, none built (roughly by expected gain; all unmeasured guesses unless a number is given):**
-- **Render thread as the limit (most promising).** After A + B1 the GUI thread idles ~25 % waiting for the next frame (queue ~6 ms +
+- **Render thread as the limit (most promising; the only known route past ~37 fps, measured 2026-11-12: section 12).** After A + B1 the GUI thread idles ~25 % waiting for the next frame (queue ~6 ms +
   picture ~10-13 ms + load). Options: prepare frame N + 1 while N is drawn (a deeper pipeline; the slideshow's "stale frames" logic must
   be kept right); make `prepare_frame_display(fast=True)` cheaper (fewer native calls: it still does compare, countNonZero, minMaxLoc,
   addWeighted, bitwise_and, merge = 6 calls with NaN pixels); drop the automatic-levels sampling during Play when the range is fixed.
@@ -285,3 +285,46 @@ screen it was already at its cap. All numbers are interleaved A/B runs of `tools
 `timeline_strip.py` (`_static_picture`), `panels/dock_container.py` (`_away_from_border`), `display_range_controls.py`
 (`show_frame_levels(playing=)`), `overlay_cache.py` (`_Entry`), tests `tests/integration/test_lspri_play_paint_savings.py`, benches
 `tools/play_bench.py` and `tools/present_bench.py`.
+
+## 12. Screen resolution restored: uncapped A/B at 4K (2026-11-12)
+
+Question (maintainer): with the graphics card on, how far does the 96-dpi "reduced" resolution go (hope: 60 fps)? Setup: real main window, a COPY of
+the 314-cube dataset (images as a junction), saved Play speed 20x (uncapped), `PLAY_BENCH_SCREEN=external` (the 4K DELL, window 2520 x 1329
+logical = 3780 x 1994 real pixels at full, 2520 x 1329 at reduced), saved layout (Image + ROI/Groups + Sensorgram), 25 s per run, order
+A B C D D C B A so drift hits every combination alike. Reduced = `QT_QPA_PLATFORM=windows:dpiawareness=0` (what Preferences -> Screen resolution
+sets). Script: the scratchpad `run_ab.sh`; raw output was one file per run.
+
+| Combination | runs (fps) | mean fps | cycle ms | GUI busy |
+|---|---|---|---|---|
+| full resolution, card off | 34.3, 27.5 | 30.9 | 29-36 | 60-67 % |
+| full resolution, card on | 22.3, 16.4 | 19.4 | 45-60 | 85-90 % |
+| **reduced, card off** | 37.7, 37.1 | **37.4** | 26.6-26.8 | 49 % |
+| **reduced, card on** | 37.6, 35.3 | **36.5** | 26.6-28.2 | 82-86 % |
+
+Reading:
+
+1. **Reduced is faster at this window**: +21 % with the card off (37.4 vs 30.9; the full-resolution pair spread 27.5-34.3, so treat as +10 to +35 %) and
+   +88 % with the card on (36.5 vs 19.4).
+2. **At reduced resolution the card makes no difference** (36.5 vs 37.4, inside the noise), so "card on" is no longer a penalty there; at full
+   resolution the card costs ~11 fps (as in section 6d).
+3. **60 fps is not reached; the ceiling is ~37 fps and it is not painting any more.** With the card off at reduced the GUI thread is only 49 % busy
+   and the cycle is 26.6 ms in both card modes: the limit is the render thread's hand-off chain (read, queue ~6 ms, picture ~8-10 ms), the "remaining
+   limit" of section 10. 60 fps needs a 16.7 ms cycle: ~10 ms less on that path. Painting less cannot give it.
+4. The full-resolution runs fell with time (34.3 -> 27.5, 22.3 -> 16.4 from the first pair to the last); the reduced ones did not. Cause unknown
+   (heat? other load?). Absolute numbers are lower than section 8/10's ~44 fps at full resolution with the card off (same code, different window
+   state and PC state: not explained). Compare only within this table.
+5. Not judged by eye: how soft the text and picture look at reduced resolution (the price). Exports and results do not depend on it (display only);
+   exported figure sizes at reduced resolution were not tested.
+
+### 12b. Possible route toward 60 fps (written down 2026-11-12 at the maintainer's request; NOT started, not promised)
+
+The A/B above leaves the render thread's hand-off chain as the limit at reduced resolution: cycle ~26.6 ms, GUI thread ~49 % busy (card off).
+60 fps needs a 16.7 ms cycle, so roughly **10 ms must come off that chain**; painting less cannot help. Where to look, in this order (details
+and the ideas around them in section 11, "Render thread as the limit"):
+
+1. Profile the chain first with `playback.window` fields (`deliver_ms`, `pic_ms`, queue) at reduced resolution, card off, so the GUI is not in the way.
+2. Prepare frame N + 1 while frame N is being drawn (deeper pipeline), keeping the slideshow's stale-frame handling right.
+3. Fewer native calls in `prepare_frame_display(fast=True)` (6 with NaN pixels), and no automatic-levels sampling while Play runs with a fixed range.
+4. Re-measure with the interleaved A/B recipe (section 11 rule 7); the maintainer's gate for "worth keeping" is a clear gain at 4K at reduced AND full resolution.
+
+Everything here is unmeasured until step 1 is done; the 10 ms figure is arithmetic from the table, not a finding about a particular call.

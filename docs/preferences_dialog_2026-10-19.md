@@ -14,10 +14,18 @@ The dialog holds the **app-wide** settings that belong to no panel: startup, lay
 | Arrange the panels when the Workflow stage changes | `AppSettings.auto_apply_preset_on_stage_change`, live on `LayoutPresetManager.auto_apply` | `wire_view_menu` reads `manager.auto_apply` |
 | ROI overlay cache size (Off / 128 / 256 / 512 / 1024 MB) | `ui_state` key `image/overlay_cache_mb` | `ImagePanel.set_overlay_cache_mb` (at once) |
 | Draw the image with the graphics card (**off by default since 2026-11-11**) | `ui_state` key `image/gpu_drawing` | `ImagePanel.set_gpu_drawing` (at once; switching it off is complete only after a restart) |
+| Screen resolution (**restored 2026-11-12**; saved values `full` / `standard`, shown as real pixel sizes) | `ui_state` key `display/resolution` | **next start**: `display_options.apply_saved_resolution` sets Qt's `windows:dpiawareness=0` before the QApplication exists |
 
-"Screen resolution" (Full / Standard) and "Show the image in a window of its own" existed on 2026-11-11 only and were removed the same day:
-a processor-drawn window at full resolution plays at the cap at 4K, faster than either (`play_diagnosis_2026-11-11.md` sections 6b-6d).
-Their old keys (`display/resolution`, `image/own_window`) may remain in a settings file; nothing reads them.
+"Screen resolution" and "Show the image in a window of its own" existed on 2026-11-11 and were removed that evening: a processor-drawn window at
+full resolution played at the Play speed cap at 4K (`play_diagnosis_2026-11-11.md` sections 6b-6d). **Screen resolution came back on 2026-11-12**
+at the maintainer's request (goal: Play beyond 30 fps, up to 60, with the graphics card on; the old 28-29 fps for it was the speed cap, not a
+measured ceiling). The drop-down shows the **real pixel sizes** of the screen the window is on, e.g. "3840 × 2160 (the monitor's real pixels,
+sharp)" and "2560 × 1440 (stretched to 3840 × 2160, faster, softer)", never the word "Standard"; the grey note says what this run has; both
+are greyed out when Windows' scale of that screen is 100 % (nothing to choose). The reduced size is Qt's logical size of the screen (identical
+in a full and a 96-dpi run); the real size is read from Windows by device name (`display_options.monitor_pixels`, `GetDeviceCaps`), because a
+96-dpi run cannot get it from Qt. Checked on the laptop screen (1920 × 1080 / 1536 × 864) and the 4K DELL (3840 × 2160 / 2560 × 1440) in both
+modes. A freely chosen size (say 1920 × 1080 on a 4K monitor) is not possible this way: the reduced size is always the screen's size at
+Windows' scale. **Restart prompt (2026-11-12):** after OK with a changed resolution (not one that goes back to what this run already has) or with the graphics card switched **off** (switching it on works at once; off leaves an OpenGL window until the next start); one box names every reason; a non-blocking box offers "Close the app now" / "Later" (default Later); it closes the main window through the normal close path and does **not** relaunch the app, because the Suite launcher tracks the app's process (output, already-running guard, crash report) and a copy started by the app itself would escape that; an automatic relaunch would need the launcher's cooperation (e.g. a special exit code). "Show the image in a window of its own" stays removed; its key (`image/own_window`) may remain in a settings file, unread.
 
 `LSPR_OVERLAY_CACHE_MB` still wins at start-up; the dialog says so when it is set and lists a size that is not one of the choices instead of replacing it.
 

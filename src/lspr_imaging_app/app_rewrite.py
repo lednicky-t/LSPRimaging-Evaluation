@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QByteArray, QPoint, QTimer, QUrl
-from PyQt6.QtGui import QAction, QActionGroup, QDesktopServices, QPixmapCache
+from PyQt6.QtGui import QAction, QActionGroup, QDesktopServices, QGuiApplication, QPixmapCache
 from PyQt6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMenu, QMessageBox, QStatusBar, QWidget
 
 from lspr_core import ACKNOWLEDGEMENT_REQUEST, DISCLAIMER_POINTS, LICENSE_NAME, NOTICE_URL, citation_text
@@ -51,6 +51,15 @@ from .applog import current as current_log_system
 from .frame_naming import FrameNamingScheme
 from .dataset import DatasetModule
 from .gil_tuning import apply_switch_interval
+from .display_options import (
+    RESOLUTION_FULL,
+    ResolutionSizes,
+    apply_saved_resolution,
+    format_size,
+    monitor_pixels,
+    resolution_sizes,
+    running_resolution,
+)
 from .opengl_surface import configure_opengl_surface
 from .gui.app_theme import LSPRI_BRIGHT_THEME, LSPRI_DARK_THEME, apply_app_theme
 from .gui.windows_titlebar import apply_windows_titlebar_color
@@ -138,6 +147,7 @@ from .storage.ui_state_keys import (
     CHROMATIC_SHOW_LANDMARKS,
     CHROMATIC_STRIDE,
     DISPLAY_RANGE,
+    DISPLAY_RESOLUTION,
     HIGHLIGHT_RANGE,
     HISTOGRAM_BIN_WIDTH,
     HISTOGRAM_LINE_WIDTH,
@@ -2144,6 +2154,21 @@ def build_main_window(
     return window
 
 
+def _screen_resolution_sizes(window: QMainWindow) -> ResolutionSizes | None:
+    """The real and the reduced pixel size of the screen the window is on (Preferences -> Screen resolution), or None when not known.
+
+    The reduced size is Qt's size of the screen; the real one comes from Windows (a 96-dpi run cannot get it from Qt). Windows only.
+    """
+    screen = window.screen()
+    if screen is None:
+        return None
+    geometry = screen.geometry()
+    real = monitor_pixels(int(window.winId())) if QGuiApplication.platformName() == "windows" else None  # winId is no HWND on other platforms
+    return resolution_sizes(
+        (geometry.width(), geometry.height()), running_resolution(), screen.devicePixelRatio(), real
+    )
+
+
 def _wire_preferences(
     edit_menu: QMenu,
     window: QMainWindow,
@@ -2171,6 +2196,7 @@ def _wire_preferences(
             auto_apply_layout_preset=layout_preset_manager.auto_apply,
             overlay_cache_mb=image_panel.overlay_cache_mb,
             gpu_drawing=image_panel.gpu_drawing,
+            screen_resolution=str(read(ui_state, DISPLAY_RESOLUTION)),  # the saved choice (applied at the next start)
             perf=get_runtime().preferences,
         )
 
@@ -2186,14 +2212,48 @@ def _wire_preferences(
         if new.overlay_cache_mb != old.overlay_cache_mb:
             image_panel.set_overlay_cache_mb(new.overlay_cache_mb)
             changed.append("overlay_cache_mb")
+        restart_reasons: list[str] = []  # what only a new start completes: one box for all of them
         if new.gpu_drawing != old.gpu_drawing:
             image_panel.set_gpu_drawing(new.gpu_drawing)  # stays off (WARNING in the log) where OpenGL is not available
             changed.append("gpu_drawing")
+            if not new.gpu_drawing:  # switching on works at once; off leaves the window an OpenGL window until the app starts again
+                restart_reasons.append(
+                    "Drawing the image with the processor is complete only after the app starts again "
+                    "(until then the window still goes through the graphics card)."
+                )
+        if new.screen_resolution != old.screen_resolution:
+            ui_state.set(DISPLAY_RESOLUTION.key, new.screen_resolution)  # read before the next start's QApplication (display_options.py)
+            changed.append("screen_resolution")
+            if new.screen_resolution != running_resolution():  # a choice that goes back to what this run already has needs no restart
+                sizes = _screen_resolution_sizes(window)
+                size_text = ""
+                if sizes is not None:
+                    size_text = f" ({format_size(sizes.full if new.screen_resolution == RESOLUTION_FULL else sizes.reduced)})"
+                restart_reasons.append(f"The new screen resolution{size_text} is used the next time the app starts.")
         if new.perf != old.perf:
             get_runtime().set_preferences(new.perf)  # takes effect for the next export or scan; a running one keeps its own
             changed.extend(f"perf_{name}" for name in write_perf_preferences(ui_state, new.perf))
         if changed:
             log_event(logger, "app.preferences_changed", logging.INFO, changed=",".join(changed))
+        if restart_reasons:
+            ask_restart(restart_reasons)
+
+    def ask_restart(reasons: list[str]) -> None:
+        """Some choices are only complete after a new start (the screen resolution is fixed when the program starts, `display_options.py`;
+        switching the graphics card off leaves an OpenGL window, `gpu_view.py`): say which, and offer to close the app now.
+
+        Not a relaunch: the Suite launcher starts the app as a process it tracks (output, "already running", crash report), and a copy started
+        by the app itself would escape that. The person starts the app again as usual. Shown with `open()` (does not block the event loop).
+        """
+        text = "\n".join(reasons) + "\n\nClose the app now, then start it again?"
+        box = QMessageBox(QMessageBox.Icon.Question, "Restart needed", text, QMessageBox.StandardButton.NoButton, window)
+        close_button = box.addButton("Close the app now", QMessageBox.ButtonRole.AcceptRole)
+        later_button = box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(later_button)  # closing the app is the one choice that must be made on purpose
+        box.setEscapeButton(later_button)
+        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        close_button.clicked.connect(lambda: QTimer.singleShot(0, lambda: window.close()))  # after the box is gone; the normal close path
+        box.open()
 
     def forget_saved_counts() -> None:
         removed = get_runtime().forget_learned()
@@ -2213,6 +2273,9 @@ def _wire_preferences(
             perf_status=perf_status_text(),
             core_count=get_runtime().last_system().logical_cores,
             perf_saved_count=perf_saved_count(),
+            running_resolution=running_resolution(),
+            resolution_sizes=_screen_resolution_sizes(window),
+            resolution_available=sys.platform == "win32",
             parent=window,
         )
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -2241,6 +2304,7 @@ def main(app: QApplication | None = None, splash: LaunchSplash | None = None) ->
     if app is None:
         set_windows_app_user_model_id(APP_ID_LSPRI_EVALUATION)  # before any window; `src/main.py` does it for the launch-screen start
         configure_opengl_surface()  # before the QApplication, as `src/main.py` does (opengl_surface.py)
+        apply_saved_resolution()  # likewise (display_options.py)
         app = QApplication(sys.argv)
     QPixmapCache.setCacheLimit(max(QPixmapCache.cacheLimit(), _PIXMAP_CACHE_KB))
     if splash is not None:

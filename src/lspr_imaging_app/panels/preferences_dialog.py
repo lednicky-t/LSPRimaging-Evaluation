@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..display_options import RESOLUTION_FULL, RESOLUTION_STANDARD, ResolutionSizes, format_size
 from .image.overlay_cache import BUDGET_CHOICES_MB, DEFAULT_BUDGET_MB, ENV_BUDGET_MB
 
 
@@ -45,6 +46,9 @@ class Preferences:
     gpu_drawing: bool = False
     """Draw the Image panel's canvas with the graphics card (OpenGL viewport; `image/gpu_view.py`). Off by default since 2026-11-11:
     with one repaint per frame, a processor-drawn window plays faster at 4K (30 vs 24.6 fps; `docs/play_diagnosis_2026-11-11.md` 6d)."""
+    screen_resolution: str = RESOLUTION_FULL
+    """"full" (sharp) or "standard" (Windows draws the window at 100 % and stretches it: fewer pixels to hand to the screen, so faster on a
+    4K screen, but softer; `display_options.py`). Saved here, applied at the next start."""
     perf: PerfPreferences = DEFAULT_PERF_PREFERENCES
     """Parallel work (export, scans): standard, tune automatically or a fixed number of workers; cores kept free; low priority."""
 
@@ -67,6 +71,9 @@ class PreferencesDialog(QDialog):
         perf_status: str = "",
         core_count: int = 8,
         perf_saved_count: int = 0,
+        running_resolution: str = RESOLUTION_FULL,
+        resolution_sizes: ResolutionSizes | None = None,
+        resolution_available: bool = True,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -120,9 +127,39 @@ class PreferencesDialog(QDialog):
             "window still goes through the graphics card). An old or virtual graphics driver can draw wrongly or slowly: "
             "turn it off if the image looks wrong. Without OpenGL on this computer it stays off."
         )
+        # The entries show the real pixel sizes of the screen this window is on (the words "full" / "standard" are only the saved values).
+        if resolution_sizes is not None:
+            full_text = f"{format_size(resolution_sizes.full)} (the monitor's real pixels, sharp)"
+            reduced_text = f"{format_size(resolution_sizes.reduced)} (stretched to {format_size(resolution_sizes.full)}, faster, softer)"
+            this_run = format_size(resolution_sizes.full if running_resolution == RESOLUTION_FULL else resolution_sizes.reduced)
+        else:  # the sizes could not be found (not Windows, or no screen): say it in words
+            full_text = "Full resolution (the monitor's real pixels, sharp)"
+            reduced_text = "Reduced resolution (stretched by Windows, faster, softer)"
+            this_run = "reduced resolution" if running_resolution == RESOLUTION_STANDARD else "full resolution"
+        self.resolution_combo = QComboBox(memory)
+        self.resolution_combo.addItem(full_text, RESOLUTION_FULL)
+        self.resolution_combo.addItem(reduced_text, RESOLUTION_STANDARD)
+        pixels_equal = resolution_sizes is not None and not resolution_sizes.differ
+        self.resolution_combo.setToolTip(
+            "The window is drawn at the monitor's real resolution (sharp), or at the smaller size Windows would use at 100 % scale; "
+            "Windows then stretches it to the monitor on the graphics card. The smaller window has fewer pixels to hand over on every "
+            "screen update, so Play is faster on a 4K monitor. The price: the whole window, text included, is softer, like an old "
+            "program on a high-resolution monitor. Little or no gain on a window that is already small.\n"
+            "The sizes are those of the screen this window is on now. Takes effect the next time the app starts."
+            + ("\nWindows' scale of this screen is 100 %, so both choices give the same window." if pixels_equal else "")
+        )
+        self.resolution_combo.setEnabled(bool(resolution_available) and not pixels_equal)
+        form.addRow("Screen resolution:", self.resolution_combo)
+        self.display_note_label = QLabel(
+            f"Screen resolution takes effect the next time the app starts. This run: {this_run}.",
+            memory,
+        )
+        self.display_note_label.setWordWrap(True)
+        self.display_note_label.setEnabled(False)  # greyed: information, not a control
         memory_layout = QVBoxLayout(memory)
         memory_layout.addLayout(form)
         memory_layout.addWidget(self.gpu_check)
+        memory_layout.addWidget(self.display_note_label)
         memory_layout.addWidget(self.cache_status_label)
         memory_layout.addWidget(self.cache_environment_label)
 
@@ -203,6 +240,7 @@ class PreferencesDialog(QDialog):
             auto_apply_layout_preset=self.auto_apply_check.isChecked(),
             overlay_cache_mb=int(self.cache_combo.currentData()),
             gpu_drawing=self.gpu_check.isChecked(),
+            screen_resolution=str(self.resolution_combo.currentData()),
             perf=self._perf_values(),
         )
 
@@ -233,6 +271,7 @@ class PreferencesDialog(QDialog):
         if index >= 0:
             self.cache_combo.setCurrentIndex(index)
         self.gpu_check.setChecked(preferences.gpu_drawing)
+        self.resolution_combo.setCurrentIndex(max(self.resolution_combo.findData(preferences.screen_resolution), 0))
         perf = preferences.perf
         self.perf_mode_combo.setCurrentIndex(max(self.perf_mode_combo.findData(perf.mode), 0))
         if perf.manual_workers > 0:
