@@ -15,6 +15,7 @@ Switches (environment variables):
   PLAY_BENCH_WINDOW=WxH                resize the window (logical pixels)
   PLAY_BENCH_GPU=0|cold0               0: switch "Draw the image with the graphics card" off at run time (the window stays an OpenGL
                                        window: a hybrid); cold0: off from the start (no OpenGL widget is ever created)
+  PLAY_BENCH_OWN_WINDOW=1              the Preferences choice "Show the image in a window of its own" (image view = a native window)
   QT_QPA_PLATFORM=windows:dpiawareness=0   (Qt's own switch, not the bench's) run as a 96-dpi program: Windows upscales the window
   PLAY_BENCH_TIMING=1                  also time the whole-window repaint passes and the plot views' paint, per frame
 Prints one result block. Ends the process with `os._exit` (the app's helper processes import this file again: keep the `__main__` guard).
@@ -64,11 +65,17 @@ def main() -> None:
 
     class TimedApp(QApplication):
         def notify(self, obj, ev):
-            if ev.type() == QEvent.Type.UpdateRequest and obj.isWidgetType() and obj.isWindow() and state["t0"]:
+            if ev.type() == QEvent.Type.UpdateRequest and obj.isWidgetType() and state["t0"]:
                 started = time.perf_counter()
                 result = super().notify(obj, ev)
-                timing["window_pass"] += time.perf_counter() - started
-                counts["window_pass"] += 1
+                elapsed = time.perf_counter() - started
+                if obj.isWindow():
+                    timing["window_pass"] += elapsed
+                    counts["window_pass"] += 1
+                else:  # a repaint request that reached a child widget (a native one has its own): name it
+                    key = f"request_{type(obj).__name__}"
+                    timing[key] += elapsed
+                    counts[key] += 1
                 return result
             return super().notify(obj, ev)
 
@@ -91,6 +98,8 @@ def main() -> None:
     settings = dataclasses.replace(load_app_settings(), last_dataset_folder=str(dataset), auto_reopen_last_dataset=True)
     if os.environ.get("PLAY_BENCH_GPU") == "cold0":
         settings = dataclasses.replace(settings, ui_state={**dict(settings.ui_state), "image/gpu_drawing": False})
+    if os.environ.get("PLAY_BENCH_OWN_WINDOW"):  # Preferences -> "Show the image in a window of its own" (saved choice, read when the panel starts)
+        settings = dataclasses.replace(settings, ui_state={**dict(settings.ui_state), "image/own_window": True})
     window = app_rewrite.build_main_window(settings, on_settings_changed=lambda *_args: None)  # never writes the settings file
     window.show()
     panel = window.findChild(ImagePanel)
@@ -150,7 +159,7 @@ def main() -> None:
         visible = [n for n, d in docks.items() if d.isVisible() and not d.visibleRegion().isEmpty()]
         print(
             f"== {label}: screen {screen.name()} {screen.geometry().width()}x{screen.geometry().height()} dpr={screen.devicePixelRatio()} "
-            f"window {window.width()}x{window.height()} image view {panel._view.width()}x{panel._view.height()} gpu={panel.gpu_drawing} docks={visible}"
+            f"window {window.width()}x{window.height()} image view {panel._view.width()}x{panel._view.height()} gpu={panel.gpu_drawing} own_window={panel.own_window} docks={visible}"
         )
         if windows:
             med = lambda key: st.median(w.get(key, 0) for w in windows)  # noqa: E731

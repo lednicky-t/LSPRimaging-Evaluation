@@ -4,6 +4,8 @@ usage (from apps/LSPRi/eva): python tools/present_bench.py MODE WxH(logical) SCR
 MODE: gl        a QOpenGLWidget "picture" (60 % of the window) + plain widgets (like the app today)
       plain     the same, picture is a plain widget (no OpenGL anywhere)
       glnative  as gl, the QOpenGLWidget has WA_NativeWindow (own HWND)
+      glview    the app's arrangement: the QOpenGLWidget is the viewport of a QGraphicsView
+      glviewnative  as glview, with WA_NativeWindow on that viewport
       glcontainer  picture = QOpenGLWindow inside createWindowContainer (own HWND, top window stays plain)
 Prints ms per iteration for: strip (only a thin cursor strip updated), frame (strip + whole picture updated), full (everything).
 """
@@ -68,6 +70,26 @@ def main() -> None:
         pic.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         if mode == "glnative":
             pic.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+    elif mode in ("glview", "glviewnative"):  # the app's arrangement: the OpenGL widget is the VIEWPORT of a QGraphicsView
+        from PyQt6.QtOpenGLWidgets import QOpenGLWidget
+        from PyQt6.QtWidgets import QGraphicsScene, QGraphicsView
+
+        class GLViewport(QOpenGLWidget):
+            n = 0
+
+            def paintGL(self) -> None:
+                paints["pic"] += 1
+                p = QPainter(self)
+                p.fillRect(self.rect(), QColor(40 + self.n % 50, 80, 120))
+                p.end()
+
+        gl_viewport = GLViewport()
+        gl_viewport.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        if mode == "glviewnative":
+            gl_viewport.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+        pic = QGraphicsView(QGraphicsScene())
+        pic.setViewport(gl_viewport)
+        pic.gl = gl_viewport  # the picture to bump
     elif mode == "glcontainer":
 
         from PyQt6.QtOpenGL import QOpenGLWindow
@@ -107,6 +129,9 @@ def main() -> None:
         if mode == "glcontainer":
             glwin.n += 1
             glwin.update()
+        elif mode in ("glview", "glviewnative"):
+            pic.gl.n += 1
+            pic.gl.update()
         else:
             pic.n += 1
             pic.update()

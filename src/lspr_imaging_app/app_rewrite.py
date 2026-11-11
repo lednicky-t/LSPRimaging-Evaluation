@@ -51,6 +51,7 @@ from .applog import current as current_log_system
 from .frame_naming import FrameNamingScheme
 from .dataset import DatasetModule
 from .gil_tuning import apply_switch_interval
+from .display_options import apply_saved_resolution, running_resolution
 from .opengl_surface import configure_opengl_surface
 from .gui.app_theme import LSPRI_BRIGHT_THEME, LSPRI_DARK_THEME, apply_app_theme
 from .gui.windows_titlebar import apply_windows_titlebar_color
@@ -138,11 +139,13 @@ from .storage.ui_state_keys import (
     CHROMATIC_SHOW_LANDMARKS,
     CHROMATIC_STRIDE,
     DISPLAY_RANGE,
+    DISPLAY_RESOLUTION,
     HIGHLIGHT_RANGE,
     HISTOGRAM_BIN_WIDTH,
     HISTOGRAM_LINE_WIDTH,
     HISTOGRAM_LOG_Y,
     HISTOGRAM_Y_MODE,
+    IMAGE_OWN_WINDOW,
     IMAGE_RIBBON_CATEGORY,
     IMAGE_SHOW_BACKGROUND,
     IMAGE_VIEW_RANGE,
@@ -2171,6 +2174,8 @@ def _wire_preferences(
             auto_apply_layout_preset=layout_preset_manager.auto_apply,
             overlay_cache_mb=image_panel.overlay_cache_mb,
             gpu_drawing=image_panel.gpu_drawing,
+            screen_resolution=str(read(ui_state, DISPLAY_RESOLUTION)),  # the saved choice (applied at the next start)
+            image_own_window=bool(read(ui_state, IMAGE_OWN_WINDOW)),
             perf=get_runtime().preferences,
         )
 
@@ -2189,6 +2194,12 @@ def _wire_preferences(
         if new.gpu_drawing != old.gpu_drawing:
             image_panel.set_gpu_drawing(new.gpu_drawing)  # stays off (WARNING in the log) where OpenGL is not available
             changed.append("gpu_drawing")
+        if new.screen_resolution != old.screen_resolution:
+            ui_state.set(DISPLAY_RESOLUTION.key, new.screen_resolution)  # read before the next start's QApplication (display_options.py)
+            changed.append("screen_resolution")
+        if new.image_own_window != old.image_own_window:
+            ui_state.set(IMAGE_OWN_WINDOW.key, new.image_own_window)  # read when the Image panel is built at the next start
+            changed.append("image_own_window")
         if new.perf != old.perf:
             get_runtime().set_preferences(new.perf)  # takes effect for the next export or scan; a running one keeps its own
             changed.extend(f"perf_{name}" for name in write_perf_preferences(ui_state, new.perf))
@@ -2213,6 +2224,9 @@ def _wire_preferences(
             perf_status=perf_status_text(),
             core_count=get_runtime().last_system().logical_cores,
             perf_saved_count=perf_saved_count(),
+            running_resolution=running_resolution(),
+            running_own_window=image_panel.own_window,
+            resolution_available=sys.platform == "win32",
             parent=window,
         )
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -2241,6 +2255,7 @@ def main(app: QApplication | None = None, splash: LaunchSplash | None = None) ->
     if app is None:
         set_windows_app_user_model_id(APP_ID_LSPRI_EVALUATION)  # before any window; `src/main.py` does it for the launch-screen start
         configure_opengl_surface()  # before the QApplication, as `src/main.py` does (opengl_surface.py)
+        apply_saved_resolution()  # likewise (display_options.py)
         app = QApplication(sys.argv)
     QPixmapCache.setCacheLimit(max(QPixmapCache.cacheLimit(), _PIXMAP_CACHE_KB))
     if splash is not None:

@@ -106,6 +106,25 @@ detail is lost in the picture, but text and overlays are; (4) the experiment swi
 (5) with the native image view the GUI thread is no longer the bottleneck (`deliver` 33 -> 0.4 ms, GUI 66 % busy, cycle still 43 ms): the
 rest is the render thread's hand-off chain, not examined.
 
+### 6b. Built as two Preferences choices (Edit -> Preferences -> Performance and memory; both applied at the next start)
+
+- **Screen resolution: Full (default) / Standard** (`display_options.py`, key `display/resolution`). Standard sets Qt's platform option
+  `windows:dpiawareness=0` before the QApplication is created (`src/main.py`, `app_rewrite.main`), so Windows draws the window at 100 % scale and
+  stretches it. Checked end to end: Qt then reports dpr 1.0 on both screens (it was 1.25 / 1.5). Measured above: 28.2 fps instead of 20.7. Never
+  overrides another platform (`offscreen` in the tests); a variable already asking for 96 dpi counts as Standard; the Preferences note says what
+  *this run* has. Windows only (the combo is greyed elsewhere).
+- **Show the image in a window of its own (experimental, off)** (`gpu_view.apply_gpu_drawing(own_window=True)`, key `image/own_window`):
+  `WA_NativeWindow` on the OpenGL viewport before the first show.
+
+**Result for the image window in the real app: no reliable gain.** Paired runs on the user's layout while the PC was no longer idle (noise about
++-2 fps): own window 20.6, 23.4, 20.1, 23.1; default 18.6, 20.2, 20.6, 22.4 (one 40 ms window pass per frame in both). The standalone test
+still shows the effect for the app's arrangement (OpenGL viewport of a `QGraphicsView`, strip only: 17.7 -> 0.9 ms), so Qt does what was
+expected. Why it does not carry over (inference, not proven): the one-repaint-per-frame change (section 3) had already merged the cursor strip
+into the image's pass, where it costs almost nothing extra; the native window can then only save the re-composition of the window area outside
+the image (~3-7 ms in the standalone test). It would matter again if the Sensorgram were repainted alone often. Kept as an opt-in because it is
+cheap to carry, but not recommended; the risks Qt lists for native child windows (flicker while resizing or docking, they cover overlapping
+siblings, widgets floating over the image: crop fields, measure calibration, cursor readout) have **not been checked by eye**.
+
 ## 7. Open
 
 - 25 fps at 4K is not reached (20.0 default, 22.6 CPU-only): every whole-window pass costs ~20-40 ms on this Intel UHD at 3840 x 2080.

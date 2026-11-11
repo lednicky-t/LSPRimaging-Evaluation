@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..display_options import RESOLUTION_FULL, RESOLUTION_STANDARD
 from .image.overlay_cache import BUDGET_CHOICES_MB, DEFAULT_BUDGET_MB, ENV_BUDGET_MB
 
 
@@ -44,6 +45,12 @@ class Preferences:
     overlay_cache_mb: int = DEFAULT_BUDGET_MB
     gpu_drawing: bool = True
     """Draw the Image panel's canvas with the graphics card (OpenGL viewport; `image/gpu_view.py`)."""
+    screen_resolution: str = RESOLUTION_FULL
+    """"full" (sharp) or "standard" (Windows draws the window at 100 % and stretches it: faster on a 4K screen, softer; `display_options.py`).
+    Saved here, applied at the next start."""
+    image_own_window: bool = False
+    """Experimental: the Image view is a window of its own, so the other panels' small repaints do not re-send the whole window to the
+    graphics driver (`image/gpu_view.py`). Saved here, applied at the next start."""
     perf: PerfPreferences = DEFAULT_PERF_PREFERENCES
     """Parallel work (export, scans): standard, tune automatically or a fixed number of workers; cores kept free; low priority."""
 
@@ -66,6 +73,9 @@ class PreferencesDialog(QDialog):
         perf_status: str = "",
         core_count: int = 8,
         perf_saved_count: int = 0,
+        running_resolution: str = RESOLUTION_FULL,
+        running_own_window: bool = False,
+        resolution_available: bool = True,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -116,9 +126,40 @@ class PreferencesDialog(QDialog):
             "driver can draw wrongly or slowly: turn it off if the image looks wrong. Takes effect at once. "
             "Without OpenGL on this computer it stays off."
         )
+        self.resolution_combo = QComboBox(memory)
+        self.resolution_combo.addItem("Full (sharp)", RESOLUTION_FULL)
+        self.resolution_combo.addItem("Standard (faster on a 4K screen, softer)", RESOLUTION_STANDARD)
+        self.resolution_combo.setToolTip(
+            "Full: the window is drawn at the monitor's real resolution. Sharp.\n"
+            "Standard: Windows draws the window at 100 % scale and stretches it to the monitor on the graphics card, so the window has "
+            "fewer pixels to hand over on every screen update. On a 4K monitor at 150 % Play went from about 20 to about 28 pictures per "
+            "second (measured on one computer). The price: the whole window, text included, is softer, like an old program on a high-resolution "
+            "monitor. Little or no gain on a window that is already small.\n"
+            "Takes effect the next time the app starts."
+        )
+        self.resolution_combo.setEnabled(bool(resolution_available))
+        form.addRow("Screen resolution:", self.resolution_combo)
+        self.own_window_check = QCheckBox("Show the image in a window of its own (experimental)", memory)
+        self.own_window_check.setToolTip(
+            "Only with 'Draw the image with the graphics card'. The image gets its own window handle, so a small change in another "
+            "panel (the Sensorgram cursor during Play) no longer sends the whole window to the graphics driver again. Faster on a large "
+            "or 4K window (about 20 -> 23 pictures per second in a first test). Experimental: if panels flicker while you resize or "
+            "dock them, or something floating over the image is hidden, turn it off.\n"
+            "Takes effect the next time the app starts."
+        )
+        self.display_note_label = QLabel(
+            "Screen resolution and the image window take effect the next time the app starts. "
+            f"This run: {'standard' if running_resolution == RESOLUTION_STANDARD else 'full'} resolution, "
+            f"image window {'on' if running_own_window else 'off'}.",
+            memory,
+        )
+        self.display_note_label.setWordWrap(True)
+        self.display_note_label.setEnabled(False)  # greyed: information, not a control
         memory_layout = QVBoxLayout(memory)
         memory_layout.addLayout(form)
         memory_layout.addWidget(self.gpu_check)
+        memory_layout.addWidget(self.own_window_check)
+        memory_layout.addWidget(self.display_note_label)
         memory_layout.addWidget(self.cache_status_label)
         memory_layout.addWidget(self.cache_environment_label)
 
@@ -199,6 +240,8 @@ class PreferencesDialog(QDialog):
             auto_apply_layout_preset=self.auto_apply_check.isChecked(),
             overlay_cache_mb=int(self.cache_combo.currentData()),
             gpu_drawing=self.gpu_check.isChecked(),
+            screen_resolution=str(self.resolution_combo.currentData()),
+            image_own_window=self.own_window_check.isChecked(),
             perf=self._perf_values(),
         )
 
@@ -229,6 +272,8 @@ class PreferencesDialog(QDialog):
         if index >= 0:
             self.cache_combo.setCurrentIndex(index)
         self.gpu_check.setChecked(preferences.gpu_drawing)
+        self.resolution_combo.setCurrentIndex(max(self.resolution_combo.findData(preferences.screen_resolution), 0))
+        self.own_window_check.setChecked(preferences.image_own_window)
         perf = preferences.perf
         self.perf_mode_combo.setCurrentIndex(max(self.perf_mode_combo.findData(perf.mode), 0))
         if perf.manual_workers > 0:

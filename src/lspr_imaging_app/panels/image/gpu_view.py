@@ -32,9 +32,17 @@ def opengl_available() -> bool:
         return False
 
 
-def apply_gpu_drawing(view: QGraphicsView, on: bool) -> bool:
+def apply_gpu_drawing(view: QGraphicsView, on: bool, own_window: bool = False) -> bool:
     """Give `view` an OpenGL viewport (`on`) or a plain one. Returns whether it now draws with the graphics card (False when asked but not
-    possible). The view keeps its scene, items and update mode."""
+    possible). The view keeps its scene, items and update mode.
+
+    `own_window` (Preferences, experimental, 2026-11-11): the OpenGL viewport gets a window handle of its own (`WA_NativeWindow`). Qt then hands
+    that window to the graphics driver by itself, and a small repaint elsewhere in the main window (the Sensorgram cursor during Play) no longer
+    sends the whole main window again: at 4K a thin cursor strip went from ~14 ms to ~0.8 ms in a standalone test
+    (`tools/present_bench.py`), Play 20.7 -> 23.0 fps in the app (`docs/play_diagnosis_2026-11-11.md` section 6). **It must be set before the
+    window is first shown**: a window that has once drawn an OpenGL widget without it keeps handing everything over through OpenGL (set
+    afterwards it made Play slower, 17.6 fps). Qt warns that native child windows can misbehave (flicker while resizing, they cover siblings
+    that overlap them); that is why it is a separate, off-by-default choice."""
     mode = view.viewportUpdateMode()
     if on and _offscreen():
         on = False  # no screen, no OpenGL: the tests (nothing to warn about)
@@ -51,6 +59,8 @@ def apply_gpu_drawing(view: QGraphicsView, on: bool) -> bool:
             # painted every widget underneath at each repaint, all hidden afterwards: the dock's card, the panel and the main window,
             # 1.3-1.6 Mpx each per Play frame (`playback.paints`, 2026-11-11). Qt's plain viewport is opaque already (it fills itself).
             gl_viewport.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+            if own_window:
+                gl_viewport.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
             replace_viewport(view, gl_viewport)
         else:
             replace_viewport(view, QWidget())
@@ -78,6 +88,11 @@ def replace_viewport(view: QGraphicsView, new_viewport: QWidget) -> None:
 
 def _offscreen() -> bool:
     return QGuiApplication.platformName() == "offscreen"
+
+
+def is_own_window(view: QGraphicsView) -> bool:
+    """Whether the view's viewport was given a window handle of its own (`apply_gpu_drawing(own_window=True)`)."""
+    return view.viewport().testAttribute(Qt.WidgetAttribute.WA_NativeWindow)
 
 
 def _is_gpu(view: QGraphicsView) -> bool:
