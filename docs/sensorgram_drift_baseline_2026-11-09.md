@@ -219,6 +219,15 @@ was lost, and a Quadratic / Cubic needed 3 / 4 steps.
 - **The ROI position tuning is unaffected** in how it scans (it still scans exactly the anchors' cubes, and the curve depends only on them); a test
   pins that a trace cut to some cubes gets the same correction as the whole trace.
 
+## 2026-11-11: no hollow squares for the Range method (maintainer)
+
+The Range method's marked steps were also drawn as a hollow square on each trace (at the mean x / mean y of the step's cubes, i.e. the middle of
+the step), next to the plan bar's anchor icon. The maintainer found the second marker confusing. Now `SensorgramPanel._draw_last` passes
+`anchor_dots` only for the Anchor points method (`panels/sensorgram/panel.py`, the `show_series` call), where the squares are the clickable anchors.
+The Range method keeps the plan-bar icon, its dashed curve and its step band. Nothing computed changed: `Series.anchor_x/y/base` are still filled
+(the fit, the tuning and the CSV record do not use them for drawing). Test:
+`test_marked_range_steps_draw_no_squares_on_the_traces_but_the_curve_and_the_plan_bar_icon`.
+
 ## Open
 
 - Before/after check on a real dataset with repeated buffer steps (not done yet, for either method, nor for the tuning; the numbers above are

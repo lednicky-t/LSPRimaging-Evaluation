@@ -844,7 +844,9 @@ class SensorgramPanel(QWidget):
         self._plot.show_series(  # the toggle hides the marks, never the points
             series, stale if self._stale_toggle.isChecked() else None, self._mask_marks(job.stored, series),
             baseline_curves=drift_shown and not stats.baseline_enabled,  # absolute traces: the dashed curve is what Subtract would take off
-            anchor_dots=("subtracted" if stats.baseline_enabled else "absolute") if drift_shown else None,
+            # Hollow squares only for the Anchor points method, where they ARE the anchors (clicked, removable). The Range method's marked steps show
+            # their anchor icon on the plan bar instead; a square in the middle of each step's trace was a second, confusing marker (maintainer, 2026-11-11).
+            anchor_dots=("subtracted" if stats.baseline_enabled else "absolute") if anchors_method else None,
         )
         self._stale_toggle.set_note(self._stale_note(stale))
         uncorrected = next((s.baseline_note for s in series if s.baseline_note), "") if drift_shown else ""
