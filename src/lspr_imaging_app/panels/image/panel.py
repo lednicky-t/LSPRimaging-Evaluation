@@ -150,7 +150,7 @@ from .crop_tool import CropTool
 from .data_axis_slider import DataAxisSlider
 from .frame_tools import FrameToolsState, FrameToolsWidget
 from .general_group import AreaSelectionPicker, style_general_icon_button
-from .gpu_view import apply_gpu_drawing
+from .gpu_view import apply_gpu_drawing, mark_opaque
 from .paint_census import PaintCensus
 from .play_repaint import PlayRepaint
 from .image_controls import ImageViewBox, controls_text
@@ -711,6 +711,7 @@ class ImagePanel(QWidget):
         # InfiniteLines span the full view, and Qt's partial-update rectangles
         # left stale copies of them behind as ghost lines (2026-10-03).
         self._view.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
+        mark_opaque(self._view.viewport())  # its background brush fills it: the widgets behind need no repaint (gpu_view.py)
         self.refresh_theme()
         # ImageViewBox: middle-drag pans, wheel zooms, left/right drags do
         # nothing (image_controls.py).
@@ -2058,7 +2059,7 @@ class ImagePanel(QWidget):
                 frame_levels = (float(self._image_item.levels[0]), float(self._image_item.levels[1]))
             else:
                 frame_levels = None
-            self._view_tab.display_range_controls.show_frame_levels(frame_levels)
+            self._view_tab.display_range_controls.show_frame_levels(frame_levels, playing=result.request.fast_rotation)
             self._playback_stats.note_detail("setImage", time.perf_counter() - stage)
             stage = time.perf_counter()
             if display is not None:
@@ -2068,7 +2069,8 @@ class ImagePanel(QWidget):
                 self._last_data_range = (float(finite.min()), float(finite.max())) if finite.size else None
             self._playback_stats.note_detail("minmax", time.perf_counter() - stage)
             stage = time.perf_counter()
-            checker = no_data_overlay_rgba(image)
+            # Worked out on the render thread when it could (display_picture.py); otherwise here.
+            checker = display.no_data if display is not None and display.no_data_known else no_data_overlay_rgba(image)
             if checker is None:
                 self._no_data_item.hide()
                 self._no_data_shown = None

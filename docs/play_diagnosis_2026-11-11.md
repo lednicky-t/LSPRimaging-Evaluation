@@ -1,5 +1,7 @@
 # Play on a 4K monitor: what slows the slideshow (2026-11-11)
 
+**Start with section 11** (summary of the day, the rules learned, ideas for later). Sections 1-10 are the record, in the order it happened.
+
 Question (maintainer): Play runs at ~14-15 fps, about 25 earlier; is it the Sensorgram or another panel? Method: controlled runs of the real
 window (your saved layout, your dataset *copy*, settings never written) with `tools/play_bench.py`, one switch changed at a time, on an
 otherwise idle machine. Earlier steps of the same day: `play_pixmap_cache_2026-11-11.md`.
@@ -169,9 +171,117 @@ that switching it off needs a restart; "Screen resolution" and "Show the image i
 `display_options.py`, keys `display/resolution` and `image/own_window`, the `own_window` argument of `gpu_view.apply_gpu_drawing`).
 `tools/play_bench.py`: `PLAY_BENCH_GPU=1` now starts with the card on (the saved choice is used otherwise).
 
+## 8. Uncapped (20x speed, cap 60 fps): where a CPU-drawn frame goes (2026-11-11, late)
+
+The maintainer's saved settings still had the graphics card on (a saved choice is not changed by a new default). 4K, your layout, 20x:
+card **off from launch 26.0-27.8 fps** (cycle 36-38 ms, GUI 82-86 % busy), card **on 19.5** (cycle 51). So Play is GUI-thread bound.
+
+py-spy `--nonblocking` (Python level, 25 s, 200 Hz) of the bench process, card off; share of the GUI thread's busy time, ~33 ms per frame:
+
+| What | share | ~ms / frame |
+|---|---|---|
+| Qt's own work with no Python frame on the stack (window composition, flush to the screen, plain Qt widgets) | 37 % | 12 |
+| `overlay_cache.LayerCacheEffect.draw`: blending the screen-sized ROI overlay picture (alpha) over the image | 15 % | 5 |
+| the image (`QGraphicsView.paintEvent` native + `ImageItem.paint`; RGB888 -> RGB32 conversion + scaling, seen in the native profile) | 15 % | 5 |
+| `PanelContainer.paintEvent` (the dock card's antialiased border, repainted each frame) | 5 % | 1.7 |
+| `no_data_overlay_rgba` (`isfinite` + `array_equal` over the whole frame, GUI thread) | 4 % | 1.4 |
+| timeline strip paint | 4 % | 1.3 |
+| display-range fields `_refresh_fields` | 2.6 % | 0.9 |
+| everything else (slideshow step, Sensorgram cursor, sliders, status text) | ~17 % | 5-6 |
+
+A native profile (`--native`, pauses the process at each sample, so only proportions count) also caught one autosave
+(`_save_now -> prepare_session -> _flat_asdict`) on the GUI thread; not per frame, but a hitch when it happens.
+
+Ideas, none built: (A) small: no-data mask on the render thread, dock card border only where needed, text fields at ~10 Hz during Play,
+cached timeline strip (~5 ms); (B) bigger: the render thread hands over a screen-ready picture (scaled to device pixels with the ROI overlay
+already blended; Play only, falls back on zoom / pan), so the GUI copies one opaque picture (~8 ms more). Floor: Qt's composition + flush (~12 ms).
+
+## 9. Item A built: four paint savings (2026-11-11, late)
+
+1. **The Image view's plain viewport is opaque** (`gpu_view.mark_opaque`, called by the panel at start and by the switch): the paint census
+   showed the main window, the dock and the Image panel each repainting the ~1.25 M logical px behind the image every frame (6.3 -> 2.0
+   M px painted per frame). The OpenGL viewport had this fix already; the plain one (now the default) did not. The biggest single gain.
+2. **The "no data" checker comes from the render thread** (`FrameDisplay.no_data`, `no_data.no_data_overlay_from_valid`): built from the
+   valid-pixel mask the render thread already has, one OpenCV call while the mask is unchanged. A first version called the four numpy
+   steps of `no_data_overlay_rgba` there and the render thread's picture time went 6 -> 17-19 ms (each native call waits for the
+   interpreter lock again while the GUI thread is busy); the one-call version is ~10-12 ms.
+3. **Timeline strips draw a cached picture** of the line and marks (`TimelineStrip._static_picture`, keyed on size, view, colours, a marks
+   version and the governing mark); only the cursor is drawn per frame. Same pixels as before.
+4. **Dock card**: when only the inside of the card asks for paint, a plain fill instead of the antialiased rounded outline
+   (`PanelContainer._away_from_border`). **Display range fields** during Play: rewritten at most every 0.1 s (`show_frame_levels(playing=)`);
+   the frame Play stops on is drawn again with `playing` False, so its numbers always show.
+
+Tests: `tests/integration/test_lspri_play_paint_savings.py`. **Measured** (interleaved A/B, last commit in a worktree vs this code, 25 s
+each, 4K, your layout, 20x, processor drawing): before 26.1 / 30.4 / 32.1 fps, after 30.3 / 38.3 / 39.2 (mean 29.5 -> 35.9); GUI CPU per
+frame 27-32 -> 19-22 ms. Back-to-back single runs on this laptop vary by +-5 fps (heat, other programs): always compare interleaved.
+
+## 10. Item B: overlay tiles kept, screen-size picture tried and removed (2026-11-11, late)
+
+**B1, kept: the cached ROI overlay is drawn as its used tiles only** (`overlay_cache._Entry`). On the first hit of a cached state the
+picture is kept in device pixels (ratio 1, drawn under a 1 / ratio scale: pixel-identical to `drawPixmap(offset, picture)`) and its
+32 x 32 tiles with any non-transparent pixel are found; runs of neighbouring tiles in a row become one piece of
+`QPainter.drawPixmapFragments` (one call). A picture with more than 60 % of its tiles in use is drawn whole. Skipping a fully
+transparent tile is exact (premultiplied alpha 0 changes nothing). Tests: `OverlayTilesTest` (sparse and dense, ratio 1.5, against Qt).
+
+**B2, removed: the frame resampled to screen size on the render thread.** Built and made pixel-identical to Qt (Qt's nearest-pixel
+draw steps through the source in 16.16 fixed point with a truncated step; plain `floor` drifted one device pixel every ~70 pixels at
+some zooms). Used for 715 of 716 frames in the app, Image paint 12 -> 8 ms in the timing run. But measured interleaved, A + B1
+**with** it 39.2 / 37.4 / 39.9 fps, **without** it 43.9 / 44.3 / 44.3; GUI CPU per frame 19.2 vs 16.5 ms. Qt's own scaled draw of the
+1275 x 799 picture reads 4x fewer source bytes than copying the 2.5 M-pixel screen picture, and the resample added ~3 ms to the render
+thread, which is now on the critical path (frame queue ~6 ms, picture ~10-13 ms). Removed completely (`screen_picture.py` deleted).
+
+**Result of A + B1** (interleaved against the last commit, your layout, 4K, 20x, processor drawing): ~32 fps -> **~44 fps**.
+What is left per frame: GUI ~16.5 ms of which ~half is Windows kernel time (handing the window to the screen), the rest the view's paint;
+the GUI thread idles ~25 %, because the next frame waits for the render thread (queue + picture ~16-19 ms). Further gains would come from
+the render thread (fewer native calls per frame, or preparing the next frame earlier), not from painting.
+
 ## 7. Open
 
-- Superseded by 6d: the CPU-only default reaches the cap at 4K. Left as headroom ideas: pre-scale the picture on the render thread
-  (paint 9-10 ms -> ~5); `display_picture` in Qt's native pixel order.
 - On the laptop screen or any window under ~2 M real pixels Play is at its cap.
 - The bench's own residue: it started the Sensorgram's helper processes; an aborted run can leave one (`parent_pid` of a dead run): safe to end.
+- The "pre-scale the picture on the render thread" idea listed here earlier was built and measured in section 10 (B2): slower, removed.
+- Everything else that is still open is in section 11.
+
+## 11. Summary of the day and ideas for later (2026-11-11)
+
+**Where Play stands** (4K DELL, 3840 x 2080 real pixels, your layout, 20x speed so the cap is 60 fps, processor-drawn image):
+14.5 fps at the start of the day -> 20 (one repaint per frame) -> ~25-27 (graphics card off) -> **~44** (sections 9-10). On the laptop
+screen it was already at its cap. All numbers are interleaved A/B runs of `tools/play_bench.py`; single runs on this laptop vary by +-5 fps.
+
+**What we learned (the rules to keep):**
+1. **Count whole-window passes, not milliseconds of painting.** Painting is cheap (3-10 ms); handing the window to the screen is 20-40 ms
+   at 4K and follows the window's pixel count. `playback.paints` (`passes_per_frame`, `kpx_per_frame`) is the number to watch.
+2. **Any `QOpenGLWidget` makes Qt compose and send the WHOLE window through OpenGL for every change.** That is why the graphics-card
+   option, once a win, became a loss after the one-repaint-per-frame fix; it is now off by default.
+3. **A widget that paints every pixel must say so (`WA_OpaquePaintEvent`).** Otherwise Qt repaints everything behind it first (the dock,
+   the panel, the main window: ~4 M px per frame). Check the census (`kpx_per_frame`) whenever a view's viewport is replaced.
+4. **On the render thread, every native call (numpy, OpenCV) hands the interpreter lock back and waits for it again while the GUI is busy.**
+   Fewer, bigger calls beat many small ones (the missing-pixel checker: 4 numpy calls +10 ms, one OpenCV call ~0).
+5. **Cached pictures beat repainting, but only copy what holds something** (overlay tiles, strip picture).
+6. **Less data wins over a pre-converted copy:** Qt scaling a 1275 x 799 picture is cheaper than copying a 2.5 M-pixel screen-size one
+   (B2, removed).
+7. **Setting measurement discipline:** compare interleaved, with the baseline in a `git worktree` of HEAD on `PYTHONPATH`; check the
+   profile at the Python level with `py-spy record --nonblocking -p <child pid>` (the venv's `python.exe` is a launcher: use the child's pid).
+
+**Ideas for later, none built (roughly by expected gain; all unmeasured guesses unless a number is given):**
+- **Render thread as the limit (most promising).** After A + B1 the GUI thread idles ~25 % waiting for the next frame (queue ~6 ms +
+  picture ~10-13 ms + load). Options: prepare frame N + 1 while N is drawn (a deeper pipeline; the slideshow's "stale frames" logic must
+  be kept right); make `prepare_frame_display(fast=True)` cheaper (fewer native calls: it still does compare, countNonZero, minMaxLoc,
+  addWeighted, bitwise_and, merge = 6 calls with NaN pixels); drop the automatic-levels sampling during Play when the range is fixed.
+- **Windows kernel time on the GUI thread (~8 ms of ~16.5).** Presenting the window is the floor. Untested ideas: a different swap
+  interval / `QT_QPA_PLATFORM` flag (D3D11 presentation was 10.7 fps in section 5, so unlikely), or a smaller repainted rectangle if the
+  view ever stops using `FullViewportUpdate` during Play (only the strip + image rectangles; needs the ghost-line problem of 2026-10-03 solved).
+- **Sensorgram cursor every second frame** (~+3 fps earlier in the day, visible as a lower cursor rate): now probably less than that.
+- **Display-range fields and status text during Play:** the remaining per-frame Python work on the GUI thread (status text, frame
+  counters) could also be throttled to 10 Hz like the range fields; ~1-2 ms.
+- **Native pixel order for the picture** (`display_picture`: build the grey picture as BGRA / ARGB32 premultiplied directly, so
+  `ndarray_to_qimage(..., RGBA8888)` is not converted by Qt: seen as `qt_convert_rgb888_to_rgb32_ssse3` in the native profile).
+- **GPU-native drawing** (textures + shaders, e.g. VisPy): the only route past the whole-window cost with the graphics card, but a rewrite of
+  the image view and every overlay item; not justified at 44 fps.
+- **Make the two load-sensitive tests robust** (`test_lspri_analysis_warm_pool`, `test_lspri_rewrite_histogram_panel` fail when other test
+  files run alongside and pass alone: they wait a fixed time for a child process / worker thread).
+
+**Where the code is:** `panels/image/gpu_view.py` (`mark_opaque`), `no_data.py` + `display_picture.py` (checker on the render thread),
+`timeline_strip.py` (`_static_picture`), `panels/dock_container.py` (`_away_from_border`), `display_range_controls.py`
+(`show_frame_levels(playing=)`), `overlay_cache.py` (`_Entry`), tests `tests/integration/test_lspri_play_paint_savings.py`, benches
+`tools/play_bench.py` and `tools/present_bench.py`.

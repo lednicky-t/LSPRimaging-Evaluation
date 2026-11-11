@@ -39,6 +39,8 @@ falls back to automatic until it is fixed.
 
 from __future__ import annotations
 
+import time
+
 from PyQt6.QtCore import QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QFontMetrics, QIcon, QIntValidator, QPainter, QPixmap
 from PyQt6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMenu, QToolButton, QWidget, QWidgetAction
@@ -74,12 +76,16 @@ def _whole(value: float) -> float:
     return float(min(max(round(value), 0), VALUE_MAX))
 
 
+_PLAY_FIELD_REFRESH_S = 0.1  # the greyed range fields during Play: at most ten rewrites a second (`show_frame_levels`)
+
+
 class DisplayRangeControls(QWidget):
     changed = pyqtSignal(bool, float, float)
     """(fixed, black point, white point) after a change made by the user (never after `set_state`)."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._fields_shown_at = float("-inf")  # time.monotonic() of the last rewrite of the greyed fields (`show_frame_levels`)
         self._fixed = False
         self._low, self._high = FULL_16BIT_RANGE
         self._frame_levels: tuple[float, float] | None = None
@@ -148,12 +154,19 @@ class DisplayRangeControls(QWidget):
         self._low, self._high = _whole(low), _whole(high)
         self._refresh()
 
-    def show_frame_levels(self, levels: tuple[float, float] | None) -> None:
+    def show_frame_levels(self, levels: tuple[float, float] | None, *, playing: bool = False) -> None:
         """The current frame's own automatic range: shown in the greyed fields while the range is automatic, and
-        the target of the fit button. Called for every frame that is displayed."""
+        the target of the fit button. Called for every frame that is displayed.
+
+        `playing` (a frame drawn during Play): the greyed fields are rewritten at most every `_PLAY_FIELD_REFRESH_S`
+        (2026-11-11: ~0.6 ms of the GUI thread per frame; numbers changing 30-60 times a second are not readable). The
+        fit button's target is always this frame's, and Play draws the frame it stops on again with `playing` False."""
         self._frame_levels = None if levels is None else (_whole(levels[0]), _whole(levels[1]))
         if not self._fixed:
-            self._refresh_fields()
+            now = time.monotonic()
+            if not playing or now - self._fields_shown_at >= _PLAY_FIELD_REFRESH_S:
+                self._refresh_fields()
+                self._fields_shown_at = now
         self._fit.setEnabled(self._fixed and self._frame_levels is not None)
 
     # -- user input -----------------------------------------------------------------------

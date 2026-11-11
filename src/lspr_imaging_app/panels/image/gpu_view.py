@@ -52,16 +52,23 @@ def apply_gpu_drawing(view: QGraphicsView, on: bool) -> bool:
             from PyQt6.QtOpenGLWidgets import QOpenGLWidget  # imported only when used
 
             gl_viewport = QOpenGLWidget()
-            # Opaque: the view paints every pixel of it (its background brush first). Without this Qt treated it as see-through and
-            # painted every widget underneath at each repaint, all hidden afterwards: the dock's card, the panel and the main window,
-            # 1.3-1.6 Mpx each per Play frame (`playback.paints`, 2026-11-11). Qt's plain viewport is opaque already (it fills itself).
-            gl_viewport.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+            mark_opaque(gl_viewport)
             replace_viewport(view, gl_viewport)
         else:
-            replace_viewport(view, QWidget())
+            plain = QWidget()
+            mark_opaque(plain)
+            replace_viewport(view, plain)
         view.setViewportUpdateMode(mode)  # a new viewport keeps the view's mode, set again to be sure
         log_event(logger, "image.gpu_drawing", logging.INFO, on=on)
     return on
+
+
+def mark_opaque(viewport: QWidget) -> None:
+    """The view paints every pixel of its viewport (its solid background brush first), so tell Qt. Without this Qt treats it as
+    see-through and paints every widget underneath at each repaint, all hidden afterwards: the dock's card, the panel and the main
+    window, ~1.25 M logical px each per Play frame (`playback.paints`). Found for the OpenGL viewport 2026-11-11; the plain one
+    (processor drawing, the default since that evening) had the same problem, seen in the same census later that day."""
+    viewport.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
 
 
 def replace_viewport(view: QGraphicsView, new_viewport: QWidget) -> None:

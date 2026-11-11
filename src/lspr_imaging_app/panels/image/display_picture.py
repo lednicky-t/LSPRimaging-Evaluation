@@ -42,6 +42,8 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
+from .no_data import no_data_overlay_from_valid
+
 # `pyqtgraph.ImageItem.setImage(autoLevels=True)` looks at (about) this many pixels to find the levels.
 LEVEL_SAMPLES = 65536
 _FLT_MAX = float(np.finfo(np.float32).max)
@@ -61,6 +63,11 @@ class FrameDisplay:
     auto_levels: tuple[float, float] | None = None
     """The brightness range pyqtgraph's *automatic* levels give this frame (the "Display range" readout and its
     "from this frame" button), whether or not a fixed range is in use; None when it has no finite range."""
+    no_data: np.ndarray | None = None
+    """The grey checker under pixels without a value (`no_data.no_data_overlay_rgba`), None when every pixel has one.
+    Only meaningful when ``no_data_known``; otherwise the panel works it out itself (2026-11-11: it was ~1.4 ms of the
+    GUI thread per Play frame at 4K)."""
+    no_data_known: bool = False
 
 
 def prepare_frame_display(
@@ -101,18 +108,20 @@ def prepare_frame_display(
         return FrameDisplay(data_range=data_range, auto_levels=auto_levels)
     data_range = (float(low), float(high))
     if count == image.size:
-        return FrameDisplay(data_range=data_range, auto_levels=auto_levels)  # no NaN: pyqtgraph's direct 8-bit path is cheaper
+        # no NaN (and no infinity, handled above): pyqtgraph's direct 8-bit path is cheaper; nothing to put under it
+        return FrameDisplay(data_range=data_range, auto_levels=auto_levels, no_data_known=True)
+    no_data = no_data_overlay_from_valid(has_value)  # here, not on the GUI thread; the same array object while the NaN mask is unchanged
 
     if fixed_levels is not None:
         levels = np.asarray(fixed_levels, dtype=np.float32)  # float32, like the automatic levels: same arithmetic
         if levels.shape != (2,) or not np.all(np.isfinite(levels)) or not levels[1] > levels[0]:
-            return FrameDisplay(data_range=data_range, auto_levels=auto_levels)
+            return FrameDisplay(data_range=data_range, auto_levels=auto_levels, no_data=no_data, no_data_known=True)
         numerator = 255.0
     else:
         levels = automatic
         numerator = 256.0
     if levels is None:
-        return FrameDisplay(data_range=data_range, auto_levels=auto_levels)
+        return FrameDisplay(data_range=data_range, auto_levels=auto_levels, no_data=no_data, no_data_known=True)
     # The same numeric types pyqtgraph uses (float32 levels, so a float32 range and scale): in Python doubles
     # a few pixels per million land one grey level away.
     minimum, maximum = levels
@@ -133,7 +142,9 @@ def prepare_frame_display(
             grey = work.astype(np.uint8)  # truncates, like pyqtgraph
     cv2.bitwise_and(grey, has_value, dst=grey)  # NaN pixels: black and (below) transparent, like pyqtgraph's
     picture = cv2.merge([grey, grey, grey, has_value])
-    return FrameDisplay(data_range=data_range, levels=levels, picture=picture, auto_levels=auto_levels)
+    return FrameDisplay(
+        data_range=data_range, levels=levels, picture=picture, auto_levels=auto_levels, no_data=no_data, no_data_known=True
+    )
 
 
 def _automatic_levels(image: np.ndarray) -> np.ndarray | None:

@@ -31,7 +31,7 @@ from collections.abc import Sequence
 from typing import NamedTuple
 
 from PyQt6.QtCore import QEvent, QPointF, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QPen, QPolygonF
+from PyQt6.QtGui import QColor, QPainter, QPen, QPixmap, QPolygonF
 from PyQt6.QtWidgets import QSizePolicy, QToolTip, QWidget
 
 from lspr_ui import get_active_theme
@@ -98,6 +98,9 @@ class TimelineStrip(QWidget):
         self.hop_possible: bool | None = None  # the owner's say on whether the wheel has anywhere to go (a mark in another cube counts); None = look at this row
         self._color = "#38bdf8"
         self._event_color = "#f472b6"
+        self._static: QPixmap | None = None  # the line and the marks (`_static_picture`)
+        self._static_key: tuple | None = None
+        self._marks_version = 0
         self.setFixedHeight(_HEIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
@@ -127,6 +130,7 @@ class TimelineStrip(QWidget):
         ordered = tuple(sorted(marks, key=lambda mark: mark.index))
         if ordered != self._marks:
             self._marks = ordered
+            self._marks_version += 1
             self.update()
 
     def set_event_marks(self, marks: Sequence[StripMark]) -> None:
@@ -135,6 +139,7 @@ class TimelineStrip(QWidget):
         ordered = tuple(sorted(marks, key=lambda mark: mark.index))
         if ordered != self._event_marks:
             self._event_marks = ordered
+            self._marks_version += 1
             self.update()
 
     def event_marks(self) -> tuple[StripMark, ...]:
@@ -202,18 +207,49 @@ class TimelineStrip(QWidget):
     # -- painting ------------------------------------------------------------------------------
 
     def paintEvent(self, _event) -> None:
+        """The line and the marks come from a picture made once per change (`_static_picture`); only the cursor is drawn each time.
+        During Play the cursor moves at every frame and every strip was redrawn mark by mark (2026-11-11: ~1 ms of the GUI thread
+        per frame at 4K over the strips)."""
         if self._count < 1 or not self.isEnabled():
             return
         theme = get_active_theme()
+        view = self._view()
+        governing = governing_mark(self._marks, self._cursor)
         painter = QPainter(self)
+        painter.drawPixmap(0, 0, self._static_picture(theme, view, governing))
+        if self._cursor is not None and 0 <= self._cursor < self._count:
+            left, width = axis_track(self.width())
+            x = axis_x(self._cursor, self._count, self.width(), view)
+            if left - 0.5 <= x <= left + width + 0.5:
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                painter.setPen(QPen(QColor(theme.text_dim), 1.0))
+                painter.drawLine(QPointF(x, 0.0), QPointF(x, float(_HEIGHT)))
+        painter.end()
+
+    def _static_picture(self, theme, view: tuple[float, float], governing: int | None) -> QPixmap:
+        """Everything but the cursor, redrawn only when something it shows changed: the size, the theme colour, the zoomed window,
+        the marks (`_marks_version`, counted by `set_marks` / `set_event_marks`), the colours, and which mark governs the cursor's tick."""
+        dpr = self.devicePixelRatioF()
+        key = (
+            self.width(), self.height(), dpr, self._count, tuple(view), theme.control_border, self._marks_version,
+            self._color, self._event_color, governing,
+        )
+        if self._static is None or key != self._static_key:
+            picture = QPixmap(max(1, round(self.width() * dpr)), max(1, round(self.height() * dpr)))
+            picture.setDevicePixelRatio(dpr)
+            picture.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(picture)
+            self._paint_static(painter, theme, view, governing)
+            painter.end()
+            self._static, self._static_key = picture, key
+        return self._static
+
+    def _paint_static(self, painter: QPainter, theme, view: tuple[float, float], governing: int | None) -> None:
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         left, width = axis_track(self.width())
         mid = (_MARK_TOP + _MARK_BOTTOM) / 2.0
         painter.setPen(QPen(QColor(theme.control_border), 1.0))
         painter.drawLine(QPointF(left, mid), QPointF(left + width, mid))
-
-        view = self._view()
-        governing = governing_mark(self._marks, self._cursor)
         for position, mark in enumerate(self._marks):
             x = axis_x(mark.index, self._count, self.width(), view)
             if not self._on_screen(x):
@@ -246,13 +282,6 @@ class TimelineStrip(QWidget):
             pen.setCapStyle(Qt.PenCapStyle.FlatCap)
             painter.setPen(pen)
             painter.drawLine(QPointF(x, _EVENT_TOP), QPointF(x, _EVENT_BOTTOM))
-
-        if self._cursor is not None and 0 <= self._cursor < self._count:
-            x = axis_x(self._cursor, self._count, self.width(), view)
-            if left - 0.5 <= x <= left + width + 0.5:
-                painter.setPen(QPen(QColor(theme.text_dim), 1.0))
-                painter.drawLine(QPointF(x, 0.0), QPointF(x, float(_HEIGHT)))
-        painter.end()
 
     # -- mouse -----------------------------------------------------------------------------------
 

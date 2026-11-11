@@ -39,9 +39,10 @@ import logging
 import os
 from collections.abc import Callable, Hashable, Mapping
 
+import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import QPoint, QRectF, Qt
-from PyQt6.QtGui import QPixmap, QTransform
+from PyQt6.QtCore import QPoint, QPointF, QRectF, Qt
+from PyQt6.QtGui import QImage, QPainter, QPixmap, QTransform
 from PyQt6.QtWidgets import QGraphicsEffect, QGraphicsItem
 
 logger = logging.getLogger(__name__)
@@ -109,6 +110,82 @@ class _Layer(pg.GraphicsObject):
         return None
 
 
+TILE_PX = 32  # the cached picture is drawn as the tiles of this many device pixels that hold anything (`_Entry.tile`)
+WHOLE_ABOVE = 0.6  # more than this share of tiles in use: one plain draw is cheaper than the pieces
+
+
+class _Entry:
+    """One cached picture. Drawn in device pixels (world scale 1 / pixel ratio, a ratio-1 picture), which is pixel-identical to
+    `drawPixmap(offset, picture)` (checked by `tests/integration/test_lspri_play_paint_savings.py`).
+
+    **Only the tiles that hold anything are drawn** (2026-11-11, `tile()` on the first hit): the overlay is the size of the view but
+    ROI outlines cover a small part of it, and blending the whole picture over the image was ~5 ms of every Play frame at 4K
+    (`docs/play_diagnosis_2026-11-11.md` section 10). `QPainter.drawPixmapFragments` draws all of them in one call; runs of
+    neighbouring tiles in a row are one piece. A fully transparent tile changes nothing under it, so skipping it is exact."""
+
+    __slots__ = ("picture", "origin", "ratio", "size", "fragments", "tiled")
+
+    def __init__(self, pixmap: QPixmap, offset: QPoint, size: int) -> None:
+        self.ratio = float(pixmap.devicePixelRatio()) or 1.0
+        self.picture = pixmap
+        self.origin = QPointF(offset.x() * self.ratio, offset.y() * self.ratio)  # where it goes, in device pixels
+        self.size = size
+        self.fragments: list | None = None  # None: draw the whole picture
+        self.tiled = False
+
+    def tile(self) -> None:
+        """Find the tiles in use once and keep the picture at ratio 1 (the device-pixel form both draws use)."""
+        self.tiled = True
+        image = self.picture.toImage()
+        if image.format() != QImage.Format.Format_ARGB32_Premultiplied:
+            image = image.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+        image.setDevicePixelRatio(1.0)
+        width, height = image.width(), image.height()
+        if width < 1 or height < 1:
+            return
+        bits = image.constBits()
+        bits.setsize(image.sizeInBytes())
+        rows = np.frombuffer(bits, np.uint8).reshape(height, image.bytesPerLine())
+        alpha = rows[:, 3 : 4 * width : 4]  # premultiplied ARGB32 in memory: B, G, R, A
+        tiles_y, tiles_x = -(-height // TILE_PX), -(-width // TILE_PX)
+        padded = np.zeros((tiles_y * TILE_PX, tiles_x * TILE_PX), np.uint8)
+        padded[:height, :width] = alpha
+        used = padded.reshape(tiles_y, TILE_PX, tiles_x, TILE_PX).max(axis=(1, 3)) > 0
+        flat = QPixmap.fromImage(image)
+        self.picture = flat
+        if used.mean() > WHOLE_ABOVE:
+            return
+        fragments = []
+        ox, oy = self.origin.x(), self.origin.y()
+        for ty in range(tiles_y):
+            row = used[ty]
+            tx = 0
+            while tx < tiles_x:
+                if not row[tx]:
+                    tx += 1
+                    continue
+                start = tx
+                while tx < tiles_x and row[tx]:
+                    tx += 1
+                sx, sy = start * TILE_PX, ty * TILE_PX
+                sw, sh = min(tx * TILE_PX, width) - sx, min(TILE_PX, height - sy)
+                fragments.append(QPainter.PixmapFragment.create(QPointF(ox + sx + sw / 2, oy + sy + sh / 2), QRectF(sx, sy, sw, sh)))
+        self.fragments = fragments
+
+    def draw(self, painter) -> None:
+        painter.save()
+        painter.setWorldTransform(QTransform())  # the picture is in device coordinates
+        if not self.tiled:
+            painter.drawPixmap(self.origin / self.ratio, self.picture)
+        else:
+            painter.scale(1.0 / self.ratio, 1.0 / self.ratio)
+            if self.fragments is None:
+                painter.drawPixmap(self.origin, self.picture)
+            elif self.fragments:
+                painter.drawPixmapFragments(self.fragments, self.picture)
+        painter.restore()
+
+
 class LayerCacheEffect(QGraphicsEffect):
     """Pass-through effect that keeps one device-coordinate picture of its item (and children) per `state`."""
 
@@ -119,7 +196,7 @@ class LayerCacheEffect(QGraphicsEffect):
         self._items_current = items_current  # do the layer's items hold the overlay of `state` right now?
         self.state: Hashable | None = None  # which overlay state the next paint shows (None: just pass through)
         self.admit = False  # may a picture that is not cached yet be kept?
-        self._entries: dict[Hashable, tuple[QPixmap, QPoint, int]] = {}
+        self._entries: dict[Hashable, _Entry] = {}
         self._entries_view: Hashable | None = None
         self._full = False  # the budget could not take another picture: later misses are painted directly, not rendered first
 
@@ -151,8 +228,8 @@ class LayerCacheEffect(QGraphicsEffect):
         return len(self._entries)
 
     def clear(self) -> None:
-        for _pixmap, _offset, size in self._entries.values():
-            self._budget.used -= size
+        for entry in self._entries.values():
+            self._budget.used -= entry.size
         self._entries.clear()
         self._full = False
 
@@ -171,17 +248,15 @@ class LayerCacheEffect(QGraphicsEffect):
                 return
             pixmap, offset = self.sourcePixmap(Qt.CoordinateSystem.DeviceCoordinates)
             size = pixmap.width() * pixmap.height() * 4
+            entry = _Entry(pixmap, offset, size)
             if self._budget.fits(size):
-                self._entries[state] = (pixmap, offset, size)
+                self._entries[state] = entry
                 self._budget.used += size
             else:
                 self._full = True  # this one is only blitted; from now on misses skip the offscreen render
-        else:
-            pixmap, offset, _size = entry
-        painter.save()
-        painter.setWorldTransform(QTransform())  # the picture is in device coordinates
-        painter.drawPixmap(offset, pixmap)
-        painter.restore()
+        elif not entry.tiled:
+            entry.tile()  # on the first hit: a picture shown once only is not worth looking at
+        entry.draw(painter)
 
 
 class OverlayLayers:

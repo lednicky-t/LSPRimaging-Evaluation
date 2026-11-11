@@ -443,18 +443,39 @@ class PanelContainer(QDockWidget):
         if self._frame_border_color is None:
             return
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setPen(QPen(QColor(self._frame_border_color)))
-        painter.setBrush(QColor(self._frame_fill_color) if self._frame_fill_color is not None else Qt.BrushStyle.NoBrush)
         if self._frame_radius:
             # Border line centered in the reserved gap (half the gap
             # between the widget's outer edge and the inset border, half
             # between the border and the content it encloses).
             inset = _CARD_GAP_PX // 2
             rect = self.rect().adjusted(inset, inset, -1 - inset, -1 - inset)
+            if self._frame_fill_color is not None and self._away_from_border(event.rect(), rect):
+                # Only the inside asks for paint (a transparent child of the card changed, e.g. a slider row during Play): the fill
+                # is all there is to draw there, without building the antialiased rounded outline (2026-11-11, every Play frame).
+                painter.fillRect(event.rect(), QColor(self._frame_fill_color))
+                return
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setPen(QPen(QColor(self._frame_border_color)))
+            painter.setBrush(QColor(self._frame_fill_color) if self._frame_fill_color is not None else Qt.BrushStyle.NoBrush)
             painter.drawRoundedRect(rect, self._frame_radius, self._frame_radius)
         else:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setPen(QPen(QColor(self._frame_border_color)))
+            painter.setBrush(QColor(self._frame_fill_color) if self._frame_fill_color is not None else Qt.BrushStyle.NoBrush)
             painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
+
+    def _away_from_border(self, dirty, card) -> bool:
+        """Whether `dirty` lies inside the card, clear of the outline (2 px of antialiasing margin) and of the four rounded corners."""
+        margin = 2
+        inner = card.adjusted(margin, margin, -margin, -margin)
+        if not inner.contains(dirty):
+            return False
+        corner = int(self._frame_radius) + margin
+        left, right = card.left() + corner, card.right() - corner
+        top, bottom = card.top() + corner, card.bottom() - corner
+        in_corner_columns = dirty.left() < left or dirty.right() > right
+        in_corner_rows = dirty.top() < top or dirty.bottom() > bottom
+        return not (in_corner_columns and in_corner_rows)
 
     def _build_title_bar(self, title: str, theme) -> QWidget:
         bar = QWidget(self)
