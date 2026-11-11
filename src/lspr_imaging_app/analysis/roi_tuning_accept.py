@@ -29,7 +29,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ..applog import log_event
+from ..applog.events import log_event
 from .roi_tuning import moved_centre
 from .roi_tuning_objectives import Ranking
 from .roi_tuning_run import TuningMatrix

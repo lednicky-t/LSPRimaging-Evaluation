@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from ..applog import log_event
+from ..applog.events import log_event
 from .baseline_drift import AnchorCubes, anchor_cubes_by_roi, cubes_needed, curve_subtracted
 from .roi_tuning import Lattice, moved_centre
 from .roi_tuning_accept import SeedReport, accepted_moves

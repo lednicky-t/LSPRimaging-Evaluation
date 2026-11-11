@@ -24,7 +24,7 @@ from dataclasses import dataclass, field, replace
 
 import numpy as np
 
-from ..applog import log_event
+from ..applog.events import log_event
 from ..progress import Cancelled
 from .baseline_drift import AnchorCubes, regions_from_cubes
 from .roi_tuning import (

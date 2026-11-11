@@ -60,7 +60,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ..applog import log_event
+from ..applog.events import log_event  # the events module, not the package: `applog.setup` imports Qt (pure-science contract, .importlinter)
 from ..plan.edits import EffectiveStep
 from .settings import StatisticsSettings
 from .statistics import apply_statistics

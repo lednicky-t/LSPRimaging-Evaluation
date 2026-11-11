@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from lspr_core.perf import get_runtime
 
-from ...applog import timed
+from ...applog.events import timed
 from ...progress import ProgressCallback, StageProgress
 from .transient_detection import (
     DetectionParams,

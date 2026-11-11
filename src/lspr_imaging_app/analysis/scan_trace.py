@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from ..applog import log_event
+from ..applog.events import log_event
 from ..progress import Cancelled
 from .scan_store import StoredScan
 from .scan_view import REFERENCE, SAMPLE, _primary_method

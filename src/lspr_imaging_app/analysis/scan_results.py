@@ -27,7 +27,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
-from ..applog import log_event
+from ..applog.events import log_event
 from .scan_fingerprint import cell_hashes
 from .scan_jobs import ScanSource, build_scan_plan, snapshot_source
 from .scan_store import ScanFileError, StoredScan, read_scan, stale_cube_indices

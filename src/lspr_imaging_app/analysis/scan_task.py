@@ -42,7 +42,7 @@ import numpy as np
 from lspr_core.perf import RunReport, get_runtime
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from ..applog import log_event, timed
+from ..applog.events import log_event, timed
 from ..progress import Cancelled, throttled
 from ..threaded_task import TaskRefused, ThreadedTask
 from .provenance import DEFAULT_REFERENCE_EXCLUSION_MODE

@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 from PyQt6.QtCore import QObject
 
-from ..applog import log_event
+from ..applog.events import log_event
 from ..threaded_task import TaskRefused, ThreadedTask
 from .baseline_drift import AnchorCubes
 from .roi_tuning import Lattice, LatticeObjectives, TuningRegions

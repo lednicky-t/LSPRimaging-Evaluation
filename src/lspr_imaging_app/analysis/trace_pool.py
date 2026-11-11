@@ -41,7 +41,7 @@ import numpy as np
 from lspr_core.perf import get_runtime, lower_process_priority
 
 from ..applog import current as current_log_system
-from ..applog import log_event
+from ..applog.events import log_event
 from .scan_view import RoiSpectrum, SpectrumFitJob, fit_spectra
 from .settings import MetricSettings
 from .trace_fit import BATCH_ROWS, TraceInput, traces_from_inputs
