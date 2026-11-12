@@ -54,11 +54,11 @@ columns are blank in these modes.
 ## The S_bulk plot (step 4), 2026-11-12
 
 A **floating window**, not a panel (maintainer: a rare check): Sensorgram > Experimental plan > Evaluation > S_bulk > "Show S_bulk plot" (window title "Bulk sensitivity"; the pop-up's heading is "Step for S<sub>bulk</sub>", tool tip "Bulk sensitivity"). x = RI (at the
-stamped wavelength), y = the step mean as the Sensorgram's y axis says (shift with Subtract on). Per line: filled points + SEM bars for the steps in the S_bulk set, hollow
+stamped wavelength), y = the step mean as the Sensorgram's y axis says (shift with Subtract on). Per line: filled points + SEM bars (vertical) and the RI's Std from RIs.txt (horizontal; none where the RI has no Std; usually smaller than the points) for the steps in the S_bulk set, hollow
 points for the other steps with an RI (their distance from the line is the table's μ − μ*), the fitted line with a band = its own uncertainty, the legend
 "name: S_bulk = … ± … nm/RIU, χ²red …". "Lines": the lines drawn on the Sensorgram, or **All groups** (the ROI table's group rows, with a "Calculate groups" button
-when they are not calculated or out of date). Save data writes `s_bulk_points` (every step with its excess and u) and `s_bulk_fits`. Size, place and the Lines choice
-are remembered.
+when they are not calculated or out of date). Save data writes `s_bulk_points` (every step with its excess and u) and `s_bulk_fits`. Size, place, the Lines choice and
+the Point size (spin box in the same row, default 9 px) are remembered.
 
 - Code: `panels/sensorgram/bulk_plot.py` (`BulkPlotWindow`, `lines_from_series`), wired by `app_rewrite._wire_bulk_plot` (a child window of the main window, so it
   closes with the app; updated only while shown; theme switch via `window.bulk_plot`).

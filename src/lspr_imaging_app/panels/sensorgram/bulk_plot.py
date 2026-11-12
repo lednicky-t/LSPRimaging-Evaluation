@@ -5,10 +5,10 @@ Screen purpose: see the fit behind the S_bulk numbers: is it a straight line, wh
 
 Layout::
 
-    [Lines: Sensorgram lines | All groups v]  [Calculate]  [save]       <- Calculate only when groups are asked for and not calculated yet
+    [Lines: Sensorgram lines | All groups v]  [Point size: 9 px]  [Calculate]  [save]       <- Calculate only when groups are asked for and not calculated yet
     +----------------------------------------------------------+
     |  y: step mean (nm), or shift with Subtract on              |      per line (its Sensorgram colour / the group colour):
-    |      ●──────── fitted line, light band = its uncertainty   |      filled points = steps in the S_bulk set, error bars = SEM
+    |      ●──────── fitted line, light band = its uncertainty   |      filled points = steps in the S_bulk set, vertical bars = SEM, horizontal = the RI's Std
     |   ○  (a step not in the set, with an RI)                   |      hollow points = other steps with an RI
     |  x: refractive index (RIU, at 589.3 nm)                    |
     +----------------------------------------------------------+
@@ -17,7 +17,7 @@ Layout::
 
 Display only: the numbers are the ones the Sensorgram's lines carry per step (computed with the curves while this window is open, `StepOverlays.stats_wanted`) or the
 ROI table's group rows (`StepTableModule.group_numbers`); the fit is `step_table.bulk_values` / `bulk_sensitivity.excess`, the same as the table's S_bulk column. Nothing
-is fitted on the GUI thread beyond those few-point lines (microseconds). The window remembers its size, place and the Lines choice.
+is fitted on the GUI thread beyond those few-point lines (microseconds). The window remembers its size, place, the Lines choice and the point size.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from dataclasses import dataclass
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import QByteArray, Qt, pyqtSignal
-from PyQt6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QSpinBox, QVBoxLayout, QWidget
 
 from lspr_ui import get_active_theme
 
@@ -43,6 +43,8 @@ LINES_SENSORGRAM = "sensorgram"
 LINES_GROUPS = "groups"
 GEOMETRY_KEY = "sensorgram/bulk_plot_geometry"
 LINES_KEY = "sensorgram/bulk_plot_lines"
+POINT_SIZE_KEY = "sensorgram/bulk_plot_point_size"
+DEFAULT_POINT_SIZE = 9  # px; the steps outside the set are drawn one larger so their hollow ring matches the filled points
 MAX_LINES = 12  # more lines than this make an unreadable plot; the rest are named in the status line
 _BAND_POINTS = 60
 
@@ -109,6 +111,13 @@ class BulkPlotWindow(QWidget):
         self.lines_pick.addItem("All groups", LINES_GROUPS)
         self.lines_pick.setToolTip("Which lines are fitted: the ones drawn on the Sensorgram now, or every ROI group (the ROI table's group rows: each group's averaged line).")
         bar.addWidget(self.lines_pick)
+        bar.addWidget(QLabel("Point size", self))
+        self.point_size = QSpinBox(self)
+        self.point_size.setRange(3, 30)
+        self.point_size.setValue(DEFAULT_POINT_SIZE)
+        self.point_size.setSuffix(" px")
+        self.point_size.setToolTip("Size of the points in the plot (the hollow points, steps outside the set, are drawn one pixel larger).")
+        bar.addWidget(self.point_size)
         self.calculate_button = QPushButton("Calculate groups", self)
         self.calculate_button.setToolTip("The groups' step numbers are not calculated yet (or out of date): calculate them, as the ROI table's refresh button does.")
         self.calculate_button.setVisible(False)
@@ -127,6 +136,7 @@ class BulkPlotWindow(QWidget):
 
         self.lines_pick.currentIndexChanged.connect(lambda _i: self.lines_mode_changed.emit(self.lines_mode()))
         self.calculate_button.clicked.connect(lambda _checked=False: self.calculate_requested.emit())
+        self.point_size.valueChanged.connect(lambda _value: self.redraw() if self.isVisible() else None)
         self.refresh_theme()
 
     # -- what it shows ------------------------------------------------------------------------------------------------------------
@@ -185,7 +195,9 @@ class BulkPlotWindow(QWidget):
                 if np.all(np.isfinite(band)):
                     fill = pg.mkColor(line.color)
                     fill.setAlpha(45)
-                    upper, lower = pg.PlotDataItem(xs, ys + band, pen=None), pg.PlotDataItem(xs, ys - band, pen=None)
+                    # PlotCurveItem, not PlotDataItem(pen=None): a PlotDataItem without a pen never hands its data to its curve, so the band had an empty path
+                    # (nothing drawn, and an empty bounding rectangle at (0, 0) that pulled the autoscale's x axis down to 0).
+                    upper, lower = pg.PlotCurveItem(xs, ys + band), pg.PlotCurveItem(xs, ys - band)
                     item.addItem(pg.FillBetweenItem(upper, lower, brush=fill))
                 chi = f", χ²red {fit.chi2_red:.2f}" if math.isfinite(fit.chi2_red) else ""
                 name = f"{line.label}: S_bulk = {fit.slope:.1f} ± {fit.u:.1f} {unit}/RIU{chi}" + ("" if line.current else " (out of date)")
@@ -195,9 +207,11 @@ class BulkPlotWindow(QWidget):
         self.status.setText(" ".join(notes))
 
     def _draw_points(self, item, line: BulkLine, theme) -> None:
-        """Error bars (SEM) and points: filled for the steps in the set, hollow for the others that have an RI."""
+        """Error bars and points: filled for the steps in the set, hollow for the others that have an RI. Vertical bar = the step mean's SEM, horizontal bar = the RI's
+        Std from RIs.txt (none for a step whose RI has no Std; it is usually far smaller than the points)."""
+        size = self.point_size.value()
         for in_set in (True, False):
-            xs, ys, errs, tips = [], [], [], []
+            xs, ys, errs, x_errs, tips = [], [], [], [], []
             for step in self._steps:
                 if step.in_set != in_set or step.ref not in line.numbers.refs:
                     continue
@@ -207,13 +221,16 @@ class BulkPlotWindow(QWidget):
                 xs.append(step.ri)
                 ys.append(value.mean)
                 errs.append(value.sem if math.isfinite(value.sem) else 0.0)
-                tips.append(f"step {step.order} ({step.name}): {value.mean:.3f} ± {value.sem:.3f} at RI {step.ri:.5f}")
+                has_std = math.isfinite(step.ri_u) and step.ri_u > 0
+                x_errs.append(step.ri_u if has_std else 0.0)
+                ri_text = f"{step.ri:.5f}" + (f" ± {step.ri_u:.5f}" if has_std else "")
+                tips.append(f"step {step.order} ({step.name}): {value.mean:.3f} ± {value.sem:.3f} at RI {ri_text}")
             if not xs:
                 continue
-            x, y, e = np.array(xs), np.array(ys), np.array(errs)
-            item.addItem(pg.ErrorBarItem(x=x, y=y, height=2 * e, beam=0.0, pen=pg.mkPen(line.color, width=1.0)))
+            x, y, e, xe = np.array(xs), np.array(ys), np.array(errs), np.array(x_errs)
+            item.addItem(pg.ErrorBarItem(x=x, y=y, height=2 * e, width=2 * xe, beam=0.0, pen=pg.mkPen(line.color, width=1.0)))
             brush = pg.mkBrush(line.color) if in_set else pg.mkBrush(theme.toolbar_bg)
-            scatter = pg.ScatterPlotItem(x=x, y=y, size=9 if in_set else 10, pen=pg.mkPen(line.color, width=1.6), brush=brush, data=tips, hoverable=True, tip=lambda x, y, data: data)
+            scatter = pg.ScatterPlotItem(x=x, y=y, size=size if in_set else size + 1, pen=pg.mkPen(line.color, width=1.6), brush=brush, data=tips, hoverable=True, tip=lambda x, y, data: data)
             item.addItem(scatter)
 
     # -- export ---------------------------------------------------------------------------------------------------------------------
@@ -268,6 +285,7 @@ class BulkPlotWindow(QWidget):
         if index >= 0:
             self.lines_pick.setCurrentIndex(index)
         self.lines_pick.currentIndexChanged.connect(lambda _i: store.set(LINES_KEY, self.lines_mode()))
+        store.bind(POINT_SIZE_KEY, self.point_size)
         geometry = store.get(GEOMETRY_KEY)
         if isinstance(geometry, str) and geometry:
             try:
