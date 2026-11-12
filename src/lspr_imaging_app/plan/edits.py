@@ -34,6 +34,14 @@ from .state import AddedStep, EvalPair, PlanEdit, PlanEditsState, StepRef, added
 
 Edge = Literal["start", "end"]
 Role = Literal["baseline", "signal"]
+BULK_CHIP = "Sb"  # the chip of a step in the S_bulk set (after its B / S chips)
+
+
+def describe_role(role: str) -> str:
+    """One hover line for a chip of `EffectiveStep.roles`."""
+    if role == BULK_CHIP:
+        return f"In the S_bulk set: its mean is one point of the bulk sensitivity fit ({role})."
+    return f"{'Baseline' if role.startswith('B') else 'Signal'} step of evaluation pair {role[1:]} ({role})."
 Side = Literal["before", "after"]
 
 MIN_LENGTH_MS = 1  # a step keeps at least this much; the module passes one cube period so a step never shrinks below one cube
@@ -148,6 +156,8 @@ def apply_edits(plan: ImagingPlan | None, state: PlanEditsState) -> AppliedPlan:
             roles.setdefault(pair.baseline, []).append(f"B{pair.number}")
         if pair.signal is not None:
             roles.setdefault(pair.signal, []).append(f"S{pair.number}")
+    for ref in state.bulk:
+        roles.setdefault(ref, []).append(BULK_CHIP)
     ordered = tuple(replace(step, order=index + 1, roles=tuple(roles.get(step.ref, ()))) for index, step in enumerate(steps))
     return AppliedPlan(ordered, tuple(warnings))
 
@@ -280,8 +290,8 @@ def reset_all(state: PlanEditsState | None = None) -> PlanEditsState:
     roles on steps the user added go with them. The uid counter stays, so an added step's id is never given twice."""
     if state is None:
         return PlanEditsState()
-    pairs = _cleared(state.pairs, {added_ref(a.uid) for a in state.added})
-    return PlanEditsState(next_uid=state.next_uid, pairs=pairs)
+    gone = {added_ref(a.uid) for a in state.added}
+    return PlanEditsState(next_uid=state.next_uid, pairs=_cleared(state.pairs, gone), bulk=tuple(ref for ref in state.bulk if ref not in gone))
 
 
 # -- structure: remove, restore, unify, add ----------------------------------------------------------------------------------------------
@@ -305,6 +315,9 @@ def roles_lost(before: PlanEditsState, after: PlanEditsState) -> list[str]:
         for name, ref in (("baseline", pair.baseline), ("signal", pair.signal)):
             if ref is not None and (now is None or getattr(now, name) != ref):
                 lost.append(f"{name} of pair {pair.number}")
+    dropped = len(set(before.bulk) - set(after.bulk))
+    if dropped:
+        lost.append("S_bulk step" if dropped == 1 else f"{dropped} S_bulk steps")
     return lost
 
 
@@ -330,6 +343,7 @@ def remove_steps(steps: Sequence[EffectiveStep], state: PlanEditsState, indices:
             removed.append(step.ref)
     return replace(
         state, removed=tuple(sorted(removed, key=lambda r: r[1:])), added=tuple(added), pairs=_cleared(state.pairs, gone),
+        bulk=tuple(ref for ref in state.bulk if ref not in gone),
     )
 
 
@@ -479,3 +493,22 @@ def clear_pair(state: PlanEditsState, pair_number: int) -> PlanEditsState:
     """Both roles of pair `pair_number` cleared, so the pair disappears. Returns `state` itself when that pair has nothing set."""
     new = tuple(p for p in state.pairs if p.number != pair_number)
     return state if new == state.pairs else replace(state, pairs=new)
+
+
+# -- the S_bulk set (2026-11-12) --------------------------------------------------------------------------------------------------------
+
+
+def add_to_bulk(state: PlanEditsState, refs: Sequence[StepRef]) -> PlanEditsState:
+    """The S_bulk set with the steps `refs` added (any number; a step already in it stays where it is). Returns `state` itself when nothing is new."""
+    new = tuple(dict.fromkeys((*state.bulk, *refs)))
+    return state if new == state.bulk else replace(state, bulk=new)
+
+
+def remove_from_bulk(state: PlanEditsState, refs: Sequence[StepRef]) -> PlanEditsState:
+    gone = set(refs)
+    new = tuple(ref for ref in state.bulk if ref not in gone)
+    return state if new == state.bulk else replace(state, bulk=new)
+
+
+def clear_bulk(state: PlanEditsState) -> PlanEditsState:
+    return replace(state, bulk=()) if state.bulk else state

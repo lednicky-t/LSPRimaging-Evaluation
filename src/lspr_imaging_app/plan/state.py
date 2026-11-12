@@ -12,6 +12,8 @@ four kinds of edit since schema 1.5, the rest since 1.6):
 - the **evaluation pairs**: which step is the baseline and which is the signal of pair 1, 2, ... (shown as ``B1`` / ``S1`` on the bar). A step is named by its *reference*:
   ``("m", step, measured_start, measured_note)`` for a measured step, ``("a", uid)`` for an added one. Other panels keep a reference, never an index or a number: the number a user
   sees is the step's place in time, and that changes when a step is added or removed.
+- the **S_bulk set** (since 1.8, 2026-11-12): the steps whose means are fitted against their solutions' refractive indices for the bulk sensitivity (``"bulk"``, a list of
+  references in time order of adding; shown as ``Sb`` on the bar). Any number of steps; a step gone from the plan is dropped from the set by the operation that removed it.
 
 Everything beyond ``"edits"`` is written only when there is something to write, so a session without structure edits is saved byte for byte as in schema 1.5.
 """
@@ -195,6 +197,7 @@ class PlanEditsState:
     added: tuple[AddedStep, ...] = ()  # in the order they were made
     next_uid: int = 1  # the uid of the next added step: never reused, even after a restart
     pairs: tuple[EvalPair, ...] = ()  # ordered by number; a pair with nothing set is dropped
+    bulk: tuple[StepRef, ...] = ()  # the S_bulk set, no duplicates, in the order the steps were added
 
     def edit_for(self, key: tuple[int, int, str]) -> PlanEdit | None:
         return next((edit for edit in self.edits if edit.key == key), None)
@@ -211,6 +214,8 @@ class PlanEditsState:
             payload["next_uid"] = self.next_uid
         if self.pairs:
             payload["pairs"] = [pair.to_payload() for pair in self.pairs]
+        if self.bulk:
+            payload["bulk"] = [ref_to_payload(ref) for ref in self.bulk]
         return payload
 
     @classmethod
@@ -264,10 +269,18 @@ class PlanEditsState:
             if pair.baseline is not None or pair.signal is not None:
                 pairs[pair.number] = pair
 
+        bulk: dict[StepRef, None] = {}
+        for record in raw.get("bulk") if isinstance(raw.get("bulk"), list) else []:
+            try:
+                bulk[ref_from_payload(record)] = None
+            except (KeyError, TypeError, ValueError):
+                logger.warning("A step of the S_bulk set in the session file could not be read and was skipped: %r", record)
+
         return cls(
             edits=tuple(sorted(edits.values(), key=lambda e: (e.step, e.measured_start_unix_ms))),
             removed=tuple(sorted(removed, key=lambda r: r[1:])),
             added=tuple(added.values()),
             next_uid=max(saved_next, max(added, default=0) + 1, 1),
             pairs=tuple(sorted(pairs.values(), key=lambda p: p.number)),
+            bulk=tuple(bulk),
         )

@@ -17,6 +17,8 @@ commands below; they keep no step state of their own.
   `set_role` names the baseline or the signal step of an evaluation pair (reason ``"roles"``, cosmetic); `clear_pair` empties both roles of a pair in one undo step. **Other panels read the steps and the roles from here**: `steps()` (each
   has ``order``, the number the user sees, and ``ref``, which stays the same when steps are added or removed), `step_by_ref`, `baseline_step(pair)` / `signal_step(pair)`, and
   `cubes_of(step)`, the whole cubes of a step. A role whose step is removed is cleared and `notice(text)` says so.
+- **The S_bulk set (2026-11-12)**: the steps of the bulk sensitivity fit (`bulk_steps()`, any number, chip ``Sb``). `add_to_bulk` / `remove_from_bulk` / `clear_bulk` are
+  undoable, reason ``"roles"`` like the pairs (the numbers are derived from the step means already computed).
 - **Refractive indices (2026-11-12)**: the second saved value, `ri_table()` (the session's ``"refractive_index"`` block; `plan/refractive_index.py`),
   one RI per solution, given to every step whose first note name is that solution (`ri_usage`). `import_ri_file` replaces it (not undoable, like a
   metadata import; the table is a copy, so later edits of the file change nothing until it is imported again). `check_ri_file`, called by the session
@@ -118,6 +120,11 @@ class ExperimentPlanModule(QObject):
     def signal_step(self, pair: int = 1) -> EffectiveStep | None:
         found = self._state.pair(pair)
         return None if found is None else self.step_by_ref(found.signal)
+
+    def bulk_steps(self) -> tuple[EffectiveStep, ...]:
+        """The steps of the S_bulk set that exist now, in time order (a reference whose step is gone is skipped)."""
+        refs = set(self._state.bulk)
+        return tuple(step for step in self.steps() if step.ref in refs)
 
     def has_removed(self) -> bool:
         return bool(self._state.removed)
@@ -402,3 +409,23 @@ class ExperimentPlanModule(QObject):
     def clear_pair(self, pair: int) -> bool:
         """Clear both the baseline and the signal of evaluation pair `pair` as one undo step. False when that pair had nothing set."""
         return self._commit(f"Remove evaluation pair {pair}", REASON_ROLES, edits.clear_pair(self._state, pair))
+
+    # -- the S_bulk set ---------------------------------------------------------------------------------------------------------
+
+    def _refs(self, indices: list[int] | tuple[int, ...]) -> list:
+        steps = self.steps()
+        return [steps[i].ref for i in sorted({int(i) for i in indices}) if 0 <= i < len(steps)]
+
+    @instrumented("ExperimentPlanModule.add_to_bulk")
+    def add_to_bulk(self, indices: list[int] | tuple[int, ...]) -> bool:
+        """Put the steps at `indices` into the S_bulk set (one undo step for all of them). False when they all were in it already."""
+        refs = self._refs(indices)
+        return self._commit("Use for S_bulk", REASON_ROLES, edits.add_to_bulk(self._state, refs))
+
+    @instrumented("ExperimentPlanModule.remove_from_bulk")
+    def remove_from_bulk(self, indices: list[int] | tuple[int, ...]) -> bool:
+        return self._commit("Remove from S_bulk", REASON_ROLES, edits.remove_from_bulk(self._state, self._refs(indices)))
+
+    @instrumented("ExperimentPlanModule.clear_bulk")
+    def clear_bulk(self) -> bool:
+        return self._commit("Clear the S_bulk set", REASON_ROLES, edits.clear_bulk(self._state))

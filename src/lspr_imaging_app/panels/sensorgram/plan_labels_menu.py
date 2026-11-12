@@ -20,7 +20,10 @@ from lspr_ui import GuiTheme, get_active_theme
 from ..icon_button_style import style_general_icon_button
 from .plan_icons import position_picture
 
-TIP = "Step labels: which part of each step's note the bar shows, what the text position is measured against, where the text sits, and its size."
+TIP = (
+    "Step labels: which part of each step's note the bar shows, whether its refractive index follows in ( ), what the text position is measured against, "
+    "where the text sits, and its size."
+)
 
 
 class PlanLabelsMenu(QToolButton):

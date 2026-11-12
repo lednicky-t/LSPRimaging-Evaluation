@@ -21,7 +21,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .axis_map import AxisMap
-from .edits import EffectiveStep
+from .edits import EffectiveStep, describe_role
 from .label_rule import DEFAULT_SEPARATORS, MODE_SOLUTION, MODE_WHOLE, shown_label
 
 POSITION_TOP = "top"
@@ -65,6 +65,7 @@ class PlanBarSettings:
     text_align: str = ALIGN_BAR
     text_stop: int = 3  # 1 (low) - 5 (high), meaning depends on text_align
     text_pt: int = 9
+    show_ri: bool = False  # 2026-11-12: write the step's refractive index in ( ) after its text (only a step whose solution has an imported RI gets one)
 
     @property
     def is_full(self) -> bool:
@@ -196,12 +197,23 @@ def _tooltip(step: EffectiveStep, x_start: float, x_end: float, time_mode: bool,
         lines.append(ri_line)
     lines.extend(describe_devices(step.devices))
     for role in step.roles:
-        lines.append(f"{'Baseline' if role.startswith('B') else 'Signal'} step of evaluation pair {role[1:]} ({role}).")
+        lines.append(describe_role(role))
     if step.is_added:
         lines.append("Added by you (not in the dataset).")
     elif step.edited:
         lines.append("Edited (the measured step is kept in the dataset).")
     return "\n".join(lines)
+
+
+RI_DECIMALS = 5  # as the hover line and the Dataset Manager table: the refractometer's own precision
+
+
+def with_ri(text: str, ri_value: float | None) -> str:
+    """`text` followed by the refractive index in ( ), e.g. ``H2O (1.33300)``. No RI (None): the text unchanged, never an empty ``()``."""
+    if ri_value is None:
+        return text
+    number = f"({ri_value:.{RI_DECIMALS}f})"
+    return f"{text} {number}" if text else number
 
 
 def build_bar_steps(
@@ -213,16 +225,22 @@ def build_bar_steps(
     separators: Sequence[str] = DEFAULT_SEPARATORS,
     time_mode: bool = True,
     ri_text: Callable[[EffectiveStep], str | None] | None = None,
+    ri_value: Callable[[EffectiveStep], float | None] | None = None,
+    show_ri: bool = False,
 ) -> list[PlanBarStep]:
     """The steps on the plot's x axis. `lines`: (x, y) of everything drawn, for the levels of the Data text mode. `ri_text`: the hover
-    line naming a step's refractive index (2026-11-12; None: no such line)."""
+    line naming a step's refractive index (2026-11-12; None: no such line). `ri_value` + `show_ri`: write that RI in ( ) after the step's
+    text (`with_ri`); a step with no RI keeps its text as it was."""
     colors = effective_colors(steps, separators)
     out: list[PlanBarStep] = []
     for index, step in enumerate(steps):
         x_start, x_end = axis.x_at(step.start_unix_ms), axis.x_at(step.end_unix_ms)
+        text = shown_label(step.label, text_mode, separators)
+        if show_ri and ri_value is not None:
+            text = with_ri(text, ri_value(step))
         out.append(
             PlanBarStep(
-                index=index, x_start=x_start, x_end=x_end, text=shown_label(step.label, text_mode, separators),
+                index=index, x_start=x_start, x_end=x_end, text=text,
                 color=colors[index], tooltip=_tooltip(step, x_start, x_end, time_mode, None if ri_text is None else ri_text(step)),
                 levels=section_levels(lines, x_start, x_end), edited=step.edited, roles=step.roles, added=step.is_added,
             )

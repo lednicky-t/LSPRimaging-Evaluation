@@ -48,6 +48,7 @@ from ...selection.cube_display_module import MODE_TIME
 from ..ui_state import UiStateStore
 from .edit_group import PlanEditControls
 from .plan_actions import PlanAxisContext, PlanBarActions
+from .bulk_group import BulkControls
 from .evaluation_group import EvaluationControls
 from .plan_group import PlanBarControls
 from .plot import LEGEND_MAX_HEIGHT_FRACTION, MAX_LEGEND_ENTRIES, MAX_LEGEND_SERIES, SensorgramPlot
@@ -101,6 +102,7 @@ class StepOverlays(QObject):
         self.evaluation = EvaluationControls(parent)
         self.evaluation.role_chosen.connect(self._on_role_chosen)
         self.evaluation.pair_removed.connect(self._on_pair_removed)
+        self.bulk = BulkControls(parent)  # the S_bulk set (2026-11-12): add / remove the steps selected on the bar, clear
         self.actions = None if experiment_plan is None else PlanBarActions(experiment_plan, plot, self.plan_context, self, cursor=self.cursor_unix_ms)
         self.edit_controls = PlanEditControls(parent)  # add / remove / merge steps (2026-11-10): the right-click menu's commands on the steps selected on the bar
         if self.actions is not None:
@@ -110,6 +112,10 @@ class StepOverlays(QObject):
             self.edit_controls.split_requested.connect(self.actions.split_at_cursor)
             self.edit_controls.restore_requested.connect(self.actions.restore_removed)
             plot.plan_bar().selection_changed.connect(lambda _indices: self._update_edit_tools())
+            plot.plan_bar().selection_changed.connect(lambda _indices: self._show_bulk())
+            self.bulk.add_requested.connect(lambda: self._plan.add_to_bulk(self.actions.selected_steps()))
+            self.bulk.remove_requested.connect(lambda: self._plan.remove_from_bulk(self.actions.selected_steps()))
+            self.bulk.clear_requested.connect(lambda: self._plan.clear_bulk())
         self.set_structure_tools(False)  # until the Experimental plan tab is shown
         self.plan_controls.settings_changed.connect(self.refresh)
         self.stats_controls.settings_changed.connect(self._on_stats_settings_changed)
@@ -123,12 +129,14 @@ class StepOverlays(QObject):
         self.plan_controls.restore_ui_state(store)
         self.stats_controls.restore_ui_state(store)
         self.evaluation.restore_ui_state(store)
+        self.bulk.restore_ui_state(store)
 
     def refresh_theme(self) -> None:
         self.edit_controls.refresh_theme()
         self.plan_controls.refresh_theme()
         self.stats_controls.refresh_theme()
         self.evaluation.refresh_theme()
+        self.bulk.refresh_theme()
 
     def set_structure_tools(self, active: bool) -> None:
         """The right-click menu offers remove / add / unify steps and the baseline / signal roles only while the Experimental plan tab is the active one."""
@@ -267,6 +275,13 @@ class StepOverlays(QObject):
         measured = "" if found.measured_on is None else f", measured {found.measured_on:%d.%m.%Y}"
         return f"Refractive index ({found.name}): {found.ri:.5f}{spread}{measured}."
 
+    def _ri_value(self, step: EffectiveStep) -> float | None:
+        """The refractive index written after the step's text (None without an imported table, or when the step's solution is not in it)."""
+        if self._plan is None or self._plan.ri_table() is None:
+            return None
+        found = self._plan.ri_of_step(step)
+        return None if found is None else found.ri
+
     def refresh(self) -> None:
         """Convert the experiment steps to the plot's x axis and hand them to the plot, or hand it none (no steps, no traces, no timing); then the table. Cheap: a few steps and
         the series already drawn; it does not compute anything."""
@@ -291,6 +306,7 @@ class StepOverlays(QObject):
         bars = build_bar_steps(
             steps, axis, lines, text_mode=settings.text_mode, separators=settings.separators,
             time_mode=self._cube_display.effective_mode() == MODE_TIME, ri_text=self._ri_text,
+            ri_value=self._ri_value, show_ri=settings.show_ri,
         )
         self._plot.set_plan(bars, settings)
         self._plot.plan_bar().set_baseline_anchors(self.anchor_step_indices())  # a small anchor in the lower left corner of each
@@ -332,6 +348,23 @@ class StepOverlays(QObject):
     def _show_evaluation(self, steps, colours: list[str] | None) -> None:
         """The Evaluation pop-up: the plan's steps (in the bar's colours when the bar is drawn) and the roles of every pair."""
         self.evaluation.set_steps(steps, colours, () if self._plan is None else self._plan.state().pairs)
+        self._show_bulk()
+
+    def _show_bulk(self) -> None:
+        """The S_bulk pop-up: the steps of the set with their refractive indices, and what its buttons can do with the bar's selection. A few steps: cheap."""
+        if self._plan is None or self.actions is None:
+            self.bulk.set_available(False)
+            return
+        rows = []
+        for step in self._plan.bulk_steps():
+            found = self._plan.ri_of_step(step)
+            name = solution_of(step.label) or "(no note)"
+            rows.append((f"{step.order} · {name}", "no RI" if found is None else f"{found.ri:.5f}"))
+        selected = self.actions.selected_steps()
+        steps = self._plan.steps()
+        in_set = {step.ref for step in self._plan.bulk_steps()}
+        self.bulk.set_state(rows, has_selection=bool(selected), selection_in_set=any(steps[i].ref in in_set for i in selected))
+        self.bulk.set_available(bool(steps))
 
     def show_stats_table(self, bars: Sequence[PlanBarStep], series: list[Series], has_steps: bool) -> None:
         """The table of mean +/- SD per step and line, from the numbers the lines carry (computed with them, in the worker), or none: no steps, nothing drawn, the numbers

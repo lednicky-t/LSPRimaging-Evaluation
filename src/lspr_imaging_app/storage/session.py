@@ -128,7 +128,9 @@ from ..domain.roi_model import (
 logger = logging.getLogger(__name__)
 
 SESSION_SCHEMA_NAME = "lspri_rewrite_session"
-SESSION_SCHEMA_VERSION = "1.7"
+SESSION_SCHEMA_VERSION = "1.8"
+# 1.8 (2026-11-12): the "plan" block may also hold "bulk" (the steps of the S_bulk set: the bulk sensitivity's steps), plan/state.py. Optional: a 1.7 file has none, and
+# a session without the set is written exactly as before.
 # 1.7 (2026-11-12): optional "refractive_index" block - the imported RI table of the experiment's solutions (every row of RIs.txt, its SHA-256, import
 # time and the refractometer wavelength), plan/refractive_index.py. Written only when a table was imported; a 1.6 file has none.
 # 1.6 (2026-10-29): the "plan" block may also hold "removed" (measured steps taken away), "added" (steps the user made), "next_uid" and "pairs" (which step is the baseline and which the

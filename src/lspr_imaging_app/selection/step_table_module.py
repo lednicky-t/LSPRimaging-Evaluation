@@ -41,14 +41,18 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 from ..analysis.scan_trace import fit_missing_traces, trace_key
 from ..analysis.step_stats import assign_cubes, membership_segments
+from ..analysis.bulk_sensitivity import WEIGHT_INVERSE_VARIANCE, WEIGHTINGS
 from ..analysis.step_table import (
+    OP_BULK,
     OP_DIFFERENCE,
     OP_SNR,
     OPERATIONS,
+    BulkPoint,
     GroupMembers,
     RowNumbers,
     StepTableNumbers,
     StepValue,
+    bulk_values,
     compare_values,
     compute_step_numbers,
     numbers_key,
@@ -57,7 +61,9 @@ from ..analysis.step_table import (
 from ..analysis.trace_store import TraceStore
 from ..applog import log_event
 from ..plan.bar_model import describe_devices, effective_colors
+from ..plan.edits import describe_role
 from ..plan.label_rule import DEFAULT_SEPARATORS, MODE_WHOLE, shown_label
+from ..plan.refractive_index import solution_of
 from .experiment_plan_module import REASON_DATASET, ExperimentPlanModule
 from .sensorgram_axis import SensorgramAxis
 
@@ -112,7 +118,10 @@ COMPARE = "cmp"  # the first item of a comparison column's `ref`: ("cmp", uid)
 def compare_title(pair: int, op: str) -> str:
     """The title of a comparison column, written as the maths it calculates: ``μ_S1 − μ_B1`` (the mean of the step with the signal role minus the mean of the baseline step) and
     ``(μ_S1 − μ_B1) / σ_B1`` (that, divided by the noise of the baseline step). The header and the arrow menu draw ``_S1`` as a subscript (`panels/roi_table/step_columns.py`,
-    `subscript_runs`, `title_html`); a place that cannot has `plain_title` or words. This is the one place the title is written."""
+    `subscript_runs`, `title_html`); a place that cannot has `plain_title` or words. This is the one place the title is written. The S_bulk column (`OP_BULK`, no pair) is
+    ``S_bulk``."""
+    if op == OP_BULK:
+        return "S_bulk"
     shift = f"μ_S{pair} − μ_B{pair}"
     return f"({shift}) / σ_B{pair}" if op == OP_SNR else shift
 
@@ -128,6 +137,7 @@ class CellValue:
     sd: float
     current: bool  # False: computed from inputs that have changed since
     sem: float = float("nan")  # standard error of the mean, SD / sqrt(n) (`step_table.sem_of`); for a difference the two steps' SEMs added in quadrature
+    bulk: object | None = None  # the S_bulk column: `step_table.BulkValues` (both fits, for the tool tip)
 
 
 @dataclass(frozen=True)
@@ -199,6 +209,7 @@ class StepTableModule(QObject):
         self._columns: tuple[StepColumn, ...] | None = None
         self._compare: tuple[CompareSpec, ...] = ()
         self._compare_uid = 0
+        self._bulk_weighting = WEIGHT_INVERSE_VARIANCE
         self._title_mode = MODE_WHOLE
         self._separators: tuple[str, ...] = DEFAULT_SEPARATORS
         self._scan_generation = 0  # a new scan file: whatever was computed from the old one is out of date
@@ -211,6 +222,7 @@ class StepTableModule(QObject):
         scan_results.results_changed.connect(self._on_results_changed)
         analysis_settings.settings_changed.connect(lambda _change: self._invalidate())
         experiment_plan.steps_changed.connect(self._on_plan_changed)
+        experiment_plan.ri_changed.connect(self._on_ri_changed)
         roi_toolbox.geometry_changed.connect(self._on_roi_changed)
         roi_toolbox.cosmetic_changed.connect(self._on_roi_cosmetic)
         roi_toolbox.roi_ids_renumbered.connect(self._on_renumbered)
@@ -243,6 +255,42 @@ class StepTableModule(QObject):
         """The evaluation pairs that have both a baseline and a signal step."""
         return [p.number for p in self._plan.state().pairs if p.baseline is not None and p.signal is not None]
 
+    def has_bulk(self) -> bool:
+        return any(c.op == OP_BULK for c in self._compare)
+
+    def set_bulk_shown(self, shown: bool) -> None:
+        """Add the S_bulk column (at the end) or take it away. There is one at most: it fits the one S_bulk set of the plan."""
+        if shown and not self.has_bulk():
+            self._set_compare((*self._compare, CompareSpec(self._next_uid(), 0, OP_BULK)))
+        elif not shown and self.has_bulk():
+            self._set_compare(tuple(c for c in self._compare if c.op != OP_BULK))
+
+    def bulk_weighting(self) -> str:
+        return self._bulk_weighting
+
+    def set_bulk_weighting(self, weighting: str) -> None:
+        """How the S_bulk fit weights the steps (the Sensorgram's S_bulk menu). Display only: the step numbers stay; the column is worked out again from them."""
+        if weighting in WEIGHTINGS and weighting != self._bulk_weighting:
+            self._bulk_weighting = weighting
+            self._columns = None
+            self.columns_changed.emit()
+            self.numbers_changed.emit()
+
+    def bulk_points(self) -> list[BulkPoint]:
+        """The steps of the S_bulk set whose solution has an imported RI, as points (in time order)."""
+        points = []
+        for step in self._plan.bulk_steps():
+            found = self._plan.ri_of_step(step)
+            if found is not None:
+                points.append(BulkPoint(step.ref, found.ri, float("nan") if found.std is None else found.std))
+        return points
+
+    def _on_ri_changed(self) -> None:
+        if self.has_bulk():
+            self._columns = None
+            self.columns_changed.emit()
+            self.numbers_changed.emit()
+
     def add_compare(self) -> CompareSpec:
         """A new comparison column: the first combination of (evaluation pair that is set, operation) that is not a column yet; failing that, pair 1 with the difference. The pair
         need not be set (the column then says so and stays empty until it is)."""
@@ -255,14 +303,15 @@ class StepTableModule(QObject):
 
     def set_compare_op(self, uid: int, op: str) -> None:
         if op in OPERATIONS:
-            self._set_compare(tuple(CompareSpec(c.uid, c.pair, op) if c.uid == uid else c for c in self._compare))
+            self._set_compare(tuple(CompareSpec(c.uid, c.pair, op) if c.uid == uid and c.op != OP_BULK else c for c in self._compare))
 
     def remove_compare(self, uid: int) -> None:
         self._set_compare(tuple(c for c in self._compare if c.uid != uid))
 
     def restore_compare(self, entries: Sequence[tuple[int, str]]) -> None:
         """The columns as remembered: `(pair, operation)` each. Anything unknown is left out."""
-        wanted = [(int(pair), op) for pair, op in entries if op in OPERATIONS and int(pair) >= 1]
+        wanted = [(int(pair), op) for pair, op in entries if (op in OPERATIONS and int(pair) >= 1) or op == OP_BULK]
+        wanted = [entry for i, entry in enumerate(wanted) if entry[1] != OP_BULK or all(e[1] != OP_BULK for e in wanted[:i])]  # one S_bulk column at most
         if wanted != [(c.pair, c.op) for c in self._compare]:  # the same list again (the table restores it every time it is shown) changes nothing
             self._set_compare(tuple(CompareSpec(self._next_uid(), pair, op) for pair, op in wanted))
 
@@ -277,6 +326,8 @@ class StepTableModule(QObject):
             self.columns_changed.emit()
 
     def _compare_column(self, spec: CompareSpec) -> StepColumn:
+        if spec.op == OP_BULK:
+            return self._bulk_column(spec)
         base, signal = self._plan.baseline_step(spec.pair), self._plan.signal_step(spec.pair)
         s_name, b_name = f"S{spec.pair}", f"B{spec.pair}"
 
@@ -301,12 +352,37 @@ class StepTableModule(QObject):
         lines.append("Click the arrow in the header to change the calculation or remove the column.")
         return StepColumn((COMPARE, spec.uid), 0, title, "\n".join(lines), (), None, "compare", unit, decimals, word, has_sd, label, spec.op, spec.pair)
 
+    def _bulk_column(self, spec: CompareSpec) -> StepColumn:
+        steps = self._plan.bulk_steps()
+        with_ri = {p.ref for p in self.bulk_points()}
+        table = self._plan.ri_table()
+        lines = ["Bulk sensitivity: the slope of the step means against the refractive index of each step's solution, in nm per refractive index unit (RIU)."]
+        if not steps:
+            lines.append("No steps in the S_bulk set yet: select steps on the Sensorgram's plan bar and use the S_bulk button (Evaluation) or right-click > Use for S_bulk.")
+        else:
+            names = ", ".join(f"{s.order} ({solution_of(s.label) or 'no note'})" for s in steps)
+            lines.append(f"Steps: {names}.")
+            missing = [s for s in steps if s.ref not in with_ri]
+            if table is None:
+                lines.append("No refractive indices imported (File > Import > Refractive Indices): the column stays empty.")
+            elif missing:
+                lines.append(f"Left out, no RI for their solution: {', '.join(str(s.order) for s in missing)}.")
+            if table is not None and table.wavelength_nm:
+                lines.append(f"RI measured at {table.wavelength_nm:g} nm; no temperature correction.")
+        weighted = self._bulk_weighting == WEIGHT_INVERSE_VARIANCE
+        lines.append(
+            ("Weighted fit (1/σ²: a step whose mean is known better counts more)." if weighted else "Unweighted fit (every step counts the same).")
+            + " SEM: the slope's uncertainty from the steps' SEMs; SD: from the steps' SDs. Raised when the steps scatter around the line more than their error bars say."
+        )
+        lines.append("Click the arrow in the header to remove the column.")
+        return StepColumn((COMPARE, spec.uid), 0, compare_title(0, OP_BULK), "\n".join(lines), (), None, "compare", "nm/RIU", 1, "slope", True, "S_bulk", OP_BULK, 0)
+
     def _column(self, step, color: str) -> StepColumn:
         title = shown_label(step.label, self._title_mode, self._separators) or f"Step {step.order}"
         lines = [f"Step {step.order}: {step.label}" if step.label else f"Step {step.order}", f"{step.duration_s:.1f} s"]
         lines.extend(describe_devices(step.devices))
         for role in step.roles:
-            lines.append(f"{'Baseline' if role.startswith('B') else 'Signal'} step of evaluation pair {role[1:]} ({role}).")
+            lines.append(describe_role(role))
         if step.is_added:
             lines.append("Added by you (not in the dataset).")
         elif step.edited:
@@ -335,6 +411,12 @@ class StepTableModule(QObject):
         spec = next((c for c in self._compare if c.uid == ref[1]), None)  # type: ignore[index]
         if spec is None:
             return None
+        if spec.op == OP_BULK:
+            points = self.bulk_points()
+            if not points:
+                return None
+            values = bulk_values(row.numbers, points, self._bulk_weighting)
+            return CellValue(values.n, values.slope, values.sd, current=stamp is not None and row.stamp == stamp, sem=values.sem, bulk=values)
         base, signal = self._plan.baseline_step(spec.pair), self._plan.signal_step(spec.pair)
         if base is None or signal is None or base.ref not in row.numbers.refs or signal.ref not in row.numbers.refs:
             return None
@@ -446,11 +528,25 @@ class StepTableModule(QObject):
                 {"title": c.export_label, "operation": c.op, "pair": c.pair, "unit": c.unit}
                 for c in self.columns() if c.kind == "compare"
             ],
+            **({"bulk_sensitivity": self._bulk_record()} if self.has_bulk() else {}),
             "what": (
                 "mean and sd over the cubes of each experiment step, of the line as the Sensorgram draws it (spike removal, smoothing, baseline subtraction as set). "
                 "A ROI row is the ROI's own line; a group row is the line made by averaging all the group's ROIs (the Sensorgram's Centre setting), so its sd is the "
                 "scatter of that averaged line in the step, not the spread between the ROIs. sem = sd / sqrt(n), n = the cubes in the step (a difference column: the two "
                 "steps' sems added in quadrature); it counts every cube as independent, so smoothing makes it a little too small."
+            ),
+        }
+
+    def _bulk_record(self) -> dict[str, object]:
+        table = self._plan.ri_table()
+        return {
+            "weighting": self._bulk_weighting,
+            "steps": [{"order": s.order, "note": s.label} for s in self._plan.bulk_steps()],
+            "points": [{"ri": p.ri, "ri_std": p.ri_u} for p in self.bulk_points()],
+            "ri_file": None if table is None else {"name": table.source_name, "sha256": table.sha256, "wavelength_nm": table.wavelength_nm},
+            "what": (
+                "slope of the step means against the solutions' refractive indices (unit of the traces per RIU). sem: the slope's uncertainty with the steps' sems as their "
+                "uncertainties, sd: with their sds; both raised by sqrt(reduced chi2) when the steps scatter more than that (analysis/bulk_sensitivity.py)."
             ),
         }
 

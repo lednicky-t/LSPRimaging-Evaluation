@@ -24,18 +24,19 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from PyQt6.QtCore import QObject, QPoint, Qt, QTimer
-from PyQt6.QtGui import QAction
+from PyQt6.QtGui import QAction, QIcon
 from PyQt6.QtWidgets import QFrame, QHBoxLayout, QMenu, QToolButton, QWidget
 
 from lspr_ui import get_active_theme, load_tabler_icon
 
 from ...analysis.export_tables import roi_step_table
-from ...analysis.step_table import OPERATIONS, GroupMembers
+from ...analysis.step_table import OP_BULK, OPERATIONS, GroupMembers
 from ...selection.step_table_module import StepTableModule, compare_title
 from ...storage.ui_state_keys import ROI_TABLE_COMPARE_COLUMNS, ROI_TABLE_STEP_DISPLAY, ROI_TABLE_STEP_WIDTH_MANUAL, ROI_TABLE_STEPS_SHOWN
 from ..icon_button_style import style_general_icon_button
 from ..plot_export_button import ExportData, PlotExportButton
 from ..ribbon_icon_size import ICON_SIZE
+from ..sensorgram.plan_icons import bulk_picture
 from ..sensorgram.stat_icons import subtract_icon
 from ..spectra.pick_menu import PickMenu, equation_picture
 from ..spectra.view_menu import IconToggle
@@ -125,10 +126,16 @@ class StepColumnControls(QObject):
             "Set the pairs in the Sensorgram's Experimental plan tab (Evaluation). The arrow in a column's header changes its calculation or removes it."
         )
         self.add_compare_button.clicked.connect(lambda _checked=False: self._add_compare())
+        self.bulk_button = self._icon_button(panel, "", checkable=True)  # (a painted icon, `plan_icons.bulk_picture`, as the Sensorgram's S_bulk button)
+        self.bulk_button.setToolTip(
+            "S_bulk column: the bulk sensitivity of every ROI and group, the slope of its step means against the refractive index of each step's solution (nm/RIU), "
+            "from the steps of the S_bulk set (Sensorgram > Experimental plan > Evaluation > S_bulk, or right-click a step > Use for S_bulk). Click again to remove the column."
+        )
+        self.bulk_button.clicked.connect(lambda _checked=False: self._toggle_bulk())
         self.refresh_button = self._icon_button(panel, "refresh")
         self.refresh_button.clicked.connect(lambda _checked=False: self.recalculate())
         self.export_button = PlotExportButton("roi_table_steps", None, self.export_data, panel)  # the app gives it the folder to save in, like the plots' buttons
-        self._dependents = (self.display_pick, self.subtract, self.add_compare_button, self.refresh_button, self.export_button)
+        self._dependents = (self.display_pick, self.subtract, self.add_compare_button, self.bulk_button, self.refresh_button, self.export_button)
         self.columns_button.setVisible(step_table is not None)
         self.separator.setVisible(step_table is not None)
         for widget in self._dependents:
@@ -175,6 +182,12 @@ class StepColumnControls(QObject):
         style_general_icon_button(self.refresh_button)
         style_general_icon_button(self.add_compare_button)
         self.add_compare_button.setIcon(load_tabler_icon("math-function", color=theme.text_secondary, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH))
+        style_general_icon_button(self.bulk_button)
+        bulk_on = self._steps is not None and self._steps.has_bulk()
+        self.bulk_button.blockSignals(True)
+        self.bulk_button.setChecked(bulk_on)
+        self.bulk_button.blockSignals(False)
+        self.bulk_button.setIcon(QIcon(bulk_picture()(theme.accent_blue if bulk_on else theme.text_secondary)))
         for widget in (self.display_pick, self.subtract, self.export_button):
             widget.refresh_theme()
         self.update_state()
@@ -196,7 +209,7 @@ class StepColumnControls(QObject):
         if isinstance(compare, list):
             entries = [
                 (int(item[0]), str(item[1])) for item in compare
-                if isinstance(item, list) and len(item) == 2 and isinstance(item[0], int) and not isinstance(item[0], bool) and item[1] in OPERATIONS
+                if isinstance(item, list) and len(item) == 2 and isinstance(item[0], int) and not isinstance(item[0], bool) and (item[1] in OPERATIONS or item[1] == OP_BULK)
             ]
             self._steps.restore_compare(entries)
         if store.get(ROI_TABLE_STEPS_SHOWN) is True:
@@ -287,6 +300,7 @@ class StepColumnControls(QObject):
     def _on_columns_changed(self) -> None:
         """The steps changed (merged, added, removed, retitled) or a comparison column was made, changed or removed: the columns follow."""
         self._save_compare()
+        self.refresh_theme()  # the S_bulk button shows whether its column is there
         if not self._on or self._steps is None:
             return
         self._host.rebuild(self._set_columns, reveal=False)
@@ -330,6 +344,15 @@ class StepColumnControls(QObject):
                 f"Choose the baseline and signal step of evaluation pair {spec.pair} in the Sensorgram's Experimental plan tab (Evaluation) to fill the new column.", error=False
             )
 
+    def _toggle_bulk(self) -> None:
+        if self._steps is None or not self._on:
+            return
+        self._steps.set_bulk_shown(not self._steps.has_bulk())
+        if self._steps.has_bulk() and not self._steps.bulk_points():
+            self._host.notice(
+                "Put steps into the S_bulk set (Sensorgram > Experimental plan > Evaluation > S_bulk) and import the refractive indices to fill the S_bulk column.", error=False
+            )
+
     def _save_compare(self) -> None:
         store = self._host.store()
         if store is not None and self._steps is not None and self._restored:
@@ -352,6 +375,12 @@ class StepColumnControls(QObject):
             return
         column = columns[index]
         uid = column.ref[1]  # type: ignore[index]
+        if column.op == OP_BULK:  # nothing to choose: the column is the S_bulk set's slope
+            menu = QMenu(self._tree)
+            menu.addAction("Remove this column").triggered.connect(lambda _checked=False: self.remove_compare(uid))
+            menu.exec(pos)
+            menu.deleteLater()
+            return
         pick = PickMenu(self.columns_button, name_on_face=False)  # (a child of the visible button: it stays hidden, there is no flash of a window)
         for op in OPERATIONS:
             pick.add_choice(op, OPERATION_LABELS[op], OPERATION_TIPS[op], equation_picture(title_html(compare_title(column.pair, op))))

@@ -334,7 +334,7 @@ class SensorgramPanel(QWidget):
         self._plan_ribbon.add_group("View steps", *self._steps.plan_controls.widgets())
         self._plan_ribbon.add_group("View stats", *self._steps.stats_controls.widgets())  # was "Step stats", after Evaluation, until 2026-11-10
         self._plan_ribbon.add_group("Edit", *self._steps.edit_controls.widgets())  # add / remove / merge / restore steps (2026-11-10), right of the two View groups
-        self._plan_ribbon.add_group("Evaluation", *self._steps.evaluation.widgets())
+        self._plan_ribbon.add_group("Evaluation", *self._steps.evaluation.widgets(), *self._steps.bulk.widgets())  # the pairs, then S_bulk (2026-11-12)
         self.checks_controls = ChecksControls(self)  # the data-quality checks (2026-11-07): the button only; `checks_presenter.py` is what the app connects to it
         self._plan_ribbon.add_group("Checks", *self.checks_controls.widgets())
         self._plan_ribbon.add_stretch()
@@ -445,6 +445,10 @@ class SensorgramPanel(QWidget):
     def set_panel_visible(self, visible: bool) -> None:
         """Connected to the dock's ``visibilityChanged``: a hidden panel does no work and catches up once when shown."""
         self._gate.set_visible(visible)
+
+    def bulk_controls(self):
+        """The S_bulk button of the Evaluation group (`bulk_group.BulkControls`): its weighting is the ROI table's S_bulk column's too (`app_rewrite._follow_plan_bar`)."""
+        return self._steps.bulk
 
     def plan_bar_settings(self):
         """The plan bar's display settings as set now (`plan.bar_model.PlanBarSettings`): the text mode and separators decide how a step's note is written in a title."""

@@ -1542,6 +1542,9 @@ def _follow_plan_bar(sensorgram_panel: SensorgramPanel, step_table: StepTableMod
 
     sensorgram_panel.plan_bar_settings_changed.connect(apply)
     apply()
+    bulk = sensorgram_panel.bulk_controls()  # the S_bulk fit's weighting (2026-11-12): chosen in the Sensorgram, used by the table's S_bulk column
+    bulk.weighting_changed.connect(step_table.set_bulk_weighting)
+    step_table.set_bulk_weighting(bulk.weighting())
 
 
 def _wire_roi_table_title(dock: PanelContainer, panel: RoiTablePanel) -> None:

@@ -164,10 +164,38 @@ def sort_value(value: CellValue | None, mode: str) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def _bulk_tooltip(head: str, column: StepColumn, value: CellValue | None) -> str:
+    """An S_bulk cell: the slope, how well it is known (from the steps' SEMs and SDs), whether the steps lie on the line (reduced chi2), and how many steps it used."""
+    if value is None:
+        return f"{head}\nNo value: the row is not calculated yet (refresh button), or no step of the S_bulk set has a refractive index."
+    fit = value.bulk.fit_sem if value.bulk is not None else None  # type: ignore[attr-defined]
+    if not math.isfinite(value.mean):
+        reason = fit.reason if fit is not None and fit.reason else "too few steps with a number"
+        return f"{head}\nNo value: {reason}."
+    unit = column.unit
+    lines = [head, f"S_bulk {value.mean:.1f} {unit}"]
+    if math.isfinite(value.sem):
+        lines.append(f"± {value.sem:.1f} {unit} from the steps' SEMs (how well the slope is known)")
+    if math.isfinite(value.sd):
+        lines.append(f"± {value.sd:.1f} {unit} from the steps' SDs (what single-cube noise would give)")
+    if fit is not None:
+        if math.isfinite(fit.chi2_red):
+            verdict = "the steps lie on the line within their error bars" if fit.chi2_red <= 2.0 else "the steps scatter more than their error bars: the uncertainty is raised by its square root"
+            lines.append(f"reduced χ² {fit.chi2_red:.2f}: {verdict}")
+        else:
+            lines.append("two steps: no check of how well they lie on a line")
+        lines.append(f"{fit.n_points} steps, {fit.n_distinct_ri} refractive indices; line: {fit.slope:.1f} × RI {fit.intercept:+.1f}")
+    if not value.current:
+        lines.append("Out of date: something changed since the steps were calculated. Use the refresh button.")
+    return "\n".join(lines)
+
+
 def cell_tooltip(row_text: str, column: StepColumn, value: CellValue | None, *, is_group: bool) -> str:
     """The full numbers of one cell and what they mean."""
     compare = column.kind == "compare"
     head = f"{row_text} - {plain_title(column.title) if compare else column.title}"  # (a tool tip cannot draw the title's subscripts)
+    if compare and column.op == "bulk":
+        return _bulk_tooltip(head, column, value)
     if value is None:
         if compare:
             return f"{head}\nNo value: the row is not calculated yet (refresh button), or the baseline or signal step of this pair is not set."

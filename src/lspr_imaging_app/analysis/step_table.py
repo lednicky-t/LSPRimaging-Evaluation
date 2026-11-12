@@ -35,6 +35,7 @@ from .scan_trace import (
     build_series,
 )
 from .baseline_drift import window_step_regions
+from .bulk_sensitivity import WEIGHT_INVERSE_VARIANCE, BulkFit, fit_bulk
 from .settings import MetricSettings, StatisticsSettings
 from .step_stats import StepMembership
 
@@ -95,7 +96,8 @@ class StepValue:
 
 OP_DIFFERENCE = "difference"
 OP_SNR = "snr"
-OPERATIONS = (OP_DIFFERENCE, OP_SNR)
+OPERATIONS = (OP_DIFFERENCE, OP_SNR)  # the operations of an evaluation pair's column (its header menu)
+OP_BULK = "bulk"  # the S_bulk column (2026-11-12): not a pair's operation; one column at most, added by its own button
 
 
 def compare_values(op: str, baseline: StepValue, signal: StepValue) -> tuple[int, float, float, float]:
@@ -121,6 +123,50 @@ def compare_values(op: str, baseline: StepValue, signal: StepValue) -> tuple[int
     sd = math.sqrt(signal.sd**2 + baseline.sd**2) if math.isfinite(signal.sd) and math.isfinite(baseline.sd) else nan
     sem = math.sqrt(signal.sem**2 + baseline.sem**2) if math.isfinite(signal.sem) and math.isfinite(baseline.sem) else nan
     return n, difference, sd, sem
+
+
+@dataclass(frozen=True)
+class BulkPoint:
+    """One step of the S_bulk set as a point: the step's reference and its solution's refractive index (and the RI's uncertainty, NaN when the file gives none)."""
+
+    ref: object
+    ri: float
+    ri_u: float = float("nan")
+
+
+@dataclass(frozen=True)
+class BulkValues:
+    """The S_bulk cell of one row: the slope from the step SEMs (the value shown as the mean), its uncertainty with the step SEMs (``sem``) and with the step SDs (``sd``),
+    and the fits themselves for the tool tip."""
+
+    n: int  # steps used
+    slope: float
+    sd: float
+    sem: float
+    fit_sem: BulkFit
+    fit_sd: BulkFit
+
+
+def bulk_values(numbers: RowNumbers, points: Sequence[BulkPoint], weighting: str = WEIGHT_INVERSE_VARIANCE) -> BulkValues:
+    """The bulk sensitivity of one row from its step numbers (`analysis/bulk_sensitivity.py`). Pure arithmetic on numbers already calculated; a step this row has no number
+    for is left out.
+
+    Two fits of the same points: with each step's SEM as its uncertainty (the slope shown, and ``sem``: how well the slope is known, which shrinks with longer steps) and with its
+    SD (``sd``: the uncertainty single-cube noise would give, as the SD of the other columns does not shrink with more cubes). With weighting the two can place the line
+    a little differently (1/SEM^2 = n/SD^2 also counts the cubes); the value shown is always the SEM one."""
+    ri, ri_u, mean, sd, sem = [], [], [], [], []
+    for point in points:
+        if point.ref not in numbers.refs:
+            continue
+        value = numbers.value_at(point.ref)
+        ri.append(point.ri)
+        ri_u.append(point.ri_u)
+        mean.append(value.mean)
+        sd.append(value.sd)
+        sem.append(value.sem)
+    fit_sem = fit_bulk(ri, mean, sem, ri_u, weighting=weighting)
+    fit_sd = fit_bulk(ri, mean, sd, ri_u, weighting=weighting)
+    return BulkValues(fit_sem.n_points, fit_sem.slope, fit_sd.u, fit_sem.u, fit_sem, fit_sd)
 
 
 @dataclass(frozen=True)

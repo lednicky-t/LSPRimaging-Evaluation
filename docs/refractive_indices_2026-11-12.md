@@ -26,6 +26,7 @@ later work.
 | File -> Import -> Refractive Indices... | `panels/file_menu.py` |
 | Table on the Experiment plan page | `panels/dataset_manager/refractive_indices.py` |
 | Plan bar hover line | `plan/bar_model.py` (`ri_text`), `panels/sensorgram/step_overlays.py` |
+| Plan bar text: RI in ( ) after the step text (opt-in checkbox in View steps > Step labels, remembered; 5 decimals; no RI = text unchanged) | `plan/bar_model.py` (`with_ri`, `show_ri`), `panels/sensorgram/plan_group.py` (`_show_ri`), `step_overlays.py` (`_ri_value`) |
 | Preferences (wavelength, age limit) | `panels/preferences_dialog.py`, keys `refractive_index/*` in `storage/ui_state_keys.py` |
 
 ## Reproducibility

@@ -4,13 +4,14 @@ Screen purpose: show or hide the bar of experiment steps on the plot and choose 
 
 Layout (left to right, inline for now; the ribbon is to be re-ordered and grouped into pick-up menus later, so the whole group is this one file):
 
-    [show] [height] [top / bottom] [transparency] [step labels menu: text: whole note / solution, text aligned to: bar / data, text position, text size]
+    [show] [height] [top / bottom] [transparency] [step labels menu: text: whole note / solution, refractive index after the text, text aligned to: bar / data, text position, text size]
 
 - **show**: the bar on or off.
 - **height**: 1 - 10 % of the plot height, then "Full" (the bar fills the plot, behind the traces).
 - **top / bottom**: which edge of the plot it sits on. Hidden while the height is Full (a bar that fills the plot has no edge); the choice is kept.
 - **transparency**: the wedge, as on the Image panel's overlays (fill only; the text stays opaque).
 - **text content**: the whole note, or only the text before the separator (the solution). The separators are listed in the menu (default `_-_` and `_--_`).
+- **refractive index** (2026-11-12): a checkbox; on, each step's RI (imported RIs.txt) is written in ( ) after its text. Off by default; a step with no RI keeps its text.
 - **text aligned to / text position**: a 5-stop slider (low to high). Aligned to the *bar* the stops are positions inside the bar; aligned to the *data* they are distances from
   the traces inside each step (far below ... far above). Each mode remembers its own stop.
 - **text size**: in points.
@@ -25,7 +26,7 @@ from collections.abc import Callable
 
 from PyQt6.QtCore import QObject, Qt, pyqtSignal
 from PyQt6.QtGui import QFontInfo, QValidator
-from PyQt6.QtWidgets import QApplication, QHBoxLayout, QLabel, QLineEdit, QSlider, QSpinBox, QWidget
+from PyQt6.QtWidgets import QApplication, QCheckBox, QHBoxLayout, QLabel, QLineEdit, QSlider, QSpinBox, QWidget
 
 from lspr_ui import CompactWedgeSlider, get_active_theme
 
@@ -63,6 +64,7 @@ from .plan_labels_menu import PlanLabelsMenu
 VISIBLE_KEY = "sensorgram/plan_visible"
 HEIGHT_KEY = "sensorgram/plan_height"
 TEXT_PT_KEY = "sensorgram/plan_text_pt"
+SHOW_RI_KEY = "sensorgram/plan_show_ri"
 
 SHOW_TIP = "Show or hide the bar of experiment steps on the plot: which solution ran when, on the same axis as the traces."
 NO_STEPS_TIP = (
@@ -78,6 +80,10 @@ STOP_TIP = (
     "Aligned to the data: from far below to far above the traces of each step (the middle one sits on their median)."
 )
 SIZE_TIP = "Text size of the step labels, in points."
+RI_TIP = (
+    "Write the step's refractive index in ( ) after its text, e.g. H2O (1.33300). The index is the one of the step's solution in the imported RIs table "
+    "(File > Import > Refractive Indices); a step whose solution has none keeps its text as it is."
+)
 SEPARATORS_TIP = "Separators of the solution mode, divided by spaces. The text before the first one found in a note is its solution."
 
 
@@ -182,16 +188,22 @@ class PlanBarControls(QObject):
         style_ribbon_number_field(self._size, f"{FONT_RANGE[1]} pt")
         self._size.setToolTip(SIZE_TIP)
 
-        # the four text controls live in one pick-up menu (they are reparented into its panel)
+        self._show_ri = QCheckBox(parent)  # no text of its own: the row's caption "Refractive index" names it, the tool tip explains
+        self._show_ri.setToolTip(RI_TIP)
+
+        # the text controls live in one pick-up menu (they are reparented into its panel)
         self._labels = PlanLabelsMenu(
-            (("Text", self._content), ("Aligned to", self._align), ("Position", self._stop), ("Size", self._size)), parent
+            (
+                ("Text", self._content), ("Refractive index", self._show_ri), ("Aligned to", self._align), ("Position", self._stop), ("Size", self._size),
+            ),
+            parent,
         )
 
         self._available = True
         self._refresh_stop_tip()
         for signal in (
             self._show.toggled, self._position.currentIndexChanged, self._height.valueChanged, self._alpha.valueChanged,
-            self._content.currentIndexChanged, self._separators.editingFinished, self._size.valueChanged,
+            self._content.currentIndexChanged, self._separators.editingFinished, self._size.valueChanged, self._show_ri.toggled,
         ):
             signal.connect(self._changed)
         self._align.currentIndexChanged.connect(self._on_align_changed)
@@ -214,6 +226,7 @@ class PlanBarControls(QObject):
             text_align=self._align.currentData() or ALIGN_BAR,
             text_stop=self._stop.value(),
             text_pt=self._size.value(),
+            show_ri=self._show_ri.isChecked(),
         )
 
     def set_available(self, available: bool) -> None:
@@ -272,6 +285,7 @@ class PlanBarControls(QObject):
             store.bind(VISIBLE_KEY, self._show)
             store.bind(HEIGHT_KEY, self._height)
             store.bind(TEXT_PT_KEY, self._size)
+            store.bind(SHOW_RI_KEY, self._show_ri)
             for menu, key in (
                 (self._position, SENSORGRAM_PLAN_POSITION), (self._content, SENSORGRAM_PLAN_TEXT_MODE), (self._align, SENSORGRAM_PLAN_TEXT_ALIGN),
             ):

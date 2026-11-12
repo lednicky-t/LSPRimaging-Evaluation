@@ -198,6 +198,22 @@ class PlanBarActions(QObject):
         restore.triggered.connect(lambda _checked=False: self._plan.restore_removed())
         menu.addSeparator()
         self._add_use_as(menu, index, many)
+        self._add_use_for_bulk(menu, targets)
+
+    def _add_use_for_bulk(self, menu: QMenu, targets: list[int]) -> None:
+        """"Use for S_bulk": a check mark, on when every step it acts on is in the S_bulk set. Unlike the pair roles it takes several steps at once (the selection);
+        clicking it when it is on takes them out again."""
+        steps = self._plan.steps()
+        in_set = {step.ref for step in self._plan.bulk_steps()}
+        all_in = bool(targets) and all(steps[i].ref in in_set for i in targets)
+        action = menu.addAction("Use for S_bulk (Sb)")
+        action.setCheckable(True)
+        action.setChecked(all_in)
+        action.setToolTip("Put the step(s) into the bulk sensitivity fit (their means against the solutions' refractive indices); click again to take them out.")
+        if all_in:
+            action.triggered.connect(lambda _checked=False: self._plan.remove_from_bulk(targets))
+        else:
+            action.triggered.connect(lambda _checked=False: self._plan.add_to_bulk(targets))
 
     def _add_use_as(self, menu: QMenu, index: int, many: bool) -> None:
         """"Use as" > one submenu per evaluation pair that is on offer (`pairs_offered`) > Baseline / Signal, each a check mark that is on when this step plays that role.

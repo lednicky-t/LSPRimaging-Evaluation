@@ -206,6 +206,25 @@ def evaluation_picture() -> PictureFor:
     return _picture(draw_into)
 
 
+def bulk_picture() -> PictureFor:
+    """The S_bulk menu (2026-11-12): a frame with a rising fit line in the accent colour and three points with error bars on it (shift against refractive index)."""
+
+    def draw_into(painter: QPainter, ink: QColor, theme) -> None:
+        _frame(painter, ink)
+        painter.setPen(_pen(QColor(theme.accent_blue), 1.4))
+        painter.drawLine(QPointF(3.5, 15.5), QPointF(16.5, 4.5))
+        painter.setPen(_pen(ink, 1.0))
+        for x, y, half in ((5.5, 13.2, 2.0), (10.0, 10.0, 2.6), (14.5, 6.0, 1.8)):
+            painter.drawLine(QPointF(x, y - half), QPointF(x, y + half))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(ink)
+        for x, y in ((5.5, 13.2), (10.0, 10.0), (14.5, 6.0)):
+            painter.drawEllipse(QPointF(x, y), 1.5, 1.5)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+    return _picture(draw_into)
+
+
 def text_content_picture(kind: str) -> PictureFor:
     """Which part of a note is shown: ``whole`` one long line of text, ``solution`` a short solid piece, a divider and the rest faded."""
 
@@ -250,6 +269,7 @@ def align_picture(kind: str) -> PictureFor:
 
 
 __all__ = [
+    "bulk_picture",
     "add_step_after_icon", "add_step_at_cursor_icon", "add_step_before_icon", "align_picture", "evaluation_picture", "merge_steps_icon", "plan_bar_icon", "position_picture",
     "remove_step_icon", "restore_steps_icon", "split_step_icon", "text_content_picture",
 ]

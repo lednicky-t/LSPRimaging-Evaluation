@@ -157,6 +157,7 @@ SENSORGRAM_PLAN_TEXT_ALIGN = UiKey("sensorgram/plan_text_align", "bar", str)  # 
 SENSORGRAM_PLAN_TEXT_STOP_BAR = UiKey("sensorgram/plan_text_stop_bar", 3, int)  # 1 (bottom) - 5 (top) of the bar
 SENSORGRAM_PLAN_TEXT_STOP_DATA = UiKey("sensorgram/plan_text_stop_data", 4, int)  # 1 (far below) - 5 (far above) the data of the step
 SENSORGRAM_EVAL_PAIRS = UiKey("sensorgram/eval_pairs", 1, int)  # how many evaluation pairs (B1+S1, B2+S2, ...) the Evaluation pop-up shows; a pair set in the plan is always shown
+SENSORGRAM_BULK_WEIGHTING = UiKey("sensorgram/bulk_weighting", "inverse_variance", str)  # "inverse_variance" | "equal": how the S_bulk fit weights the steps (analysis/bulk_sensitivity.py)
 SENSORGRAM_STATS_POSITION = UiKey("sensorgram/stats_position", "top", str)  # "top" | "bottom": the edge of the plot the step statistics table sits on
 SENSORGRAM_CHECKS_PAIR = UiKey("sensorgram/checks_pair", None, int)  # the evaluation pair the data checks compare (None: the first complete one)
 SLIDESHOW_SPEED =UiKey("image/slideshow_speed", 1, int)  # 1, 2, 5 or 10 (x)
