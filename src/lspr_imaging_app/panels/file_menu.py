@@ -6,7 +6,7 @@
       -----
       Session                      >  New Session / (one radio entry per session: the checked one is active)
       -----
-      Import                       >  Experiment Plan / Metadata...
+      Import                       >  Experiment Plan / Metadata...  /  Refractive Indices... (2026-11-12)
       Export                       >  Acquisition Metadata (JSON)...
       -----
       Dataset Manager...             Ctrl+I
@@ -36,6 +36,8 @@ from PyQt6.QtWidgets import QFileDialog, QMainWindow, QMenu, QMessageBox
 from ..dataset import DatasetModule
 from ..dataset.io import DatasetLoadChoice, resolve_remembered_dataset_choice, save_dataset_choice, summarize_dataset_candidate
 from ..dataset.model import ImageDataset
+from ..plan.refractive_index import RiFileError, step_numbers_text
+from ..selection.experiment_plan_module import ExperimentPlanModule
 from ..shortcuts import bind_action
 from ..storage.session_coordinator import SessionCoordinator
 from ..storage.session_index import SessionRecord
@@ -73,12 +75,15 @@ class FileMenu(QObject):
         dataset: DatasetModule,
         sessions: SessionCoordinator,
         manager: DatasetManagerDialog,
+        *,
+        experiment_plan: ExperimentPlanModule | None = None,
     ) -> None:
         super().__init__(window)
         self._window = window
         self._dataset = dataset
         self._sessions = sessions
         self._manager = manager
+        self._plan = experiment_plan
 
         self.open_action = menu.addAction("Open Dataset...")
         bind_action(self.open_action, "file.open_dataset")
@@ -105,6 +110,14 @@ class FileMenu(QObject):
             "metadata file. Several files can be picked at once: each is recognised by its content, not its name."
         )
         self.import_plan_action.triggered.connect(self.import_plan)
+        self.import_ri_action = import_menu.addAction("Refractive Indices...")
+        self.import_ri_action.setToolTip(
+            "A tab-separated RI table (RIs.txt: Sample, RI, Std, Temp, N, Date). One value per solution, given to every step whose note "
+            "starts with that solution's name. The values are copied into the session; RIs.txt in the dataset folder is imported "
+            "automatically when the session has none."
+        )
+        self.import_ri_action.triggered.connect(self.import_refractive_indices)
+        self.import_ri_action.setVisible(experiment_plan is not None)
         export_menu = menu.addMenu("Export")
         self.export_metadata_action = export_menu.addAction("Acquisition Metadata (JSON)...")
         self.export_metadata_action.triggered.connect(self.export_metadata)
@@ -200,6 +213,35 @@ class FileMenu(QObject):
             self._manager.plan.show_files(paths)
             self.status_message.emit(f"Imported {', '.join(path.name for path in paths)}.")
 
+    def import_refractive_indices(self) -> None:
+        if self._plan is None:
+            return
+        start = self._dataset.dataset_home()
+        path_text, _ = QFileDialog.getOpenFileName(
+            self._window, "Import refractive indices", str(start) if start is not None else "", "RI table (*.txt *.tsv);;All files (*)"
+        )
+        if not path_text:
+            return
+        try:
+            table = self._plan.import_ri_file(Path(path_text))
+        except (RiFileError, OSError) as exc:
+            QMessageBox.critical(self._window, "Refractive indices not imported", f"{Path(path_text).name}: {exc}")
+            return
+        report = self._plan.ri_usage()
+        lines = [f"{len(table.solutions)} solutions read from {table.source_name}."]
+        if report.used:
+            lines.append(f"Used in this experiment: {', '.join(row.name for row, _steps in report.used)}.")
+        if report.missing:
+            lines.append(
+                "No RI for: " + "; ".join(f"{name} (step {step_numbers_text(steps)})" for name, steps in report.missing) + "."
+            )
+        if report.unused:
+            lines.append(f"Not used by any step (kept, not shown): {', '.join(report.unused)}.")
+        if table.wavelength_nm is None:
+            lines.append("The refractometer wavelength is not given (Edit -> Preferences -> Refractive indices).")
+        QMessageBox.information(self._window, "Refractive indices imported", "\n".join(lines))
+        self.status_message.emit(f"Refractive indices imported from {table.source_name}.")
+
     def export_metadata(self) -> None:
         path = export_metadata_dialog(self._window, self._dataset)
         if path is not None:
@@ -233,5 +275,9 @@ class FileMenu(QObject):
 
     def _sync_enabled(self) -> None:
         loaded = self._dataset.dataset_home() is not None
-        for action in (self.show_folder_action, self.import_plan_action, self.export_metadata_action):
+        for action in (self.show_folder_action, self.import_plan_action, self.import_ri_action, self.export_metadata_action):
             action.setEnabled(loaded)
+
+    @property
+    def manager(self) -> DatasetManagerDialog:
+        return self._manager

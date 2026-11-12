@@ -5,8 +5,9 @@ keep a dock open for it). The actions moved to the File menu (`panels/file_menu.
 *manage* is here, one tab per subject:
 
 - **Overview**: folder, type, size, counts, OME-Zarr details (`summary.py`).
-- **Experiment plan**: the acquisition metadata and pump-plan steps, with Import / Export (`experimental_plan.py`).
-  The planned step manager (refractive index per step, editable step parameters) is meant to grow here.
+- **Experiment plan**: the acquisition metadata and pump-plan steps, with Import / Export (`experimental_plan.py`), and
+  the refractive indices of the steps' solutions (`refractive_indices.py`, 2026-11-12). An editable step manager is
+  meant to grow here.
 - **Sessions**: list, open, new (`sessions.py`).
 
 Non-modal (`show()`, not `exec()`): the app keeps working while it is open. Closing only hides it; the widgets stay,
@@ -21,10 +22,12 @@ from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QScrollArea, QTabWidget, 
 
 from ...dataset import DatasetModule
 from ...selection import CubeDisplayModule, SelectionModule
+from ...selection.experiment_plan_module import ExperimentPlanModule
 from ...storage.session_coordinator import SessionCoordinator
 from ...storage.ui_state_keys import DATASET_MANAGER_PAGE, DATASET_MANAGER_SIZE
 from ..ui_state import UiStateStore
 from .experimental_plan import ExperimentalPlanSection
+from .refractive_indices import RefractiveIndexView
 from .sessions import SessionsPage
 from .summary import DatasetSummarySection
 
@@ -55,6 +58,7 @@ class DatasetManagerDialog(QDialog):
         cube_display: CubeDisplayModule | None = None,
         ui_state: UiStateStore | None = None,
         parent: QWidget | None = None,
+        experiment_plan: ExperimentPlanModule | None = None,
     ) -> None:
         super().__init__(parent)
         self._store = ui_state
@@ -67,8 +71,17 @@ class DatasetManagerDialog(QDialog):
         self.summary = DatasetSummarySection(dataset, self)
         self.plan = ExperimentalPlanSection(dataset, selection, self, cube_display=cube_display)
         self.sessions = SessionsPage(session_coordinator, self)
+        # The refractive indices of the steps' solutions sit under the plan (2026-11-12; None in a test without the plan module).
+        self.refractive = None if experiment_plan is None else RefractiveIndexView(experiment_plan, self)
+        plan_page = QWidget(self)
+        plan_layout = QVBoxLayout(plan_page)
+        plan_layout.setContentsMargins(0, 0, 0, 0)
+        plan_layout.addWidget(self.plan)
+        if self.refractive is not None:
+            plan_layout.addWidget(self.refractive)
+        plan_layout.addStretch(1)
         self.tabs.addTab(_scrolled(self.summary, self.tabs), "Overview")
-        self.tabs.addTab(_scrolled(self.plan, self.tabs), "Experiment plan")
+        self.tabs.addTab(_scrolled(plan_page, self.tabs), "Experiment plan")
         self.tabs.addTab(self.sessions, "Sessions")
         self.show_page(self._saved_page())
         self.tabs.currentChanged.connect(self._remember_page)

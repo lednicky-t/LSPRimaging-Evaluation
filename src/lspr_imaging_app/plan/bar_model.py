@@ -15,7 +15,7 @@ Design: ``docs/experimental_plan_bar_design_2026-10-26.md``.
 
 from __future__ import annotations
 
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -186,12 +186,14 @@ def describe_devices(devices: Mapping[str, object] | None) -> list[str]:
     return lines
 
 
-def _tooltip(step: EffectiveStep, x_start: float, x_end: float, time_mode: bool) -> str:
+def _tooltip(step: EffectiveStep, x_start: float, x_end: float, time_mode: bool, ri_line: str | None = None) -> str:
     lines = [f"Step {step.order}: {step.label}" if step.label else f"Step {step.order}"]
     if time_mode:
         lines.append(f"{x_start:.1f} s to {x_end:.1f} s ({step.duration_s:.1f} s)")
     else:
         lines.append(f"cube {x_start:.1f} to cube {x_end:.1f} ({step.duration_s:.1f} s)")
+    if ri_line:
+        lines.append(ri_line)
     lines.extend(describe_devices(step.devices))
     for role in step.roles:
         lines.append(f"{'Baseline' if role.startswith('B') else 'Signal'} step of evaluation pair {role[1:]} ({role}).")
@@ -210,8 +212,10 @@ def build_bar_steps(
     text_mode: str = MODE_WHOLE,
     separators: Sequence[str] = DEFAULT_SEPARATORS,
     time_mode: bool = True,
+    ri_text: Callable[[EffectiveStep], str | None] | None = None,
 ) -> list[PlanBarStep]:
-    """The steps on the plot's x axis. `lines`: (x, y) of everything drawn, for the levels of the Data text mode."""
+    """The steps on the plot's x axis. `lines`: (x, y) of everything drawn, for the levels of the Data text mode. `ri_text`: the hover
+    line naming a step's refractive index (2026-11-12; None: no such line)."""
     colors = effective_colors(steps, separators)
     out: list[PlanBarStep] = []
     for index, step in enumerate(steps):
@@ -219,7 +223,7 @@ def build_bar_steps(
         out.append(
             PlanBarStep(
                 index=index, x_start=x_start, x_end=x_end, text=shown_label(step.label, text_mode, separators),
-                color=colors[index], tooltip=_tooltip(step, x_start, x_end, time_mode),
+                color=colors[index], tooltip=_tooltip(step, x_start, x_end, time_mode, None if ri_text is None else ri_text(step)),
                 levels=section_levels(lines, x_start, x_end), edited=step.edited, roles=step.roles, added=step.is_added,
             )
         )

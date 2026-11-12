@@ -111,6 +111,7 @@ from ..image_tools.mask.mask_pointers_state import MaskPointersState
 from ..image_tools.mask.mask_pointers_state import from_payload as mask_pointers_from_payload
 from ..image_tools.mask.mask_pointers_state import to_payload as mask_pointers_to_payload
 from ..progress import Cancelled, ProgressCallback
+from ..plan.refractive_index import RiTable
 from ..plan.state import PlanEditsState
 from ..frame_roles_state import FrameRolesState
 from ..domain.roi_model import (
@@ -127,7 +128,9 @@ from ..domain.roi_model import (
 logger = logging.getLogger(__name__)
 
 SESSION_SCHEMA_NAME = "lspri_rewrite_session"
-SESSION_SCHEMA_VERSION = "1.6"
+SESSION_SCHEMA_VERSION = "1.7"
+# 1.7 (2026-11-12): optional "refractive_index" block - the imported RI table of the experiment's solutions (every row of RIs.txt, its SHA-256, import
+# time and the refractometer wavelength), plan/refractive_index.py. Written only when a table was imported; a 1.6 file has none.
 # 1.6 (2026-10-29): the "plan" block may also hold "removed" (measured steps taken away), "added" (steps the user made), "next_uid" and "pairs" (which step is the baseline and which the
 # signal of evaluation pair 1, 2, ...), plan/state.py. All optional: a 1.5 file has none of them, and a session without such changes is written exactly as before.
 # 1.5 (2026-10-26): optional "plan" block - the user's edits to the experiment steps (boundaries, notes, colours), plan/state.py.
@@ -423,6 +426,7 @@ class SessionState:
     frame_roles: FrameRolesState = field(default_factory=FrameRolesState)
     mask_pointers: MaskPointersState = field(default_factory=MaskPointersState)
     plan_edits: PlanEditsState = field(default_factory=PlanEditsState)
+    refractive_index: RiTable | None = None  # the imported RIs.txt (None: none imported)
     mask_versions: dict[MaskChange, int] = field(default_factory=dict)
     """Only filled by `load_session`: which file version each mask change was read from, for
     `SessionWriter.seed`. Not part of the saved format, and empty in a state captured from the modules (it says
@@ -716,6 +720,7 @@ def prepare_session(state: SessionState, naming: FrameNamingScheme) -> PreparedS
         },
         "frames": asdict(state.frame_roles),
         "plan": state.plan_edits.to_payload(),
+        **({} if state.refractive_index is None else {"refractive_index": state.refractive_index.to_payload()}),
         "mask_pointers": None,  # filled in by `SessionWriter.write` from `PreparedSession.mask_pointers`
         "selection": {
             "cube_index": int(state.selected_cube),
@@ -822,4 +827,15 @@ def load_session(
         frame_roles=FrameRolesState.from_payload(payload.get("frames")),
         mask_pointers=mask_pointers_from_payload(payload.get("mask_pointers")),
         plan_edits=PlanEditsState.from_payload(payload.get("plan")),
+        refractive_index=_decode_ri_table(payload.get("refractive_index")),
     )
+
+
+def _decode_ri_table(raw: object) -> RiTable | None:
+    """Lenient like the "plan" block: an unreadable RI block is dropped with a WARNING (the rest of the session still loads), and the
+    app then offers RIs.txt from the dataset folder again (`ExperimentPlanModule.check_ri_file`)."""
+    try:
+        return RiTable.from_payload(raw)
+    except (KeyError, TypeError, ValueError):
+        logger.warning("The session's refractive_index block could not be read; it was left out", exc_info=True)
+        return None

@@ -32,6 +32,8 @@ from ...analysis.settings_module import AnalysisSettingsModule
 from ...analysis.step_stats import StepMembership, assign_cubes, membership_segments
 from ...dataset import DatasetModule
 from ...plan.bar_model import PlanBarStep, build_bar_steps
+from ...plan.edits import EffectiveStep
+from ...plan.refractive_index import solution_of
 from ...selection.experiment_plan_module import (
     REASON_BOUNDARY,
     REASON_DATASET,
@@ -113,6 +115,7 @@ class StepOverlays(QObject):
         self.stats_controls.settings_changed.connect(self._on_stats_settings_changed)
         if experiment_plan is not None:
             experiment_plan.steps_changed.connect(self._on_plan_changed)
+            experiment_plan.ri_changed.connect(lambda: self._on_plan_changed("ri"))  # the bar's hover text names each step's RI: text only
 
     # -- the panel's wiring -------------------------------------------------------------------------------------------------
 
@@ -253,6 +256,17 @@ class StepOverlays(QObject):
         axis, cubes = found
         return PlanAxisContext(axis, self._plan.snap_grid_unix_ms(cubes), self._cube_display.effective_mode() == MODE_TIME)
 
+    def _ri_text(self, step: EffectiveStep) -> str | None:
+        """The hover line naming the step's refractive index (None without an imported RI table)."""
+        if self._plan is None or self._plan.ri_table() is None:
+            return None
+        found = self._plan.ri_of_step(step)
+        if found is None:
+            return f"Refractive index: none for {solution_of(step.label)!r} in the imported table."
+        spread = "" if found.std is None else f" ± {found.std:.6f}"
+        measured = "" if found.measured_on is None else f", measured {found.measured_on:%d.%m.%Y}"
+        return f"Refractive index ({found.name}): {found.ri:.5f}{spread}{measured}."
+
     def refresh(self) -> None:
         """Convert the experiment steps to the plot's x axis and hand them to the plot, or hand it none (no steps, no traces, no timing); then the table. Cheap: a few steps and
         the series already drawn; it does not compute anything."""
@@ -276,7 +290,7 @@ class StepOverlays(QObject):
                 lines.extend(((s.x, s.band_low), (s.x, s.band_high)))
         bars = build_bar_steps(
             steps, axis, lines, text_mode=settings.text_mode, separators=settings.separators,
-            time_mode=self._cube_display.effective_mode() == MODE_TIME,
+            time_mode=self._cube_display.effective_mode() == MODE_TIME, ri_text=self._ri_text,
         )
         self._plot.set_plan(bars, settings)
         self._plot.plan_bar().set_baseline_anchors(self.anchor_step_indices())  # a small anchor in the lower left corner of each

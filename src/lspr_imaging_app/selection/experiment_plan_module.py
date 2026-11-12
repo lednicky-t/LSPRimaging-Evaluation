@@ -17,11 +17,19 @@ commands below; they keep no step state of their own.
   `set_role` names the baseline or the signal step of an evaluation pair (reason ``"roles"``, cosmetic); `clear_pair` empties both roles of a pair in one undo step. **Other panels read the steps and the roles from here**: `steps()` (each
   has ``order``, the number the user sees, and ``ref``, which stays the same when steps are added or removed), `step_by_ref`, `baseline_step(pair)` / `signal_step(pair)`, and
   `cubes_of(step)`, the whole cubes of a step. A role whose step is removed is cleared and `notice(text)` says so.
+- **Refractive indices (2026-11-12)**: the second saved value, `ri_table()` (the session's ``"refractive_index"`` block; `plan/refractive_index.py`),
+  one RI per solution, given to every step whose first note name is that solution (`ri_usage`). `import_ri_file` replaces it (not undoable, like a
+  metadata import; the table is a copy, so later edits of the file change nothing until it is imported again). `check_ri_file`, called by the session
+  wiring once autosave is on for the session, imports ``RIs.txt`` from the dataset folder when the session has no table, and only *reports* a file that
+  changed since its import (`ri_file_changed`): new values are never taken in silently. `ri_changed` / `ri_notice(text)` tell the views and the status bar.
+  The file is ~1 KB, read on the GUI thread (a user's import, or once per session opened).
 """
 
 from __future__ import annotations
 
 import logging
+from datetime import date, datetime, timezone
+from pathlib import Path
 
 import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -32,6 +40,7 @@ from ..analysis.step_stats import StepMembership, assign_cubes
 from ..dataset.module import DatasetModule
 from ..diagnostics import instrumented
 from ..plan import edits
+from ..plan import refractive_index as ri
 from ..plan.axis_map import AxisMap
 from ..plan.edits import AppliedPlan, Edge, EffectiveStep, Role, Side
 from ..plan.state import PlanEditsState, StepRef
@@ -52,12 +61,18 @@ REASON_DATASET = "dataset"
 class ExperimentPlanModule(QObject):
     steps_changed = pyqtSignal(str)  # reason, see the module docstring
     notice = pyqtSignal(str)  # a plain sentence for the user: a role was cleared, a step could not be added
+    ri_changed = pyqtSignal()  # the RI table was imported, restored or cleared, or the folder's file was found changed
+    ri_notice = pyqtSignal(str)  # a sentence for the status bar: RIs.txt imported automatically, or changed since its import
 
     def __init__(self, dataset: DatasetModule, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._dataset = dataset
         self._state = PlanEditsState()
         self._cache: tuple[ImagingPlan | None, PlanEditsState, AppliedPlan] | None = None
+        self._ri_table: ri.RiTable | None = None
+        self._ri_file_changed = False
+        self.ri_wavelength_nm: float | None = None
+        """The refractometer's wavelength (Preferences; None: not given), stamped on a table when it is imported."""
         dataset.dataset_loaded.connect(lambda _dataset: self.steps_changed.emit(REASON_DATASET))  # also fires when the metadata is replaced
         dataset.dataset_cleared.connect(self._on_dataset_cleared)
 
@@ -151,6 +166,80 @@ class ExperimentPlanModule(QObject):
     def _on_dataset_cleared(self) -> None:
         self._state = PlanEditsState()
         self.steps_changed.emit(REASON_DATASET)
+        self._set_ri_table(None, changed_file=False)
+
+    # -- refractive indices -------------------------------------------------------------------------------------------------
+
+    def ri_table(self) -> ri.RiTable | None:
+        return self._ri_table
+
+    def ri_file_changed(self) -> bool:
+        """The dataset folder's RIs.txt differs from the imported copy (checked when the session opened)."""
+        return self._ri_file_changed
+
+    def ri_usage(self) -> ri.RiUsage:
+        """The table seen through the steps: which solutions have an RI (and their steps), which steps' solutions have none, which rows are unused."""
+        return ri.usage(self._ri_table, ((step.order, step.label) for step in self.steps()))
+
+    def ri_of_step(self, step: EffectiveStep) -> ri.SolutionRi | None:
+        return None if self._ri_table is None else self._ri_table.find(ri.solution_of(step.label))
+
+    def experiment_day(self) -> date | None:
+        """The local calendar day the first step started (what an RI measurement's age is counted to); None without steps."""
+        steps = self.steps()
+        if not steps:
+            return None
+        return datetime.fromtimestamp(min(step.start_unix_ms for step in steps) / 1000.0).date()
+
+    def restore_ri_table(self, table: ri.RiTable | None) -> None:
+        """As a session load does: not undo-tracked, no file look (that is `check_ri_file`, once saving is on)."""
+        self._set_ri_table(table, changed_file=False)
+
+    @instrumented("ExperimentPlanModule.import_ri_file")
+    def import_ri_file(self, path: Path) -> ri.RiTable:
+        """Read `path` and make it the table (replacing any). Raises `RiFileError` / `OSError`, leaving the old table as it was."""
+        table = ri.table_from_bytes(
+            Path(path).read_bytes(), Path(path).name, wavelength_nm=self.ri_wavelength_nm, now_utc=datetime.now(timezone.utc)
+        )
+        self._set_ri_table(table, changed_file=False)
+        logger.info("Refractive indices imported from %s: %d solutions, wavelength %s nm", path, len(table.solutions), self.ri_wavelength_nm)
+        return table
+
+    def check_ri_file(self) -> None:
+        """Look for RIs.txt in the dataset folder: import it when the session has no table, report it when it changed since the import.
+        A file that cannot be read is reported, not imported."""
+        path = ri.find_ri_file(self._dataset.dataset_home())
+        if path is None:
+            return
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            self.ri_notice.emit(f"{path.name} could not be read: {exc}")
+            return
+        if self._ri_table is None:
+            try:
+                self.import_ri_file(path)
+            except (ri.RiFileError, OSError) as exc:
+                self.ri_notice.emit(f"{path.name} in the dataset folder was not imported: {exc}")
+                return
+            self.ri_notice.emit(f"Refractive indices imported from {path.name} in the dataset folder.")
+            return
+        changed = ri.checksum(data) != self._ri_table.sha256
+        if changed != self._ri_file_changed:
+            self._ri_file_changed = changed
+            self.ri_changed.emit()
+        if changed:
+            self.ri_notice.emit(
+                f"{path.name} has changed since its refractive indices were imported; the imported values are still used "
+                "(File -> Import -> Refractive Indices... takes the new ones)."
+            )
+
+    def _set_ri_table(self, table: ri.RiTable | None, *, changed_file: bool) -> None:
+        if table == self._ri_table and changed_file == self._ri_file_changed:
+            return
+        self._ri_table = table
+        self._ri_file_changed = changed_file
+        self.ri_changed.emit()
 
     # -- commands (undoable) ------------------------------------------------------------------------------------------------
 

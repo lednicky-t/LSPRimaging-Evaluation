@@ -148,6 +148,8 @@ from .storage.ui_state_keys import (
     CHROMATIC_STRIDE,
     DISPLAY_RANGE,
     DISPLAY_RESOLUTION,
+    RI_AGE_WARNING_DAYS,
+    RI_WAVELENGTH_NM,
     HIGHLIGHT_RANGE,
     HISTOGRAM_BIN_WIDTH,
     HISTOGRAM_LINE_WIDTH,
@@ -435,7 +437,7 @@ def capture_session(
         selected_roi_ids=tuple(sorted(selection.selected_roi_ids())),
         **({} if frame_roles is None else {"frame_roles": frame_roles.state()}),
         **({} if mask_pointers is None else {"mask_pointers": mask_pointers.state()}),
-        **({} if experiment_plan is None else {"plan_edits": experiment_plan.state()}),
+        **({} if experiment_plan is None else {"plan_edits": experiment_plan.state(), "refractive_index": experiment_plan.ri_table()}),
     )
 
 
@@ -476,6 +478,7 @@ def apply_session(
         mask_pointers.restore_state(state.mask_pointers)
     if experiment_plan is not None:
         experiment_plan.restore_state(state.plan_edits)
+        experiment_plan.restore_ri_table(state.refractive_index)
 
     selection.set_cube(state.selected_cube)
     selection.set_wavelength(state.selected_wavelength)
@@ -579,6 +582,7 @@ def _build_session_autosave(
         signals.append(mask_pointers.pointers_changed)  # cosmetic for the analysis, but part of the session
     if experiment_plan is not None:
         signals.append(experiment_plan.steps_changed)  # a dragged boundary, a retyped note, a colour: part of the session
+        signals.append(experiment_plan.ri_changed)  # an imported RI table (RIs.txt) is part of the session too
     for signal in signals:
         signal.connect(autosave.schedule)
 
@@ -656,6 +660,7 @@ def _wire_session_coordinator(
             # Nothing to read (a fresh dataset, a brand-new session): blank, and saving may start now.
             apply(None, root)
             autosave.set_root(root)
+            check_ri_file()
             return
         # Reading the session takes seconds when it holds hundreds of masks, so it happens off the GUI thread (2026-10-22,
         # `storage/session_load_task.py`): the modules are blank for now, autosave stays OFF for this root (a blank state must
@@ -674,6 +679,13 @@ def _wire_session_coordinator(
         # save does not read every PNG back to find that out (2026-10-21).
         if result.state is not None:
             autosave.seed_mask_versions(result.root, result.state)
+        check_ri_file()
+
+    def check_ri_file() -> None:
+        # RIs.txt in the dataset folder: imported when the session has none, reported when changed since its import. Only once
+        # autosave is on for the session (an import is saved; the blank state shown while a session loads never imports).
+        if experiment_plan is not None:
+            experiment_plan.check_ri_file()
 
     def ended(root: Path, outcome: str) -> None:
         if outcome == "completed" or root != wanted["root"]:
@@ -754,6 +766,11 @@ class _SettingsWriter:
 def _build_modules() -> _Modules:
     """Construct every module and connect them to each other (no panels yet)."""
     dataset = DatasetModule()
+    session_coordinator = SessionCoordinator()
+    # Connected FIRST, before any module that resets itself on `dataset_cleared` (2026-11-12): Qt calls the slots in connection order,
+    # and the unbind hands the session over (writes what is pending, then points autosave at nothing). A module clearing itself
+    # earlier would schedule a save of its cleared state into the still-bound session (the plan edits and RI table were lost that way).
+    dataset.dataset_cleared.connect(session_coordinator.unbind)
     geometry = GeometryModule()
     # Transient UI mode (which canvas tool is on) - not undoable/persisted; see its docstring.
     active_tool = ActiveToolModule()
@@ -782,7 +799,6 @@ def _build_modules() -> _Modules:
     area_selection = AreaSelectionModule()
     geometry.geometry_changed.connect(lambda _change: area_selection.clear())
     analysis_settings = AnalysisSettingsModule()
-    session_coordinator = SessionCoordinator()
 
     # SelectionModule holds no RoiToolbox reference of its own (CLAUDE.md,
     # "no module reaches into another's internals") - this is the one place
@@ -810,7 +826,6 @@ def _build_modules() -> _Modules:
         mask_pointers, session_load, experiment_plan,
     )
     dataset.dataset_loaded.connect(lambda ds: session_coordinator.bind_dataset(ds.home))
-    dataset.dataset_cleared.connect(session_coordinator.unbind)
 
     # An OME-Zarr export can take the session with it, moved into the exported pixels' coordinates (2026-10-22,
     # `storage/session_carry.py`). The Export tab calls `prepare` when the user starts an export; a finished export
@@ -1030,11 +1045,22 @@ def _build_histogram_panel(m: _Modules, image_panel: ImagePanel, ui_state: UiSta
 
 def _wire_file_menu(file_menu: QMenu, window: QMainWindow, m: _Modules, ui_state: UiStateStore) -> FileMenu:
     """File menu + the Dataset Manager window (2026-11-11; they replace the Workflow panel). The manager is built now,
-    hidden, so it hears the first `dataset_loaded` (`panels/dataset_manager/dialog.py`)."""
+    hidden, so it hears the first `dataset_loaded` (`panels/dataset_manager/dialog.py`). The saved RI settings
+    (Preferences) are applied here, before any dataset or session opens."""
     manager = DatasetManagerDialog(
-        m.dataset, m.selection, m.session_coordinator, cube_display=m.cube_display, ui_state=ui_state, parent=window
+        m.dataset, m.selection, m.session_coordinator, cube_display=m.cube_display, ui_state=ui_state, parent=window,
+        experiment_plan=m.experiment_plan,
     )
-    return FileMenu(file_menu, window, m.dataset, m.session_coordinator, manager)
+    actions = FileMenu(file_menu, window, m.dataset, m.session_coordinator, manager, experiment_plan=m.experiment_plan)
+    _apply_ri_settings(m, actions, float(read(ui_state, RI_WAVELENGTH_NM)), int(read(ui_state, RI_AGE_WARNING_DAYS)))
+    return actions
+
+
+def _apply_ri_settings(m: _Modules, file_actions: FileMenu, wavelength_nm: float, age_warning_days: int) -> None:
+    """Preferences -> Refractive indices: the wavelength is stamped on the next import (0 = not given); the age limit only colours the table."""
+    m.experiment_plan.ri_wavelength_nm = float(wavelength_nm) if wavelength_nm > 0 else None
+    if file_actions.manager.refractive is not None:
+        file_actions.manager.refractive.set_age_warning_days(int(age_warning_days))
 
 
 def _wire_analysis_scan(m: _Modules, row: AnalysisTab, ui_state: UiStateStore, startup: StartupTracker | None = None) -> None:
@@ -1462,6 +1488,7 @@ def _build_status_bar(
     # message on the bar's left side; the task indicator above is permanent, on the
     # right, so neither covers the other.
     file_actions.status_message.connect(status_bar.showMessage)
+    m.experiment_plan.ri_notice.connect(lambda message: status_bar.showMessage(message, 15000))  # RIs.txt imported / changed (15 s: easy to miss)
     m.roi_geometry_sync.status_changed.connect(status_bar.showMessage)
     roi_table_panel.status_message.connect(status_bar.showMessage)
     # A failed session write must reach the user, not only the log (30 s: long enough to be seen,
@@ -2038,7 +2065,10 @@ def build_main_window(
 
     # Edit -> Preferences...: reopen-last-dataset, the overlay cache size and the rest of the app-wide settings (2026-10-19;
     # they were in the Options menu, which is gone).
-    _wire_preferences(edit_menu, window, image_panel, writer, ui_state)
+    _wire_preferences(
+        edit_menu, window, image_panel, writer, ui_state,
+        apply_ri_settings=lambda wavelength_nm, age_days: _apply_ri_settings(m, file_actions, wavelength_nm, age_days),
+    )
 
     _wire_quit_persistence(window, m, writer, ui_state, layout_preset_manager)
     stages.done("preferences and quit wiring", "Opening the last dataset...")
@@ -2072,6 +2102,7 @@ def _wire_preferences(
     image_panel: ImagePanel,
     writer: _SettingsWriter,
     ui_state: UiStateStore,
+    apply_ri_settings: Callable[[float, int], None] = lambda _wavelength_nm, _age_days: None,
 ) -> QAction:
     """Edit -> Preferences... (Ctrl+, anywhere in the app): the app-wide settings that belong to no panel
     (`panels/preferences_dialog.py`; replaced the Options menu on 2026-10-19).
@@ -2089,6 +2120,8 @@ def _wire_preferences(
     def current() -> Preferences:
         return Preferences(
             reopen_last_dataset=bool(writer.settings.auto_reopen_last_dataset),
+            ri_wavelength_nm=float(read(ui_state, RI_WAVELENGTH_NM)),
+            ri_age_warning_days=int(read(ui_state, RI_AGE_WARNING_DAYS)),
             overlay_cache_mb=image_panel.overlay_cache_mb,
             gpu_drawing=image_panel.gpu_drawing,
             screen_resolution=str(read(ui_state, DISPLAY_RESOLUTION)),  # the saved choice (applied at the next start)
@@ -2100,6 +2133,11 @@ def _wire_preferences(
         if new.reopen_last_dataset != old.reopen_last_dataset:
             writer.persist(auto_reopen_last_dataset=new.reopen_last_dataset)
             changed.append("reopen_last_dataset")
+        if (new.ri_wavelength_nm, new.ri_age_warning_days) != (old.ri_wavelength_nm, old.ri_age_warning_days):
+            ui_state.set(RI_WAVELENGTH_NM.key, float(new.ri_wavelength_nm))
+            ui_state.set(RI_AGE_WARNING_DAYS.key, int(new.ri_age_warning_days))
+            apply_ri_settings(new.ri_wavelength_nm, new.ri_age_warning_days)
+            changed.append("refractive_index")
         if new.overlay_cache_mb != old.overlay_cache_mb:
             image_panel.set_overlay_cache_mb(new.overlay_cache_mb)
             changed.append("overlay_cache_mb")

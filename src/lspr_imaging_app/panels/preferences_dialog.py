@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QLabel,
@@ -42,6 +43,10 @@ class Preferences:
     """The values the dialog edits. The defaults are the app's own (pinned against `AppSettings` in the tests)."""
 
     reopen_last_dataset: bool = True
+    ri_wavelength_nm: float = 589.3
+    """The refractometer's wavelength, stamped on an imported RI table; 0 = not given. Default: the lab's Rudolph Research J357 (589.3 nm LED)."""
+    ri_age_warning_days: int = 7
+    """An RI measured more than this many days before the experiment is shown in amber (maintainer: 7)."""
     overlay_cache_mb: int = DEFAULT_BUDGET_MB
     gpu_drawing: bool = False
     """Draw the Image panel's canvas with the graphics card (OpenGL viewport; `image/gpu_view.py`). Off by default since 2026-11-11:
@@ -88,6 +93,27 @@ class PreferencesDialog(QDialog):
         self.reopen_check.setToolTip("When the app starts, load the dataset that was open when it was last closed.")
         general_layout = QVBoxLayout(general)
         general_layout.addWidget(self.reopen_check)
+
+        refractive = QGroupBox("Refractive indices (RIs.txt)", self)
+        self.ri_wavelength_spin = QDoubleSpinBox(refractive)
+        self.ri_wavelength_spin.setRange(0.0, 2000.0)
+        self.ri_wavelength_spin.setDecimals(1)
+        self.ri_wavelength_spin.setSuffix(" nm")
+        self.ri_wavelength_spin.setSpecialValueText("Not given")  # shown at 0: no wavelength is assumed
+        self.ri_wavelength_spin.setToolTip(
+            "The wavelength the refractometer measures at (default: 589.3 nm, the LED of the lab's Rudolph Research J357). A refractive "
+            "index depends on the wavelength, so it is saved with every RI table when it is imported; changing it here changes "
+            "only tables imported afterwards. 0 = not given."
+        )
+        self.ri_age_spin = QSpinBox(refractive)
+        self.ri_age_spin.setRange(0, 3650)
+        self.ri_age_spin.setSuffix(" days")
+        self.ri_age_spin.setToolTip(
+            "An RI measured more than this many days before the experiment is shown in amber in File -> Dataset Manager -> Experiment plan."
+        )
+        refractive_form = QFormLayout(refractive)
+        refractive_form.addRow("Refractometer wavelength:", self.ri_wavelength_spin)
+        refractive_form.addRow("Warn when an RI is older than:", self.ri_age_spin)
 
         memory = QGroupBox("Performance and memory", self)
         self.cache_combo = QComboBox(memory)
@@ -221,6 +247,7 @@ class PreferencesDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.addWidget(general)
+        layout.addWidget(refractive)
         layout.addWidget(memory)
         layout.addWidget(parallel)
         layout.addWidget(self.button_box)
@@ -231,6 +258,8 @@ class PreferencesDialog(QDialog):
         """What the dialog shows now (what OK would apply)."""
         return Preferences(
             reopen_last_dataset=self.reopen_check.isChecked(),
+            ri_wavelength_nm=float(self.ri_wavelength_spin.value()),
+            ri_age_warning_days=int(self.ri_age_spin.value()),
             overlay_cache_mb=int(self.cache_combo.currentData()),
             gpu_drawing=self.gpu_check.isChecked(),
             screen_resolution=str(self.resolution_combo.currentData()),
@@ -259,6 +288,8 @@ class PreferencesDialog(QDialog):
 
     def _show(self, preferences: Preferences) -> None:
         self.reopen_check.setChecked(preferences.reopen_last_dataset)
+        self.ri_wavelength_spin.setValue(float(preferences.ri_wavelength_nm))
+        self.ri_age_spin.setValue(int(preferences.ri_age_warning_days))
         index = self.cache_combo.findData(int(preferences.overlay_cache_mb))
         if index >= 0:
             self.cache_combo.setCurrentIndex(index)
