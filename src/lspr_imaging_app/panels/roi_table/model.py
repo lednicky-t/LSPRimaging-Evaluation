@@ -48,7 +48,7 @@ from .rows import (
     format_length,
     sort_rows,
 )
-from .step_columns import DEFAULT_DECIMALS, DISPLAY_BOTH, DISPLAY_MEAN, cell_tooltip, format_cell, sort_value, table_decimals
+from .step_columns import DEFAULT_DECIMALS, DISPLAY_BOTH, DISPLAY_MEAN, cell_tooltip, format_cell, is_excess, sort_value, table_decimals
 
 KIND_ROLE = Qt.ItemDataRole.UserRole + 1
 """``"group"`` or ``"roi"``."""
@@ -290,7 +290,7 @@ class RoiTreeModel(QAbstractItemModel):
 
     def _mode_of(self, column: StepColumn) -> str:
         """What a column shows: the chosen display, except a column with no spread (signal to noise) which has only its value, whatever is chosen."""
-        return self._display if column.has_sd else DISPLAY_MEAN
+        return self._display if column.has_sd or is_excess(self._display) else DISPLAY_MEAN  # (in an excess mode a ratio column is blank: nothing predicts it)
 
     def _step_sort(self) -> StepSort | None:
         """The values the active step column sorts by, or None when a fixed column sorts."""

@@ -45,6 +45,9 @@ from .model import RoiTreeModel
 from .rows import COLUMN_COUNT
 from .step_columns import (
     DISPLAY_BOTH,
+    DISPLAY_EXCESS,
+    DISPLAY_EXCESS_U,
+    DISPLAY_EXCESS_Z,
     DISPLAY_MEAN,
     DISPLAY_MEAN_SEM,
     DISPLAY_SEM,
@@ -67,6 +70,9 @@ _DISPLAY_HTML = {
     DISPLAY_BOTH: "&mu; &plusmn; &sigma;",
     DISPLAY_SEM: "SEM",
     DISPLAY_MEAN_SEM: "&mu; &plusmn; SEM",
+    DISPLAY_EXCESS: "&mu; &minus; &mu;*",
+    DISPLAY_EXCESS_U: "&mu; &minus; &mu;* &plusmn; u",
+    DISPLAY_EXCESS_Z: "(&mu; &minus; &mu;*) / u",
 }
 
 
@@ -112,7 +118,8 @@ class StepColumnControls(QObject):
         self.display_pick.finish()
         self.display_pick.setCurrentIndex(self.display_pick.findData(DISPLAY_BOTH))
         self.display_pick.setToolTip(
-            "What the step columns show: the mean, the standard deviation (SD), the standard error of the mean (SEM = SD / sqrt(cubes in the step)), or the mean with one of them."
+            "What the step columns show: the mean, the standard deviation (SD), the standard error of the mean (SEM = SD / sqrt(cubes in the step)), or the mean with one of them; "
+            "or measured minus the bulk prediction (μ* from the row's own S_bulk and the step's refractive index), with its uncertainty u or divided by it."
         )
         self.subtract = IconToggle(
             subtract_icon,
@@ -493,7 +500,7 @@ class StepColumnControls(QObject):
 
         def values(cells):
             current = [c.current for c in cells if c is not None]
-            return [None if c is None else (c.n, c.mean, c.sd, c.sem) for c in cells], (None if not current else all(current))
+            return [None if c is None else (c.n, c.mean, c.sd, c.sem, c.excess, c.excess_u) for c in cells], (None if not current else all(current))
 
         rows = []
         for group, members in self._model.display_order():

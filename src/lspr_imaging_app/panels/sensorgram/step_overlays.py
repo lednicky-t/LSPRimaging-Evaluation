@@ -22,7 +22,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 
 import numpy as np
-from PyQt6.QtCore import QObject
+from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtWidgets import QWidget
 
 from ...analysis.baseline_drift import uses_anchor_steps, window_step_regions
@@ -61,6 +61,7 @@ Drawn = tuple[StoredScan, list[Series]]  # the scan and the lines last drawn
 
 
 class StepOverlays(QObject):
+    bulk_inputs_changed = pyqtSignal()  # after every refresh: the lines drawn, the steps or their RIs may have changed (the S_bulk plot reads `bulk_inputs`)
     def __init__(
         self,
         parent: QWidget,
@@ -95,6 +96,7 @@ class StepOverlays(QObject):
         self._current_cube = current_cube
         self._edit_has_axis = False  # what the last full update of the Edit group found: traces drawn, so the plan has an axis
         self._edit_cursor_flags = (False, False)  # (the cursor is on the plot, it is inside a step) as the Edit group last showed them
+        self._numbers_for_plot = False  # the S_bulk plot is open (`set_numbers_for_plot`)
         self.plan_controls = PlanBarControls(parent)
         self.plan_controls.set_available(False)  # until a dataset with steps is open
         self.stats_controls = StatsTableControls(parent)
@@ -185,8 +187,21 @@ class StepOverlays(QObject):
         return self._plan is not None and stats.smooth_within_steps and stats.smoothing_method != "none" and self._plan.has_steps()
 
     def stats_wanted(self) -> bool:
-        """The step statistics table is on and the dataset has experiment steps: the lines then carry their mean +/- SD per step."""
-        return self.stats_controls.settings().visible and self._plan is not None and self._plan.has_steps()
+        """The step statistics table is on (or the S_bulk plot is open) and the dataset has experiment steps: the lines then carry their mean +/- SD per step."""
+        return (self.stats_controls.settings().visible or self._numbers_for_plot) and self._plan is not None and self._plan.has_steps()
+
+    def set_numbers_for_plot(self, on: bool) -> None:
+        """The S_bulk plot is open: the lines must carry their per-step numbers even with the step table off. Asks for a redraw when they do not yet."""
+        self._numbers_for_plot = bool(on)
+        drawn = self._drawn()
+        if on and drawn is not None and any(s.step_values is None for s in drawn[1]):
+            self._schedule_redraw()
+
+    def bulk_inputs(self) -> tuple[list, tuple, str]:
+        """(lines drawn, the plan's step references in order = the columns of their step numbers, the y-axis label) for the S_bulk plot."""
+        drawn = self._drawn()
+        steps = () if self._plan is None else tuple(step.ref for step in self._plan.steps())
+        return ([] if drawn is None else list(drawn[1])), steps, self._plot._axis_labels[1]
 
     def step_inputs(self, stored: StoredScan) -> tuple[np.ndarray | None, StepMembership | None]:
         """What the request needs from the experiment steps: (the pieces to smooth on their own, one label per cube; which cubes belong to which step, for the numbers of the
@@ -295,6 +310,7 @@ class StepOverlays(QObject):
             self._plot.set_plan((), settings)
             self.show_stats_table((), [], bool(steps))
             self._update_edit_tools(has_axis=False)
+            self.bulk_inputs_changed.emit()
             return
         axis, _cubes = found
         _stored, series = self._drawn()
@@ -313,6 +329,7 @@ class StepOverlays(QObject):
         self._show_evaluation(steps, [bar.color for bar in bars])
         self.show_stats_table(bars, series, True)
         self._update_edit_tools(has_axis=True)
+        self.bulk_inputs_changed.emit()
 
     def _update_edit_tools(self, has_axis: bool | None = None) -> None:
         """The Edit group: which of add / remove / merge / split / restore can act on the steps selected on the bar and the cursor now. `has_axis`: the traces drawn give the plan an

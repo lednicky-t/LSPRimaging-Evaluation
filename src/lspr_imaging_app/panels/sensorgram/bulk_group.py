@@ -5,8 +5,8 @@ choose how the fit weights them. The numbers are shown in the ROI / Groups table
 
 Layout: one icon button that opens a pop-up (a `QWidgetAction` in a `QMenu`, like the Evaluation button)::
 
-    Steps in the S_bulk set
-      1 · H2O           1.33300
+    Step for S_bulk                        (bulk is a subscript; tool tip "Bulk sensitivity")
+      1 · H2O          1.33300
       3 · 10perEG       1.34531
       5 · 20perEG       no RI          (a step whose solution has no imported RI: left out of the fit)
     ------------------------------
@@ -21,9 +21,9 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from PyQt6.QtCore import QObject, QSize, pyqtSignal
+from PyQt6.QtCore import QObject, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QIcon
-from PyQt6.QtWidgets import QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QMenu, QToolButton, QVBoxLayout, QWidget, QWidgetAction
+from PyQt6.QtWidgets import QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QMenu, QToolButton, QVBoxLayout, QWidget, QWidgetAction
 
 from lspr_ui import get_active_theme, load_tabler_icon
 
@@ -34,6 +34,8 @@ from ..ribbon_icon_size import ICON_SIZE
 from ..ui_state import UiStateStore
 from .plan_icons import bulk_picture
 
+TITLE_HTML = "Step for S<sub>bulk</sub>"
+TITLE_TIP = "Bulk sensitivity"
 BUTTON_TIP = (
     "S_bulk: the bulk sensitivity, the slope of the step means against the refractive index of each step's solution (nm/RIU). "
     "Click to see the steps in the fit and to add the steps selected on the plan bar. The numbers are in the ROI / Groups table's S_bulk column."
@@ -48,6 +50,10 @@ WEIGHTING_TIP = (
     "Equal: every step counts the same; useful to compare when one step dominates."
 )
 EMPTY_TEXT = "No steps yet. Select steps on the plan bar and click +."
+PLOT_TIP = (
+    "A floating window with the step means against the refractive index: the fitted bulk line with its uncertainty, filled points for the steps in the set and hollow "
+    "points for the other steps with a refractive index (how far they sit from the line is the ROI table's measured − predicted)."
+)
 
 _RENDER_SIZE = ICON_SIZE * 2
 _STROKE_WIDTH = 2.1
@@ -58,6 +64,7 @@ class BulkControls(QObject):
     remove_requested = pyqtSignal()
     clear_requested = pyqtSignal()
     weighting_changed = pyqtSignal(str)
+    plot_toggled = pyqtSignal(bool)  # the floating S_bulk plot (2026-11-12, `bulk_plot.py`) shown / hidden
 
     def __init__(self, parent: QWidget) -> None:
         super().__init__(parent)
@@ -72,7 +79,9 @@ class BulkControls(QObject):
         outer = QVBoxLayout(self._panel)
         outer.setContentsMargins(10, 8, 10, 8)
         outer.setSpacing(6)
-        title = QLabel("Steps in the S_bulk set", self._panel)
+        title = QLabel(TITLE_HTML, self._panel)
+        title.setTextFormat(Qt.TextFormat.RichText)  # a real subscript: S<sub>bulk</sub>
+        title.setToolTip(TITLE_TIP)
         title.setStyleSheet("font-weight: bold;")
         outer.addWidget(title)
         self._grid = QGridLayout()
@@ -95,6 +104,9 @@ class BulkControls(QObject):
         self._weighting.setToolTip(WEIGHTING_TIP)
         weighting_row.addWidget(self._weighting, 1)
         outer.addLayout(weighting_row)
+        self.plot_toggle = QCheckBox("Show S_bulk plot", self._panel)  # a check box draws plain text: no subscript here
+        self.plot_toggle.setToolTip(PLOT_TIP)
+        outer.addWidget(self.plot_toggle)
         buttons = QHBoxLayout()
         buttons.setContentsMargins(0, 0, 0, 0)
         buttons.setSpacing(2)
@@ -115,6 +127,7 @@ class BulkControls(QObject):
         self._remove.clicked.connect(lambda _checked=False: self.remove_requested.emit())
         self._clear.clicked.connect(lambda _checked=False: self.clear_requested.emit())
         self._weighting.currentIndexChanged.connect(lambda _i: self.weighting_changed.emit(self.weighting()))
+        self.plot_toggle.toggled.connect(self.plot_toggled.emit)
         self._remove.setToolTip(REMOVE_TIP)
         self._clear.setToolTip(CLEAR_TIP)
         self.set_state((), has_selection=False, selection_in_set=False)
@@ -128,6 +141,12 @@ class BulkControls(QObject):
 
     def weighting(self) -> str:
         return self._weighting.currentData() or WEIGHT_INVERSE_VARIANCE
+
+    def set_plot_shown(self, shown: bool) -> None:
+        """The window was closed by its own title bar (or opened elsewhere): the check box follows without asking again."""
+        self.plot_toggle.blockSignals(True)
+        self.plot_toggle.setChecked(shown)
+        self.plot_toggle.blockSignals(False)
 
     def set_available(self, available: bool) -> None:
         self._button.setEnabled(bool(available))

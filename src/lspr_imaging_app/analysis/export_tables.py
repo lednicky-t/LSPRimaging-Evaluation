@@ -91,6 +91,8 @@ def roi_step_table(
     ``(kind "group" | "roi", group name, ROI id or None, [(n, value, sd, sem) or None per column], current)``; `current` is True / False for numbers that are / are not up to
     date and None for a row that was never calculated (its cells are empty). A column without a spread (a signal-to-noise ratio) has only its value, in every mode. Full precision;
     an empty cell is no number."""
+    if mode in ("excess", "excess_u", "excess_z"):
+        return _excess_table(steps, rows)
     spread = "sem" if mode in ("sem", "mean_sem") else "sd"
     with_value = mode not in ("std", "sem")
     with_spread = mode != "mean"
@@ -107,7 +109,7 @@ def roi_step_table(
     for kind, group, roi_id, values, current in rows:
         cells: list[object] = [kind, group, roi_id]
         for value, (_label, _word, _unit, has_sd) in zip(values, steps):
-            n, mean, sd, sem = value if value is not None else (None, None, None, None)
+            n, mean, sd, sem = value[:4] if value is not None else (None, None, None, None)
             if with_value or not has_sd:
                 cells.append(mean)
             if with_spread and has_sd:
@@ -119,6 +121,32 @@ def roi_step_table(
     stale = sum(1 for row in rows if row[4] is False)
     if stale:
         notes.append(f"{stale} row{'s' if stale != 1 else ''} out of date (marked 'no' in the last column): the steps, the statistics or the scan changed after they were calculated.")
+    return Table(tuple(header), tuple(out), tuple(notes))
+
+
+def _excess_table(steps, rows) -> Table:
+    """`roi_step_table` in an excess mode (2026-11-12): per column measured minus the bulk prediction, its uncertainty, and the two divided, whichever excess mode is shown
+    (the other two are one division away). A column with no excess (S_bulk, a ratio) is left out; a cell with none is empty (the tool tip and the table say NA and why)."""
+    header: list[str] = ["row", "group", "roi_id"]
+    keep = [has_sd and word != "slope" for _label, word, _unit, has_sd in steps]
+    for (label, _word, unit, _has_sd), kept in zip(steps, keep):
+        if kept:
+            header.extend((f"{label} measured - predicted ({unit})", f"{label} u ({unit})", f"{label} (measured - predicted) / u", f"{label} n"))
+    header.append("up_to_date")
+    out = []
+    for kind, group, roi_id, values, current in rows:
+        cells: list[object] = [kind, group, roi_id]
+        for value, kept in zip(values, keep):
+            if not kept:
+                continue
+            n, e, u = (None, None, None) if value is None or len(value) < 6 else (value[0], value[4], value[5])
+            finite_e = e is not None and math.isfinite(e)
+            finite_u = u is not None and math.isfinite(u) and u > 0
+            cells.extend((e if finite_e else None, u if finite_u else None, e / u if finite_e and finite_u else None, n))
+        cells.append("" if current is None else ("yes" if current else "no"))
+        out.append(tuple(cells))
+    notes = ["measured - predicted: the step's mean (or a difference S - B) minus what the row's own bulk sensitivity predicts from the refractive index; "
+             "positive = more shift than the bulk refractive index explains. Empty = no refractive index for the step's solution, or no S_bulk."]
     return Table(tuple(header), tuple(out), tuple(notes))
 
 

@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -61,6 +61,13 @@ class BulkFit:
     n_distinct_ri: int
     weighting: str
     reason: str = ""  # empty when a slope was found
+    # What a prediction at another RI needs (`line_weights`, `excess`): the points used, in the order of the input (``used`` marks which input points those are),
+    # the weights that placed the line (1/s^2, or 1), each point's variance (s^2 with the RI part; NaN where unknown), and how much the scatter raised u (u / u_data).
+    used: tuple[bool, ...] = ()
+    x: tuple[float, ...] = ()
+    w: tuple[float, ...] = ()
+    var: tuple[float, ...] = ()
+    inflation: float = float("nan")
 
     @property
     def ok(self) -> bool:
@@ -96,6 +103,7 @@ def fit_bulk(
     use = np.isfinite(x) & np.isfinite(yy)
     if weighting == WEIGHT_INVERSE_VARIANCE:
         use &= np.isfinite(sy) & (sy > 0.0)
+    used = tuple(bool(u) for u in use)
     x, yy, sy, sx = x[use], yy[use], sy[use], sx[use]
     n = int(x.size)
     distinct = int(np.unique(x).size)
@@ -103,8 +111,10 @@ def fit_bulk(
         return _nan_fit(n, distinct, weighting, "needs steps of at least two solutions with different refractive indices")
 
     if weighting == WEIGHT_EQUAL:
-        return _fit_equal(x, yy, sy, sx, n, distinct)
-    return _fit_weighted(x, yy, sy, sx, n, distinct)
+        fit = _fit_equal(x, yy, sy, sx, n, distinct)
+    else:
+        fit = _fit_weighted(x, yy, sy, sx, n, distinct)
+    return replace(fit, used=used)
 
 
 def _weighted_line(x: np.ndarray, y: np.ndarray, w: np.ndarray) -> tuple[float, float, float]:
@@ -133,7 +143,11 @@ def _fit_weighted(x: np.ndarray, y: np.ndarray, sy: np.ndarray, sx: np.ndarray, 
         slope, intercept, sxx = _weighted_line(x, y, 1.0 / var)
     u_data = 1.0 / math.sqrt(sxx)
     chi2_red = _chi2_red(x, y, var, slope, intercept, n)
-    return BulkFit(slope, intercept, _birge(u_data, chi2_red), u_data, chi2_red, n, distinct, WEIGHT_INVERSE_VARIANCE)
+    u = _birge(u_data, chi2_red)
+    return BulkFit(
+        slope, intercept, u, u_data, chi2_red, n, distinct, WEIGHT_INVERSE_VARIANCE,
+        x=tuple(x.tolist()), w=tuple((1.0 / var).tolist()), var=tuple(var.tolist()), inflation=u / u_data,
+    )
 
 
 def _fit_equal(x: np.ndarray, y: np.ndarray, sy: np.ndarray, sx: np.ndarray, n: int, distinct: int) -> BulkFit:
@@ -147,7 +161,11 @@ def _fit_equal(x: np.ndarray, y: np.ndarray, sy: np.ndarray, sx: np.ndarray, n: 
         residual = y - (slope * x + intercept)
         u_scatter = math.sqrt(float((residual * residual).sum()) / (n - 2) / sxx)
     finite = [u for u in (u_data, u_scatter) if math.isfinite(u)]
-    return BulkFit(slope, intercept, max(finite) if finite else float("nan"), u_data, chi2_red, n, distinct, WEIGHT_EQUAL)
+    u = max(finite) if finite else float("nan")
+    return BulkFit(
+        slope, intercept, u, u_data, chi2_red, n, distinct, WEIGHT_EQUAL,
+        x=tuple(x.tolist()), w=tuple([1.0] * n), var=tuple(var.tolist()), inflation=u / u_data if math.isfinite(u_data) and u_data > 0 else float("nan"),
+    )
 
 
 def _chi2_red(x: np.ndarray, y: np.ndarray, var: np.ndarray, slope: float, intercept: float, n: int) -> float:
@@ -162,3 +180,58 @@ def _birge(u_data: float, chi2_red: float) -> float:
     if not math.isfinite(chi2_red):
         return u_data
     return u_data * max(1.0, math.sqrt(chi2_red))
+
+
+# -- how far a measured value is from the bulk prediction (2026-11-12) --------------------------------------------------------------------
+
+
+def line_weights(fit: BulkFit, ri: float) -> np.ndarray:
+    """The line at `ri` as a sum over the fitted points' means: ``fit_line(ri) = sum a_j y_j``, returns ``a`` (one per point used, the order of ``fit.x``).
+    The line is linear in the means: ``a_j = w_j / W + (ri - x_w) w_j (x_j - x_w) / Sxx_w`` (W = sum w, x_w the weighted mean RI)."""
+    x = np.asarray(fit.x, dtype=np.float64)
+    w = np.asarray(fit.w, dtype=np.float64)
+    total = float(w.sum())
+    xw = float((w * x).sum()) / total
+    dx = x - xw
+    sxx = float((w * dx * dx).sum())
+    return w / total + (float(ri) - xw) * w * dx / sxx
+
+
+@dataclass(frozen=True)
+class Excess:
+    """Measured minus predicted, and its standard uncertainty (NaN when a point's uncertainty is unknown)."""
+
+    value: float
+    u: float
+    predicted: float
+
+
+def excess(fit: BulkFit, terms: dict[object, float], points: dict[object, tuple[float, float, float, float]], fit_keys: list[object]) -> Excess:
+    """``sum c_k (y_k - fit_line(x_k))`` for the terms ``{key: c_k}``: a step (``{step: 1}``) or a difference of two (``{signal: 1, baseline: -1}``, where the
+    intercept cancels and the prediction is ``S_bulk * (RI_S - RI_B)``).
+
+    `points`: ``{key: (RI, its uncertainty or NaN, mean, uncertainty of the mean)}`` for every key in `terms`; `fit_keys`: the keys of the fitted points in the
+    order of ``fit.x``. Everything is a linear combination of independent step means, ``sum g_i y_i``, so the variance is ``sum g_i^2 var_i`` exactly: a step that
+    is itself one of the fitted points is correlated with the line, and this counts it (its excess is the fit residual, smaller than sqrt(SEM^2 + u_line^2)).
+    The RI uncertainty of a term outside the fit adds ``(c_k * slope * u_RI)^2``; inside the fit it is already in that point's variance. The result is raised by
+    ``fit.inflation`` as the slope's own u is (the scatter about the line)."""
+    g: dict[object, float] = {}
+    predicted = 0.0
+    var_extra = 0.0
+    for key, c in terms.items():
+        ri, ri_u, mean, _u = points[key]
+        g[key] = g.get(key, 0.0) + c
+        a = line_weights(fit, ri)
+        for fk, aj in zip(fit_keys, a):
+            g[fk] = g.get(fk, 0.0) - c * float(aj)
+        predicted += c * (fit.slope * ri + fit.intercept)
+        if key not in fit_keys and math.isfinite(ri_u):
+            var_extra += (c * fit.slope * ri_u) ** 2
+    measured = sum(c * points[key][2] for key, c in terms.items())
+    var_of = {fk: v for fk, v in zip(fit_keys, fit.var)}
+    total = var_extra
+    for key, gi in g.items():
+        var = var_of[key] if key in var_of else points[key][3] ** 2
+        total += gi * gi * var
+    u = math.sqrt(total) * fit.inflation if math.isfinite(total) and math.isfinite(fit.inflation) else float("nan")
+    return Excess(measured - predicted, u, predicted)

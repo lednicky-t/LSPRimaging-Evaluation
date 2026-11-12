@@ -34,6 +34,38 @@ What it is: per ROI or group, the slope of the step means against the refractive
 | Weighting hand-over | `app_rewrite._follow_plan_bar` |
 | Tests | `tests/unit/test_lspri_bulk_sensitivity.py`, `tests/integration/test_lspri_bulk_set.py`, S_bulk tests in `test_lspri_step_table.py` and `test_lspri_plan_bar_gestures.py` |
 
+## Measured minus predicted (μ − μ*), 2026-11-12
+
+Does a step follow the bulk line, or does it shift more (binding, a higher-RI layer)? Three more display modes of the ROI / Groups table: **μ − μ\***,
+**μ − μ\* ± u**, **(μ − μ\*) / u**. Maintainer decisions: measured − predicted (positive = more than bulk); every step shown alike, also the steps in the fit
+(their residual); a step whose solution has no RI shows **NA** (the tool tip says to add it to RIs.txt: there is no step manager yet); the S_bulk and S/N
+columns are blank in these modes.
+
+- Step column: μ* = the row's own line at the step's RI (S_bulk × RI + intercept, `bulk_sensitivity.line_weights`). Difference column (S − B): μ* = S_bulk × (RI_S − RI_B), the intercept cancels.
+- u: the excess is a linear combination of independent step means, Σ gᵢ yᵢ, so u² = Σ gᵢ² varᵢ exactly (`bulk_sensitivity.excess`): a step that is one of the fitted points is
+  correlated with the line and gets the residual's smaller u (σ²(1 − h) for equal weights), not √(SEM² + u_line²). A step outside the fit adds (slope × its RI Std)².
+  Raised by the same factor as S_bulk's u (`BulkFit.inflation`). With two fitted steps their own residuals are 0 ± 0 (the line passes through both): (μ − μ*)/u shows NA.
+- Coverage on synthetic data (5 steps fitted, 4000 runs, everything on the line): |excess| ≤ u in 73.8 % (a step outside the fit), 73.0 % (a fitted step), 73.7 % (a difference).
+- Code: `analysis/bulk_sensitivity.py` (`line_weights`, `excess`), `analysis/step_table.py` (`bulk_excess`), `selection/step_table_module.py` (`_with_excess`,
+  `_row_bulk` = one fit per row, cached by the row's numbers; `CellValue.excess / excess_u / excess_note / predicted`), `panels/roi_table/step_columns.py`
+  (`DISPLAY_EXCESS*`, `_excess_text`, `_excess_lines` in every step / difference tool tip), `analysis/export_tables._excess_table` (export: excess, u, excess/u, n).
+- The prediction is only as good as the RI of the step's own solution: for a protein step, measure the protein solution, not only its buffer.
+
+## The S_bulk plot (step 4), 2026-11-12
+
+A **floating window**, not a panel (maintainer: a rare check): Sensorgram > Experimental plan > Evaluation > S_bulk > "Show S_bulk plot" (window title "Bulk sensitivity"; the pop-up's heading is "Step for S<sub>bulk</sub>", tool tip "Bulk sensitivity"). x = RI (at the
+stamped wavelength), y = the step mean as the Sensorgram's y axis says (shift with Subtract on). Per line: filled points + SEM bars for the steps in the S_bulk set, hollow
+points for the other steps with an RI (their distance from the line is the table's μ − μ*), the fitted line with a band = its own uncertainty, the legend
+"name: S_bulk = … ± … nm/RIU, χ²red …". "Lines": the lines drawn on the Sensorgram, or **All groups** (the ROI table's group rows, with a "Calculate groups" button
+when they are not calculated or out of date). Save data writes `s_bulk_points` (every step with its excess and u) and `s_bulk_fits`. Size, place and the Lines choice
+are remembered.
+
+- Code: `panels/sensorgram/bulk_plot.py` (`BulkPlotWindow`, `lines_from_series`), wired by `app_rewrite._wire_bulk_plot` (a child window of the main window, so it
+  closes with the app; updated only while shown; theme switch via `window.bulk_plot`).
+- While it is open the Sensorgram's lines carry their per-step numbers even with its step table off (`StepOverlays.set_numbers_for_plot`, part of `stats_wanted`); it
+  is told of every refresh by `StepOverlays.bulk_inputs_changed`. Group rows: `StepTableModule.group_numbers`.
+- At most 12 lines are drawn (the rest are named in the status line).
+
 ## Known limits
 
 - The step mean is the whole step (as the step columns): the arrival transient of a new solution is in it. Trimming (`step_stats.StepWindow`) is not wired.

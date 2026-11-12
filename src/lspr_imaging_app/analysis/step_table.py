@@ -35,7 +35,7 @@ from .scan_trace import (
     build_series,
 )
 from .baseline_drift import window_step_regions
-from .bulk_sensitivity import WEIGHT_INVERSE_VARIANCE, BulkFit, fit_bulk
+from .bulk_sensitivity import WEIGHT_INVERSE_VARIANCE, BulkFit, Excess, excess, fit_bulk
 from .settings import MetricSettings, StatisticsSettings
 from .step_stats import StepMembership
 
@@ -145,6 +145,10 @@ class BulkValues:
     sem: float
     fit_sem: BulkFit
     fit_sd: BulkFit
+    keys: tuple = ()  # the step references handed to the fit, in its input order (``fit_sem.used`` marks the ones it used)
+
+    def fit_keys(self) -> list:
+        return [key for key, used in zip(self.keys, self.fit_sem.used) if used]
 
 
 def bulk_values(numbers: RowNumbers, points: Sequence[BulkPoint], weighting: str = WEIGHT_INVERSE_VARIANCE) -> BulkValues:
@@ -154,10 +158,11 @@ def bulk_values(numbers: RowNumbers, points: Sequence[BulkPoint], weighting: str
     Two fits of the same points: with each step's SEM as its uncertainty (the slope shown, and ``sem``: how well the slope is known, which shrinks with longer steps) and with its
     SD (``sd``: the uncertainty single-cube noise would give, as the SD of the other columns does not shrink with more cubes). With weighting the two can place the line
     a little differently (1/SEM^2 = n/SD^2 also counts the cubes); the value shown is always the SEM one."""
-    ri, ri_u, mean, sd, sem = [], [], [], [], []
+    ri, ri_u, mean, sd, sem, keys = [], [], [], [], [], []
     for point in points:
         if point.ref not in numbers.refs:
             continue
+        keys.append(point.ref)
         value = numbers.value_at(point.ref)
         ri.append(point.ri)
         ri_u.append(point.ri_u)
@@ -166,7 +171,27 @@ def bulk_values(numbers: RowNumbers, points: Sequence[BulkPoint], weighting: str
         sem.append(value.sem)
     fit_sem = fit_bulk(ri, mean, sem, ri_u, weighting=weighting)
     fit_sd = fit_bulk(ri, mean, sd, ri_u, weighting=weighting)
-    return BulkValues(fit_sem.n_points, fit_sem.slope, fit_sd.u, fit_sem.u, fit_sem, fit_sd)
+    return BulkValues(fit_sem.n_points, fit_sem.slope, fit_sd.u, fit_sem.u, fit_sem, fit_sd, tuple(keys))
+
+
+def bulk_excess(numbers: RowNumbers, values: BulkValues, terms: Mapping[object, tuple[float, float, float]]) -> Excess | None:
+    """Measured minus what the row's own bulk sensitivity predicts (2026-11-12) for a step (``{ref: (1, RI, RI uncertainty)}``) or the difference of two
+    (``{signal: (1, ...), baseline: (-1, ...)}``), with its uncertainty from the steps' SEMs (`bulk_sensitivity.excess`). None when the row has no slope or no number in
+    one of the steps. The means are the row's numbers as the other columns show them (Subtract on or off: the line is fitted to the same means)."""
+    fit = values.fit_sem
+    if not fit.ok or any(ref not in numbers.refs for ref in terms):
+        return None
+    points = {}
+    for ref, (_c, ri, ri_u) in terms.items():
+        value = numbers.value_at(ref)
+        if not math.isfinite(value.mean):
+            return None
+        points[ref] = (ri, ri_u, value.mean, value.sem)
+    for ref in values.fit_keys():  # a fitted point's mean, in case the terms do not name it (its variance comes from the fit)
+        if ref not in points:
+            value = numbers.value_at(ref)
+            points[ref] = (float("nan"), float("nan"), value.mean, value.sem)
+    return excess(fit, {ref: c for ref, (c, _ri, _u) in terms.items()}, points, values.fit_keys())
 
 
 @dataclass(frozen=True)

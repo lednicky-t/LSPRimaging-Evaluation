@@ -30,10 +30,11 @@ the traces a cancelled or superseded run finished are kept. Nothing here shows a
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -52,6 +53,7 @@ from ..analysis.step_table import (
     RowNumbers,
     StepTableNumbers,
     StepValue,
+    bulk_excess,
     bulk_values,
     compare_values,
     compute_step_numbers,
@@ -138,6 +140,10 @@ class CellValue:
     current: bool  # False: computed from inputs that have changed since
     sem: float = float("nan")  # standard error of the mean, SD / sqrt(n) (`step_table.sem_of`); for a difference the two steps' SEMs added in quadrature
     bulk: object | None = None  # the S_bulk column: `step_table.BulkValues` (both fits, for the tool tip)
+    excess: float = float("nan")  # measured minus the row's own bulk prediction (2026-11-12): a step column, or a difference column (S - B)
+    excess_u: float = float("nan")  # its standard uncertainty (from the steps' SEMs, raised as S_bulk's u is)
+    excess_note: str = ""  # why there is no excess where one could be ("NA ..."), shown as NA; empty where the column has none (S_bulk, S/N)
+    predicted: float = float("nan")  # the prediction itself, for the tool tip
 
 
 @dataclass(frozen=True)
@@ -210,6 +216,7 @@ class StepTableModule(QObject):
         self._compare: tuple[CompareSpec, ...] = ()
         self._compare_uid = 0
         self._bulk_weighting = WEIGHT_INVERSE_VARIANCE
+        self._bulk_cache: dict[int, tuple] = {}  # id(RowNumbers) -> (numbers, key, BulkValues): one fit per row, not per cell
         self._title_mode = MODE_WHOLE
         self._separators: tuple[str, ...] = DEFAULT_SEPARATORS
         self._scan_generation = 0  # a new scan file: whatever was computed from the old one is out of date
@@ -399,6 +406,14 @@ class StepTableModule(QObject):
         stamp = self._stamp(group=False, members=None)
         return self._compare_cell(row, ref, stamp) if is_compare_ref(ref) else self._cell(row, ref, stamp)
 
+    def group_numbers(self, key: str | None, members: Sequence[int]) -> tuple[RowNumbers, bool] | None:
+        """A group row's numbers in every step and whether they are current; None before it was calculated. For a reader that fits the steps itself (the S_bulk plot)."""
+        row = self._groups.get(key)
+        if row is None:
+            return None
+        stamp = self._stamp(group=True, members=tuple(sorted(int(r) for r in members)))
+        return row.numbers, stamp is not None and row.stamp == stamp
+
     def group_cell(self, key: str | None, members: Sequence[int], ref: object) -> CellValue | None:
         row = self._groups.get(key)
         if row is None:
@@ -421,13 +436,56 @@ class StepTableModule(QObject):
         if base is None or signal is None or base.ref not in row.numbers.refs or signal.ref not in row.numbers.refs:
             return None
         n, value, sd, sem = compare_values(spec.op, row.numbers.value_at(base.ref), row.numbers.value_at(signal.ref))
-        return CellValue(n, value, sd, current=stamp is not None and row.stamp == stamp, sem=sem)  # current exactly when the row's numbers are (they are all the cell is made of)
+        cell = CellValue(n, value, sd, current=stamp is not None and row.stamp == stamp, sem=sem)  # current exactly when the row's numbers are (they are all the cell is made of)
+        if spec.op == OP_DIFFERENCE and math.isfinite(value):
+            return self._with_excess(cell, row, {signal.ref: 1.0, base.ref: -1.0})  # the shift beyond S_bulk * (RI_S - RI_B)
+        return cell
 
     def _cell(self, row: _Row, ref: object, stamp: tuple | None) -> CellValue | None:
         if ref not in row.numbers.refs:
             return None
         n, mean, sd = row.numbers.at(ref)
-        return CellValue(n, mean, sd, current=stamp is not None and row.stamp == stamp, sem=sem_of(n, sd))
+        cell = CellValue(n, mean, sd, current=stamp is not None and row.stamp == stamp, sem=sem_of(n, sd))
+        return self._with_excess(cell, row, {ref: 1.0}) if math.isfinite(mean) else cell
+
+    # -- measured minus the bulk prediction (2026-11-12) -------------------------------------------------------------------------
+
+    def _row_bulk(self, row: _Row):
+        """The row's own S_bulk fit (`step_table.BulkValues`), or None without points; cached per row's numbers, the set and the weighting."""
+        points = self.bulk_points()
+        if not points:
+            return None
+        key = (self._bulk_weighting, tuple((p.ref, p.ri, p.ri_u if math.isfinite(p.ri_u) else None) for p in points))
+        found = self._bulk_cache.get(id(row.numbers))
+        if found is not None and found[0] is row.numbers and found[1] == key:
+            return found[2]
+        values = bulk_values(row.numbers, points, self._bulk_weighting)
+        if len(self._bulk_cache) > 4096:
+            self._bulk_cache.clear()
+        self._bulk_cache[id(row.numbers)] = (row.numbers, key, values)  # (the numbers are kept, so their id cannot be reused while the entry lives)
+        return values
+
+    def _with_excess(self, cell: CellValue, row: _Row, coefficients: dict) -> CellValue:
+        """`cell` with measured minus predicted for the steps in `coefficients` ({ref: +1 / -1}), or the reason there is none (shown as NA)."""
+        terms = {}
+        for ref, c in coefficients.items():
+            step = self._plan.step_by_ref(ref)
+            found = None if step is None else self._plan.ri_of_step(step)
+            if found is None:
+                name = "" if step is None else solution_of(step.label)
+                return replace(cell, excess_note=(
+                    f"NA: no refractive index for {name!r}. Add it to RIs.txt and import it again (File > Import > Refractive Indices)." if name
+                    else "NA: the step has no note, so no solution and no refractive index."
+                ))
+            terms[ref] = (c, found.ri, float("nan") if found.std is None else found.std)
+        values = self._row_bulk(row)
+        if values is None or not values.fit_sem.ok:
+            reason = "no steps with a refractive index in the S_bulk set" if values is None else values.fit_sem.reason
+            return replace(cell, excess_note=f"NA: no S_bulk for this row ({reason}). Put steps into the S_bulk set (Sensorgram > Evaluation > S_bulk).")
+        found = bulk_excess(row.numbers, values, terms)
+        if found is None:
+            return replace(cell, excess_note="NA: this row has no number in one of the steps.")
+        return replace(cell, excess=found.value, excess_u=found.u, predicted=found.predicted)
 
     def roi_step_value(self, roi_id: int, ref: object) -> tuple[StepValue, bool] | None:
         """Everything a ROI row has in one step (n, mean, SD, noise) and whether it is current; None if the row has no numbers for that step. For a reader

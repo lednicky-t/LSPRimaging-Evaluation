@@ -446,6 +446,10 @@ class SensorgramPanel(QWidget):
         """Connected to the dock's ``visibilityChanged``: a hidden panel does no work and catches up once when shown."""
         self._gate.set_visible(visible)
 
+    def bulk_overlays(self):
+        """The step overlays (`StepOverlays`): what the S_bulk plot reads (`bulk_inputs`, `bulk_inputs_changed`, `set_numbers_for_plot`)."""
+        return self._steps
+
     def bulk_controls(self):
         """The S_bulk button of the Evaluation group (`bulk_group.BulkControls`): its weighting is the ROI table's S_bulk column's too (`app_rewrite._follow_plan_bar`)."""
         return self._steps.bulk
