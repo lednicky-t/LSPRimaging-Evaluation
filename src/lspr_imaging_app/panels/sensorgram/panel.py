@@ -1,7 +1,8 @@
 """``SensorgramPanel`` (sketch §7 "Display panels" > Sensorgram, §10): the metric of the selected ROIs against time.
 
-**Screen.** A ribbon of compact controls on top (display mode, centre and band for averages, smoothing, spike removal, baseline) in the look of
-the Image panel's ribbon (captioned groups, `ribbon_row.py`): a double-click on its empty space rolls it up to a "..." handle, and a panel
+**Screen.** A ribbon of compact controls on top, in three tabs (since 2026-11-13) in the look of the Image panel's ribbon (captioned groups, `ribbon_row.py`): **Plot** (display mode, centre and
+band for averages, smoothing, spike removal, baseline, export), **View** (how everything is drawn: `view_controls.py`, `docs/sensorgram_view_tab_2026-11-13.md`) and **Experimental plan** (editing
+the plan, the evaluation, the checks). A double-click on the ribbon's empty space rolls it up to a "..." handle, and a panel
 narrower than the row scrolls it with an arrow at each edge. The plot fills the rest and one status line sits below it. For the ROIs selected in the ROI table or on the image it plots, at every scanned cube, the **metric** of the
 Spectra panel (the position of the fitted maximum or centroid, in nm: a peak *shifting* is the measurement). The x axis is time in seconds or the
 cube number, following the app-wide Cube / Time choice. A dashed line marks the current cube; clicking the plot moves the cube slider there.
@@ -10,8 +11,8 @@ cube number, following the app-wide Cube / Time choice. A dashed line marks the 
 analysis. ``analysis/scan_trace.py`` fits every cube of every selected ROI (all cubes of a ROI at once, ``trace_fit.py``, in a helper process, ``trace_pool.py``) and then applies the statistics of
 ``AnalysisSettingsModule`` **per ROI** (spike removal, smoothing, baseline, in that order) and only then, for "Average all" / "Average by group",
 combines the finished per-ROI traces (mean or median, band = SD or SEM). Averaging fitted values, never spectra (CLAUDE.md). Points of cubes
-whose results are out of date are marked with a grey hollow diamond, never hidden (2026-11-03: the **View** group's clock button hides the marks only, never the points;
-it is on by default and remembered, and its tool tip says how many cubes are out of date). The **View** group's mask button (2026-10-24) adds orange marks
+whose results are out of date are marked with a grey hollow diamond, never hidden (2026-11-03: the View tab's clock button hides the marks only, never the points;
+it is on by default and remembered, and its tool tip says how many cubes are out of date). The View tab's mask button (2026-10-24) adds orange marks
 where an ignore mask touched the ROIs of a line: a triangle for a persistent mask, a circle for an individual one. They are read from
 ``n_masked`` in the scan file (``analysis/scan_mask_marks.py``), so only masks that really removed pixels of a ROI's disk or ring are marked.
 
@@ -23,17 +24,17 @@ older file is dropped, and nothing happens while the dock is hidden (``HiddenPan
 
 **Y axis and baseline selector (2026-10-25).** A double-click on the y axis label switches between the absolute position and the shift from the
 baseline (the same switch as the Baseline group's "Subtract"). The baseline selector is the draggable band along the bottom tenth of the plot; the
-View group's baseline button shows or hides it and sets its colour and fill transparency (a pick-up menu like the Image ribbon's ROI display; all
+Baseline group's pencil shows or hides it and its menu sets its colour and fill transparency (a pick-up menu like the Image ribbon's ROI display; all
 three remembered). The selector is drawn whether or not the traces are subtracted, and dragging it only stores where it is.
 
-**Experimental plan group (2026-10-26).** The last ribbon group controls the bar of experiment steps along the top or bottom of the plot (``plan_group.py`` the controls,
+**The plan bar (2026-10-26).** The bar of experiment steps along the top or bottom of the plot is controlled by the Steps and Evaluation menus of the View tab (``plan_group.py`` the controls,
 ``plan_bar.py`` the item, ``plan/bar_model.py`` what is drawn and where the text goes; design ``docs/experimental_plan_bar_design_2026-10-26.md``). The steps come from
 ``ExperimentPlanModule`` (the dataset's measured steps with the user's edits); the panel only converts them to the plot's x axis (``plan/axis_map.py``) and hands them to the
 plot. They follow the Cube / Time choice, and are drawn only while traces are (an empty plot has no axis to put them on). The bar's gestures (drag a boundary, double-click to retype a note,
 right-click for colour and reset) are handled by ``plan_actions.PlanBarActions``, which edits the module; everything that hangs on the steps lives in ``step_overlays.StepOverlays`` (split out of this file 2026-10-26); this panel only gives it the plot, the lines last drawn and the x axis.
 
-**Smoothing inside steps and the View stats group (2026-10-26; "Step stats" until 2026-11-10).** With the "smooth inside steps" toggle on (Smoothing group) and a dataset that has steps, each step is smoothed on its own, so a
-window never mixes two solutions; without steps the whole trace is smoothed. The View stats group writes mean +/- SD of every line in every step on the plot, level with the legend's rows
+**Smoothing inside steps and the Stats menu (2026-10-26).** With the "smooth inside steps" toggle on (Smoothing group) and a dataset that has steps, each step is smoothed on its own, so a
+window never mixes two solutions; without steps the whole trace is smoothed. The Stats menu (View tab) writes mean +/- SD of every line in every step on the plot, level with the legend's rows
 (``stats_group.py`` the controls, ``stats_table.py`` the item, ``plan/stats_table.py`` what is written). Both need the steps and the cube times, which `StepOverlays.step_inputs` turns into the two extra
 inputs of the request (the pieces to smooth, the cubes of each step); the numbers are computed in the worker with the curves, so they follow smoothing, baseline and spike removal. A moved,
 reset or restored boundary asks for a redraw when either is on (`StepOverlays._on_plan_changed`); a note or colour edit does not. Design and measurements: ``docs/step_statistics_backbone_2026-10-26.md``.
@@ -124,14 +125,17 @@ from .checks_group import ChecksControls
 from .mask_marks_toggle import MaskMarksToggle
 from .stale_marks_toggle import StaleMarksToggle
 from .stat_icons import band_picture, center_picture, display_picture, smoothing_picture, spikes_icon, subtract_icon, within_steps_icon
+from .text_link import TextSizeLink
+from .view_controls import SensorgramViewControls
 from .step_overlays import StepOverlays
 from .plot import SensorgramPlot
 
 logger = logging.getLogger(__name__)
 
 TASK_ID = "sensorgram.compute"
-PLOT_TAB = "Plot"  # the control row's first tab: how the traces are made and drawn
-PLAN_TAB = "Experimental plan"  # its second: the plan bar, the baseline / signal steps, the numbers per step; the plan bar's structure tools are live only here
+PLOT_TAB = "Plot"  # the control row's first tab: how the traces are made (display, statistic, smoothing, baseline)
+VIEW_TAB = "View"  # its second (2026-11-13): how everything is drawn: the marks, points and lines, the legend, the plan bar and the step table (`view_controls.py`)
+PLAN_TAB = "Experimental plan"  # its third: the baseline / signal steps, the editing of the plan, the evaluation and the checks; the plan bar's structure tools are live only here
 MASK_MARKS_KEY = "sensorgram/mask_marks"
 STALE_MARKS_KEY = "sensorgram/stale_marks"
 BAND_HEIGHT_KEY = "sensorgram/baseline_band_height"
@@ -208,7 +212,7 @@ class SensorgramPanel(QWidget):
     ) -> None:
         """`image_busy`: True while the Image panel has a frame in flight; a computation then waits for it (`ImageFirst`). `trace_in_process`: the
         fits run in a helper process (`TracePool`), so they never compete with the window for the interpreter lock; False computes them in the worker
-        thread (tests that spy on the fit, debugging); it applies only to the store this panel makes for itself. `mask`: tells which masks are individual (the marks of the View group); without it every mask counts as persistent.
+        thread (tests that spy on the fit, debugging); it applies only to the store this panel makes for itself. `mask`: tells which masks are individual (the mask marks); without it every mask counts as persistent.
         `experiment_plan`: the experiment steps for the plan bar; without it the Experimental plan group stays greyed out.
         `trace_store`: the fitted traces and the helper process, shared with the ROI / Groups table's step columns (`analysis/trace_store.py`); without one the panel makes its own and shuts it down itself.
         `axis`: the x axis and the baseline switch, shared with the same table (`selection/sensorgram_axis.py`); without one it takes the settings' own (`SensorgramAxis.of`)."""
@@ -280,6 +284,7 @@ class SensorgramPanel(QWidget):
         self._mask_toggle.setChecked(True)
         self._stale_toggle = StaleMarksToggle(self)
         self._stale_toggle.setChecked(True)  # on by default: out-of-date results are never hidden unless the user says so
+        self._view_controls = SensorgramViewControls(self)  # the View tab's band / anchors toggles, points & lines and legend menus (2026-11-13)
         self._band_visible = True  # the baseline selector: the controls hold the truth, these copies follow their signals
         self._band_color = QColor(DEFAULT_COLOR)
         self._band_alpha = DEFAULT_ALPHA
@@ -313,6 +318,10 @@ class SensorgramPanel(QWidget):
             schedule_redraw=self._schedule_redraw, defer=lambda: self._gate.defer(), on_steps_available=self._on_steps_available,  # the gate is made further down
             current_cube=self._selection.current_cube,
         )
+        # The legend's text size and the stats numbers' text size can be linked (2026-11-13): a chain button in each of the two menus, one state, one rule (`text_link.py`).
+        self._text_link = TextSizeLink(
+            self._view_controls.legend_text, self._view_controls.text_link, self._steps.stats_controls.size_box, self._steps.stats_controls.text_link, self
+        )
         self.task = PanelTask(TASK_ID, "Sensorgram", self)  # connected to the status bar's task indicator by app_rewrite
         self._steps.plan_controls.settings_changed.connect(self.plan_bar_settings_changed)
 
@@ -323,24 +332,31 @@ class SensorgramPanel(QWidget):
         self._ribbon.add_group("Statistic", self._display, self._center, self._band)  # how the ROIs are shown, and how an average is made
         self._ribbon.add_group("Smoothing", self._smoothing, self._window, self._within_steps, self._spikes)
         self._ribbon.add_group("Baseline", self._baseline, *self._drift.widgets(), self._band_edit, self._band_menu)
-        self._ribbon.add_group("View", self._mask_toggle, self._stale_toggle)
         self.export_button = PlotExportButton("sensorgram", lambda: self._plot.plot_item(), self._export_data, self, svg_parts=self._plot.export_parts)
         self._ribbon.add_group("Export", self.export_button)
         self._ribbon.add_stretch()
-        # The experimental plan has a tab of its own (2026-10-29): the bar's controls, the baseline / signal steps, the table of numbers per step. The plan bar's structure tools
+        # The View tab (2026-11-13) holds every option of how the plot is drawn, as the Image panel's View tab does: what is shown (the band, the anchors, the mask and out-of-date
+        # marks), the points and lines, the legend, and the two groups that were on the Experimental plan tab until now, the plan bar's and the step table's.
+        self._view_ribbon = RibbonRow(self)
+        self._view_ribbon.add_group("Show", self._view_controls.band, self._view_controls.anchors, self._mask_toggle, self._stale_toggle)
+        self._view_ribbon.add_group("Points & lines", self._view_controls.lines_menu)
+        self._view_ribbon.add_group("Legend", self._view_controls.legend_menu)
+        self._view_ribbon.add_group("Steps", *self._steps.plan_controls.widgets())  # the plan bar's menu
+        self._view_ribbon.add_group("Evaluation", *self._steps.plan_controls.evaluation_widgets())  # the markers B1 / S1 / Sb on the bar: shown, where, in what colour (2026-11-13)
+        self._view_ribbon.add_group("Stats", *self._steps.stats_controls.widgets())  # the step table's menu
+        self._view_ribbon.add_stretch()
+        # The experimental plan has a tab of its own (2026-10-29): the baseline / signal steps, the editing of the plan, the evaluation and the checks. The plan bar's structure tools
         # (remove, add, unify, the roles in the right-click menu) are live only while it is the active tab, as the ROI gestures are only live on the Image ribbon's ROIs tab.
         # The Edit group's buttons are on this tab, so they are reachable only here by themselves.
         self._plan_ribbon = RibbonRow(self)
-        self._plan_ribbon.add_group("View steps", *self._steps.plan_controls.widgets())
-        self._plan_ribbon.add_group("View stats", *self._steps.stats_controls.widgets())  # was "Step stats", after Evaluation, until 2026-11-10
-        self._plan_ribbon.add_group("Edit", *self._steps.edit_controls.widgets())  # add / remove / merge / restore steps (2026-11-10), right of the two View groups
+        self._plan_ribbon.add_group("Edit", *self._steps.edit_controls.widgets())  # add / remove / merge / restore steps (2026-11-10)
         self._plan_ribbon.add_group("Evaluation", *self._steps.evaluation.widgets(), *self._steps.bulk.widgets())  # the pairs, then S_bulk (2026-11-12)
         self.checks_controls = ChecksControls(self)  # the data-quality checks (2026-11-07): the button only; `checks_presenter.py` is what the app connects to it
         self._plan_ribbon.add_group("Checks", *self.checks_controls.widgets())
         self._plan_ribbon.add_stretch()
-        self._ribbon_tabs = ImageToolRibbon([(PLOT_TAB, self._ribbon), (PLAN_TAB, self._plan_ribbon)], self)
+        self._ribbon_tabs = ImageToolRibbon([(PLOT_TAB, self._ribbon), (VIEW_TAB, self._view_ribbon), (PLAN_TAB, self._plan_ribbon)], self)
         self._ribbon_drawer = RibbonDrawer(self._ribbon_tabs, "Show the sensorgram controls.", self, handle_alignment=Qt.AlignmentFlag.AlignTop)
-        for row in (self._ribbon, self._plan_ribbon):
+        for row in (self._ribbon, self._view_ribbon, self._plan_ribbon):
             row.roll_up_requested.connect(lambda: self._ribbon_drawer.set_expanded(False))
         self._ribbon_tabs.category_changed.connect(self._on_ribbon_tab)
         controls = QHBoxLayout()
@@ -370,6 +386,7 @@ class SensorgramPanel(QWidget):
         self._baseline.toggled.connect(self._on_baseline_toggled)
         self._mask_toggle.toggled.connect(lambda _on: self._draw_last())
         self._stale_toggle.toggled.connect(lambda _on: self._draw_last())
+        self._view_controls.settings_changed.connect(self._on_view_changed)
         self._plot.baseline_window_changed.connect(self._on_baseline_dragged)
         self._plot.y_label_double_clicked.connect(self._on_y_label_double_clicked)
         self._plot.x_label_double_clicked.connect(self._on_x_label_double_clicked)
@@ -392,6 +409,7 @@ class SensorgramPanel(QWidget):
         self._drift.steps_in_plan = lambda: len(self._steps.anchor_step_indices())
 
         self._selection.roi_selection_changed.connect(lambda _ids: self._schedule_redraw())
+        self._selection.roi_selection_changed.connect(lambda _ids: self._drift.refresh_tools())  # "apply to all ROIs" depends on the lines shown
         self._following_play = False  # `follow_play`: the cursor follows the frame on screen, not the slider
         self._play_cube: int | None = None
         self._selection.cube_changed.connect(
@@ -413,13 +431,21 @@ class SensorgramPanel(QWidget):
 
     # -- wiring with the owner -------------------------------------------------------------------------------------------------
 
+    def _on_view_changed(self) -> None:
+        """An option of the View tab changed (or was restored): the plot takes it and the last result is drawn again. Nothing is recomputed."""
+        self._plot.set_view(self._view_controls.settings())
+        self._draw_last()
+
     def restore_ui_state(self, store: UiStateStore) -> None:
         store.bind(MASK_MARKS_KEY, self._mask_toggle)
         store.bind(STALE_MARKS_KEY, self._stale_toggle)
+        self._text_link.begin_restore()  # the legend's and the stats' text sizes are restored one after the other: no size is copied between them until both are back
+        self._view_controls.restore_ui_state(store)  # also hands the restored options to the plot
         store.bind(BAND_HEIGHT_KEY, self._band_height)
         self._plot.set_baseline_height(self._band_height.value())  # a restored value arrives without a signal
         store.bind(BAND_FONT_KEY, self._band_font)
         self._steps.restore_ui_state(store)
+        self._text_link.end_restore()  # both text sizes are restored now: linked, they are made equal (the Legend menu's wins)
         self._plot.set_readout_font_size(self._band_font.value())
         saved_color = read(store, SENSORGRAM_BASELINE_BAND_COLOR)
         self._band_visible = read(store, SENSORGRAM_BASELINE_BAND_VISIBLE) is not False
@@ -471,6 +497,7 @@ class SensorgramPanel(QWidget):
         self._within_steps.refresh_theme()
         self._baseline.refresh_theme()
         self._drift.refresh_theme()
+        self._view_controls.refresh_theme()
         self._band_controls.refresh_theme(get_active_theme())
         self._band_edit.refresh_theme()
         self._band_menu.refresh_theme(get_active_theme())
@@ -511,6 +538,8 @@ class SensorgramPanel(QWidget):
             self._spikes.setChecked(bool(stats.spike_rejection_enabled))
             self._baseline.setChecked(bool(stats.baseline_enabled))
             self._drift.sync(stats)
+            # a toggle with nothing to act on is greyed out; the anchors toggle also owns the dashed baseline curve, which the Range method's marked steps have too
+            self._view_controls.set_available(band=averaged, anchors=stats.baseline_method == METHOD_ANCHORS or uses_anchor_steps(stats))
             for widget in (self._band_edit, self._band_menu):
                 widget.setVisible(stats.baseline_method != METHOD_ANCHORS)  # the window selector means nothing to the anchors method
         finally:
@@ -851,10 +880,10 @@ class SensorgramPanel(QWidget):
         drift_shown = anchors_method or uses_anchor_steps(stats)  # a curve through anchors: anchor points, or the Range method's marked steps
         self._plot.show_series(  # the toggle hides the marks, never the points
             series, stale if self._stale_toggle.isChecked() else None, self._mask_marks(job.stored, series),
-            baseline_curves=drift_shown and not stats.baseline_enabled,  # absolute traces: the dashed curve is what Subtract would take off
+            baseline_curves=drift_shown and not stats.baseline_enabled and self._plot.view().show_anchors,  # absolute traces: the dashed curve is what Subtract would take off (View tab: it can be hidden)
             # Hollow squares only for the Anchor points method, where they ARE the anchors (clicked, removable). The Range method's marked steps show
             # their anchor icon on the plan bar instead; a square in the middle of each step's trace was a second, confusing marker (maintainer, 2026-11-11).
-            anchor_dots=("subtracted" if stats.baseline_enabled else "absolute") if anchors_method else None,
+            anchor_dots=("subtracted" if stats.baseline_enabled else "absolute") if anchors_method and self._plot.view().show_anchors else None,  # View tab: the squares can be hidden
         )
         self._stale_toggle.set_note(self._stale_note(stale))
         uncorrected = next((s.baseline_note for s in series if s.baseline_note), "") if drift_shown else ""

@@ -141,7 +141,7 @@ PLOT_EXPORT_FOLDER = UiKey("export/last_folder", None, str)  # the folder a plot
 PLOT_EXPORT_FIGURE_FORMAT = UiKey("export/figure_format", "png", str)  # the file type a plot's figure was last saved as, "png" | "svg" (all plots; the dialog opens on it)
 SPECTRA_X_UNIT = UiKey("spectra/x_unit", "nm", str)  # the Spectra plot's x axis: "nm" (wavelength) | "ev" (photon energy); double-click the axis label
 SPECTRA_LINE_STYLE = UiKey("spectra/line_style", "solid", str)  # the line between the measured points: "solid" | "dash" | "dot" | "dashdot" (View menu)
-SENSORGRAM_RIBBON_TAB = UiKey("sensorgram/ribbon_tab", "Plot", str)  # the tab of the Sensorgram's control row that was shown: "Plot" or "Experimental plan"
+SENSORGRAM_RIBBON_TAB = UiKey("sensorgram/ribbon_tab", "Plot", str)  # the tab of the Sensorgram's control row that was shown: "Plot", "View" or "Experimental plan"
 SENSORGRAM_ANCHOR_POINT_SCOPE = UiKey("sensorgram/anchor_point_scope", "all", str)  # whom a new baseline anchor point applies to: "all" ROIs or the lines "shown"
 SENSORGRAM_RIBBON_OPEN = UiKey("sensorgram/ribbon_open", True, bool)  # the Sensorgram panel's control row: rolled down (True) or up
 SENSORGRAM_BASELINE_BAND_VISIBLE = UiKey("sensorgram/baseline_band_visible", True, bool)  # the draggable baseline band (View group)
@@ -156,9 +156,12 @@ SENSORGRAM_PLAN_SEPARATORS = UiKey("sensorgram/plan_separators", "_-_ _--_", str
 SENSORGRAM_PLAN_TEXT_ALIGN = UiKey("sensorgram/plan_text_align", "bar", str)  # "bar" | "data": what the text position is measured against
 SENSORGRAM_PLAN_TEXT_STOP_BAR = UiKey("sensorgram/plan_text_stop_bar", 3, int)  # 1 (bottom) - 5 (top) of the bar
 SENSORGRAM_PLAN_TEXT_STOP_DATA = UiKey("sensorgram/plan_text_stop_data", 4, int)  # 1 (far below) - 5 (far above) the data of the step
+SENSORGRAM_PLAN_ROLES_PLACE = UiKey("sensorgram/plan_roles_place", "auto", str)  # where the evaluation chips (B1 / S1 / Sb) sit: "top-left" | "top-right" | "auto" | "bottom-left" | "bottom-right" (the Evaluation menu's dice; auto = beside the bar, as always)
 SENSORGRAM_EVAL_PAIRS = UiKey("sensorgram/eval_pairs", 1, int)  # how many evaluation pairs (B1+S1, B2+S2, ...) the Evaluation pop-up shows; a pair set in the plan is always shown
 SENSORGRAM_BULK_WEIGHTING = UiKey("sensorgram/bulk_weighting", "inverse_variance", str)  # "inverse_variance" | "equal": how the S_bulk fit weights the steps (analysis/bulk_sensitivity.py)
 SENSORGRAM_STATS_POSITION = UiKey("sensorgram/stats_position", "top", str)  # "top" | "bottom": the edge of the plot the step statistics table sits on
+SENSORGRAM_LINE_STYLE = UiKey("sensorgram/line_style", "straight", str)  # "straight" | "spline": how the plot joins the points (View tab, Points & lines)
+SENSORGRAM_LEGEND_MODE = UiKey("sensorgram/legend_mode", "auto", str)  # "auto" | "show" | "hide": the plot's legend (View tab; auto = named up to 24 lines, kept while it fits)
 SENSORGRAM_CHECKS_PAIR = UiKey("sensorgram/checks_pair", None, int)  # the evaluation pair the data checks compare (None: the first complete one)
 SLIDESHOW_SPEED =UiKey("image/slideshow_speed", 1, int)  # 1, 2, 5 or 10 (x)
 SLIDESHOW_MODE = UiKey("image/slideshow_mode", "all", str)  # "all" | "one_wavelength" | "roi_states" | "mask_states" | "events"

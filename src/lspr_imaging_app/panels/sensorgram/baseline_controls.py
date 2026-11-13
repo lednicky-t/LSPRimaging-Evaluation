@@ -10,13 +10,16 @@ Main user actions:
 - Anchor-point edit toggle (Anchor points only): while on, a left click on the plot adds an anchor point at the nearest cube, a right click on a
   point's square removes it, a right click anywhere else opens `fill_context_menu` (the cube cursor, the plot's own menu and the plan bar wait until
   it is off).
-- Anchors menu (Anchor points only): whom new points apply to (all ROIs / the lines shown), how many cubes each point averages, clearing the points,
-  and what the last fit said (anchor scatter, lines that could not be corrected and why).
+- Anchor tools (`anchor_tools.AnchorTools`; 2026-11-13, replacing the Anchors drop-down): they roll out beside the pencil while it is on and go away
+  when it is off. The number of points, whom new points apply to (all ROIs / the lines shown), handing the points of the lines shown on to every ROI
+  (also in the right-click menu), how many cubes each point averages, clearing the points. What the last fit said (anchor scatter, lines that could
+  not be corrected and why) is the tool tip of the number.
 - Anchor steps (Range only): `fill_step_menu` adds "make / remove baseline anchor" to a plan step's right-click menu; the panel offers it while the
   Range pencil is on (`SensorgramPanel._baseline_step_menu`).
 
-Layout: five controls in the existing Baseline group, after the Subtract switch (Method, Shape, offset, edit pencil, Anchors menu), each shown only
-when it means something for the chosen method; the Range method's own pencil and band menu belong to the panel.
+Layout: five controls in the existing Baseline group, after the Subtract switch (Method, Shape, offset, edit pencil, anchor tools), each shown only
+when it means something for the chosen method (the tools: only while the pencil is on); the Range method's own pencil and band menu belong to the
+panel.
 
 Important states: no anchors, or fewer than the shape needs -> every line says so and is left uncorrected (never a silent switch to a simpler shape,
 and marked steps never fall back to the range's mean). The user is told what is missing where they act (2026-11-10): anchor points by the number
@@ -32,18 +35,21 @@ from collections.abc import Callable, Sequence
 from dataclasses import replace
 
 import numpy as np
-from PyQt6.QtCore import QObject, QPointF, QRectF, QSize, Qt
+from PyQt6.QtCore import QObject, QPointF, QRectF, Qt
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPainterPath
-from PyQt6.QtWidgets import QButtonGroup, QHBoxLayout, QLabel, QMenu, QSpinBox, QToolButton, QVBoxLayout, QWidget, QWidgetAction
+from PyQt6.QtWidgets import QMenu, QSpinBox, QWidget
 
 from lspr_ui import get_active_theme, load_tabler_icon
 
-from ...analysis.baseline_drift import ALL_ROIS, METHOD_ANCHORS, METHOD_WINDOW, MIN_ANCHORS, SHAPES, TRIM_RANGE, points_for, uses_anchor_steps
+from ...analysis.baseline_drift import (
+    ALL_ROIS, METHOD_ANCHORS, METHOD_WINDOW, MIN_ANCHORS, SHAPES, TRIM_RANGE, points_for, share_points, uses_anchor_steps,
+)
 from ...analysis.settings import StatisticsSettings
 from ...analysis.settings_module import AnalysisSettingsModule
 from ..spectra.pick_menu import PickMenu, PictureFor
 from ..ribbon_fields import style_ribbon_number_field
 from ..spectra.view_menu import IconToggle
+from .anchor_tools import SCOPE_ALL, SCOPE_SHOWN, AnchorTools
 from .stat_icons import _pen, _picture
 
 METHOD_LABELS = {METHOD_WINDOW: "Range", METHOD_ANCHORS: "Anchor points"}
@@ -70,10 +76,6 @@ SHAPE_BUTTON_TIP = (
     "Shape of the baseline curve through the anchors (anchor points, or the plan steps marked as anchors). A shape that needs more anchors than "
     "there are leaves the line uncorrected."
 )
-SCOPE_ALL, SCOPE_SHOWN = "all", "shown"  # whom a new anchor point applies to
-HALFWIDTH_MAX = 50
-
-
 def pencil_icon(on: bool, off_color: str, on_color: str) -> QIcon:
     """The baseline's edit toggles (anchor points, and the Range method's selector band): the standard pencil, in ``on_color`` while editing."""
     return load_tabler_icon("pencil", color=on_color if on else off_color, size=24)
@@ -136,11 +138,12 @@ def shape_picture(kind: str) -> PictureFor:
     return _picture(draw_into)
 
 
-_SUMMARY_NOTES_MAX = 4  # lines named one by one in the Anchors menu; the rest are counted
+_SUMMARY_NOTES_MAX = 4  # lines named one by one in the anchor tools' tool tip; the rest are counted
 
 
 def drift_summary(series: Sequence) -> list[str]:
-    """What the last fit said, for the bottom of the Anchors menu: the anchor scatter left after correction, and the lines that could not be corrected (why)."""
+    """What the last fit said, for the tool tip of the anchor tools' number of points: the anchor scatter left after correction, and the lines that could not
+    be corrected (why)."""
     rms = [float(s.anchor_rms) for s in series if np.isfinite(s.anchor_rms)]
     lines: list[str] = []
     if rms:
@@ -156,39 +159,6 @@ def drift_summary(series: Sequence) -> list[str]:
 def anchor_count(stats: StatisticsSettings) -> int:
     """How many anchor points there are (a point at one cube counts once, shared or not)."""
     return len({c for _r, c in stats.baseline_anchor_points})
-
-
-class AnchorsButton(QToolButton):
-    """The Anchors menu. Rebuilt every time it opens, so it counts the ROIs plotted as they are at that moment."""
-
-    def __init__(self, controls: DriftBaselineControls, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._controls = controls
-        self._menu = QMenu(self)
-        self._menu.aboutToShow.connect(self._rebuild)
-        self.setMenu(self._menu)
-        self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.setAutoRaise(True)
-        self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)  # the anchor icon and the number of points
-        self.setIconSize(QSize(18, 18))
-        self.setToolTip(
-            "Anchor points (the number is how many): whom new points apply to, how many cubes each averages, clearing them, and what the last fit "
-            "left at the anchors."
-        )
-        self.refresh_theme()
-
-    def refresh_theme(self) -> None:
-        theme = get_active_theme()
-        self.setIcon(load_tabler_icon("anchor", color=theme.text_primary, size=18))
-        self.setStyleSheet(
-            f"QToolButton {{ background: transparent; border: none; padding: 0 12px 0 6px; color: {theme.text_primary}; font-weight: 400; }}"
-            f"QToolButton:hover {{ background: {theme.control_bg_hover}; }}"
-            "QToolButton::menu-indicator { subcontrol-origin: padding; subcontrol-position: center right; right: 2px; }"
-        )
-
-    def _rebuild(self) -> None:
-        self._menu.clear()
-        self._controls.fill_anchor_menu(self._menu)
 
 
 class DriftBaselineControls(QObject):
@@ -224,14 +194,22 @@ class DriftBaselineControls(QObject):
             self.shape.add_choice(key, SHAPE_LABELS[key], SHAPE_TIPS[key], shape_picture(key))
         self.shape.finish()
         self.shape.setToolTip(SHAPE_BUTTON_TIP)
-        self.anchors = AnchorsButton(self, parent)
         self.edit = IconToggle(
             pencil_icon,
             "Anchor points: while this is on, a left click on the plot adds an anchor point at the nearest cube, a right click on a point's square "
-            "removes it, and a right click anywhere else opens a menu (add here, clear all, ...). Each point is the mean of the cubes around it "
-            "(Anchors menu). The cube cursor waits until this is off.",
+            "removes it, and a right click anywhere else opens a menu (add here, clear all, ...). Each point is the mean of the cubes around it. "
+            "The anchor tools (number of points, whom new points apply to, apply to all ROIs, cubes averaged, clear) roll out beside this button "
+            "while it is on. The cube cursor waits until this is off.",
             parent,
         )
+        self.tools = AnchorTools(parent)  # beside the pencil, shown only while the pencil is on (`_show_tools`)
+        self.tools.hide()
+        self._anchors_method = False
+        self.tools.scope_picked.connect(self.set_point_scope)
+        self.tools.share_requested.connect(self.share_points_of_shown)
+        self.tools.clear_requested.connect(self.clear_points)
+        self.tools.halfwidth_changed.connect(self.set_halfwidth)
+        self.edit.toggled.connect(lambda _on: self._show_tools())
         # the Range method's border offset: cubes left out at each end of every anchor step (shown while steps are marked)
         self.trim = QSpinBox(parent)
         self.trim.setRange(*TRIM_RANGE)
@@ -247,12 +225,12 @@ class DriftBaselineControls(QObject):
         self.trim.valueChanged.connect(lambda value: None if self._syncing else self.set_step_trim(value))
 
     def widgets(self) -> tuple[QWidget, ...]:
-        return (self.method, self.shape, self.trim, self.edit, self.anchors)
+        return (self.method, self.shape, self.trim, self.edit, self.tools)
 
     def refresh_theme(self) -> None:
         self.method.refresh_theme()
         self.shape.refresh_theme()
-        self.anchors.refresh_theme()
+        self.tools.refresh_theme()
         self.edit.refresh_theme()
 
     # -- settings <-> controls ------------------------------------------------------------------------------------------------
@@ -265,15 +243,29 @@ class DriftBaselineControls(QObject):
             self.trim.setValue(int(stats.baseline_step_trim))
             anchors = stats.baseline_method == METHOD_ANCHORS
             steps = uses_anchor_steps(stats)  # Range with marked anchor steps
-            for widget in (self.anchors, self.edit):
-                widget.setVisible(anchors)
+            self.edit.setVisible(anchors)
             self.shape.setVisible(anchors or steps)
             self.trim.setVisible(steps)
+            self._anchors_method = anchors
             if not anchors and self.edit.isChecked():
                 self.edit.setChecked(False)  # no anchors to edit with the window method
-            self.anchors.setText(str(anchor_count(stats)))  # the button's face: the anchor icon and the number of points
+            self._show_tools()
+            self.refresh_tools(stats)
         finally:
             self._syncing = False
+
+    def _show_tools(self) -> None:
+        """The anchor tools roll out beside the pencil while it is on, and only for the Anchor points method."""
+        self.tools.setVisible(self._anchors_method and self.edit.isChecked())
+
+    def refresh_tools(self, stats: StatisticsSettings | None = None) -> None:
+        """Bring the anchor tools in line with the settings and the lines shown: "apply to all ROIs" depends on which ROIs are selected, so the panel
+        calls this on a selection change too."""
+        stats = stats if stats is not None else self._settings.statistics_settings()
+        self.tools.show_state(
+            count=anchor_count(stats), scope=self.point_scope, halfwidth=int(stats.baseline_point_halfwidth),
+            can_share=self.points_to_share() > 0, share_tip=self.share_tip(), can_clear=bool(stats.baseline_anchor_points),
+        )
 
     def _on_edited(self, *_args: object) -> None:
         if self._syncing:
@@ -285,89 +277,14 @@ class DriftBaselineControls(QObject):
         self._say_steps_note()  # a shape that needs more anchor steps than are marked: said at once
 
     def set_fit_summary(self, lines: Sequence[str], uncorrected: str = "") -> None:
-        """What the last drawn fit said (shown at the bottom of the Anchors menu). `uncorrected`: why lines were left uncorrected ("" = none were);
-        it goes into the Shape pick-up's tool tip and the step menu, the places the Range method's anchor steps have (no Anchors menu there)."""
+        """What the last drawn fit said (the tool tip of the anchor tools' number of points). `uncorrected`: why lines were left uncorrected ("" = none
+        were); it goes into the Shape pick-up's tool tip and the step menu, the places the Range method's anchor steps have (no anchor tools there)."""
         self._summary = list(lines)
+        self.tools.set_notes(self._summary)
         self._uncorrected = str(uncorrected)
         self.shape.setToolTip(SHAPE_BUTTON_TIP + (f"\n\nNot corrected now: {self._uncorrected}." if self._uncorrected else ""))
 
-    # -- the anchors menu ------------------------------------------------------------------------------------------------------
-
-    def fill_anchor_menu(self, menu: QMenu) -> None:
-        """One compact row of icon buttons (maintainer, 2026-11-09): new points for all ROIs / for the lines shown, ± cubes each point averages,
-        clear every point. Below it one small dim line: the point counts and what the last fit said. Every button explains itself in its tooltip."""
-        stats = self._settings.statistics_settings()
-        theme = get_active_theme()
-        holder = QWidget(menu)
-        holder.setStyleSheet(
-            f"QToolButton {{ border: none; border-radius: 3px; padding: 3px; background: transparent; }}"
-            f"QToolButton:hover {{ background: {theme.control_bg_hover}; }}"
-            f"QToolButton:checked {{ background: {theme.control_bg_hover}; border: 1px solid {theme.accent_blue}; }}"
-            f"QLabel#anchor_notes {{ color: {theme.text_dim}; font-size: 8pt; }}"
-        )
-        column = QVBoxLayout(holder)
-        column.setContentsMargins(6, 4, 6, 4)
-        column.setSpacing(2)
-        row = QHBoxLayout()
-        row.setSpacing(2)
-        column.addLayout(row)
-
-        def icon_button(name: str, icon: str, tip: str, checkable: bool = False) -> QToolButton:
-            button = QToolButton(holder)
-            button.setObjectName(name)
-            button.setIcon(load_tabler_icon(icon, color=theme.text_primary, size=18))
-            button.setIconSize(QSize(18, 18))
-            button.setToolTip(tip)
-            button.setCheckable(checkable)
-            row.addWidget(button)
-            return button
-
-        count_icon = QLabel(holder)
-        count_icon.setPixmap(load_tabler_icon("anchor", color=theme.text_primary, size=18).pixmap(18, 18))
-        row.addWidget(count_icon)
-        count = QLabel(str(anchor_count(stats)), holder)  # the number of anchor points, at the head of the row
-        count.setObjectName("anchor_count")
-        count.setToolTip("Number of anchor points.")
-        count.setStyleSheet(f"color: {theme.text_primary}; font-weight: 600; padding-right: 6px;")
-        row.addWidget(count)
-        scope_group = QButtonGroup(holder)
-        for scope, name, icon, tip in (
-            (SCOPE_ALL, "anchor_scope_all", "stack-3", "New points apply to all ROIs (shared points)."),
-            (SCOPE_SHOWN, "anchor_scope_shown", "eye", "New points apply to the lines shown only (their own points)."),
-        ):
-            button = icon_button(name, icon, tip, checkable=True)
-            button.setChecked(self.point_scope == scope)
-            button.clicked.connect(lambda _c=False, picked=scope: self.set_point_scope(picked))
-            scope_group.addButton(button)
-        row.addSpacing(6)
-        box = QSpinBox(holder)
-        box.setObjectName("anchor_halfwidth")
-        box.setRange(0, HALFWIDTH_MAX)
-        box.setPrefix("± ")
-        box.setValue(int(stats.baseline_point_halfwidth))
-        box.setKeyboardTracking(False)
-        box.setToolTip("Each point averages this many cubes on each side of it (0 = the point's own cube only).")
-        box.valueChanged.connect(self.set_halfwidth)
-        row.addWidget(box)
-        row.addSpacing(6)
-        clear = icon_button("anchor_clear", "trash-x", "Clear every anchor point (shared and own).")
-        clear.setEnabled(bool(stats.baseline_anchor_points))
-        clear.clicked.connect(self.clear_points)
-        clear.clicked.connect(menu.close)
-        row.addStretch(1)
-
-        n_shared = sum(1 for r, _c in stats.baseline_anchor_points if r == ALL_ROIS)
-        n_own = len(stats.baseline_anchor_points) - n_shared
-        n = anchor_count(stats)
-        notes = [f"{n} anchor point{'s' if n != 1 else ''}: {n_shared} shared, {n_own} own"] if n else ["No anchor points yet."]
-        notes += self._summary
-        label = QLabel("\n".join(notes), holder)
-        label.setObjectName("anchor_notes")
-        label.setWordWrap(True)
-        column.addWidget(label)
-        action = QWidgetAction(menu)
-        action.setDefaultWidget(holder)
-        menu.addAction(action)
+    # -- the anchor edit's right-click menu ------------------------------------------------------------
 
     def fill_context_menu(self, menu: QMenu, x: float) -> None:
         """The anchor edit's right-click menu (a right click away from every anchor square; on a square the click removes it): add a point here,
@@ -388,6 +305,10 @@ class DriftBaselineControls(QObject):
             action.setCheckable(True)
             action.setChecked(self.point_scope == scope)
             action.triggered.connect(lambda _c=False, picked=scope: self.set_point_scope(picked))
+        share = menu.addAction(icon("share"), "Apply the lines' anchor points to all ROIs")
+        share.setToolTip(self.share_tip())
+        share.setEnabled(self.points_to_share() > 0)
+        share.triggered.connect(self.share_points_of_shown)
         menu.addSeparator()
         clear = menu.addAction(icon("trash-x"), "Clear all anchor points")
         clear.setEnabled(bool(stats.baseline_anchor_points))
@@ -470,8 +391,38 @@ class DriftBaselineControls(QObject):
     def set_point_scope(self, scope: str) -> None:
         """Whom a new anchor point applies to: every ROI (`SCOPE_ALL`) or only the ROIs plotted now (`SCOPE_SHOWN`)."""
         self.point_scope = SCOPE_SHOWN if scope == SCOPE_SHOWN else SCOPE_ALL
+        self.refresh_tools()  # also when the remembered scope is restored at start-up
         if self.scope_changed is not None:
             self.scope_changed(self.point_scope)
+
+    def points_to_share(self) -> int:
+        """How many anchor points the lines shown (the selected ROIs) keep for themselves, counted by cube: what `share_points_of_shown` hands on.
+        Shared points need no handing on, so 0 = nothing to do (no ROI selected, or all their points are shared already)."""
+        chosen = {int(r) for r in self._shown_rois()} - {ALL_ROIS}
+        return len({int(c) for r, c in self._settings.statistics_settings().baseline_anchor_points if int(r) in chosen})
+
+    def share_tip(self) -> str:
+        """The tool tip of the share button / menu entry; when there is nothing to hand on, it says why."""
+        tip = (
+            "Apply the anchor points of the lines shown (the selected ROIs) to all ROIs: they become shared points, so every other line is "
+            "corrected with them too. The other ROIs keep their own points at other cubes."
+        )
+        if self.points_to_share() == 0:
+            tip += "\n\nNothing to apply: the lines shown have no points of their own (none are selected, or their points are shared already)."
+        return tip
+
+    def share_points_of_shown(self) -> int:
+        """Hand the own anchor points of the lines shown on to every ROI (`baseline_drift.share_points`). Says what it did at the pointer, since the
+        menu closes. Returns how many points were handed on (0: nothing to do, nothing changed)."""
+        count = self.points_to_share()
+        if count == 0:
+            return 0
+        stats = self._settings.statistics_settings()
+        shared = share_points(stats.baseline_anchor_points, self._shown_rois())
+        self._settings.set_statistics_settings(replace(stats, baseline_anchor_points=shared))
+        if self.say is not None:
+            self.say(f"{count} anchor point{'s' if count != 1 else ''} of the lines shown now apply to all ROIs.")
+        return count
 
     def set_halfwidth(self, cubes: int) -> None:
         self._settings.set_statistics_settings(replace(self._settings.statistics_settings(), baseline_point_halfwidth=int(cubes)))

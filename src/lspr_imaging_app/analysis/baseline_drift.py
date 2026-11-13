@@ -213,6 +213,28 @@ def points_for(roi_id: int, points: Sequence[tuple[int, int]]) -> tuple[int, ...
     return tuple(sorted({int(c) for r, c in points if int(r) in (ALL_ROIS, int(roi_id))}))
 
 
+def share_points(points: Sequence[tuple[int, int]], roi_ids: Sequence[int]) -> tuple[tuple[int, int], ...]:
+    """Make the anchor points that the ROIs `roi_ids` keep for themselves points of every ROI (2026-11-13: "transfer the anchors of the selected lines to
+    all others").
+
+    Why it is needed: the "lines shown only" scope stores a clicked point as an *own* point of the ROIs shown at that moment, and changing the scope
+    later never re-labels points already placed. So another ROI never sees them.
+
+    Each cube that is an own point of one of `roi_ids` becomes one shared point (roi id `ALL_ROIS`). No own point of any ROI is left at such a cube:
+    it is kept in one place only, so removing the shared point removes it for everybody (an own copy of the same cube would silently stay behind).
+    Nothing a ROI used is lost: the ROIs `roi_ids` and every other ROI still have exactly the cubes they had, plus the transferred ones. Other ROIs'
+    own points at other cubes stay (this adds, it does not replace). Order: the points that stay keep their order, new shared points follow in cube
+    order. Without own points among `roi_ids` the points come back unchanged."""
+    pairs = tuple((int(r), int(c)) for r, c in points)
+    chosen = {int(r) for r in roi_ids} - {ALL_ROIS}
+    cubes = {c for r, c in pairs if r in chosen}
+    if not cubes:
+        return pairs
+    already_shared = {c for r, c in pairs if r == ALL_ROIS}
+    stay = tuple((r, c) for r, c in pairs if r == ALL_ROIS or c not in cubes)
+    return stay + tuple((ALL_ROIS, c) for c in sorted(cubes - already_shared))
+
+
 def regions_by_roi(
     roi_ids: Sequence[int],
     cube_numbers: Sequence[int] | np.ndarray,

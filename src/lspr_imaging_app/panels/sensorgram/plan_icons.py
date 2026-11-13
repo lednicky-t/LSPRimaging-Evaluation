@@ -1,7 +1,7 @@
 """Pictograms of the Sensorgram ribbon's "Experimental plan" group (2026-10-26), painted like the other Sensorgram icons (``stat_icons.py``, whose helpers they share):
 not vendored icon files (``lspr_ui/ICONS.md``), a plot frame with a bar of steps is not in the icon library.
 
-``plan_bar_icon`` the toggle: a plot frame with a bar of three steps along its top and a trace under it; ``position_picture`` where the bar sits (top / bottom);
+``plan_bar_icon`` the toggle: a plot frame with a bar of three steps along its top and a trace under it; ``role_chips_icon`` the Evaluation menu and its toggle (2026-11-13): a step's bar with a dim and a solid chip hanging from it; ``position_picture`` where the bar sits (top / bottom);
 ``text_content_picture`` the whole note or only the solution before the separator; ``align_picture`` what the text position is measured against (the bar, or the data of the step);
 ``evaluation_picture`` the Evaluation menu (a baseline bar and a signal bar over a stepped trace); ``add_step_at_cursor_icon`` / ``add_step_before_icon`` / ``add_step_after_icon`` /
 ``remove_step_icon`` / ``merge_steps_icon`` / ``split_step_icon`` / ``restore_steps_icon`` the buttons of the Edit group (2026-11-10), each a few outlined boxes standing for steps;
@@ -37,6 +37,44 @@ def plan_bar_icon(on: bool, off_color: str, on_color: str) -> QIcon:
     _polyline(painter, ((0.20, 0.74), (0.40, 0.70), (0.52, 0.56), (0.68, 0.58), (0.80, 0.50)))
     if not on:
         _slash(painter, color)
+    painter.end()
+    return QIcon(pixmap)
+
+
+def role_chips_icon(on: bool, off_color: str, on_color: str) -> QIcon:
+    """The evaluation chips (B1 / S1 ...) on the plan bar: a step's bar along the top with two chips hanging from it, the left one dimmer (the baseline) and the right one solid
+    (the signal); in ``on_color``; in ``off_color`` and crossed out when off."""
+    pixmap, painter = _canvas()
+    color = QColor(on_color if on else off_color)
+    bar = QColor(color)
+    bar.setAlpha(110)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(bar)
+    painter.drawRect(QRectF(_at(0.10, 0.14), _at(0.90, 0.30)))
+    for left, right, alpha in ((0.14, 0.46, 120), (0.54, 0.86, 255)):
+        chip = QColor(color)
+        chip.setAlpha(alpha)
+        painter.setBrush(chip)
+        painter.drawRoundedRect(QRectF(_at(left, 0.44), _at(right, 0.82)), 3.0, 3.0)
+    if not on:
+        _slash(painter, color)
+    painter.end()
+    return QIcon(pixmap)
+
+
+def pip_icon(on: bool, off_color: str, on_color: str) -> QIcon:
+    """One pip of a die (the Evaluation menu's place picker): a solid dot in ``on_color`` when it is the chosen place, a small hollow ring in ``off_color`` when it is not."""
+    pixmap, painter = _canvas()
+    if on:
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(on_color))
+        painter.drawEllipse(_at(0.5, 0.5), _RENDER_SIZE * 0.28, _RENDER_SIZE * 0.28)
+    else:
+        ring = QColor(off_color)
+        ring.setAlpha(170)
+        painter.setPen(_pen(ring, _STROKE * 0.8))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(_at(0.5, 0.5), _RENDER_SIZE * 0.20, _RENDER_SIZE * 0.20)
     painter.end()
     return QIcon(pixmap)
 
@@ -271,5 +309,5 @@ def align_picture(kind: str) -> PictureFor:
 __all__ = [
     "bulk_picture",
     "add_step_after_icon", "add_step_at_cursor_icon", "add_step_before_icon", "align_picture", "evaluation_picture", "merge_steps_icon", "plan_bar_icon", "position_picture",
-    "remove_step_icon", "restore_steps_icon", "split_step_icon", "text_content_picture",
+    "pip_icon", "remove_step_icon", "restore_steps_icon", "role_chips_icon", "split_step_icon", "text_content_picture",
 ]

@@ -3,7 +3,7 @@ coloured when "on", grey and crossed out when "off". Not vendored icon files (`l
 and each is a few lines of painter code.
 
 ``step_stats_icon`` a bar of two steps with strokes of text under each (the toggle of the table of mean +/- SD per step); ``within_steps_icon`` a dashed step boundary with a separately smoothed curve on each side (the toggle that smooths each experiment step on its own);
-``spikes_icon`` a trace with one sharp spike (the toggle that removes such outliers); ``subtract_icon`` a dashed baseline, a trace that has risen from it and an arrow down to it
+``band_icon`` a trace inside a translucent band (the View tab's toggle of the shaded SD / SEM band); ``spikes_icon`` a trace with one sharp spike (the toggle that removes such outliers); ``subtract_icon`` a dashed baseline, a trace that has risen from it and an arrow down to it
 (the toggle that shows every trace as a shift from its baseline); ``smoothing_picture`` the picture of one smoothing method for the pick-up menu: the letters N/A for no smoothing,
 SG for Savitzky-Golay and MA for the moving average.
 """
@@ -60,6 +60,32 @@ def spikes_icon(on: bool, off_color: str, on_color: str) -> QIcon:
     painter.setPen(Qt.PenStyle.NoPen)
     painter.setBrush(color)
     painter.drawEllipse(_at(0.50, 0.12), _RENDER_SIZE * 0.07, _RENDER_SIZE * 0.07)
+    if not on:
+        _slash(painter, color)
+    painter.end()
+    return QIcon(pixmap)
+
+
+def band_icon(on: bool, off_color: str, on_color: str) -> QIcon:
+    """The shaded SD / SEM band around an average (the View tab's toggle): a trace inside a translucent band that follows it; in ``on_color``; grey and crossed out when off."""
+    pixmap, painter = _canvas()
+    color = QColor(on_color if on else off_color)
+    trace = ((0.10, 0.58), (0.30, 0.44), (0.50, 0.56), (0.70, 0.40), (0.90, 0.50))
+    half = 0.17  # how far the band reaches above and below the trace
+    outline = QPainterPath(_at(trace[0][0], trace[0][1] - half))
+    for x, y in trace[1:]:
+        outline.lineTo(_at(x, y - half))
+    for x, y in reversed(trace):
+        outline.lineTo(_at(x, y + half))
+    outline.closeSubpath()
+    fill = QColor(color)
+    fill.setAlpha(80)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(fill)
+    painter.drawPath(outline)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.setPen(_pen(color))
+    _polyline(painter, trace)
     if not on:
         _slash(painter, color)
     painter.end()
@@ -215,4 +241,4 @@ def band_picture(kind: str) -> PictureFor:
     return equation_picture("SEM" if kind == "sem" else "SD")
 
 
-__all__ = ["band_picture", "center_picture", "display_picture", "smoothing_picture", "spikes_icon", "step_stats_icon", "subtract_icon", "within_steps_icon"]
+__all__ = ["band_icon", "band_picture", "center_picture", "display_picture", "smoothing_picture", "spikes_icon", "step_stats_icon", "subtract_icon", "within_steps_icon"]

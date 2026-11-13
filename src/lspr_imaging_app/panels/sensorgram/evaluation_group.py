@@ -33,6 +33,7 @@ from PyQt6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QMenu, QTo
 from lspr_ui import get_active_theme, load_tabler_icon
 
 from ...plan.edits import EffectiveStep
+from ...plan.role_colors import darken, pair_color
 from ...plan.state import EvalPair, StepRef
 from ...storage.ui_state_keys import SENSORGRAM_EVAL_PAIRS, read
 from ..icon_button_style import style_general_icon_button
@@ -42,7 +43,8 @@ from ..ui_state import UiStateStore
 from .plan_icons import evaluation_picture
 
 MIN_PAIRS = 1
-MAX_PAIRS = 8  # 16 rows: tall, but still a pop-up that fits a laptop screen
+MAX_PAIRS = 8  # 16 rows: tall, but still a pop-up that fits a laptop screen (the six pair colours of `plan/role_colors.py` start again at the seventh pair)
+_LABEL_BASELINE_DARKEN = 0.75  # a baseline label's colour is its pair's colour times this (the chip on the bar uses 0.55: it is a fill with text on it, this is the text)
 
 BUTTON_TIP = (
     "Evaluation: which steps of the experimental plan are the baseline (B) and the signal (S) of each evaluation pair. Click to pick them, "
@@ -208,10 +210,13 @@ class EvaluationControls(QObject):
             picker.show()
 
     def _style_labels(self) -> None:
-        """Bold role names; the signal's in the accent colour, as its chip on the plan bar (the baseline's chip is neutral)."""
-        accent = get_active_theme().accent_blue
+        """Bold role names in the colour of their chip on the plan bar (2026-11-13, `plan/role_colors.py`): a pair is one colour, its baseline's a little darker (not as dark as the chip,
+        which has its text on it: this is the text)."""
         for index, label in enumerate(self._labels):
-            label.setStyleSheet(f"font-weight: bold; color: {accent};" if index % 2 else "font-weight: bold;")
+            color = pair_color(index // 2 + 1)
+            if not index % 2:
+                color = darken(color, _LABEL_BASELINE_DARKEN)
+            label.setStyleSheet(f"font-weight: bold; color: {color};")
 
     def _update_buttons(self) -> None:
         can_add, can_remove = self._count < MAX_PAIRS, self._count > MIN_PAIRS

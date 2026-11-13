@@ -2,14 +2,14 @@
 
 The steps come from ``ExperimentPlanModule`` (the dataset's measured steps with the user's edits). This object owns what hangs on them:
 
-- the **bar of steps** on the plot and its ribbon group "View steps" on the Experimental plan tab (`PlanBarControls`), and the bar's gestures (`PlanBarActions`, which edits the module);
+- the **bar of steps** on the plot and its "Steps" menu on the View tab (`PlanBarControls`), and the bar's gestures (`PlanBarActions`, which edits the module);
   the bar's structure tools in the right-click menu (remove, add, unify, the roles) are offered only while that tab is the active one (`set_structure_tools`);
 - the group "Edit" (`PlanEditControls`, 2026-11-10): add (at the cursor, in front of / behind the selected step) / remove / merge / split / restore buttons, the same commands as that
   menu plus add at the cursor and split at the cursor (through `PlanBarActions`); their
   enabled state follows the selection and the plan (`_update_edit_tools`);
 - the group "Evaluation" (`EvaluationControls`): one icon whose pop-up holds a picker per baseline / signal step of each evaluation pair (B1, S1, B2, S2 ...), which write the plan
   module's roles; taking the last pair out clears its roles in the module;
-- the **table of mean +/- SD per step** and its ribbon group "View stats" (`StatsTableControls`);
+- the **table of mean +/- SD per step** and its "Stats" menu on the View tab (`StatsTableControls`);
 - the two inputs the steps add to a Sensorgram request: the **pieces to smooth on their own** ("smooth inside steps") and **which cubes belong to which step** (`step_inputs`).
 
 It converts the steps to the plot's x axis (``plan/axis_map.py``) and hands them to the plot, and it asks the panel for a redraw when a change of the steps changes what the curves are

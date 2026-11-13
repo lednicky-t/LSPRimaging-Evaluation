@@ -4,7 +4,7 @@ Screen purpose: change *which steps exist* from the ribbon. Most commands work o
 menu ("Add step", "Remove step", "Unify selected steps", "Restore removed steps"); the menu keeps them. Display only: the group holds no choice and changes no step. It reports what
 the user asked for, and `StepOverlays` hands that to `PlanBarActions`, which edits `ExperimentPlanModule` (one undo step each).
 
-Layout (left to right, on the Experimental plan tab, after "View steps" and "View stats" and before "Evaluation")::
+Layout (left to right, the first group of the Experimental plan tab, before "Evaluation"; the plan bar's "Steps" and "Stats" menus are on the View tab)::
 
     [add at cursor] [add in front] [add behind]   [remove]  [merge]  [split]  [restore removed]
 
@@ -39,7 +39,7 @@ from .plan_icons import (
     add_step_after_icon, add_step_at_cursor_icon, add_step_before_icon, merge_steps_icon, remove_step_icon, restore_steps_icon, split_step_icon,
 )
 
-SELECT_HINT = "Click a step on the plan bar to select it (Ctrl-click or Shift-click selects several). The bar must be shown: turn it on in View steps."
+SELECT_HINT = "Click a step on the plan bar to select it (Ctrl-click or Shift-click selects several). The bar must be shown: turn it on in the Steps menu (View tab)."
 
 NO_STEPS_TIP = "This dataset has no experiment steps. Import the measurement notes (and the pump plan) in Workflow > Experimental plan to get them."
 NO_STEPS_LEFT_TIP = "There are no steps left to select: every step was removed. Restore removed steps brings them back."

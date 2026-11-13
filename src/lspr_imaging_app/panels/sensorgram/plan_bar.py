@@ -35,7 +35,10 @@ from lspr_ui import load_tabler_icon
 from ...plan.bar_model import (
     ALIGN_DATA,
     MIN_TEXT_WIDTH_PX,
+    POSITION_BOTTOM,
     POSITION_TOP,
+    ROLES_AUTO,
+    SIDE_RIGHT,
     PlanBarSettings,
     PlanBarStep,
     click_selection,
@@ -43,6 +46,8 @@ from ...plan.bar_model import (
     grab_edge,
     text_top_y,
 )
+from ...plan.edits import BULK_CHIP
+from ...plan.role_colors import GRAY_MIDDLE, KIND_BULK, bulk_grays, parse_role, role_fill
 from .device_item import DeviceSpaceItem
 
 Z_VALUE = -20  # below the filled bands of an average (-10), the baseline selector (-5) and every trace (0)
@@ -50,6 +55,20 @@ EDGE_TOLERANCE_PX = 5.0  # how close to a boundary the pointer must be to take h
 _EDGE_ALPHA = 90
 _TEXT_SIDE_MARGIN_PX = 4.0
 _ANCHOR_MARK_PX = 12.0  # the anchor drawn in a Range baseline anchor step's lower left corner
+_CHIP_GAP_PX = 3.0  # between the evaluation chips of one step
+_CHIP_MARGIN_PX = 2.0  # from the step's end and from the edge the chips are measured from
+
+
+@dataclass(frozen=True)
+class DrawnChip:
+    """One evaluation chip (``B1``, ``S1``, ``Sb``) as it is placed, in device pixels."""
+
+    step_index: int
+    role: str
+    rect: QRectF
+    fill: str  # '#rrggbb'
+    alpha: float
+    outlined: bool  # the S_bulk greys: a white or a black chip needs an edge on a plot of either colour
 
 
 @dataclass(frozen=True)
@@ -87,6 +106,7 @@ class PlanBarItem(DeviceSpaceItem):
         self._drag_together = False  # the boundary being held is shared by two selected steps: both move
         self._baseline_anchors: frozenset[int] = frozenset()  # steps marked as Range baseline anchors: a small anchor in their lower left corner
         self._anchor_icons: dict[tuple[str, int], QIcon] = {}  # (colour, size in px) -> the anchor mark, made once (a handful: one per step colour)
+        self._bulk_grays: dict[int, str] = {}  # step index -> the grey of its Sb chip, made from ALL the steps of the plan (so it does not change while panning or zooming)
         self.setZValue(Z_VALUE)
 
     # -- what to draw ---------------------------------------------------------------------------------------------------
@@ -95,6 +115,8 @@ class PlanBarItem(DeviceSpaceItem):
         self.prepareGeometryChange()
         self._steps = tuple(steps)
         self._settings = settings
+        # the S_bulk steps' greys, from dark (lowest level) to white (highest), judged over every step of the plan, not only those in view
+        self._bulk_grays = bulk_grays({s.index: None if s.levels is None else s.levels.median for s in self._steps if BULK_CHIP in s.roles})
         present = {step.index for step in self._steps}
         if any(index not in present for index in self._selected):
             self._set_selection(tuple(i for i in self._selected if i in present), self._anchor if self._anchor in present else None)  # a step is gone (another dataset, no traces)
@@ -446,35 +468,72 @@ class PlanBarItem(DeviceSpaceItem):
                 icon = self._anchor_icons[key] = load_tabler_icon("anchor", color=color, size=key[1])
             icon.paint(painter, spot.toRect())
 
-    def _paint_role_chips(self, painter: QPainter, drawn: list[DrawnStep], area: QRectF) -> None:
-        """The evaluation roles of each step (``B1`` baseline of pair 1, ``S1`` signal ...) as small chips hanging from the bar's free edge (inside it when the bar fills the plot),
-        so they never cover the step's text. The baseline chip is neutral, the signal chip in the accent colour."""
+    def _chip_font(self) -> QFont:
         font = self.font()
         font.setPointSizeF(max(6.0, font.pointSizeF() * 0.85))
         font.setBold(True)
-        painter.setFont(font)
-        metrics = QFontMetricsF(font)
+        return font
+
+    def _chip_fill(self, role: str, step_index: int) -> tuple[str, float, bool]:
+        """(colour, opacity, outlined) of one chip. A pair is one colour: its signal chip (``S1``) in the pair's colour, its baseline chip (``B1``) the same colour darker and a little
+        more transparent (`plan/role_colors.py`). ``Sb``: a grey from dark to white by the step's level among the S_bulk steps. Anything else: neutral, as the baseline chip once was."""
+        fill = role_fill(role)
+        if fill is not None:
+            return fill[0], fill[1], False
+        if parse_role(role)[0] == KIND_BULK:
+            return self._bulk_grays.get(step_index, f"#{GRAY_MIDDLE:02x}{GRAY_MIDDLE:02x}{GRAY_MIDDLE:02x}"), 1.0, True
+        return self._text_color, 0.43, False
+
+    def _chip_top(self, rect: QRectF, area: QRectF, height: float) -> float:
+        """Device y of the top of the chips of the step whose bar segment is `rect`. ``roles_edge`` auto: hanging from the bar's free edge (below a bar at the top, above a bar at the
+        bottom, inside a full bar at its top), as always. Top / bottom: that edge of the plot; when the bar is on that edge the chips hang from its inner edge (inside a full bar:
+        at its top / bottom)."""
+        settings = self._settings
+        want = settings.position if settings.roles_edge == ROLES_AUTO else settings.roles_edge
+        if settings.is_full:
+            return rect.bottom() - _CHIP_MARGIN_PX - height if want == POSITION_BOTTOM and settings.roles_edge != ROLES_AUTO else rect.top() + _CHIP_MARGIN_PX
+        if want == POSITION_BOTTOM:
+            return rect.top() - _CHIP_MARGIN_PX - height if settings.position == POSITION_BOTTOM else area.bottom() - _CHIP_MARGIN_PX - height
+        return rect.bottom() + _CHIP_MARGIN_PX if settings.position == POSITION_TOP else area.top() + _CHIP_MARGIN_PX
+
+    def role_chips(self, drawn: list[DrawnStep], area: QRectF) -> list[DrawnChip]:
+        """Where every evaluation chip goes (no painting): a row of chips per step, at the left or the right end of its bar segment (``roles_side``), in the order of the step's roles
+        read left to right either way, at the edge `_chip_top` says. None when the chips are switched off (``show_roles``)."""
+        if not self._settings.show_roles:
+            return []
+        metrics = QFontMetricsF(self._chip_font())
         height = metrics.height() + 2.0
+        chips: list[DrawnChip] = []
         for item in drawn:
-            if not item.step.roles:
+            roles = item.step.roles
+            if not roles:
                 continue
-            x = max(item.rect.left(), area.left()) + 2.0
-            if self._settings.is_full:
-                y = item.rect.top() + 2.0
-            elif self._settings.position == POSITION_TOP:
-                y = item.rect.bottom() + 2.0
+            widths = [metrics.horizontalAdvance(role) + 8.0 for role in roles]
+            if self._settings.roles_side == SIDE_RIGHT:
+                x = min(item.rect.right(), area.right()) - _CHIP_MARGIN_PX - (sum(widths) + _CHIP_GAP_PX * (len(roles) - 1))
             else:
-                y = item.rect.top() - 2.0 - height
-            for role in item.step.roles:
-                width = metrics.horizontalAdvance(role) + 8.0
-                chip = QRectF(x, y, width, height)
-                signal = role.startswith("S")
-                fill = QColor(self._accent if signal else self._text_color)
-                fill.setAlpha(235 if signal else 110)
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(fill)
-                painter.drawRoundedRect(chip, 3.0, 3.0)
-                painter.setPen(QColor(contrast_text_color(fill.name(), fill.alphaF(), self._background)))
-                painter.drawText(chip, int(Qt.AlignmentFlag.AlignCenter), role)
-                x += width + 3.0
+                x = max(item.rect.left(), area.left()) + _CHIP_MARGIN_PX
+            y = self._chip_top(item.rect, area, height)
+            for role, width in zip(roles, widths):
+                fill, alpha, outlined = self._chip_fill(role, item.step.index)
+                chips.append(DrawnChip(item.step.index, role, QRectF(x, y, width, height), fill, alpha, outlined))
+                x += width + _CHIP_GAP_PX
+        return chips
+
+    def _paint_role_chips(self, painter: QPainter, drawn: list[DrawnStep], area: QRectF) -> None:
+        """The evaluation roles of each step (``B1`` baseline of pair 1, ``S1`` signal ..., ``Sb`` S_bulk step) as small chips placed by `role_chips`, away from the step's text."""
+        chips = self.role_chips(drawn, area)
+        if not chips:
+            return
+        painter.setFont(self._chip_font())
+        edge = QColor(self._text_color)
+        edge.setAlpha(170)
+        for chip in chips:
+            fill = QColor(chip.fill)
+            fill.setAlphaF(chip.alpha)
+            painter.setPen(QPen(edge, 1.0) if chip.outlined else Qt.PenStyle.NoPen)
+            painter.setBrush(fill)
+            painter.drawRoundedRect(chip.rect, 3.0, 3.0)
+            painter.setPen(QColor(contrast_text_color(chip.fill, chip.alpha, self._background)))
+            painter.drawText(chip.rect, int(Qt.AlignmentFlag.AlignCenter), chip.role)
         painter.setBrush(Qt.BrushStyle.NoBrush)

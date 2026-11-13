@@ -26,6 +26,23 @@ from .label_rule import DEFAULT_SEPARATORS, MODE_SOLUTION, MODE_WHOLE, shown_lab
 
 POSITION_TOP = "top"
 POSITION_BOTTOM = "bottom"
+ROLES_AUTO = "auto"  # the evaluation chips hang from the bar's free edge (below a bar at the top, above a bar at the bottom): how they were drawn until 2026-11-13
+SIDE_LEFT, SIDE_RIGHT = "left", "right"  # which end of its step the evaluation chips sit at
+# The Evaluation menu's "dice" picker (2026-11-13): five places, the four corners and the middle (auto). Each is an (edge, side) pair of `PlanBarSettings`; the middle keeps the
+# left end, where the chips always were, so it is exactly the old default. (Auto at the right end is not a place of its own.)
+PLACE_AUTO = "auto"
+ROLES_PLACES: dict[str, tuple[str, str]] = {
+    "top-left": (POSITION_TOP, SIDE_LEFT),
+    "top-right": (POSITION_TOP, SIDE_RIGHT),
+    PLACE_AUTO: (ROLES_AUTO, SIDE_LEFT),
+    "bottom-left": (POSITION_BOTTOM, SIDE_LEFT),
+    "bottom-right": (POSITION_BOTTOM, SIDE_RIGHT),
+}
+
+
+def roles_place_of(edge: str, side: str) -> str:
+    """The place (a key of `ROLES_PLACES`) of an (edge, side) pair; ``PLACE_AUTO`` for one that is not a place of its own (auto at the right end)."""
+    return next((place for place, pair in ROLES_PLACES.items() if pair == (edge, side)), PLACE_AUTO)
 POSITIONS = (POSITION_TOP, POSITION_BOTTOM)
 ALIGN_BAR = "bar"
 ALIGN_DATA = "data"
@@ -66,6 +83,11 @@ class PlanBarSettings:
     text_stop: int = 3  # 1 (low) - 5 (high), meaning depends on text_align
     text_pt: int = 9
     show_ri: bool = False  # 2026-11-12: write the step's refractive index in ( ) after its text (only a step whose solution has an imported RI gets one)
+    # The evaluation chips (B1 / S1 / ... / Sb; 2026-11-13). Where: `roles_edge` is ROLES_AUTO (beside the bar, as always), POSITION_TOP or POSITION_BOTTOM (that edge of the plot,
+    # below / above the bar when the bar is on it); `roles_side` is the left or the right end of each step.
+    show_roles: bool = True
+    roles_edge: str = ROLES_AUTO
+    roles_side: str = SIDE_LEFT
 
     @property
     def is_full(self) -> bool:

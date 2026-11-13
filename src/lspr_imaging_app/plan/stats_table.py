@@ -34,6 +34,9 @@ class StatsTableSettings:
     visible: bool = True
     position: str = POSITION_TOP  # which edge of the plot the table sits on
     text_pt: int = 9
+    # Room made on the left of the first step (before the start of the x axis) for the legend the table's rows line up with, in percent of what holds the legend and its margins:
+    # 100 = as the plot always made it, 0 = none made (2026-11-13). Less than 100 lets the first step's numbers start close to or under the legend (they never draw under it).
+    legend_room_pct: int = 100
 
 
 @dataclass(frozen=True)

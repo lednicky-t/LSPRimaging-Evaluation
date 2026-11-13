@@ -97,6 +97,9 @@ class Series:
     anchor_x: np.ndarray | None = None
     anchor_y: np.ndarray | None = None
     anchor_base: np.ndarray | None = None
+    # The label without the number of ROIs ("Group A" for "Group A (n=12)", "Average" for "Average of 12 ROIs"); "" for a line that has no count in its label (one ROI).
+    # The plot's legend can leave the count out (`view_settings.legend_text`); the label itself, used by the exports and the tooltips, always keeps it.
+    short_label: str = ""
 
 
 def response_groups(groups: Sequence[Sequence[int]]) -> tuple[tuple[int, ...], ...]:
@@ -331,7 +334,7 @@ def _attach_drift(line: Series, member_fits: list[DriftFit], center: str) -> Non
 def _combine(request: SensorgramRequest, processed: dict[int, tuple[np.ndarray, float]], display_mode: str, center: str, band: str) -> list[Series]:
     x = np.asarray(request.x, dtype=np.float64)
     if display_mode == DISPLAY_AVERAGE_ALL:
-        groups = [("average", f"Average of {len(processed)} ROIs", "#e5e7eb", tuple(processed))]
+        groups = [("average", f"Average of {len(processed)} ROIs", "#e5e7eb", tuple(processed), "Average")]
     elif display_mode == DISPLAY_BY_GROUP:
         groups = []
         claimed: set[int] = set()
@@ -339,21 +342,21 @@ def _combine(request: SensorgramRequest, processed: dict[int, tuple[np.ndarray, 
             members = tuple(r for r in g.roi_ids if r in processed and r not in claimed)
             claimed.update(members)
             if members:
-                groups.append((f"group:{g.name}", f"{g.name} (n={len(members)})", g.color, members))
+                groups.append((f"group:{g.name}", f"{g.name} (n={len(members)})", g.color, members, g.name))
         rest = tuple(r for r in request.roi_ids if r not in claimed)
         if rest:
-            groups.append(("group:ungrouped", f"{UNGROUPED} (n={len(rest)})", "#9ca3af", rest))
+            groups.append(("group:ungrouped", f"{UNGROUPED} (n={len(rest)})", "#9ca3af", rest, UNGROUPED))
     else:
         return [
             Series(f"roi:{r}", f"ROI {r}", request.roi_colors.get(r, "#f59e0b"), x, processed[r][0], baseline=processed[r][1], member_ids=(r,))
             for r in request.roi_ids
         ]
     series: list[Series] = []
-    for key, label, color, members in groups:
+    for key, label, color, members, short_label in groups:
         centre, low, high = aggregate_traces({r: processed[r][0] for r in members}, center=center, band=band)
         baselines = [processed[r][1] for r in members if np.isfinite(processed[r][1])]
         series.append(Series(key, label, color, x, centre, low, high, n_members=len(members),
-                             baseline=float(np.mean(baselines)) if baselines else float("nan"), member_ids=tuple(members)))
+                             baseline=float(np.mean(baselines)) if baselines else float("nan"), member_ids=tuple(members), short_label=short_label))
     return series
 
 

@@ -52,6 +52,7 @@ From pixels to numbers, and how the numbers are shown.
 - [`sensorgram_panel_split_2026-10-26.md`](sensorgram_panel_split_2026-10-26.md): Sensorgram panel split (2026-10-26)
 - [`sensorgram_fit_freeze_2026-10-24.md`](sensorgram_fit_freeze_2026-10-24.md): Sensorgram fit froze the window (2026-10-24)
 - [`sensorgram_mask_marks_2026-10-24.md`](sensorgram_mask_marks_2026-10-24.md): Sensorgram mask marks (2026-10-24)
+- [`sensorgram_view_tab_2026-11-13.md`](sensorgram_view_tab_2026-11-13.md): Sensorgram View tab: band / anchor toggles, points & lines and legend menus, the plan bar and step table groups moved onto it (2026-11-13)
 - [`sensorgram_stale_marks_2026-11-03.md`](sensorgram_stale_marks_2026-11-03.md): Sensorgram out-of-date marks: grey diamond + View clock button; why every line is marked (2026-11-03)
 - [`sensorgram_baseline_selector_2026-10-25.md`](sensorgram_baseline_selector_2026-10-25.md): Sensorgram: y-axis switch, baseline selector, y-range fix (2026-10-25)
 - [`sensorgram_reentrancy_and_cube_slider_cache_indicator.md`](sensorgram_reentrancy_and_cube_slider_cache_indicator.md): Sensorgram Start/Stop reentrancy fix, and the Cube/Time slider cache indicator

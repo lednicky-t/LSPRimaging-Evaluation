@@ -1,10 +1,18 @@
-"""The Sensorgram ribbon's "Experimental plan" group (2026-10-26): the controls of the plan bar.
+"""The Sensorgram's "Steps" and "Evaluation" menus (View tab): the controls of the plan bar (2026-10-26; menus since 2026-11-13).
 
 Screen purpose: show or hide the bar of experiment steps on the plot and choose how it looks. Display only: nothing here changes a number or an edit of a step.
 
-Layout (left to right, inline for now; the ribbon is to be re-ordered and grouped into pick-up menus later, so the whole group is this one file):
+Layout: one icon button (`menu`, a `GroupMenuButton`) in the View tab's "Steps" group; its panel holds the rows below, like the Legend menu. (Until 2026-11-13 they were inline fields of the
+ribbon, and the text controls were a "Step labels" pop-up of their own; the two panels are one now, with "Step labels" as a heading.)
 
-    [show] [height] [top / bottom] [transparency] [step labels menu: text: whole note / solution, refractive index after the text, text aligned to: bar / data, text position, text size]
+    Show  Height  Edge  Transparency
+    -- Step labels --
+    Text: whole note / solution   Refractive index after the text   Aligned to: bar / data   Position   Size
+
+A second menu of its own, **Evaluation** (`evaluation_menu`, 2026-11-13), has the markers of the evaluation steps on the bar (the ``B1`` / ``S1`` ... / ``Sb`` chips): ``Markers`` shown or
+hidden, and ``Place``: five pips like the 5 of a die (`place_picker.PlacePicker`), the four corners (top / bottom edge x left / right end of the step) and the middle = auto, beside
+the bar as always. The place is turned into `PlanBarSettings.roles_edge` / `roles_side` (`bar_model.ROLES_PLACES`), like the rest of the settings; the colours are
+`plan/role_colors.py`'s, the layout `PlanBarItem.role_chips`.
 
 - **show**: the bar on or off.
 - **height**: 1 - 10 % of the plot height, then "Full" (the bar fills the plot, behind the traces).
@@ -28,7 +36,7 @@ from PyQt6.QtCore import QObject, Qt, pyqtSignal
 from PyQt6.QtGui import QFontInfo, QValidator
 from PyQt6.QtWidgets import QApplication, QCheckBox, QHBoxLayout, QLabel, QLineEdit, QSlider, QSpinBox, QWidget
 
-from lspr_ui import CompactWedgeSlider, get_active_theme
+from lspr_ui import CompactWedgeSlider
 
 from ...plan.bar_model import (
     ALIGN_BAR,
@@ -37,8 +45,10 @@ from ...plan.bar_model import (
     DATA_STOP_NAMES,
     FONT_RANGE,
     HEIGHT_FULL,
+    PLACE_AUTO,
     POSITION_BOTTOM,
     POSITION_TOP,
+    ROLES_PLACES,
     STOP_MAX,
     STOP_MIN,
     PlanBarSettings,
@@ -47,6 +57,7 @@ from ...plan.label_rule import MODE_SOLUTION, MODE_WHOLE, parse_separators
 from ...storage.ui_state_keys import (
     SENSORGRAM_PLAN_ALPHA,
     SENSORGRAM_PLAN_POSITION,
+    SENSORGRAM_PLAN_ROLES_PLACE,
     SENSORGRAM_PLAN_SEPARATORS,
     SENSORGRAM_PLAN_TEXT_ALIGN,
     SENSORGRAM_PLAN_TEXT_MODE,
@@ -58,14 +69,34 @@ from ..ribbon_fields import style_ribbon_number_field
 from ..ui_state import UiStateStore
 from ..spectra.pick_menu import PickMenu
 from ..spectra.view_menu import IconToggle
-from .plan_icons import align_picture, plan_bar_icon, position_picture, text_content_picture
-from .plan_labels_menu import PlanLabelsMenu
+from .group_menu import GroupMenuButton
+from .place_picker import PlacePicker
+from .plan_icons import align_picture, plan_bar_icon, position_picture, role_chips_icon, text_content_picture
 
 VISIBLE_KEY = "sensorgram/plan_visible"
+ROLES_KEY = "sensorgram/plan_roles_visible"
 HEIGHT_KEY = "sensorgram/plan_height"
 TEXT_PT_KEY = "sensorgram/plan_text_pt"
 SHOW_RI_KEY = "sensorgram/plan_show_ri"
 
+MENU_TIP = (
+    "Steps: show or hide the bar of experiment steps on the plot, its height, edge and transparency, and how the step labels are written "
+    "(which part of the note, the refractive index, where the text sits and its size)."
+)
+EVAL_MENU_TIP = (
+    "Evaluation: show or hide the markers of the evaluation steps on the plan bar (B1 / S1, B2 / S2 ... and Sb), and where on its step each one sits."
+)
+ROLES_TIP = (
+    "Show or hide the evaluation markers on the plan bar: B1 / S1 (the baseline and the signal step of pair 1; one colour for each pair, the baseline darker), B2 / S2 ..., "
+    "and Sb for a step of the S_bulk set (a grey from dark to white by how far the lines moved in that step). Hiding them changes nothing of the evaluation."
+)
+ROLES_PLACE_TIPS = {  # the five pips of the place picker, like the 5 of a die
+    "top-left": "Top left: at the top edge of the plot, at the left end of each step (below the bar when the bar is there).",
+    "top-right": "Top right: at the top edge of the plot, at the right end of each step (below the bar when the bar is there).",
+    PLACE_AUTO: "Middle (auto): beside the bar, at the left end of each step, as they always were: below a bar at the top of the plot, above a bar at the bottom, inside a full bar at its top.",
+    "bottom-left": "Bottom left: at the bottom edge of the plot, at the left end of each step (above the bar when the bar is there).",
+    "bottom-right": "Bottom right: at the bottom edge of the plot, at the right end of each step (above the bar when the bar is there).",
+}
 SHOW_TIP = "Show or hide the bar of experiment steps on the plot: which solution ran when, on the same axis as the traces."
 NO_STEPS_TIP = (
     "This dataset has no experiment steps. Import the measurement notes (and the pump plan) in Workflow > Experimental plan to get them."
@@ -191,19 +222,37 @@ class PlanBarControls(QObject):
         self._show_ri = QCheckBox(parent)  # no text of its own: the row's caption "Refractive index" names it, the tool tip explains
         self._show_ri.setToolTip(RI_TIP)
 
-        # the text controls live in one pick-up menu (they are reparented into its panel)
-        self._labels = PlanLabelsMenu(
+        # every control lives in the one Steps menu (they are reparented into its panel)
+        self.menu = GroupMenuButton(
+            lambda color: plan_bar_icon(True, color, color),
+            MENU_TIP,
             (
+                ("Show", self._show), ("Height", self._height), ("Edge", self._position), ("Transparency", self._alpha),
+                ("Step labels", None),
                 ("Text", self._content), ("Refractive index", self._show_ri), ("Aligned to", self._align), ("Position", self._stop), ("Size", self._size),
             ),
             parent,
         )
+        # The Evaluation menu (2026-11-13): the markers of the evaluation steps (B1 / S1 ... / Sb) on the bar. Its settings are part of `PlanBarSettings` like the rest.
+        self._show_roles = IconToggle(role_chips_icon, ROLES_TIP, parent)
+        self._show_roles.setChecked(True)
+        self._roles_place = PlacePicker(ROLES_PLACE_TIPS, parent)  # five pips like the 5 of a die: the corners, and the middle = auto
+        self.evaluation_menu = GroupMenuButton(
+            lambda color: role_chips_icon(True, color, color), EVAL_MENU_TIP,
+            (("Markers", self._show_roles), ("Place", self._roles_place)),
+            parent,
+        )
+        self._controls = (
+            self._show, self._height, self._position, self._alpha, self._content, self._show_ri, self._align, self._stop, self._size, self._show_roles,
+            *self._roles_place.buttons.values(),
+        )  # greyed out together with the menu buttons when there are no steps
 
         self._available = True
         self._refresh_stop_tip()
         for signal in (
             self._show.toggled, self._position.currentIndexChanged, self._height.valueChanged, self._alpha.valueChanged,
             self._content.currentIndexChanged, self._separators.editingFinished, self._size.valueChanged, self._show_ri.toggled,
+            self._show_roles.toggled, self._roles_place.changed,
         ):
             signal.connect(self._changed)
         self._align.currentIndexChanged.connect(self._on_align_changed)
@@ -213,9 +262,18 @@ class PlanBarControls(QObject):
     # -- the group ----------------------------------------------------------------------------------------------------------
 
     def widgets(self) -> tuple[QWidget, ...]:
-        return (self._show, self._height, self._position, self._alpha, self._labels)
+        return (self.menu,)
+
+    def evaluation_widgets(self) -> tuple[QWidget, ...]:
+        """The View tab's "Evaluation" group: the menu of the evaluation markers."""
+        return (self.evaluation_menu,)
+
+    def roles_place(self) -> str:
+        """The place of the evaluation chips chosen with the dice: a key of `bar_model.ROLES_PLACES`."""
+        return self._roles_place.place()
 
     def settings(self) -> PlanBarSettings:
+        roles_edge, roles_side = ROLES_PLACES[self.roles_place()]  # the dice's place as the (edge, side) the bar draws with
         return PlanBarSettings(
             visible=self._show.isChecked(),
             position=self._position.currentData() or POSITION_TOP,
@@ -227,13 +285,18 @@ class PlanBarControls(QObject):
             text_stop=self._stop.value(),
             text_pt=self._size.value(),
             show_ri=self._show_ri.isChecked(),
+            show_roles=self._show_roles.isChecked(),
+            roles_edge=roles_edge,
+            roles_side=roles_side,
         )
 
     def set_available(self, available: bool) -> None:
-        """Without experiment steps the group is greyed out, and the toggle says why."""
+        """Without experiment steps the menu is greyed out (and every control in it), and its tool tip says why."""
         self._available = bool(available)
-        for widget in self.widgets():
+        for widget in (self.menu, self.evaluation_menu, *self._controls):
             widget.setEnabled(self._available)
+        self.menu.setToolTip(MENU_TIP if self._available else NO_STEPS_TIP)
+        self.evaluation_menu.setToolTip(EVAL_MENU_TIP if self._available else NO_STEPS_TIP)
         self._show.setToolTip(SHOW_TIP if self._available else NO_STEPS_TIP)
 
     def is_available(self) -> bool:
@@ -243,7 +306,10 @@ class PlanBarControls(QObject):
         self._show.refresh_theme()
         for menu in (self._position, self._content, self._align):
             menu.refresh_theme()
-        self._labels.refresh_theme(get_active_theme())
+        self.menu.refresh_theme()
+        self._show_roles.refresh_theme()
+        self.evaluation_menu.refresh_theme()
+        self._roles_place.refresh_theme()
 
     # -- changes ------------------------------------------------------------------------------------------------------------
 
@@ -253,7 +319,7 @@ class PlanBarControls(QObject):
 
     def _refresh_position_visible(self, *_args: object) -> None:
         """A full-height bar fills the plot and has no edge, so its top / bottom choice is out of the way (and still remembered)."""
-        self._position.setVisible(self._height.value() < HEIGHT_FULL)
+        self.menu.set_row_visible(self._position, self._height.value() < HEIGHT_FULL)
 
     def _refresh_stop_tip(self) -> None:
         names = DATA_STOP_NAMES if self._align_key == ALIGN_DATA else BAR_STOP_NAMES
@@ -286,6 +352,8 @@ class PlanBarControls(QObject):
             store.bind(HEIGHT_KEY, self._height)
             store.bind(TEXT_PT_KEY, self._size)
             store.bind(SHOW_RI_KEY, self._show_ri)
+            store.bind(ROLES_KEY, self._show_roles)
+            self._roles_place.set_place(str(read(store, SENSORGRAM_PLAN_ROLES_PLACE)))  # an unknown remembered place is ignored: the middle (auto) stays
             for menu, key in (
                 (self._position, SENSORGRAM_PLAN_POSITION), (self._content, SENSORGRAM_PLAN_TEXT_MODE), (self._align, SENSORGRAM_PLAN_TEXT_ALIGN),
             ):
@@ -314,4 +382,6 @@ class PlanBarControls(QObject):
         remember(self._separators.editingFinished, SENSORGRAM_PLAN_SEPARATORS, lambda: self._separators.text())
         remember(self._stop.valueChanged, SENSORGRAM_PLAN_TEXT_STOP_BAR, lambda: self._stops[ALIGN_BAR])
         remember(self._stop.valueChanged, SENSORGRAM_PLAN_TEXT_STOP_DATA, lambda: self._stops[ALIGN_DATA])
+        for place, button in self._roles_place.buttons.items():  # `toggled`, not the picker's `changed`: pressing a pip in code is remembered too
+            button.toggled.connect(lambda on, picked=place: store.set(SENSORGRAM_PLAN_ROLES_PLACE.key, picked) if on else None)
         self.settings_changed.emit()  # whatever was restored is what the plot should show

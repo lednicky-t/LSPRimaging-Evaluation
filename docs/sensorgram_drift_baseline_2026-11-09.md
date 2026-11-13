@@ -26,23 +26,24 @@ anchor-point baseline: first pick where the baseline is, then how to connect the
 | A ROI's own points follow ROI renumbering | `AnalysisSettingsModule.remap_roi_ids`, wired in `app_rewrite._connect_roi_renumbering` |
 | Lines carry `baseline_curve`, `baseline_note`, `anchor_rms`, `anchor_x/_y/_base` | `analysis/scan_trace.py` `_build_lines` / `_attach_drift` |
 | ROI-table step columns use the same anchors | `analysis/step_table.py` `_request` (`cube_numbers=`) |
-| Ribbon controls + Anchors menu | `panels/sensorgram/baseline_controls.py` |
+| Ribbon controls + the right-click anchor menu | `panels/sensorgram/baseline_controls.py` |
+| The anchor tools that roll out beside the edit pencil (since 2026-11-13; before: the Anchors drop-down) | `panels/sensorgram/anchor_tools.py` |
 | Dashed curve, hollow-square anchor marks, edit mode | `panels/sensorgram/plot.py` `show_series`, `set_anchor_mode`, `_on_scene_clicked` |
 | Plan bar lock during the edit | `panels/sensorgram/plan_bar.py` `set_locked` |
 
 ## How it is used
 
 Method **Anchor points** -> turn on the edit toggle -> left click adds a point at the nearest cube, right click on a point's square removes it (a
-right click elsewhere opens the anchor menu) -> pick a **Shape** -> **Subtract**. The Baseline group shows: Method, Shape, edit toggle, Anchors menu.
+right click elsewhere opens the anchor menu) -> pick a **Shape** -> **Subtract**. The Baseline group shows: Method, Shape, edit toggle, and, while the toggle is on, the anchor tools (2026-11-13; before: an Anchors menu).
 
 Method **Range** with anchor steps: see "Range method with anchor steps" below.
 
 ## The rules, and the reasons for them
 
-- **One anchor per point.** Each is the mean x and mean y of the cubes within ± `baseline_point_halfwidth` (default 2, set in the Anchors menu) of the
+- **One anchor per point.** Each is the mean x and mean y of the cubes within ± `baseline_point_halfwidth` (default 2, set in the anchor tools) of the
   clicked cube, in file order.
 - **Storage.** `(roi id, cube number)` pairs; roi id 0 = shared by every ROI. Cube numbers, not plot x, so a Cube / Time switch keeps them in place.
-- **Scope.** New points go to all ROIs or to the lines shown only (Anchors menu, remembered under `sensorgram/anchor_point_scope`). A ROI's points are
+- **Scope.** New points go to all ROIs or to the lines shown only (anchor tools, remembered under `sensorgram/anchor_point_scope`). A ROI's points are
   the shared ones plus its own.
 - **Removal.** A right click within 10 screen px of an anchor square (`plot._ANCHOR_HIT_PX`, `anchor_square_at`) deletes that point wherever it is
   kept (shared, and the shown ROIs' own): what you see is what goes. Before 2026-11-09 evening any right click removed the nearest point, which was
@@ -53,9 +54,11 @@ Method **Range** with anchor steps: see "Range method with anchor steps" below.
 - **Icons (2026-11-09).** Both edit toggles are the standard pencil (`baseline_controls.pencil_icon`).
   - The window method got its own pencil (`panel._band_edit`). It shows or hides the baseline selector band, so the band menu has no show / hide
     toggle any more (`RoiOverlayControls.set_toggle_shown(False)`); the remembered key is still `sensorgram/baseline_band_visible`.
-  - The Anchors button is Tabler's `anchor` icon (vendored into `lspr_ui/icon_assets/`, umbrella repo) plus the number of points. The drop-down
-    repeats the count at the head of its row.
-- **Anchors drop-down.** One row of icon buttons (scope all / shown, ± cubes, clear) and a small dim line with the counts and the fit notes.
+  - The Anchors button was Tabler's `anchor` icon (vendored into `lspr_ui/icon_assets/`, umbrella repo) plus the number of points. The drop-down
+    repeated the count at the head of its row. *Replaced 2026-11-13 by the anchor tools (below); the anchor icon and the count are their first two
+    items.*
+- **Anchors drop-down (until 2026-11-13).** One row of icon buttons (scope all / shown, ± cubes, clear) and a small dim line with the counts and the
+  fit notes. *Replaced by `anchor_tools.py`; the dim line is gone, its fit notes are the tool tip of the number.*
 - **Renumbering.** A shared point stays; a ROI's own point follows its ROI or goes with it. Not undo-tracked.
 - **No silent fallback.** Too few anchors for the shape: the line stays uncorrected (NaN baseline) and a note says why ("no anchors ...", "linear
   needs 2 anchors with values, found 1"). This follows the rule that controls mean the same for every selection. The notes say "anchors", not
@@ -228,6 +231,63 @@ The Range method keeps the plan-bar icon, its dashed curve and its step band. No
 (the fit, the tuning and the CSV record do not use them for drawing). Test:
 `test_marked_range_steps_draw_no_squares_on_the_traces_but_the_curve_and_the_plan_bar_icon`.
 
+## 2026-11-13: hand the selected lines' anchor points on to every ROI (maintainer)
+
+**The report.** Points placed on one line did not appear on the other lines, even after the Anchors menu was switched to "all ROIs". That is how
+the storage works, not a fault: a point is `(roi id, cube)`. The "lines shown only" scope stores a clicked point as an *own* point of the ROIs
+selected at that moment; "all ROIs" stores it as a shared point (roi id 0). The scope button only decides about points placed **afterwards**; it never
+re-labels points already placed. So own points of line A stayed with A.
+
+**The tool.** A share button (Tabler `share`, vendored into `lspr_ui/icon_assets/`) after the scope buttons of the anchor tools
+(`anchor_share`; first built in the Anchors drop-down, moved the same day, see "The anchor tools" below), and the entry "Apply the lines' anchor
+points to all ROIs" in the right-click anchor menu. Both call
+`DriftBaselineControls.share_points_of_shown`, which calls the pure `baseline_drift.share_points(points, roi_ids)`.
+
+- **What it does.** Each cube that is an own point of one of the selected ROIs becomes one shared point. Several selected lines hand on the union of
+  their own points, each cube once.
+- **What it never does.** Nothing a ROI used is lost: every ROI keeps the cubes it had and gains the transferred ones. Other ROIs' own points at
+  other cubes stay: this *adds*, it does not replace. (A "make every ROI identical" tool would have to delete them; not built, not asked for.)
+- **One place per cube.** An own copy of a transferred cube, on any ROI, is dropped, because the shared point now gives it. Otherwise removing the
+  shared point from the plot would leave that copy behind on one ROI, and the point would seem to come back there. (`StatisticsSettings` only
+  de-duplicates identical pairs, so `(0, c)` and `(3, c)` would both be kept.)
+- **Nothing to hand on.** The button and entry are off when the selected lines keep no points of their own (no ROI selected, or their points are
+  shared already); the tool tip says so. Selection is read like the "lines shown" scope reads it (`selected_roi_ids`).
+- **Feedback.** The menu closes, and the panel's `say` shows "N anchor points of the lines shown now apply to all ROIs." at the pointer.
+- **Not undo-tracked**, like every anchor edit (see Renumbering above); Clear removes everything if a transfer was a mistake.
+- **No numbers change.** Only which cubes belong to which ROI; the fit (`fit_drift`) and the stored scan are untouched.
+- Tests: `test_lspri_baseline_drift.py` (`test_sharing_...`, four), `test_lspri_sensorgram_drift_baseline.py`
+  (`test_the_share_button_hands_the_selected_lines_points_to_every_roi`, `test_sharing_keeps_the_other_rois_own_points_at_other_cubes`,
+  `test_the_anchor_context_menu_has_the_share_entry_too`). Unseen by eye.
+- The Range method's anchor steps never needed it: they are shared by every ROI already.
+
+### The anchor tools roll out beside the pencil (2026-11-13, same day, maintainer)
+
+The maintainer asked for the Anchors drop-down to go: "make the edit icon something like a menu, which rolls out the tools and keeps them displayed
+until edit is off", with the anchor points, the scope selection and the new transfer function in it, and **no text that lists the anchor points**.
+
+- **What it is now.** `panels/sensorgram/anchor_tools.py` `AnchorTools`: one row, the last field of the Baseline group, right after the pencil. In
+  order: anchor icon and the number of points, scope (all ROIs / lines shown), apply to all ROIs, `± N` cubes, clear.
+- **Rolls out and in.** `DriftBaselineControls._show_tools`: visible while the pencil is on **and** the method is Anchor points; hidden when the
+  pencil goes off, and when the method changes (the pencil goes off with it). Inline in the ribbon, not a pop-up: a Qt pop-up menu closes on any click
+  outside it, so one that "stays until edit is off" would have had to be a floating window of its own. There is no sliding animation: it appears at
+  once. If the ribbon is too narrow the drawer scrolls it (arrows at the edges), as for every other group.
+- **Always in step.** The buttons are real widgets that live as long as the panel, not a menu rebuilt on each opening, so `refresh_tools` keeps them
+  current: on every settings change (`sync`), on a scope change (also the one restored at start-up) and on **every ROI selection change** (panel:
+  `roi_selection_changed`), because "apply to all ROIs" is on only when the selected lines keep points of their own.
+- **No text list.** The dim line ("N anchor points: n shared, n own" and the fit notes) is gone. The fit notes (the anchor scatter left after
+  correction, the lines that could not be corrected and why: `drift_summary`) are not lost: they are the tool tip of the number. The shared / own
+  split is no longer shown anywhere. Pinned by `test_the_tools_hold_no_text_list_of_the_points`.
+- **The number is no longer always visible.** It used to be on the Anchors button at all times; it is now seen only while the pencil is on. (While
+  editing, the cross-hair's gold badge still counts the points the shape needs.)
+- **Layout code and logic apart.** `AnchorTools` reads and writes no settings: it gets its values through `show_state` and sends signals
+  (`scope_picked`, `share_requested`, `clear_requested`, `halfwidth_changed`); `DriftBaselineControls` turns them into settings edits. Its object
+  names (`anchor_scope_all`, `anchor_scope_shown`, `anchor_share`, `anchor_halfwidth`, `anchor_clear`, `anchor_count`) are the ones the Anchors
+  drop-down had.
+- **Removed:** `AnchorsButton`, `DriftBaselineControls.anchors`, `fill_anchor_menu`. The right-click anchor menu is unchanged (it still has the scope
+  entries, apply to all ROIs and clear).
+- Tests: `test_lspri_sensorgram_drift_baseline.py` (`test_the_anchor_tools_roll_out_with_the_pencil_...`, `test_the_tools_hold_no_text_list_...`,
+  `test_the_tools_are_one_row_of_icons_...`, `test_the_tools_follow_a_scope_set_by_code_...`, and the share tests now drive the tools). Unseen by eye.
+
 ## Open
 
 - Before/after check on a real dataset with repeated buffer steps (not done yet, for either method, nor for the tuning; the numbers above are
@@ -236,5 +296,6 @@ The Range method keeps the plan-bar icon, its dashed curve and its step band. No
   counts as "steps marked": the range band stays hidden and the lines are uncorrected with "no anchors ...". The way out is "Clear all anchor steps"
   on any step's menu. Dropping such refs when the plan changes would be simple, but then undoing the step's removal would not bring the mark back.
 - Free anchor *regions* (a dragged range instead of a point); exponential / smoothing-spline shapes.
-- Copying anchors between plots (the maintainer's "translation function").
+- Copying anchors between plots (the maintainer's "translation function"): the within-one-plot case is built (2026-11-13, above); a copy from one
+  *dataset / session* to another is not.
 - The dashed curve is not in the CSV export; the export record has `anchor_rms_nm` and `baseline_note` per line.
