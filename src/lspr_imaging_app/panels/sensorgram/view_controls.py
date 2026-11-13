@@ -9,7 +9,7 @@ Main user actions (groups of the tab, left to right; each pop-up is a `GroupMenu
 - **Points & lines** - a pop-up (`lines_menu`): the dots (show / hide, size, and the Dot limit: dots are drawn only for up to that many lines), the lines (show / hide, width), how
   the points are joined (Straight / Spline, two pictures, `line_icons.py`) and a "Reset to default". While more lines are drawn than the Dot limit the Points toggle shows itself off
   (the remembered choice is kept) and a click on it asks whether to raise the limit (`points_toggle.py`).
-- **Legend** - a pop-up (`legend_menu`): Auto / Show / Hide, the text size (with a chain button that links it to the Steps and Stats menus' sizes, `text_link.py`), the gap between its rows, whether a group's
+- **Legend** - a pop-up (`legend_menu`): Auto / Show / Hide, the text size (the size the Steps and Stats menus' chain buttons link to, `text_link.py`), the gap between its rows, whether a group's
   name carries its number of ROIs ("Group A (n=12)"), whether it sits at the edge of the plot instead of just inside the plan bar, and a "Reset to default". The step table's rows line up with the
   legend's rows, so the gap and the place move them too.
 - **Steps**, **Evaluation** and **Stats** - the plan bar's, its evaluation markers' and the step table's own menus (`plan_group.py`, `stats_group.py`, the same kind of pop-up).
@@ -41,7 +41,6 @@ from .line_icons import joint_picture, lines_toggle_icon, points_lines_icon, poi
 from .plot import MAX_LEGEND_ENTRIES, MAX_LEGEND_SERIES
 from .points_toggle import PointsToggle, ask_to_raise_dots_limit
 from .stat_icons import band_icon
-from .text_link import LINK_KEY, make_link_toggle
 from .view_settings import (
     DEFAULT_DOTS_MAX_LINES,
     DEFAULT_LEGEND_SPACING_PX,
@@ -201,7 +200,6 @@ class SensorgramViewControls(QObject):
         # -- Legend -------------------------------------------------------------------------------------------------------------
         modes_holder, self._mode_group, self._mode_buttons = segmented_buttons(parent, LEGEND_MODES, LEGEND_MODE_LABELS, LEGEND_MODE_TIPS, "view_legend")
         self.legend_text = _spin(parent, "view_legend_text", *LEGEND_TEXT_RANGE, DEFAULT_LEGEND_TEXT_PT, " pt", LEGEND_TEXT_TIP)
-        self.text_link = make_link_toggle(parent)  # links this size with the Stats menu's (`text_link.TextSizeLink`, made by the panel)
         self.legend_spacing = _spin(parent, "view_legend_spacing", *LEGEND_SPACING_RANGE, DEFAULT_LEGEND_SPACING_PX, " px", LEGEND_SPACING_TIP)
         self.legend_counts = QCheckBox("(n=12)", parent)
         self.legend_counts.setObjectName("view_legend_counts")
@@ -215,7 +213,7 @@ class SensorgramViewControls(QObject):
         self.legend_menu = GroupMenuButton(
             _tabler("list-details"), LEGEND_TIP,
             (
-                ("Legend", modes_holder), ("Text", widgets_row(parent, self.legend_text, self.text_link)), ("Row gap", self.legend_spacing), ("ROI count", self.legend_counts),
+                ("Legend", modes_holder), ("Text", self.legend_text), ("Row gap", self.legend_spacing), ("ROI count", self.legend_counts),
                 ("Position", self.legend_over_bar),
             ),
             parent, footer=self._legend_reset,
@@ -317,7 +315,6 @@ class SensorgramViewControls(QObject):
 
     def reset_legend(self) -> None:
         def put_back() -> None:
-            self.text_link.setChecked(False)  # unlinked first, so that putting the legend's size back does not drag the stats numbers' size along
             self.set_legend_mode(LEGEND_AUTO)
             self.legend_text.setValue(DEFAULT_LEGEND_TEXT_PT)
             self.legend_spacing.setValue(DEFAULT_LEGEND_SPACING_PX)
@@ -344,7 +341,6 @@ class SensorgramViewControls(QObject):
         self.anchors.refresh_theme()
         self.show_points.refresh_theme()
         self.show_lines.refresh_theme()
-        self.text_link.refresh_theme()
         self.lines_menu.refresh_theme()
         self.legend_menu.refresh_theme()
         segment = segment_stylesheet()
@@ -364,7 +360,7 @@ class SensorgramViewControls(QObject):
                 (BAND_KEY, self.band), (ANCHORS_KEY, self.anchors), (POINTS_KEY, self.show_points), (LINES_KEY, self.show_lines),
                 (POINT_SIZE_KEY, self.point_size), (DOTS_LIMIT_KEY, self.dots_limit), (LINE_WIDTH_KEY, self.line_width),
                 (LEGEND_TEXT_KEY, self.legend_text), (LEGEND_SPACING_KEY, self.legend_spacing), (LEGEND_COUNTS_KEY, self.legend_counts),
-                (LEGEND_OVER_BAR_KEY, self.legend_over_bar), (LINK_KEY, self.text_link),
+                (LEGEND_OVER_BAR_KEY, self.legend_over_bar),
             ):
                 store.bind(key, widget)
             self.set_legend_mode(str(read(store, SENSORGRAM_LEGEND_MODE)))

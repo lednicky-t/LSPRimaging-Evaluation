@@ -22,7 +22,7 @@ the bar as always. The place is turned into `PlanBarSettings.roles_edge` / `role
 - **refractive index** (2026-11-12): a checkbox; on, each step's RI (imported RIs.txt) is written in ( ) after its text. Off by default; a step with no RI keeps its text.
 - **text aligned to / text position**: a 5-stop slider (low to high). Aligned to the *bar* the stops are positions inside the bar; aligned to the *data* they are distances from
   the traces inside each step (far below ... far above). Each mode remembers its own stop.
-- **text size**: in points, with a chain button that links it to the Legend menu's and the Stats menu's sizes (`text_link.py`).
+- **text size**: in points, with a chain button that links it to the Legend menu's text size (`text_link.py`; the Stats menu has a button of its own).
 
 Every control is remembered (CLAUDE.md "Remembering UI state"): the toggle and the two number boxes by ``store.bind``, the rest by the rows in ``storage/ui_state_keys.py``.
 ``settings()`` returns the current values as one `PlanBarSettings`; ``settings_changed`` fires after any change. Without steps in the dataset the whole group is greyed out.
@@ -78,6 +78,7 @@ VISIBLE_KEY = "sensorgram/plan_visible"
 ROLES_KEY = "sensorgram/plan_roles_visible"
 HEIGHT_KEY = "sensorgram/plan_height"
 TEXT_PT_KEY = "sensorgram/plan_text_pt"
+LINK_KEY = "sensorgram/plan_text_size_linked"  # the chain beside the size: linked to the Legend's text size
 SHOW_RI_KEY = "sensorgram/plan_show_ri"
 
 MENU_TIP = (
@@ -223,7 +224,7 @@ class PlanBarControls(QObject):
         self._size.setKeyboardTracking(False)
         style_ribbon_number_field(self._size, f"{FONT_RANGE[1]} pt")
         self._size.setToolTip(SIZE_TIP)
-        self.text_link = make_link_toggle(parent)  # links this size with the Legend's and the Stats menus' (`text_link.TextSizeLink`, made by the panel)
+        self.text_link = make_link_toggle(parent, "the step names")  # links this size to the Legend menu's (`text_link.TextSizeLink`, made by the panel)
 
         self._show_ri = QCheckBox(parent)  # no text of its own: the row's caption "Refractive index" names it, the tool tip explains
         self._show_ri.setToolTip(RI_TIP)
@@ -364,6 +365,7 @@ class PlanBarControls(QObject):
             store.bind(VISIBLE_KEY, self._show)
             store.bind(HEIGHT_KEY, self._height)
             store.bind(TEXT_PT_KEY, self._size)
+            store.bind(LINK_KEY, self.text_link)
             store.bind(SHOW_RI_KEY, self._show_ri)
             store.bind(ROLES_KEY, self._show_roles)
             self._roles_place.set_place(str(read(store, SENSORGRAM_PLAN_ROLES_PLACE)))  # an unknown remembered place is ignored: the middle (auto) stays

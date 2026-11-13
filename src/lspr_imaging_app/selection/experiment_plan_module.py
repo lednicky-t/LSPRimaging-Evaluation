@@ -25,11 +25,18 @@ commands below; they keep no step state of their own.
   wiring once autosave is on for the session, imports ``RIs.txt`` from the dataset folder when the session has no table, and only *reports* a file that
   changed since its import (`ri_file_changed`): new values are never taken in silently. `ri_changed` / `ri_notice(text)` tell the views and the status bar.
   The file is ~1 KB, read on the GUI thread (a user's import, or once per session opened).
+- **Editing the refractive indices (2026-11-13)**: the imported table is never changed; the user's edits are a *working table* on top of it (`RiTable.rows`, same session
+  block, schema 1.9). `ri_edit` (one cell), `ri_set_steps` (assign a row to steps by hand, or back to "by its name"), `ri_add_row` / `ri_add_row_for`, `ri_remove_row`,
+  `ri_revert_row`, `ri_restore_removed`, `ri_revert_all` each make one undo step and emit `ri_changed`, so everything that reads `ri_table()` / `ri_of_step` (the S_bulk
+  columns, the bulk plot, the plan bar) recalculates by the paths that already follow an import; no scan is touched, the RIs never enter it. A value that differs from the
+  import comes back flagged (`SolutionRi.edited`). An undo is skipped, with a notice, when the table was replaced by an import since. Importing a file replaces the table and
+  drops the edits: the menu asks first (`FileMenuController.import_refractive_indices`). A refused edit raises `ri.RiEditError` (a sentence for the user) and changes nothing.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -186,10 +193,32 @@ class ExperimentPlanModule(QObject):
 
     def ri_usage(self) -> ri.RiUsage:
         """The table seen through the steps: which solutions have an RI (and their steps), which steps' solutions have none, which rows are unused."""
-        return ri.usage(self._ri_table, ((step.order, step.label) for step in self.steps()))
+        return ri.usage(self._ri_table, ((step.order, step.label, step.ref) for step in self.steps()))
 
     def ri_of_step(self, step: EffectiveStep) -> ri.SolutionRi | None:
-        return None if self._ri_table is None else self._ri_table.find(ri.solution_of(step.label))
+        """The RI a step uses: the row the user assigned it to by hand, else the row named like its note's first name (None: none, or the row has no value yet)."""
+        return None if self._ri_table is None else self._ri_table.find_for_step(step.ref, step.label)
+
+    def ri_has_edits(self) -> bool:
+        return self._ri_table is not None and self._ri_table.has_edits()
+
+    def ri_edited_values_used_by(self, steps: Sequence[EffectiveStep]) -> list[tuple[ri.SolutionRi, str]]:
+        """The edited values (and what the import had, "" for an added row) that `steps` take their RI from: what a result built from these steps should say it used."""
+        table = self._ri_table
+        found: list[tuple[ri.SolutionRi, str]] = []
+        if table is None:
+            return found
+        seen: set[int] = set()
+        for step in steps:
+            index = table.row_index_for_step(step.ref, step.label)
+            if index is None or index in seen:
+                continue
+            seen.add(index)
+            row = table.working()[index]
+            value = table.solution_for(row)
+            if value is not None and value.edited:
+                found.append((value, table.imported_text(row)))
+        return found
 
     def experiment_day(self) -> date | None:
         """The local calendar day the first step started (what an RI measurement's age is counted to); None without steps."""
@@ -247,6 +276,91 @@ class ExperimentPlanModule(QObject):
         self._ri_table = table
         self._ri_file_changed = changed_file
         self.ri_changed.emit()
+
+    # -- editing the refractive indices (2026-11-13) --------------------------------------------------------------------------
+
+    def _ri_rows(self) -> tuple[ri.RiRow, ...]:
+        return () if self._ri_table is None else self._ri_table.working()
+
+    @instrumented("ExperimentPlanModule.ri_edit")
+    def ri_edit(self, index: int, field: str, text: str) -> bool:
+        """Change one cell of row `index` of the working table: `field` is ``name``, ``ri``, ``std``, ``temp_c``, ``n`` or ``measured_on`` (`ri.edit_row`). Raises
+        `ri.RiEditError` (and changes nothing) when the text is refused. False when the value is the one it was."""
+        return self._commit_ri_rows("Edit refractive index", ri.edit_row(self._ri_rows(), index, field, text))
+
+    @instrumented("ExperimentPlanModule.ri_set_steps")
+    def ri_set_steps(self, index: int, text: str) -> bool:
+        """Assign row `index` to the steps written in `text` (``1, 3-5, 9``: the numbers the user sees), by hand; empty text gives the row back to its name. Raises `ri.RiEditError`."""
+        numbers = ri.parse_step_numbers(text)
+        by_number = {step.order: step for step in self.steps()}
+        unknown = [number for number in numbers if number not in by_number]
+        if unknown:
+            raise ri.RiEditError(
+                f"there is no step {unknown[0]} (this experiment has {len(by_number)} steps)" if by_number else "this experiment has no steps to assign"
+            )
+        number_of = {step.ref: number for number, step in by_number.items()}
+        rows = ri.set_row_steps(
+            self._ri_rows(), index, tuple(by_number[number].ref for number in numbers) or None, describe=lambda ref: f"step {number_of.get(ref, '?')}"
+        )
+        return self._commit_ri_rows("Assign refractive index to steps", rows)
+
+    @instrumented("ExperimentPlanModule.ri_add_row")
+    def ri_add_row(self) -> int:
+        """A blank row at the end, to be filled in (one waiting already is reused). Returns its index in the working table."""
+        rows, index = ri.add_row(self._ri_rows())
+        self._commit_ri_rows("Add refractive index row", rows)
+        return index
+
+    @instrumented("ExperimentPlanModule.ri_add_row_for")
+    def ri_add_row_for(self, name: str, ri_text: str) -> bool:
+        """A new row for a solution of the steps that has none, with the RI typed for it. Raises `ri.RiEditError`."""
+        return self._commit_ri_rows("Add refractive index", ri.add_row_with(self._ri_rows(), name, ri_text))
+
+    @instrumented("ExperimentPlanModule.ri_remove_row")
+    def ri_remove_row(self, index: int) -> bool:
+        """Take row `index` out of the working table (an imported row can be put back: `ri_restore_removed`)."""
+        return self._commit_ri_rows("Remove refractive index row", ri.remove_row(self._ri_rows(), index))
+
+    @instrumented("ExperimentPlanModule.ri_revert_row")
+    def ri_revert_row(self, index: int) -> bool:
+        """Row `index` back as imported (an added row is removed)."""
+        table = self._ri_table
+        return False if table is None else self._commit_ri_rows("Revert refractive index row", ri.revert_row(table.working(), index, table.imported_rows()))
+
+    @instrumented("ExperimentPlanModule.ri_restore_removed")
+    def ri_restore_removed(self, base: str) -> bool:
+        """Put the imported row `base` (``RiRow.base``) back, as imported. Raises `ri.RiEditError` when a name taken since is in the way."""
+        table = self._ri_table
+        return False if table is None else self._commit_ri_rows("Restore refractive index row", ri.restore_row(table.working(), base, table.imported_rows()))
+
+    @instrumented("ExperimentPlanModule.ri_revert_all")
+    def ri_revert_all(self) -> bool:
+        """Every edit undone at once: the table as imported (a table started by hand has no import: it ends up empty)."""
+        table = self._ri_table
+        return False if table is None or not table.has_edits() else self._commit_ri_rows("Revert refractive index edits", table.imported_rows())
+
+    def _commit_ri_rows(self, label: str, rows: tuple[ri.RiRow, ...]) -> bool:
+        """`rows` become the working table, as one undo step. A table started by hand (no file) is made for the first row; one left with nothing is dropped again."""
+        old = self._ri_table
+        base = old if old is not None else ri.RiTable(
+            source_name=ri.HAND_SOURCE_NAME, sha256="", imported_at_utc=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            wavelength_nm=self.ri_wavelength_nm, solutions=(),
+        )
+        new = base.with_rows(rows)
+        if not new.solutions and new.rows is None:
+            new = None
+        if new == old:
+            return False
+        self._set_ri_table(new, changed_file=self._ri_file_changed)
+        undo_manager.push(FunctionCommand(label, undo_fn=lambda: self._swap_ri(new, old), redo_fn=lambda: self._swap_ri(old, new)))
+        return True
+
+    def _swap_ri(self, expected: ri.RiTable | None, target: ri.RiTable | None) -> None:
+        """Undo / redo of an edit: only while the table is still the one the edit made (an import since would be overwritten by an old copy)."""
+        if self._ri_table != expected:
+            self.ri_notice.emit("The refractive index table was replaced since that edit (a new import), so the edit was not undone or redone.")
+            return
+        self._set_ri_table(target, changed_file=self._ri_file_changed)
 
     # -- commands (undoable) ------------------------------------------------------------------------------------------------
 

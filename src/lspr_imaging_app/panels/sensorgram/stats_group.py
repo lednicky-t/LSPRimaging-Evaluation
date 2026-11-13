@@ -3,8 +3,8 @@
 Screen purpose: show or hide, on the plot, the numbers of every line in every step and choose where they go. Display only: nothing here changes a number.
 
 Layout: one icon button (`menu`, a `GroupMenuButton`) in the View tab's "Stats" group, next to "Steps"; its panel holds the rows ``Show`` / ``Edge`` (top / bottom) / ``Text size`` /
-``Legend room``, like the Legend menu. (Until 2026-11-13 the first three were fields of the ribbon.) A **link** button (a chain) beside the text size joins it to the Legend menu's
-text size (`text_link.TextSizeLink`: while linked, changing either changes both). **Legend room**: how much of the x axis before the first step is left for the
+``Legend room``, like the Legend menu. (Until 2026-11-13 the first three were fields of the ribbon.) A **link** button (a chain) beside the text size links it to the Legend menu's
+text size (`text_link.TextSizeLink`: while linked, it is the legend's size and changing either changes the other; the Steps menu has a button of its own). **Legend room**: how much of the x axis before the first step is left for the
 legend the rows of the numbers line up with, in percent of what holds the legend (100 % = as always, 0 = "off": none is made); `SensorgramPlot._room` applies it.
 
 - **show**: the table on or off.
@@ -35,6 +35,7 @@ from .text_link import make_link_toggle
 
 VISIBLE_KEY = "sensorgram/stats_visible"
 TEXT_PT_KEY = "sensorgram/stats_text_pt"
+LINK_KEY = "sensorgram/stats_text_size_linked"  # the chain beside the size: linked to the Legend's text size
 ROOM_KEY = "sensorgram/stats_legend_room"
 ROOM_RANGE = (0, 300)  # percent
 ROOM_STEP = 25
@@ -79,7 +80,7 @@ class StatsTableControls(QObject):
         self._size.setKeyboardTracking(False)
         style_ribbon_number_field(self._size, f"{FONT_RANGE[1]} pt")
         self._size.setToolTip(SIZE_TIP)
-        self.text_link = make_link_toggle(parent)  # links this size with the Legend menu's (`text_link.TextSizeLink`, made by the panel)
+        self.text_link = make_link_toggle(parent, "the stats numbers")  # links this size to the Legend menu's (`text_link.TextSizeLink`, made by the panel)
 
         self._room = QSpinBox(parent)  # the room made for the legend before the start of the x axis (2026-11-13)
         self._room.setRange(*ROOM_RANGE)
@@ -147,6 +148,7 @@ class StatsTableControls(QObject):
         try:
             store.bind(VISIBLE_KEY, self._show)
             store.bind(TEXT_PT_KEY, self._size)
+            store.bind(LINK_KEY, self.text_link)
             store.bind(ROOM_KEY, self._room)
             index = self._position.findData(read(store, SENSORGRAM_STATS_POSITION))
             if index >= 0:

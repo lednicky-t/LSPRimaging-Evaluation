@@ -318,10 +318,11 @@ class SensorgramPanel(QWidget):
             schedule_redraw=self._schedule_redraw, defer=lambda: self._gate.defer(), on_steps_available=self._on_steps_available,  # the gate is made further down
             current_cube=self._selection.current_cube,
         )
-        # The text sizes of the legend, the stats numbers and the step names can be linked (2026-11-13): a chain button in each of the three menus, one state, one rule (`text_link.py`).
+        # The step names' and the stats numbers' text sizes can each be linked to the legend's (2026-11-13): a chain button in the Steps menu and one in the Stats menu, independent of each
+        # other; the Legend's size is the one they follow (`text_link.py`).
         self._text_link = TextSizeLink(
+            self._view_controls.legend_text,
             (
-                (self._view_controls.legend_text, self._view_controls.text_link),  # the Legend's first: its size wins when a restored set disagrees
                 (self._steps.stats_controls.size_box, self._steps.stats_controls.text_link),
                 (self._steps.plan_controls.size_box, self._steps.plan_controls.text_link),
             ),
@@ -444,13 +445,13 @@ class SensorgramPanel(QWidget):
     def restore_ui_state(self, store: UiStateStore) -> None:
         store.bind(MASK_MARKS_KEY, self._mask_toggle)
         store.bind(STALE_MARKS_KEY, self._stale_toggle)
-        self._text_link.begin_restore()  # the legend's and the stats' text sizes are restored one after the other: no size is copied between them until both are back
+        self._text_link.begin_restore()  # the legend's, the stats' and the step names' text sizes are restored one after the other: no size is copied between them until all are back
         self._view_controls.restore_ui_state(store)  # also hands the restored options to the plot
         store.bind(BAND_HEIGHT_KEY, self._band_height)
         self._plot.set_baseline_height(self._band_height.value())  # a restored value arrives without a signal
         store.bind(BAND_FONT_KEY, self._band_font)
         self._steps.restore_ui_state(store)
-        self._text_link.end_restore()  # both text sizes are restored now: linked, they are made equal (the Legend menu's wins)
+        self._text_link.end_restore()  # all the text sizes are restored now: a linked menu takes the Legend's size
         self._plot.set_readout_font_size(self._band_font.value())
         saved_color = read(store, SENSORGRAM_BASELINE_BAND_COLOR)
         self._band_visible = read(store, SENSORGRAM_BASELINE_BAND_VISIBLE) is not False

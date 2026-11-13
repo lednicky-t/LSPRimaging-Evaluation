@@ -1581,7 +1581,7 @@ def _wire_bulk_plot(m, window: QMainWindow, sensorgram_panel: SensorgramPanel, u
         plot.set_weighting(controls.weighting())
         series, refs, y_label = overlays.bulk_inputs()
         if ri_table is None:
-            plot.set_lines([], y_label=y_label, note="No refractive indices imported (File > Import > Refractive Indices).")
+            plot.set_lines([], y_label=y_label, note="No refractive indices (File > Import > Refractive Indices, or type them in the Dataset Manager's table).")
             return
         if plot.lines_mode() == LINES_SENSORGRAM:
             lines = lines_from_series(series, refs)

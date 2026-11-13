@@ -132,21 +132,25 @@ A new group **Evaluation** on the View tab (between Steps and Stats; an icon of 
     differed between them at 18 px; measured as pixels whose opacity differs by more than 40/255). (2) Five zigzag dots, one colour, 59 %: "terrible". (3) This: three dots of another
     colour than the line, in the baseline pictures' style: 63 % differ. A test keeps it above half. Not looked at by eye.
 
-### Linking the legend's and the stats' text size (`text_link.py`)
+### Linking the step names' and the stats' text size to the legend's (`text_link.py`)
 
-A **chain** button beside the text-size box of both menus (Legend "Text", Stats "Text size"; Tabler `link` / `link-off`, already vendored) makes the two sizes one: while it is on, changing
-either box changes the other, so the stats numbers and the legend they line up with stay the same size. Off at the start (nothing changes until it is used) and remembered
-(`sensorgram/text_size_linked`, bound to the Legend menu's button).
+The **Steps** menu (Size) and the **Stats** menu (Text size) each have a **chain** button beside their size box (Tabler `link` / `link-off`, already vendored). The Legend menu has none:
+its "Text" size is the one the others follow. Each chain is a **switch of its own** (maintainer, 2026-11-13, the last build of it: "those icons should not be linked together, there should be
+two independent icons one in steps and one in stats, linking the size to the Legend text size"). Off at the start (nothing changes until it is used); each is remembered on its own
+(`sensorgram/plan_text_size_linked`, `sensorgram/stats_text_size_linked`, bound in the two menus' `restore_ui_state`).
 
-- **Who wins when it is turned on:** the menu you pressed it in (its size is copied to the other). *Not* a fixed side, because the box you are looking at is the one you mean.
-- **One state, two buttons:** pressing either presses both (`TextSizeLink`, made by the panel because it owns both menus).
-- **Ranges:** while linked both boxes take the narrower of the two ranges, so "the same size" is always possible (today both are 6 - 24 pt, so nothing is cut); each has its own range again
-  when unlinked.
-- **Restoring:** the two sizes come back one after the other (the Legend menu's first). A first build let the second one's value flow through the already-active link and overwrite
-  the first (found by a test). Now `begin_restore()` / `end_restore()` around the two restores copy nothing until both are back, then, if linked, make them equal, **the Legend
-  menu's winning**: the result does not depend on the order, and a saved pair that disagrees cannot show a linked pair that differs.
-- The Legend menu's **Reset to default** also turns the link off (first, so that putting the legend's size back does not drag the stats size along); the stats size itself is not part of
-  that reset and keeps what it had.
+- **Turning one on** gives that menu the Legend's size. The other chain is not touched. (Before, a first build copied the size of whichever menu the chain was pressed in; with a fixed
+  reference there is nothing to choose.)
+- **While linked** the two boxes show one size, whichever is changed: the legend moves the linked menu, and the linked menu's box moves the legend (and so any other linked menu). An unlinked
+  menu is independent of all of this. If the maintainer would rather have a linked box *follow only* (greyed out, the legend the only place to change it), that is a change of `TextSizeLink._spread`.
+- **Ranges:** the legend and every linked menu take the narrowest of their ranges, so "the same size" is always possible (today all are 6 - 24 pt, so nothing is cut); an unlinked menu keeps
+  its own, and each box has its own range again when it is unlinked.
+- **Restoring:** the three sizes come back one after the other. A first build let a later size flow through an already-active link and overwrite an earlier one (found by a test). Now
+  `begin_restore()` / `end_restore()` around the restores copy nothing until all are back, then every linked menu takes the Legend's size: the result does not depend on the order, and a saved
+  linked size that disagrees with the legend's cannot show a linked pair that differs.
+- The Legend menu's **Reset to default** puts the legend's size back at its default; a menu linked to it follows (that is what the link means), an unlinked one keeps what it had. The
+  reset no longer touches any chain: they are the Steps and Stats menus' settings.
+- **The key of the old shared chain** (`sensorgram/text_size_linked`) is no longer read: a maintainer who had it on finds both chains off once (a display option, pressed again in one click).
 
 ### The legend at the edge ("Position" row of the Legend menu)
 
@@ -205,8 +209,8 @@ With the step table on, the plot puts the legend (and with it the table's rows) 
      bar's height goes through it: the bar's layout and hit area (`plan_bar.layout`, `_strip_data`), the legend and rows under it (`plot._bar_height_px`) and the room kept for them (`plot._room`).
      Chosen over letting the text hang out of a thin bar: that would have put it on the legend and over the plot background, where its colour (chosen for the fill) can be unreadable.
    - **Text-size link for the step names.** The Steps menu's Size row (it was there, last row) got the chain button; `TextSizeLink` now takes any number of menus, still one state, one rule: the
-     chain in the Legend, Steps and Stats menus is one button, pressing it gives all three the size of the menu you pressed it in, the Legend's wins on restore. If the maintainer wants the step
-     names linked but the stats not (a chain of its own per menu), that is a change of `TextSizeLink`, not of the menus.
+     chain in the Legend, Steps and Stats menus is one button, pressing it gives all three the size of the menu you pressed it in, the Legend's wins on restore. *(Replaced the same day: the
+     maintainer wanted two independent chains, in Steps and in Stats, each linking to the Legend's size; see "Linking the step names' and the stats' text size to the legend's" above.)*
    - **Gap above the legend when everything is hidden.** With the stats table off the legend sat at 8 + 9 = 17 px from the top (table on: 9). Its offset is now the same `_LEGEND_EDGE_PX` as with
      the table on, so hiding the stats does not move it.
 9. **The evaluation chips now sit inside the bar (maintainer, 2026-11-13, night): "the evaluation labels are put under the step bars when the bar is not full height, which is not good. Can

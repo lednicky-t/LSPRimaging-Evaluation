@@ -222,6 +222,16 @@ class FileMenu(QObject):
         )
         if not path_text:
             return
+        current = self._plan.ri_table()
+        if current is not None and current.has_edits():  # an import replaces the whole table: the maintainer's rule (2026-11-13) is to say so first
+            answer = QMessageBox.question(
+                self._window, "Replace the edited refractive indices?",
+                f"You have edited the refractive index table ({current.edit_summary()}).\n\nImporting {Path(path_text).name} replaces the whole table and these edits are lost "
+                "(Edit -> Undo cannot bring them back).\n\nImport anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
         try:
             table = self._plan.import_ri_file(Path(path_text))
         except (RiFileError, OSError) as exc:
@@ -236,7 +246,7 @@ class FileMenu(QObject):
                 "No RI for: " + "; ".join(f"{name} (step {step_numbers_text(steps)})" for name, steps in report.missing) + "."
             )
         if report.unused:
-            lines.append(f"Not used by any step (kept, not shown): {', '.join(report.unused)}.")
+            lines.append(f"Not used by any step (kept in the table): {', '.join(report.unused)}.")
         if table.wavelength_nm is None:
             lines.append("The refractometer wavelength is not given (Edit -> Preferences -> Refractive indices).")
         QMessageBox.information(self._window, "Refractive indices imported", "\n".join(lines))

@@ -285,10 +285,12 @@ class StepOverlays(QObject):
             return None
         found = self._plan.ri_of_step(step)
         if found is None:
-            return f"Refractive index: none for {solution_of(step.label)!r} in the imported table."
+            return f"Refractive index: none for {solution_of(step.label)!r} in the table."
         spread = "" if found.std is None else f" ± {found.std:.6f}"
         measured = "" if found.measured_on is None else f", measured {found.measured_on:%d.%m.%Y}"
-        return f"Refractive index ({found.name}): {found.ri:.5f}{spread}{measured}."
+        edited = self._plan.ri_edited_values_used_by([step])
+        mark = "" if not edited else (f" Edited by you (imported: {edited[0][1]})." if edited[0][1] else " Added by you (not in the imported file).")
+        return f"Refractive index ({found.name}): {found.ri:.5f}{spread}{measured}.{mark}"
 
     def _ri_value(self, step: EffectiveStep) -> float | None:
         """The refractive index written after the step's text (None without an imported table, or when the step's solution is not in it)."""

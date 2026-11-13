@@ -371,9 +371,12 @@ class StepTableModule(QObject):
             lines.append(f"Steps: {names}.")
             missing = [s for s in steps if s.ref not in with_ri]
             if table is None:
-                lines.append("No refractive indices imported (File > Import > Refractive Indices): the column stays empty.")
+                lines.append("No refractive indices (File > Import > Refractive Indices, or type them in the Dataset Manager's table): the column stays empty.")
             elif missing:
                 lines.append(f"Left out, no RI for their solution: {', '.join(str(s.order) for s in missing)}.")
+            edited = self._plan.ri_edited_values_used_by(steps)
+            if edited:
+                lines.append("Uses refractive indices you edited: " + "; ".join(f"{v.name} {v.ri:.5f} (imported: {text or 'not in the file, added by you'})" for v, text in edited) + ".")
             if table is not None and table.wavelength_nm:
                 lines.append(f"RI measured at {table.wavelength_nm:g} nm; no temperature correction.")
         weighted = self._bulk_weighting == WEIGHT_INVERSE_VARIANCE
@@ -474,7 +477,7 @@ class StepTableModule(QObject):
             if found is None:
                 name = "" if step is None else solution_of(step.label)
                 return replace(cell, excess_note=(
-                    f"NA: no refractive index for {name!r}. Add it to RIs.txt and import it again (File > Import > Refractive Indices)." if name
+                    f"NA: no refractive index for {name!r}. Type it in the Dataset Manager's refractive index table, or add it to RIs.txt and import it again." if name
                     else "NA: the step has no note, so no solution and no refractive index."
                 ))
             terms[ref] = (c, found.ri, float("nan") if found.std is None else found.std)
@@ -601,7 +604,12 @@ class StepTableModule(QObject):
             "weighting": self._bulk_weighting,
             "steps": [{"order": s.order, "note": s.label} for s in self._plan.bulk_steps()],
             "points": [{"ri": p.ri, "ri_std": p.ri_u} for p in self.bulk_points()],
-            "ri_file": None if table is None else {"name": table.source_name, "sha256": table.sha256, "wavelength_nm": table.wavelength_nm},
+            "ri_file": None if table is None else {"name": table.source_name, "sha256": table.sha256, "wavelength_nm": table.wavelength_nm, "table_edited": table.has_edits()},
+            # the refractive indices this result used that the user changed (or added, or assigned to steps by hand), with what the imported file had: an exported number says so
+            "ri_edits": [
+                {"solution": value.name, "ri_used": value.ri, "ri_std_used": value.std, "imported": text or None}
+                for value, text in self._plan.ri_edited_values_used_by(self._plan.bulk_steps())
+            ],
             "what": (
                 "slope of the step means against the solutions' refractive indices (unit of the traces per RIU). sem: the slope's uncertainty with the steps' sems as their "
                 "uncertainties, sd: with their sds; both raised by sqrt(reduced chi2) when the steps scatter more than that (analysis/bulk_sensitivity.py)."
