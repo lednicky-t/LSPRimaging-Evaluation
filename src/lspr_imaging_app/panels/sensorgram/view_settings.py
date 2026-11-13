@@ -6,7 +6,7 @@ its rows, whether a group's label carries its number of ROIs). The controls (`vi
 (`SensorgramPlot.set_view`) draws with them.
 
 The defaults are what the plot always did, so a session that never touched the View tab looks as before: the band and the anchors shown, dots (4 px, on up to
-`plot.DOTS_MAX_LINES` lines) and lines (1 px) drawn, joined straight, the legend automatic with 9 pt text and its rows as close as they were, the counts in the labels.
+`DEFAULT_DOTS_MAX_LINES` lines, the Dot limit) and lines (1 px) drawn, joined straight, the legend automatic with 9 pt text and its rows as close as they were, the counts in the labels.
 """
 
 from __future__ import annotations
@@ -21,6 +21,8 @@ LINE_STYLES = (LINE_STRAIGHT, LINE_SPLINE)
 
 DEFAULT_POINT_SIZE = 4  # px
 POINT_SIZE_RANGE = (1, 14)  # no dots at all is the Points toggle, not a size
+DEFAULT_DOTS_MAX_LINES = 10  # dots on every point only up to this many lines: 64,000 dots (160 lines x 400 cubes) cost ~1 s per redraw (docs/spectra_sensorgram_draw_cost_2026-11-02.md)
+DOTS_MAX_LINES_RANGE = (1, 10000)  # the Dot limit of the View tab: raising it is the maintainer's choice, and then the redraw is as slow as it is
 DEFAULT_LINE_WIDTH = 1.0  # px. Qt paints only 1 px lines fast: 160 lines x 400 cubes took 140 ms at 1.5 px and 30 ms at 1 px (docs/spectra_sensorgram_draw_cost_2026-11-02.md)
 LINE_WIDTH_RANGE = (0.5, 4.0)
 LINE_WIDTH_STEP = 0.5
@@ -34,9 +36,10 @@ LEGEND_SPACING_RANGE = (-6, 24)
 class SensorgramViewSettings:
     show_band: bool = True  # the shaded SD / SEM band around an average
     show_anchors: bool = True  # the anchors and the baseline made from them: the hollow squares of the Anchor points method and the dashed baseline curve
-    show_points: bool = True  # the dots on the measured points (drawn only up to `plot.DOTS_MAX_LINES` lines)
+    show_points: bool = True  # the dots on the measured points (the user's choice; drawn only up to `dots_max_lines` lines)
     show_lines: bool = True  # the lines that join them; hidden, the line items stay (invisible) so the view still fits the data, and the legend keeps its colour marks
     point_size: int = DEFAULT_POINT_SIZE
+    dots_max_lines: int = DEFAULT_DOTS_MAX_LINES  # with more lines than this no dots are drawn, whatever `show_points` says (the controls show the toggle off and say why)
     line_width: float = DEFAULT_LINE_WIDTH
     line_style: str = LINE_STRAIGHT
     legend_mode: str = LEGEND_AUTO  # auto: as before (named up to 24 lines, kept while it takes at most half the plot); show: always; hide: never drawn
@@ -54,6 +57,7 @@ class SensorgramViewSettings:
             show_band=bool(self.show_band), show_anchors=bool(self.show_anchors), legend_counts=bool(self.legend_counts), legend_over_bar=bool(self.legend_over_bar),
             show_points=bool(self.show_points), show_lines=bool(self.show_lines),
             point_size=_clamp(int(self.point_size), *POINT_SIZE_RANGE),
+            dots_max_lines=_clamp(int(self.dots_max_lines), *DOTS_MAX_LINES_RANGE),
             line_width=round(_clamp(float(self.line_width), *LINE_WIDTH_RANGE) / LINE_WIDTH_STEP) * LINE_WIDTH_STEP,
             line_style=self.line_style if self.line_style in LINE_STYLES else LINE_STRAIGHT,
             legend_mode=self.legend_mode if self.legend_mode in LEGEND_MODES else LEGEND_AUTO,

@@ -26,10 +26,10 @@ from .label_rule import DEFAULT_SEPARATORS, MODE_SOLUTION, MODE_WHOLE, shown_lab
 
 POSITION_TOP = "top"
 POSITION_BOTTOM = "bottom"
-ROLES_AUTO = "auto"  # the evaluation chips hang from the bar's free edge (below a bar at the top, above a bar at the bottom): how they were drawn until 2026-11-13
+ROLES_AUTO = "auto"  # the evaluation chips in the middle of the bar's height (the top of a full-height bar); until 2026-11-13 they hung below / above a bar that was not full
 SIDE_LEFT, SIDE_RIGHT = "left", "right"  # which end of its step the evaluation chips sit at
 # The Evaluation menu's "dice" picker (2026-11-13): five places, the four corners and the middle (auto). Each is an (edge, side) pair of `PlanBarSettings`; the middle keeps the
-# left end, where the chips always were, so it is exactly the old default. (Auto at the right end is not a place of its own.)
+# left end. All of them are inside the step's own bar, so they follow its height. (Auto at the right end is not a place of its own.)
 PLACE_AUTO = "auto"
 ROLES_PLACES: dict[str, tuple[str, str]] = {
     "top-left": (POSITION_TOP, SIDE_LEFT),
@@ -83,8 +83,8 @@ class PlanBarSettings:
     text_stop: int = 3  # 1 (low) - 5 (high), meaning depends on text_align
     text_pt: int = 9
     show_ri: bool = False  # 2026-11-12: write the step's refractive index in ( ) after its text (only a step whose solution has an imported RI gets one)
-    # The evaluation chips (B1 / S1 / ... / Sb; 2026-11-13). Where: `roles_edge` is ROLES_AUTO (beside the bar, as always), POSITION_TOP or POSITION_BOTTOM (that edge of the plot,
-    # below / above the bar when the bar is on it); `roles_side` is the left or the right end of each step.
+    # The evaluation chips (B1 / S1 / ... / Sb; 2026-11-13). Where, inside each step's bar: `roles_edge` is ROLES_AUTO (the middle of the bar's height), POSITION_TOP or
+    # POSITION_BOTTOM (the top / the bottom of the bar); `roles_side` is the left or the right end of each step.
     show_roles: bool = True
     roles_edge: str = ROLES_AUTO
     roles_side: str = SIDE_LEFT
@@ -97,6 +97,14 @@ class PlanBarSettings:
     def height_fraction(self) -> float:
         """The bar's height as a fraction of the plot height (1.0 for Full)."""
         return 1.0 if self.is_full else min(max(self.height_stop, 1), HEIGHT_MAX_PERCENT) / 100.0
+
+    def strip_height_px(self, plot_height_px: float, text_height_px: float) -> float:
+        """Pixels the bar's strip takes along its edge: the chosen percentage of the plot height, but never lower than one line of its text with its padding (2026-11-13: below that the
+        step names used to disappear; the maintainer wanted them to stay). The whole plot height for Full. Every place that needs the bar's height asks here, so the bar, the legend
+        and the stats rows under it, and the room kept for them agree."""
+        if self.is_full:
+            return float(plot_height_px)
+        return max(self.height_fraction * float(plot_height_px), float(text_height_px) + 2.0 * BAR_TEXT_PADDING_PX)
 
     def stop_name(self) -> str:
         names = DATA_STOP_NAMES if self.text_align == ALIGN_DATA else BAR_STOP_NAMES
@@ -339,17 +347,22 @@ def text_top_y(
     bar_top: float,
     bar_bottom: float,
     levels_y: tuple[float, float, float] | None = None,
+    keep_top: float = 0.0,
+    keep_bottom: float = 0.0,
 ) -> float | None:
     """The top edge of the text box in device pixels (y grows downwards), or None when the text does not fit and is not drawn.
 
     `area_*`: the plot area. `bar_*`: the bar's strip (the whole area for Full). `levels_y`: the device y of the step's (high, median, low) levels, for the Data mode;
-    without them (no point in the step) the text falls back to the middle of the bar."""
+    without them (no point in the step) the text falls back to the middle of the bar. `keep_top` / `keep_bottom`: pixels at the top / bottom edge of the plot that the step stats
+    table (with the legend) takes; in a Full bar, whose strip is the whole plot, the names stay out of them (2026-11-13: names at the top of the bar overlapped the stats rows)."""
     pad = BAR_TEXT_PADDING_PX
     stop = min(max(int(settings.text_stop), STOP_MIN), STOP_MAX)
     th = float(text_height)
+    if settings.is_full:  # only a Full bar reaches the stats table's edge: any other strip is lower than the rows, which sit beyond it
+        bar_top, bar_bottom = bar_top + max(float(keep_top), 0.0), bar_bottom - max(float(keep_bottom), 0.0)
 
     def in_bar(at: int) -> float | None:
-        if (bar_bottom - bar_top) - 2 * pad < th:  # the bar is lower than the text
+        if (bar_bottom - bar_top) - 2 * pad < th:  # the room is lower than the text
             return None
         if at == 5:
             top = bar_top + pad

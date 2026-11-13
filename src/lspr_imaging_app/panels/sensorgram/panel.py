@@ -318,9 +318,14 @@ class SensorgramPanel(QWidget):
             schedule_redraw=self._schedule_redraw, defer=lambda: self._gate.defer(), on_steps_available=self._on_steps_available,  # the gate is made further down
             current_cube=self._selection.current_cube,
         )
-        # The legend's text size and the stats numbers' text size can be linked (2026-11-13): a chain button in each of the two menus, one state, one rule (`text_link.py`).
+        # The text sizes of the legend, the stats numbers and the step names can be linked (2026-11-13): a chain button in each of the three menus, one state, one rule (`text_link.py`).
         self._text_link = TextSizeLink(
-            self._view_controls.legend_text, self._view_controls.text_link, self._steps.stats_controls.size_box, self._steps.stats_controls.text_link, self
+            (
+                (self._view_controls.legend_text, self._view_controls.text_link),  # the Legend's first: its size wins when a restored set disagrees
+                (self._steps.stats_controls.size_box, self._steps.stats_controls.text_link),
+                (self._steps.plan_controls.size_box, self._steps.plan_controls.text_link),
+            ),
+            self,
         )
         self.task = PanelTask(TASK_ID, "Sensorgram", self)  # connected to the status bar's task indicator by app_rewrite
         self._steps.plan_controls.settings_changed.connect(self.plan_bar_settings_changed)
@@ -864,6 +869,7 @@ class SensorgramPanel(QWidget):
         if self._gate.defer() or self._last is None:
             return
         job, series = self._last
+        self._view_controls.set_line_count(len(series))  # the Points toggle shows itself off while more lines are drawn than the Dot limit (it reports no change)
         stale = self._stale_mask(job.stored)
         label, x_axis = self._x_axis()
         self._plot.set_snap_grid(x_axis)

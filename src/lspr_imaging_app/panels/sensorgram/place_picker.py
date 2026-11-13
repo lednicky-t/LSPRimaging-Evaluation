@@ -1,7 +1,7 @@
 """``PlacePicker``: five pips like the 5 of a die, to choose where something sits: the four corners and the middle (2026-11-13).
 
 Screen purpose: the Evaluation menu's "Place" row (where the B1 / S1 / Sb chips sit on their step): one picture instead of two rows of words. Each corner is a pip, the middle pip
-is "auto" (beside the bar, as the chips always were). Exactly one pip is solid, the others are small rings.
+is "auto" (in the middle of the bar's height, at the left end). Exactly one pip is solid, the others are small rings.
 
 Layout: a 3 x 3 grid with the four unused cells empty, so the pips sit like the 5 of a die:
 

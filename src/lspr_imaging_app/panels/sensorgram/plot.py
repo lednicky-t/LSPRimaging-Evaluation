@@ -40,15 +40,19 @@ from .plan_text_editor import StepTextEditor
 from .play_repaint import PlayCursorRepaint
 from .stats_table import LegendRows, StepStatsItem
 from .curve_smoothing import smooth_line, smooth_run
-from .view_settings import LEGEND_HIDE, LEGEND_SHOW, LINE_SPLINE, SensorgramViewSettings, legend_text
+from .view_settings import DEFAULT_DOTS_MAX_LINES, LEGEND_HIDE, LEGEND_SHOW, LINE_SPLINE, SensorgramViewSettings, legend_text
 
 MAX_LEGEND_SERIES = 6  # up to this many lines always have a legend
 MAX_LEGEND_ENTRIES = 24  # more lines carry no names at all (a legend of a hundred ROIs is a wall of text)
 LEGEND_MAX_HEIGHT_FRACTION = 0.5  # between the two: the legend stays while it takes at most this much of the plot height (it is cleared otherwise); a row is ~21 px
-_LEGEND_OFFSET_PX = (8, 8)  # where the legend sits from the top-left corner of the plot when the step statistics table is off
+_LEGEND_MARGIN_PX = 3.0  # the legend's own inner margin on all four sides (2026-11-13; pyqtgraph's default is 9: the first row's text sat 25 px below the plot's top edge, now 19)
+_LEGEND_MARGIN_GIVEN_UP_PX = 9.0 - _LEGEND_MARGIN_PX
 _STATS_GAP_PX = 4  # between the legend and the plan bar / the edge, and around the rows of the step statistics table
 _LEGEND_TEXT_MARGIN_PX = 2.0  # pyqtgraph's legend label keeps 4 px of document margin above and below its text; half of that halves the gap between rows
-_LEGEND_EDGE_PX = _STATS_GAP_PX + (4.0 - _LEGEND_TEXT_MARGIN_PX)  # legend to the edge / plan bar with the table on: the first row's text sits where it did before the rows were tightened
+_LEGEND_EDGE_PX = _STATS_GAP_PX + (4.0 - _LEGEND_TEXT_MARGIN_PX)  # legend to the edge / plan bar with the table on (the legend's own inner margin, `_LEGEND_MARGIN_PX`, comes on top of it)
+# From the top-left corner of the plot when the step statistics table is off. Down: the same `_LEGEND_EDGE_PX` as with the table on, so hiding the stats does not move the legend
+# (maintainer, 2026-11-13: "when I hide stats, the gap gets bigger"; it was 8 + the 9 px margin = 17 px, now 6 + 3 = 9). Across: 8 px as it always was plus what the smaller inner margin gave up.
+_LEGEND_OFFSET_PX = (8 + _LEGEND_MARGIN_GIVEN_UP_PX, _LEGEND_EDGE_PX)
 _BAND_ALPHA = 55
 BASELINE_BAND_SPAN = (0.0, 0.1)  # the baseline selector fills the bottom tenth of the plot, not its full height
 _WINDOW_EDGE_ALPHA = 160
@@ -57,7 +61,7 @@ _INVISIBLE_PEN = pg.mkPen(0, 0, 0, 0)  # a curve with no pen at all is left out 
 _LABEL_HIT_MARGIN = 4.0  # pixels around the y axis label that still count as a double-click on it
 _READOUT_GAP = 0  # pixels between the bottom edge of the "Baseline [start, end]" box and the x axis line (the plot area's bottom edge); it was 2
 LINE_WIDTH = 1.0  # px, antialiased. Qt paints only 1 px lines fast: 160 lines x 400 cubes took 140 ms at 1.5 px, 30 ms at 1 px antialiased (2026-11-02)
-DOTS_MAX_LINES = 10  # a dot on every point only up to this many lines (with more they merge into the lines and cost ~1 s per redraw at 160 ROIs)
+DOTS_MAX_LINES = DEFAULT_DOTS_MAX_LINES  # a dot on every point only up to this many lines until the View tab's Dot limit says otherwise (with more they merge into the lines and cost ~1 s per redraw at 160 ROIs)
 _Z_BAND, _Z_LINE, _Z_DOTS, _Z_RINGS, _Z_MARKS = -10.0, 0.0, 1.0, 2.0, 3.0  # bands behind the lines, rings and mask marks over the dots
 _ANCHOR_DRAG_TIME_S, _ANCHOR_MOVE_PX = 60.0, 12  # anchor edit: a press is a click unless the mouse moves more than 12 px (held time does not matter)
 
@@ -66,6 +70,24 @@ def _line_pen(color: QColor, width: float = LINE_WIDTH) -> QPen:
     pen = pg.mkPen(color, width=width)
     pen.setCosmetic(True)
     return pen
+
+
+class _Legend(pg.LegendItem):
+    """pyqtgraph's legend, sized to exactly what its layout needs (2026-11-13).
+
+    pyqtgraph makes the legend as high as its rows added up, which ignores the margins and the Row gap. With its 9 px margins the layout always needed more than that and so no row
+    was ever stretched; with the tighter margins (`_LEGEND_MARGIN_PX`) a negative Row gap makes the layout need less, and the spare height was shared out between the rows, so
+    the rows moved by less than the gap that was set. Here the height is the layout's own minimum, so a row gap of -3 px moves the rows by exactly -3 px, with any margin and
+    any number of rows."""
+
+    def updateSize(self) -> None:
+        super().updateSize()
+        if self.size is not None:  # a fixed size was asked for
+            return
+        self.layout.activate()
+        # Ask for no height at all: Qt raises it to the widget's own minimum, which is the rows, the row gaps and the margins and nothing spare. (Asking for a computed height
+        # was fragile: the layout's size hint counts the margins or not depending on the moment.)
+        self.resize(self.width(), 0.0)
 
 
 def _finite_runs(*arrays: np.ndarray) -> list[tuple[int, int]]:
@@ -336,8 +358,8 @@ class SensorgramPlot(QWidget):
         (Subtract off: the curve passes through or near them), ``"subtracted"`` at what is left after correction (Subtract on: on or near zero); None draws none.
 
         Drawing cost (2026-11-02, ``docs/spectra_sensorgram_draw_cost_2026-11-02.md``): the items are reused (`PlotItemPool`), the lines are 1 px
-        (Qt's fast path; 1.5 px was 8-11x slower to paint) and the dots on the points are drawn only up to `DOTS_MAX_LINES` lines (64,000 dots
-        for 160 ROIs cost ~1 s per redraw and cannot be told apart anyway)."""
+        (Qt's fast path; 1.5 px was 8-11x slower to paint) and the dots on the points are drawn only up to the View tab's Dot limit (`view.dots_max_lines`, 10 at first: 64,000 dots
+        for 160 ROIs cost ~1 s per redraw and cannot be told apart anyway). The Points toggle shows itself off while the limit holds (`points_toggle.py`)."""
         pool = self._pool
         pool.begin()
         self._svg_parts: list[SvgPart] = []  # names for a layered SVG export (svg_layers.py): one per drawn item
@@ -346,7 +368,10 @@ class SensorgramPlot(QWidget):
         named = view.legend_mode == LEGEND_SHOW or len(series) <= MAX_LEGEND_ENTRIES
         if named:
             if self._legend is None:
-                self._legend = self._item.addLegend(offset=_LEGEND_OFFSET_PX)
+                self._legend = _Legend(offset=_LEGEND_OFFSET_PX)
+                self._legend.setParentItem(self._item.vb)
+                self._item.legend = self._legend  # as `PlotItem.addLegend` does: a curve made with a name joins it
+                self._legend.layout.setContentsMargins(_LEGEND_MARGIN_PX, _LEGEND_MARGIN_PX, _LEGEND_MARGIN_PX, _LEGEND_MARGIN_PX)  # tighter than pyqtgraph's 9 px: less empty space above the first row
                 # The table reads the legend's rows when it paints; with its picture cached it must be told when the legend moves or resizes.
                 for signal in (self._legend.geometryChanged, self._legend.xChanged, self._legend.yChanged):
                     signal.connect(self._stats.update)
@@ -355,7 +380,7 @@ class SensorgramPlot(QWidget):
             self._style_legend()
         elif self._legend is not None:
             self._legend.clear()
-        dots = len(series) <= DOTS_MAX_LINES and view.show_points
+        dots = len(series) <= view.dots_max_lines and view.show_points
         spline = view.line_style == LINE_SPLINE
         for s in series:
             color = QColor(s.color)
@@ -491,13 +516,16 @@ class SensorgramPlot(QWidget):
         bar = self._plan_bar
         if bar.is_shown():
             settings = bar.settings()
+            text_height = QFontMetricsF(bar.font()).height()
             if not settings.is_full:  # a full-height bar sits behind the traces and needs no room
+                # the bar is never lower than one line of its text (`strip_height_px`), so the room is what it really takes
+                fraction = settings.height_fraction if view_height <= 0.0 else min(settings.strip_height_px(view_height, text_height) / view_height, 0.8)
                 if settings.position == POSITION_TOP:
-                    bar_top = settings.height_fraction
+                    bar_top = fraction
                 else:
-                    bar_bottom = settings.height_fraction
+                    bar_bottom = fraction
             if settings.text_align == ALIGN_DATA and view_height > 0.0:
-                above, below = label_headroom_px(settings, QFontMetricsF(bar.font()).height())
+                above, below = label_headroom_px(settings, text_height)
                 head_top, head_bottom = above / view_height, below / view_height
         if self._stats.is_shown() and view_height > 0.0:
             width, height = self._legend_size()
@@ -510,10 +538,17 @@ class SensorgramPlot(QWidget):
                 if not self._legend_hidden():  # a hidden legend takes no room on the left: the numbers may start at the edge
                     # the Stats menu's "Legend room" (percent of what holds the legend; 0 = none): the x axis is widened before its start by this much
                     left = (width + _LEGEND_OFFSET_PX[0] + 2 * _STATS_GAP_PX) * max(0, self._stats.settings().legend_room_pct) / 100.0
-        if self._view.legend_over_bar:
+        if self._legend_ignores_bar():
             # The legend (and the table's rows with it) ignores the bar and sits over it at the edge, so the two share the room: the larger one, not the sum.
             return max(bar_top, rows_top) + head_top, max(bar_bottom, rows_bottom) + head_bottom, left
         return bar_top + head_top + rows_top, bar_bottom + head_bottom + rows_bottom, left
+
+    def _legend_ignores_bar(self) -> bool:
+        """The View tab's "at the edge of the plot": the legend and the stats rows ignore the bar and sit over it. Only for a bar that holds no names (they are aligned to the data):
+        with the names inside the bar the rows would sit on top of them (maintainer, 2026-11-13: "stats overlap"), so then the rows stay beyond the bar whatever the tick says."""
+        bar = self._plan_bar
+        names_in_the_bar = bar.is_shown() and bar.settings().text_align != ALIGN_DATA
+        return bool(self._view.legend_over_bar) and not names_in_the_bar
 
     def _remake_room_if_changed(self) -> None:
         """Range the view again, with the room made, when what the bar, its labels and the table need beyond the traces is not what the view was ranged with.
@@ -578,25 +613,30 @@ class SensorgramPlot(QWidget):
         settings = bar.settings()
         if settings.is_full or settings.position != position:
             return 0.0
-        return settings.height_fraction * float(self._item.getViewBox().height())
+        return settings.strip_height_px(float(self._item.getViewBox().height()), QFontMetricsF(bar.font()).height())
 
     def _place_legend(self) -> None:
-        """With the table on, the legend sits at its edge just inside the plan bar (or at the very edge, over the bar, when the View tab says so: `legend_over_bar`), so its rows
-        and the cells line up (the table owns its place). With the table off it is where it always was (top left) and wherever the user dragged it: it is put back only if the
-        table had moved it."""
+        """With the table on, the legend sits at its edge just inside the plan bar (or at the very edge, over a bar that holds no names, when the View tab says so:
+        `_legend_ignores_bar`), so its rows and the cells line up (the table owns its place). With the table off it is where it always was (top left) and wherever the user dragged it:
+        it is put back only if the table had moved it. The band the rows take is handed to the bar, so the names of a Full bar stay out of it."""
         legend = self._legend
         if legend is None:
+            self._plan_bar.set_keep_out(0.0, 0.0)
             return
         if not self._stats.is_shown():
             if self._legend_placed_by_table:
                 legend.setOffset(_LEGEND_OFFSET_PX)
                 self._legend_placed_by_table = False
+            self._plan_bar.set_keep_out(0.0, 0.0)
             return
         position = self._stats.settings().position
-        # Just inside the bar, or (the Legend menu's "at the edge of the plot") ignoring the bar and what hangs from it: at the very edge, over the bar.
-        gap = _LEGEND_EDGE_PX if self._view.legend_over_bar else self._bar_height_px(position) + _LEGEND_EDGE_PX
+        # Just inside the bar, or (the Legend menu's "at the edge of the plot") ignoring a bar without names: at the very edge, over the bar.
+        gap = _LEGEND_EDGE_PX if self._legend_ignores_bar() else self._bar_height_px(position) + _LEGEND_EDGE_PX
         legend.setOffset((_LEGEND_OFFSET_PX[0], gap if position == POSITION_TOP else -gap))  # a negative offset is measured from the bottom
         self._legend_placed_by_table = True
+        height = self._legend_size()[1]
+        band = gap + height + _LEGEND_EDGE_PX if height > 0.0 else 0.0  # from the edge of the plot to the far side of the rows
+        self._plan_bar.set_keep_out(band if position == POSITION_TOP else 0.0, band if position != POSITION_TOP else 0.0)
 
     def _on_scene_moved(self, scene_pos) -> None:
         """The bar's tooltip is the one of the step under the pointer, and the cursor shows a resize arrow over a boundary; set on every move, so they are right when Qt

@@ -22,7 +22,7 @@ the bar as always. The place is turned into `PlanBarSettings.roles_edge` / `role
 - **refractive index** (2026-11-12): a checkbox; on, each step's RI (imported RIs.txt) is written in ( ) after its text. Off by default; a step with no RI keeps its text.
 - **text aligned to / text position**: a 5-stop slider (low to high). Aligned to the *bar* the stops are positions inside the bar; aligned to the *data* they are distances from
   the traces inside each step (far below ... far above). Each mode remembers its own stop.
-- **text size**: in points.
+- **text size**: in points, with a chain button that links it to the Legend menu's and the Stats menu's sizes (`text_link.py`).
 
 Every control is remembered (CLAUDE.md "Remembering UI state"): the toggle and the two number boxes by ``store.bind``, the rest by the rows in ``storage/ui_state_keys.py``.
 ``settings()`` returns the current values as one `PlanBarSettings`; ``settings_changed`` fires after any change. Without steps in the dataset the whole group is greyed out.
@@ -69,9 +69,10 @@ from ..ribbon_fields import style_ribbon_number_field
 from ..ui_state import UiStateStore
 from ..spectra.pick_menu import PickMenu
 from ..spectra.view_menu import IconToggle
-from .group_menu import GroupMenuButton
+from .group_menu import GroupMenuButton, widgets_row
 from .place_picker import PlacePicker
 from .plan_icons import align_picture, plan_bar_icon, position_picture, role_chips_icon, text_content_picture
+from .text_link import make_link_toggle
 
 VISIBLE_KEY = "sensorgram/plan_visible"
 ROLES_KEY = "sensorgram/plan_roles_visible"
@@ -91,18 +92,22 @@ ROLES_TIP = (
     "and Sb for a step of the S_bulk set (a grey from dark to white by how far the lines moved in that step). Hiding them changes nothing of the evaluation."
 )
 ROLES_PLACE_TIPS = {  # the five pips of the place picker, like the 5 of a die
-    "top-left": "Top left: at the top edge of the plot, at the left end of each step (below the bar when the bar is there).",
-    "top-right": "Top right: at the top edge of the plot, at the right end of each step (below the bar when the bar is there).",
-    PLACE_AUTO: "Middle (auto): beside the bar, at the left end of each step, as they always were: below a bar at the top of the plot, above a bar at the bottom, inside a full bar at its top.",
-    "bottom-left": "Bottom left: at the bottom edge of the plot, at the left end of each step (above the bar when the bar is there).",
-    "bottom-right": "Bottom right: at the bottom edge of the plot, at the right end of each step (above the bar when the bar is there).",
+    "top-left": "Top left: inside the step's bar, at its top, at the left end of the step.",
+    "top-right": "Top right: inside the step's bar, at its top, at the right end of the step.",
+    PLACE_AUTO: "Middle (auto): inside the step's bar at the left end of the step, in the middle of the bar's height (at the top of a full-height bar, where the middle of the plot is the data).",
+    "bottom-left": "Bottom left: inside the step's bar, at its bottom, at the left end of the step.",
+    "bottom-right": "Bottom right: inside the step's bar, at its bottom, at the right end of the step.",
 }
+# The markers always sit in the bar, so they follow its height. A step name on the same line as them moves aside; with a bar of one line that is the whole bar.
 SHOW_TIP = "Show or hide the bar of experiment steps on the plot: which solution ran when, on the same axis as the traces."
 NO_STEPS_TIP = (
     "This dataset has no experiment steps. Import the measurement notes (and the pump plan) in Workflow > Experimental plan to get them."
 )
 POSITION_TIP = "Which edge of the plot the bar of steps sits on."
-HEIGHT_TIP = "Height of the bar, in percent of the plot height (1 - 10), or Full: the bar fills the plot, behind the traces."
+HEIGHT_TIP = (
+    "Height of the bar, in percent of the plot height (1 - 10), or Full: the bar fills the plot, behind the traces. The bar is never lower than one line of its text, so that the "
+    "step names stay: on a small plot, or with large text, the lowest values give the same bar."
+)
 ALPHA_TIP = "Transparency of the bar's fill (the text stays opaque)."
 CONTENT_TIP = "Which part of a step's note the bar shows."
 ALIGN_TIP = "What the text position is measured against: the bar itself, or the traces inside each step."
@@ -218,6 +223,7 @@ class PlanBarControls(QObject):
         self._size.setKeyboardTracking(False)
         style_ribbon_number_field(self._size, f"{FONT_RANGE[1]} pt")
         self._size.setToolTip(SIZE_TIP)
+        self.text_link = make_link_toggle(parent)  # links this size with the Legend's and the Stats menus' (`text_link.TextSizeLink`, made by the panel)
 
         self._show_ri = QCheckBox(parent)  # no text of its own: the row's caption "Refractive index" names it, the tool tip explains
         self._show_ri.setToolTip(RI_TIP)
@@ -229,7 +235,8 @@ class PlanBarControls(QObject):
             (
                 ("Show", self._show), ("Height", self._height), ("Edge", self._position), ("Transparency", self._alpha),
                 ("Step labels", None),
-                ("Text", self._content), ("Refractive index", self._show_ri), ("Aligned to", self._align), ("Position", self._stop), ("Size", self._size),
+                ("Text", self._content), ("Refractive index", self._show_ri), ("Aligned to", self._align), ("Position", self._stop),
+                ("Size", widgets_row(parent, self._size, self.text_link)),
             ),
             parent,
         )
@@ -243,7 +250,7 @@ class PlanBarControls(QObject):
             parent,
         )
         self._controls = (
-            self._show, self._height, self._position, self._alpha, self._content, self._show_ri, self._align, self._stop, self._size, self._show_roles,
+            self._show, self._height, self._position, self._alpha, self._content, self._show_ri, self._align, self._stop, self._size, self.text_link, self._show_roles,
             *self._roles_place.buttons.values(),
         )  # greyed out together with the menu buttons when there are no steps
 
@@ -260,6 +267,11 @@ class PlanBarControls(QObject):
         self._height.valueChanged.connect(self._refresh_position_visible)
 
     # -- the group ----------------------------------------------------------------------------------------------------------
+
+    @property
+    def size_box(self) -> QSpinBox:
+        """The step names' text size box (the panel links it with the legend's and the stats' sizes)."""
+        return self._size
 
     def widgets(self) -> tuple[QWidget, ...]:
         return (self.menu,)
@@ -304,6 +316,7 @@ class PlanBarControls(QObject):
 
     def refresh_theme(self) -> None:
         self._show.refresh_theme()
+        self.text_link.refresh_theme()
         for menu in (self._position, self._content, self._align):
             menu.refresh_theme()
         self.menu.refresh_theme()

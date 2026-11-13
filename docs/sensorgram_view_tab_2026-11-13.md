@@ -90,13 +90,14 @@ A new group **Evaluation** on the View tab (between Steps and Stats; an icon of 
   | bottom left / bottom right | bottom | left / right |
   | **middle** | **auto** | left |
 
-  The middle is "auto" and keeps the left end, so it is exactly the old default (`bar_model.ROLES_PLACES`, `roles_place_of`; a test pins that `PlanBarSettings()` is the middle).
+  The middle is "auto" and keeps the left end (`bar_model.ROLES_PLACES`, `roles_place_of`; a test pins that `PlanBarSettings()` is the middle). It was "exactly the old default" until the chips
+  moved into the bar (item 9 under "Decisions").
   **What the dice cannot say:** auto at the *right* end (it was possible with the two rows, nobody asked for it; a saved "plan_roles_edge" / "plan_roles_side" of the first build
   is ignored, a day old and unseen).
 - **Placement** (`PlanBarItem.role_chips` lays the chips out, `_paint_role_chips` paints them): a row of chips at the left or right end of each step's bar segment, in the order
-  of its roles read left to right on either side. *Edge*: **auto** is what the chips always did (hanging from the bar's free edge: below a bar at the top, above a bar at the
-  bottom, inside a full bar at its top) and is the default; **top** / **bottom** put them at that edge of the plot, and when the bar is on that edge they hang from its inner edge
-  (inside a full bar: at its top / bottom). The layout is pinned by a test for every combination of bar position, edge and side.
+  of its roles read left to right on either side. *Edge* (**changed the same night, item 9 under "Decisions"**: this paragraph is the first build, where the chips hung below / above a bar
+  that was not full): the chips are inside the step's bar; **auto** (the default) is the middle of the bar's height (the top of a full bar), **top** / **bottom** the top / bottom of the bar.
+  The layout is pinned by a test for every combination of bar position, edge and side.
 - **Colours** (`plan/role_colors.py`, pure): **a pair is one colour**. The signal chip (`S1`) is the pair's colour from a palette of six (theme accents: sky blue, gold,
   green, red, purple, teal; a seventh pair starts again, the Evaluation pop-up allows eight); the baseline chip (`B1`) is the same colour x 0.55 (darker) and a little more
   transparent (0.88 against 0.95 opacity). Before: the baseline chip neutral grey, the signal chip the accent blue, for every pair.
@@ -175,11 +176,54 @@ With the step table on, the plot puts the legend (and with it the table's rows) 
 4. **"Number of ROIs" means the count in a group or average name**: `Group A (n=12)` / `Average of 12 ROIs` against `Group A` / `Average`. A single ROI's line
    (`ROI 5`) has no count and is never changed. Implemented as `Series.short_label` (set in `scan_trace._combine`); the label itself, the SVG layer names, the tooltips
    and the step table keep the full text.
-5. **The dots keep their guard**: dots are drawn only for up to `plot.DOTS_MAX_LINES` (10) lines (64,000 dots cost ~1 s per redraw, see
-   `docs/spectra_sensorgram_draw_cost_2026-11-02.md`). Neither the point-size box nor the Points toggle lifts it. Making the cap a setting is possible; it was not asked for.
+5. **The dots keep their guard, but it is now visible and a setting** (changed later the same day, after the maintainer found "the Points toggle is not working": with more than 10
+   lines the toggle stayed on and drew nothing). Dots are drawn only for up to the **Dot limit** lines (`SensorgramViewSettings.dots_max_lines`, default
+   `DEFAULT_DOTS_MAX_LINES` = 10, range 1-10000; 64,000 dots cost ~1 s per redraw, see `docs/spectra_sensorgram_draw_cost_2026-11-02.md`; the box is in the Points & lines menu, remembered
+   as `sensorgram/view_dots_limit`, put back by its reset). While more lines are drawn than the limit, the **Points toggle shows itself off** (`points_toggle.py`: the off picture and a
+   tool tip saying why) **without changing the remembered choice** (it is still checked, `settings().show_points` is still the choice, the store is not written), so the dots come
+   back by themselves when fewer lines are drawn. A click on it while capped does not toggle: it asks (`ask_to_raise_dots_limit`: "Raise the limit to N" / "Keep the limit", Enter and
+   Escape keep) and, on agreement, turns the choice on and raises the limit to the number of lines in one reported change. The panel tells the controls the line count after every
+   draw (`SensorgramViewControls.set_line_count`, from `_draw_last`); the plot applies the limit itself. The hook for the picture is `IconToggle._shown_on` (Spectra's toggles: unchanged).
 6. **Line width is the one option with a cost.** 1 px is Qt's fast path; the plot comment of 2026-11-02 measured 140 ms against 30 ms per redraw for 160 lines x 400
    cubes at 1.5 px. The default stays 1 px and the tool tip says so. Per the rule "a control means the same for every selection", the width is never reduced
    automatically for many lines.
+7. **The legend's inner margin is 3 px, not pyqtgraph's 9** (`plot._LEGEND_MARGIN_PX`; the maintainer asked "why is there 25 px if the padding is only 6 px?"). The first row's text sat 6 (the
+   edge offset) + 9 (pyqtgraph's inner margin) + half a row = 25 px below the top; now 19 px with the stats table on. With the table off the legend stays where it always was (its offset
+   grew by the 6 px the margin gave up, `_LEGEND_OFFSET_PX`). The stats rows follow the legend's rows and the room kept for them shrank by 12 px, so the traces gain it.
+   **Found on the way, and fixed with it** (`plot._Legend`): pyqtgraph sizes the legend as the sum of its rows' heights, ignoring the margins and the Row gap; Qt raises that to the layout's
+   minimum when the minimum is larger. With 9 px margins that was nearly always so; with 3 px and a negative Row gap it was not, and the spare height was shared out between the
+   rows (a gap of -3 px moved four rows by -2.25 px). The same already happened with the old margin from 6 rows on (a gap of -6 px with 12 rows put the rows 34 px apart instead of
+   16). `_Legend.updateSize` now asks for no extra height and lets Qt raise it to the layout's own minimum. Measured at gap 0 (the default) the row pitch is 22 px both before and after.
+   Do not size it by the layout's size hint: that hint counts the margins or not depending on the moment (a first try added them twice and stretched the rows to 24 px).
+8. **Four reports after seeing it (maintainer, 2026-11-13, evening)** and what was done (the numbers are plot pixels, measured offscreen; nothing seen by eye):
+   - **Stats rows overlapped the step names when they were aligned to the top of the bar.** Two causes. (a) With the "at the edge" tick on, the rows went over the bar, on top of names written in
+     it: now the tick applies only to a bar that holds no names (aligned to the data), `plot._legend_ignores_bar`; with names in the bar the rows stay under it. (b) A Full bar is the whole plot, so
+     its names (any of the five positions) could land on the rows at the plot's edge: the plot hands the band the rows take to the bar (`PlanBarItem.set_keep_out`, from `_place_legend`) and
+     `bar_model.text_top_y(keep_top, keep_bottom)` places the names outside it, all five positions staying distinct. The tick is still there; its tool tip says when it has an effect.
+   - **Names vanished when the bar was 5 % or lower** (`text_top_y` dropped the text when the strip was lower than a line). Now the strip is never lower than one line of text plus its padding
+     (`PlanBarSettings.strip_height_px`; about 21 px at 9 pt, i.e. 5-6 % of a normal plot, so the lowest Height values give the same bar; said in the Height tool tip). Every user of the
+     bar's height goes through it: the bar's layout and hit area (`plan_bar.layout`, `_strip_data`), the legend and rows under it (`plot._bar_height_px`) and the room kept for them (`plot._room`).
+     Chosen over letting the text hang out of a thin bar: that would have put it on the legend and over the plot background, where its colour (chosen for the fill) can be unreadable.
+   - **Text-size link for the step names.** The Steps menu's Size row (it was there, last row) got the chain button; `TextSizeLink` now takes any number of menus, still one state, one rule: the
+     chain in the Legend, Steps and Stats menus is one button, pressing it gives all three the size of the menu you pressed it in, the Legend's wins on restore. If the maintainer wants the step
+     names linked but the stats not (a chain of its own per menu), that is a change of `TextSizeLink`, not of the menus.
+   - **Gap above the legend when everything is hidden.** With the stats table off the legend sat at 8 + 9 = 17 px from the top (table on: 9). Its offset is now the same `_LEGEND_EDGE_PX` as with
+     the table on, so hiding the stats does not move it.
+9. **The evaluation chips now sit inside the bar (maintainer, 2026-11-13, night): "the evaluation labels are put under the step bars when the bar is not full height, which is not good. Can
+   their position work with the height of the step bars?"** Before, with a bar of a few percent the chips hung below it (a bar at the top) or above it (a bar at the bottom), among the traces and
+   exactly where the legend and the stats rows sit (the plot never reserved room for them). Now (`plan_bar._chip_top`, `_chip_block`):
+   - **Always inside the step's own segment of the bar, whichever edge it is on**, so they follow its height. Dice: *top* = at the top of the bar, *bottom* = at its bottom, *middle (auto)* = in
+     the middle of the bar's height (a full-height bar: at its top, as before, because its middle is the data). Left / right = the step's end, as before. A bar barely higher than a chip keeps the
+     chip inside it (the 2 px margin shrinks first). The thinnest bar is one line of text + padding (`strip_height_px`), a little higher than a chip at every size 6-24 pt (a test), so the chips
+     always fit. The earlier meaning "top / bottom = that edge of the *plot*" is gone for a bar that is not full: a top pip with a bar at the bottom used to put the chips at the top of the plot,
+     away from the bar.
+   - **A name on the chips' line gives way sideways** (`_clear_of_chips`; the chips and the names share a one-line bar): a name that still clears the chips stays centred on the step as before; one
+     that would touch them is centred in what is left beside them and shortened to fit; under the 40 px limit once the chips are taken off it is dropped (as for any narrow step; its tool tip has
+     it). A name on another line (a thicker bar, a full bar, aligned to the data) takes nothing. Applies to a full bar too (its chips at the top and names at the top stop used to overlap).
+   - **The anchor mark** (lower left corner of a Range baseline anchor step) is on the same line as the chips on a thin bar: the left chips start after it (`_anchor_spot`).
+   - The Place tool tips, the Evaluation icon (chips inside the bar) and the "at the edge" tool tip ("markers in it") were rewritten. **Not changed:** the "at the edge" legend over a bar covers the
+     chips too (it covers the whole bar; its tool tip says so); a Full bar's chips at its top are not kept out of the stats rows' band (names are; nobody reported it).
+   - Test pins: `EvaluationChipsTest` (inside the bar at every edge / side / height, the middle follows the height, fits at 6-24 pt, anchor, name gives way / stays centred / other line / dropped).
 
 ## Where
 

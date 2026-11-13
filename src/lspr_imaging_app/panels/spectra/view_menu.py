@@ -50,9 +50,13 @@ class IconToggle(QToolButton):
         self.toggled.connect(lambda _checked: self._refresh_icon())
         self.refresh_theme()
 
+    def _shown_on(self) -> bool:
+        """Whether the picture shows "on": the checked state, unless a subclass has a reason to show it otherwise (the Sensorgram's Points toggle while its dot limit holds)."""
+        return self.isChecked()
+
     def _refresh_icon(self) -> None:
         theme = get_active_theme()
-        self.setIcon(self._icon_for(self.isChecked(), theme.text_dim, theme.accent_blue))
+        self.setIcon(self._icon_for(self._shown_on(), theme.text_dim, theme.accent_blue))
 
     def refresh_theme(self) -> None:
         _style_icon_button(self)

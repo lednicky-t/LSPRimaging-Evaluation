@@ -107,6 +107,7 @@ class PlanBarItem(DeviceSpaceItem):
         self._baseline_anchors: frozenset[int] = frozenset()  # steps marked as Range baseline anchors: a small anchor in their lower left corner
         self._anchor_icons: dict[tuple[str, int], QIcon] = {}  # (colour, size in px) -> the anchor mark, made once (a handful: one per step colour)
         self._bulk_grays: dict[int, str] = {}  # step index -> the grey of its Sb chip, made from ALL the steps of the plan (so it does not change while panning or zooming)
+        self._keep_out = (0.0, 0.0)  # pixels at the top / bottom edge of the plot that the stats table takes: the names of a Full bar stay out of them (`set_keep_out`)
         self.setZValue(Z_VALUE)
 
     # -- what to draw ---------------------------------------------------------------------------------------------------
@@ -121,6 +122,14 @@ class PlanBarItem(DeviceSpaceItem):
         if any(index not in present for index in self._selected):
             self._set_selection(tuple(i for i in self._selected if i in present), self._anchor if self._anchor in present else None)  # a step is gone (another dataset, no traces)
         self.update()
+
+    def set_keep_out(self, top_px: float, bottom_px: float) -> None:
+        """The band at the top / bottom edge of the plot that the step stats table (with the legend) takes, in pixels: the names of a Full bar, whose strip is the whole plot, are
+        placed outside it (2026-11-13), so they never overlap the rows. (0, 0): nothing to keep out of. Display only: it moves text, nothing else."""
+        keep = (max(float(top_px), 0.0), max(float(bottom_px), 0.0))
+        if keep != self._keep_out:
+            self._keep_out = keep
+            self.update()
 
     def set_baseline_anchors(self, indices: frozenset[int] | set[int]) -> None:
         """The steps (by index) marked as anchors of the Range baseline (2026-11-09): each gets a small anchor in its lower left corner."""
@@ -201,7 +210,11 @@ class PlanBarItem(DeviceSpaceItem):
         settings = self._settings
         if settings.is_full:
             return view.top(), view.bottom()
-        height = settings.height_fraction * view.height()
+        transform = self._device_transform()
+        plot_px = 0.0 if transform is None else abs(transform.mapRect(view).height())
+        # the bar is never lower than one line of its text (`PlanBarSettings.strip_height_px`): as a share of the plot height, so it can be laid out in data coordinates
+        share = settings.height_fraction if plot_px <= 0.0 else min(settings.strip_height_px(plot_px, QFontMetricsF(self.font()).height()) / plot_px, 1.0)
+        height = share * view.height()
         if settings.position == POSITION_TOP:
             return view.bottom() - height, view.bottom()
         return view.top(), view.top() + height
@@ -367,14 +380,16 @@ class PlanBarItem(DeviceSpaceItem):
         area = to_device.mapRect(view)
         if area.isEmpty():
             return []
+        metrics = QFontMetricsF(self.font())
+        text_height = metrics.height()
+        strip = min(settings.strip_height_px(area.height(), text_height), area.height())  # never lower than one line of text: the names stay (2026-11-13)
         if settings.is_full:
             bar_top, bar_bottom = area.top(), area.bottom()
         elif settings.position == POSITION_TOP:
-            bar_top, bar_bottom = area.top(), area.top() + settings.height_fraction * area.height()
+            bar_top, bar_bottom = area.top(), area.top() + strip
         else:
-            bar_top, bar_bottom = area.bottom() - settings.height_fraction * area.height(), area.bottom()
-        metrics = QFontMetricsF(self.font())
-        text_height = metrics.height()
+            bar_top, bar_bottom = area.bottom() - strip, area.bottom()
+        chip_metrics = QFontMetricsF(self._chip_font())
         drawn: list[DrawnStep] = []
         for step in self._steps:
             x0 = to_device.map(QPointF(step.x_start, 0.0)).x()
@@ -390,14 +405,19 @@ class PlanBarItem(DeviceSpaceItem):
                 if step.levels is not None and settings.text_align == ALIGN_DATA:
                     levels_y = tuple(to_device.map(QPointF(0.0, v)).y() for v in (step.levels.high, step.levels.median, step.levels.low))
                 top = text_top_y(
-                    settings, text_height=text_height, area_top=area.top(), area_bottom=area.bottom(), bar_top=bar_top, bar_bottom=bar_bottom, levels_y=levels_y
+                    settings, text_height=text_height, area_top=area.top(), area_bottom=area.bottom(), bar_top=bar_top, bar_bottom=bar_bottom, levels_y=levels_y,
+                    keep_top=self._keep_out[0], keep_bottom=self._keep_out[1],
                 )
                 if top is not None:
-                    text = metrics.elidedText(step.text, Qt.TextElideMode.ElideRight, int(available))
-                    text_rect = QRectF(rect.left() + _TEXT_SIDE_MARGIN_PX, top, available, text_height)
-                    on_fill = settings.text_align != ALIGN_DATA or settings.is_full or levels_y is None
-                    if on_fill:
-                        text_color = contrast_text_color(step.color, settings.alpha, self._background)
+                    # the evaluation chips sit in the bar too: a name on the same line as them gives way sideways (2026-11-13)
+                    chips = self._chip_block(step, rect, area, chip_metrics)
+                    name_left, available = self._clear_of_chips(step.text, rect, chips, top, text_height, metrics)
+                    if available >= MIN_TEXT_WIDTH_PX:
+                        text = metrics.elidedText(step.text, Qt.TextElideMode.ElideRight, int(available))
+                        text_rect = QRectF(name_left, top, available, text_height)
+                        on_fill = settings.text_align != ALIGN_DATA or settings.is_full or levels_y is None
+                        if on_fill:
+                            text_color = contrast_text_color(step.color, settings.alpha, self._background)
             drawn.append(
                 DrawnStep(
                     step=step, rect=rect, left_edge=x0 if area.left() <= x0 <= area.right() else None,
@@ -455,14 +475,11 @@ class PlanBarItem(DeviceSpaceItem):
         if not self._baseline_anchors:
             return
         for item in drawn:
-            if item.step.index not in self._baseline_anchors:
+            spot = self._anchor_spot(item.step, item.rect)
+            if spot is None:
                 continue
-            size = min(_ANCHOR_MARK_PX, item.rect.height() - 2.0, item.rect.width() - 2.0)
-            if size < 6.0:
-                continue  # no room in a very thin or narrow step
             color = QColor(contrast_text_color(item.step.color, self._settings.alpha, self._background)).name()
-            spot = QRectF(item.rect.left() + 2.0, item.rect.bottom() - 2.0 - size, size, size)
-            key = (color, int(round(size)))
+            key = (color, int(round(spot.width())))
             icon = self._anchor_icons.get(key)
             if icon is None:  # kept: the bar is repainted on every pan, zoom and hover, and making the icon parses its SVG each time
                 icon = self._anchor_icons[key] = load_tabler_icon("anchor", color=color, size=key[1])
@@ -484,44 +501,94 @@ class PlanBarItem(DeviceSpaceItem):
             return self._bulk_grays.get(step_index, f"#{GRAY_MIDDLE:02x}{GRAY_MIDDLE:02x}{GRAY_MIDDLE:02x}"), 1.0, True
         return self._text_color, 0.43, False
 
-    def _chip_top(self, rect: QRectF, area: QRectF, height: float) -> float:
-        """Device y of the top of the chips of the step whose bar segment is `rect`. ``roles_edge`` auto: hanging from the bar's free edge (below a bar at the top, above a bar at the
-        bottom, inside a full bar at its top), as always. Top / bottom: that edge of the plot; when the bar is on that edge the chips hang from its inner edge (inside a full bar:
-        at its top / bottom)."""
+    def _anchor_spot(self, step: PlanBarStep, rect: QRectF) -> QRectF | None:
+        """Where the anchor mark of a Range baseline anchor step is drawn (its lower left corner); None for any other step, or when the step is too small to hold it."""
+        if step.index not in self._baseline_anchors:
+            return None
+        size = min(_ANCHOR_MARK_PX, rect.height() - 2.0, rect.width() - 2.0)
+        if size < 6.0:
+            return None  # no room in a very thin or narrow step
+        return QRectF(rect.left() + 2.0, rect.bottom() - 2.0 - size, size, size)
+
+    def _chip_top(self, rect: QRectF, height: float) -> float:
+        """Device y of the top of the chips of the step whose bar segment is `rect`. The chips are always inside the step's own segment of the bar, so they follow its height
+        (2026-11-13: they used to hang below / above a bar that is not full height, among the traces and the stats rows, which the maintainer did not want). ``roles_edge``
+        top: at the segment's top; bottom: at its bottom; auto: in the middle of a bar of a few percent, at the top of a full-height bar (where the middle of the plot is the data).
+        A segment barely higher than a chip keeps the chip inside it: the margin shrinks before the chip leaves."""
         settings = self._settings
-        want = settings.position if settings.roles_edge == ROLES_AUTO else settings.roles_edge
-        if settings.is_full:
-            return rect.bottom() - _CHIP_MARGIN_PX - height if want == POSITION_BOTTOM and settings.roles_edge != ROLES_AUTO else rect.top() + _CHIP_MARGIN_PX
-        if want == POSITION_BOTTOM:
-            return rect.top() - _CHIP_MARGIN_PX - height if settings.position == POSITION_BOTTOM else area.bottom() - _CHIP_MARGIN_PX - height
-        return rect.bottom() + _CHIP_MARGIN_PX if settings.position == POSITION_TOP else area.top() + _CHIP_MARGIN_PX
+        free = max(rect.height() - height, 0.0)  # what the segment has left over
+        margin = min(_CHIP_MARGIN_PX, free / 2.0)
+        if settings.roles_edge == POSITION_BOTTOM:
+            return rect.bottom() - margin - height
+        if settings.roles_edge == ROLES_AUTO and not settings.is_full:
+            return rect.top() + free / 2.0
+        return rect.top() + margin
+
+    def _chip_block(self, step: PlanBarStep, rect: QRectF, area: QRectF, metrics: QFontMetricsF) -> tuple[QRectF, list[float]] | None:
+        """The row of this step's chips as one rectangle, with the width of each chip (None: no chips for this step, or they are switched off). It starts at the left or the right
+        end of the step's segment (``roles_side``); on the left it starts after the step's anchor mark when the two are on the same line."""
+        if not self._settings.show_roles or not step.roles:
+            return None
+        height = metrics.height() + 2.0
+        widths = [metrics.horizontalAdvance(role) + 8.0 for role in step.roles]
+        total = sum(widths) + _CHIP_GAP_PX * (len(widths) - 1)
+        y = self._chip_top(rect, height)
+        if self._settings.roles_side == SIDE_RIGHT:
+            x = min(rect.right(), area.right()) - _CHIP_MARGIN_PX - total
+        else:
+            x = max(rect.left(), area.left()) + _CHIP_MARGIN_PX
+            spot = self._anchor_spot(step, rect)
+            if spot is not None and spot.top() < y + height and y < spot.bottom():
+                x = max(x, spot.right() + _CHIP_GAP_PX)  # a thin bar: the anchor is on the chips' line, they start after it
+        return QRectF(x, y, total, height), widths
+
+    def _clear_of_chips(
+        self, text: str, rect: QRectF, chips: tuple[QRectF, list[float]] | None, top: float, text_height: float, metrics: QFontMetricsF,
+    ) -> tuple[float, float]:
+        """(left, width) of the room a step's name has, so it does not run into the step's chips. Chips on another line (a bar higher than two lines, the names at its other end,
+        or the names over the data) take nothing. On the same line, a name that still clears them stays centred on the step as it was; one that would touch them uses what is
+        left beside them (centred there), and is shortened to fit."""
+        left, right = rect.left() + _TEXT_SIDE_MARGIN_PX, rect.right() - _TEXT_SIDE_MARGIN_PX
+        if chips is None:
+            return left, right - left
+        block = chips[0]
+        if not (block.top() < top + text_height and top < block.bottom()):
+            return left, right - left
+        half = min(metrics.horizontalAdvance(text), right - left) / 2.0
+        centre = (left + right) / 2.0
+        if self._settings.roles_side == SIDE_RIGHT:
+            limit = block.left() - _CHIP_GAP_PX
+            if centre + half <= limit:
+                return left, right - left
+            right = min(right, limit)
+        else:
+            limit = block.right() + _CHIP_GAP_PX
+            if centre - half >= limit:
+                return left, right - left
+            left = max(left, limit)
+        return left, max(right - left, 0.0)
 
     def role_chips(self, drawn: list[DrawnStep], area: QRectF) -> list[DrawnChip]:
         """Where every evaluation chip goes (no painting): a row of chips per step, at the left or the right end of its bar segment (``roles_side``), in the order of the step's roles
-        read left to right either way, at the edge `_chip_top` says. None when the chips are switched off (``show_roles``)."""
+        read left to right either way, at the height `_chip_top` says. Empty when the chips are switched off (``show_roles``)."""
         if not self._settings.show_roles:
             return []
         metrics = QFontMetricsF(self._chip_font())
-        height = metrics.height() + 2.0
         chips: list[DrawnChip] = []
         for item in drawn:
-            roles = item.step.roles
-            if not roles:
+            block = self._chip_block(item.step, item.rect, area, metrics)
+            if block is None:
                 continue
-            widths = [metrics.horizontalAdvance(role) + 8.0 for role in roles]
-            if self._settings.roles_side == SIDE_RIGHT:
-                x = min(item.rect.right(), area.right()) - _CHIP_MARGIN_PX - (sum(widths) + _CHIP_GAP_PX * (len(roles) - 1))
-            else:
-                x = max(item.rect.left(), area.left()) + _CHIP_MARGIN_PX
-            y = self._chip_top(item.rect, area, height)
-            for role, width in zip(roles, widths):
+            row, widths = block
+            x = row.left()
+            for role, width in zip(item.step.roles, widths):
                 fill, alpha, outlined = self._chip_fill(role, item.step.index)
-                chips.append(DrawnChip(item.step.index, role, QRectF(x, y, width, height), fill, alpha, outlined))
+                chips.append(DrawnChip(item.step.index, role, QRectF(x, row.top(), width, row.height()), fill, alpha, outlined))
                 x += width + _CHIP_GAP_PX
         return chips
 
     def _paint_role_chips(self, painter: QPainter, drawn: list[DrawnStep], area: QRectF) -> None:
-        """The evaluation roles of each step (``B1`` baseline of pair 1, ``S1`` signal ..., ``Sb`` S_bulk step) as small chips placed by `role_chips`, away from the step's text."""
+        """The evaluation roles of each step (``B1`` baseline of pair 1, ``S1`` signal ..., ``Sb`` S_bulk step) as small chips placed by `role_chips`; a name on their line gives way."""
         chips = self.role_chips(drawn, area)
         if not chips:
             return

@@ -1,20 +1,23 @@
-"""Linking the legend's text size and the step stats' text size (2026-11-13). Display only: two sizes of text, nothing of the analysis.
+"""Linking the text sizes of the legend, the step names and the step stats numbers (2026-11-13). Display only: sizes of text, nothing of the analysis.
 
-Screen purpose: the stats numbers line up with the legend's rows, so they usually look best at one size. A **link** button (a chain) beside the text-size box of both menus, the Legend
-menu's "Text" and the Stats menu's "Text size", makes the two sizes one: while it is on, changing either box changes the other. Off, they are as independent as ever (the default).
+Screen purpose: the stats numbers line up with the legend's rows and the step names sit on the same bar, so they usually look best at one size. A **link** button (a chain) beside
+the text-size box of each of the three menus (Legend "Text", Steps "Size", Stats "Text size") makes the three sizes one: while it is on, changing any box changes the others. Off,
+they are as independent as ever (the default). (First built for two menus, the legend and the stats; the Steps menu joined the same day, maintainer.)
 
 Rules:
-- Turning the link on gives both boxes the size of the box in the menu where the button was pressed (the one the user is looking at).
-- While it is on, the two boxes have the same range (the narrower of the two ranges, so that "the same size" is always possible; today both are 6 - 24 pt). The ranges come back when it is off.
-- The two buttons show one state: pressing either presses both. It is remembered (`sensorgram/text_size_linked`, bound to the Legend menu's button by `SensorgramViewControls`).
-- Restoring the remembered state is a pair of calls around the two menus' restores: `begin_restore()` (the buttons still follow each other, but no size is copied) and `end_restore()`
-  (then, if linked, the two sizes are made equal, the Legend menu's winning). So a saved file whose two sizes disagree cannot show a linked pair that differs, and which size wins does
-  not depend on the order in which the menus happen to restore.
+- Turning the link on gives every box the size of the box in the menu where the button was pressed (the one the user is looking at).
+- While it is on, the boxes have the same range (the narrowest of the ranges, so that "the same size" is always possible; today all are 6 - 24 pt). The ranges come back when it is off.
+- The buttons show one state: pressing any of them presses all. It is remembered (`sensorgram/text_size_linked`, bound to the Legend menu's button by `SensorgramViewControls`).
+- Restoring the remembered state is a pair of calls around the menus' restores: `begin_restore()` (the buttons still follow each other, but no size is copied) and `end_restore()`
+  (then, if linked, the sizes are made equal, the first menu's - the Legend's - winning). So a saved file whose sizes disagree cannot show a linked set that differs, and which size
+  wins does not depend on the order in which the menus happen to restore.
 
-`make_link_toggle` makes the button (it is built by each menu, the link by the panel, which owns both); `TextSizeLink` holds the rule.
+`make_link_toggle` makes the button (it is built by each menu, the link by the panel, which owns all of them); `TextSizeLink` holds the rule.
 """
 
 from __future__ import annotations
+
+from collections.abc import Sequence
 
 from PyQt6.QtCore import QObject
 from PyQt6.QtGui import QIcon
@@ -25,8 +28,8 @@ from lspr_ui import load_tabler_icon
 from ..spectra.view_menu import IconToggle
 
 LINK_TIP = (
-    "Link the text size of the legend and of the stats numbers: while this is on, changing either size changes both, so the numbers and the legend they line up with stay the same size. "
-    "Turning it on gives both the size of the menu you are in."
+    "Link the text sizes of the legend, the step names and the stats numbers: while this is on, changing any of the sizes changes all of them, so the three stay the same size. "
+    "Turning it on gives all of them the size of the menu you are in."
 )
 LINK_KEY = "sensorgram/text_size_linked"
 
@@ -37,21 +40,22 @@ def link_icon(on: bool, off_color: str, on_color: str) -> QIcon:
 
 
 def make_link_toggle(parent: QWidget) -> IconToggle:
-    """The link button of one menu (not pressed at the start; `TextSizeLink` joins it to the other menu's)."""
+    """The link button of one menu (not pressed at the start; `TextSizeLink` joins it to the other menus')."""
     toggle = IconToggle(link_icon, LINK_TIP, parent)
     toggle.setObjectName("text_size_link")
     return toggle
 
 
 class TextSizeLink(QObject):
-    def __init__(self, legend_box: QSpinBox, legend_toggle: IconToggle, stats_box: QSpinBox, stats_toggle: IconToggle, parent: QObject | None = None) -> None:
+    def __init__(self, members: Sequence[tuple[QSpinBox, IconToggle]], parent: QObject | None = None) -> None:
+        """`members`: (size box, link button) of each menu, the Legend's first (its size wins when a restored set disagrees)."""
         super().__init__(parent)
-        self._boxes = (legend_box, stats_box)
-        self._toggles = (legend_toggle, stats_toggle)
+        self._boxes = tuple(box for box, _toggle in members)
+        self._toggles = tuple(toggle for _box, toggle in members)
         self._ranges = [(box.minimum(), box.maximum()) for box in self._boxes]  # as the menus made them, put back when the link goes
         self._busy = False
         self._restoring = False  # between `begin_restore` and `end_restore`: sizes are not copied
-        for index in (0, 1):
+        for index in range(len(members)):
             self._toggles[index].toggled.connect(lambda on, source=index: self._on_toggled(source, on))
             self._boxes[index].valueChanged.connect(lambda value, source=index: self._on_value(source, value))
 
@@ -59,21 +63,22 @@ class TextSizeLink(QObject):
         return self._toggles[0].isChecked()
 
     def begin_restore(self) -> None:
-        """The remembered state is about to be restored into the two menus: until `end_restore` the buttons still follow each other but no size is copied."""
+        """The remembered state is about to be restored into the menus: until `end_restore` the buttons still follow each other but no size is copied."""
         self._restoring = True
 
     def end_restore(self) -> None:
-        """Both menus are restored: if linked, the two sizes are made equal (the Legend menu's wins)."""
+        """All the menus are restored: if linked, the sizes are made equal (the first menu's, the Legend's, wins)."""
         self._restoring = False
         self.sync()
 
     def sync(self) -> None:
-        """Make the two sizes equal if linked. The Legend menu's size wins."""
+        """Make the sizes equal if linked. The first menu's (the Legend's) size wins."""
         if self.is_linked() and not self._busy:
             self._busy = True
             try:
                 self._apply_ranges(True)
-                self._boxes[1].setValue(self._boxes[0].value())
+                for box in self._boxes[1:]:
+                    box.setValue(self._boxes[0].value())
             finally:
                 self._busy = False
 
@@ -82,11 +87,14 @@ class TextSizeLink(QObject):
             return
         self._busy = True
         try:
-            other = 1 - source
-            self._toggles[other].setChecked(on)  # one state in both menus
+            for index, toggle in enumerate(self._toggles):
+                if index != source:
+                    toggle.setChecked(on)  # one state in every menu
             self._apply_ranges(on)
             if on and not self._restoring:
-                self._boxes[other].setValue(self._boxes[source].value())  # the menu you pressed it in decides
+                for index, box in enumerate(self._boxes):
+                    if index != source:
+                        box.setValue(self._boxes[source].value())  # the menu you pressed it in decides
         finally:
             self._busy = False
 
@@ -95,12 +103,14 @@ class TextSizeLink(QObject):
             return
         self._busy = True
         try:
-            self._boxes[1 - source].setValue(value)
+            for index, box in enumerate(self._boxes):
+                if index != source:
+                    box.setValue(value)
         finally:
             self._busy = False
 
     def _apply_ranges(self, linked: bool) -> None:
-        """Linked: both boxes take the narrower of the two ranges; not linked: each its own again."""
+        """Linked: every box takes the narrowest of the ranges; not linked: each its own again."""
         if linked:
             low, high = max(r[0] for r in self._ranges), min(r[1] for r in self._ranges)
             for box in self._boxes:
