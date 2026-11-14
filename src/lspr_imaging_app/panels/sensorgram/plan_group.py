@@ -10,7 +10,7 @@ ribbon, and the text controls were a "Step labels" pop-up of their own; the two 
     Text: whole note / solution   Refractive index after the text   Aligned to: bar / data   Position   Size
 
 A second menu of its own, **Evaluation** (`evaluation_menu`, 2026-11-13), has the markers of the evaluation steps on the bar (the ``B1`` / ``S1`` ... / ``Sb`` chips): ``Markers`` shown or
-hidden, and ``Place``: five pips like the 5 of a die (`place_picker.PlacePicker`), the four corners (top / bottom edge x left / right end of the step) and the middle = auto, beside
+hidden, and ``Place``: five cells of the ROI labels' 3 x 3 grid (`place_picker.PlacePicker`), the four corners (top / bottom edge x left / right end of the step) and the middle = auto, beside
 the bar as always. The place is turned into `PlanBarSettings.roles_edge` / `roles_side` (`bar_model.ROLES_PLACES`), like the rest of the settings; the colours are
 `plan/role_colors.py`'s, the layout `PlanBarItem.role_chips`.
 
@@ -244,7 +244,7 @@ class PlanBarControls(QObject):
         # The Evaluation menu (2026-11-13): the markers of the evaluation steps (B1 / S1 ... / Sb) on the bar. Its settings are part of `PlanBarSettings` like the rest.
         self._show_roles = IconToggle(role_chips_icon, ROLES_TIP, parent)
         self._show_roles.setChecked(True)
-        self._roles_place = PlacePicker(ROLES_PLACE_TIPS, parent)  # five pips like the 5 of a die: the corners, and the middle = auto
+        self._roles_place = PlacePicker(ROLES_PLACE_TIPS, parent)  # five cells of the ROI labels' 3 x 3 grid: the corners, and the middle = auto
         self.evaluation_menu = GroupMenuButton(
             lambda color: role_chips_icon(True, color, color), EVAL_MENU_TIP,
             (("Markers", self._show_roles), ("Place", self._roles_place)),
@@ -397,6 +397,6 @@ class PlanBarControls(QObject):
         remember(self._separators.editingFinished, SENSORGRAM_PLAN_SEPARATORS, lambda: self._separators.text())
         remember(self._stop.valueChanged, SENSORGRAM_PLAN_TEXT_STOP_BAR, lambda: self._stops[ALIGN_BAR])
         remember(self._stop.valueChanged, SENSORGRAM_PLAN_TEXT_STOP_DATA, lambda: self._stops[ALIGN_DATA])
-        for place, button in self._roles_place.buttons.items():  # `toggled`, not the picker's `changed`: pressing a pip in code is remembered too
+        for place, button in self._roles_place.buttons.items():  # `toggled`, not the picker's `changed`: picking a cell in code is remembered too
             button.toggled.connect(lambda on, picked=place: store.set(SENSORGRAM_PLAN_ROLES_PLACE.key, picked) if on else None)
         self.settings_changed.emit()  # whatever was restored is what the plot should show

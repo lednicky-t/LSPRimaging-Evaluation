@@ -19,8 +19,20 @@ from lspr_ui import GuiTheme, get_active_theme
 from ..ui_state import UiStateStore
 from .label_placement import PLACEMENTS
 
-_CELL_SIZE = 9  # was 12 (the whole grid 40 px, now 31 px)
-_SPACING = 2
+CELL_SIZE = 9  # was 12 (the whole grid 40 px, now 31 px)
+CELL_SPACING = 2
+
+
+def cell_style(theme: GuiTheme, *, round_cell: bool) -> str:
+    """The look of one cell: a small square (a round one for the middle), the theme's blue when it is the pick. Shared with the Sensorgram's Evaluation menu (`sensorgram/place_picker.py`)."""
+    return (
+        f"QToolButton {{ background-color: {theme.control_bg}; border: 1px solid {theme.control_border}; "
+        f"border-radius: {CELL_SIZE // 2 if round_cell else 2}px; padding: 0; }}"
+        f"QToolButton:hover {{ border-color: {theme.control_border_hover}; }}"
+        f"QToolButton:checked {{ background-color: {theme.accent_blue}; border-color: {theme.accent_blue}; }}"
+    )
+
+
 _TIPS = {
     "top-left": "Label off the top-left corner of the ROI.",
     "top": "Label above the ROI.",
@@ -46,12 +58,12 @@ class LabelPlacementPicker(QWidget):
         self._group.setExclusive(True)
         grid = QGridLayout(self)
         grid.setContentsMargins(0, 0, 0, 0)
-        grid.setSpacing(_SPACING)
+        grid.setSpacing(CELL_SPACING)
         for index, name in enumerate(PLACEMENTS):
             button = QToolButton(self)
             button.setCheckable(True)
             button.setAutoRaise(False)
-            button.setFixedSize(_CELL_SIZE, _CELL_SIZE)
+            button.setFixedSize(CELL_SIZE, CELL_SIZE)
             button.setToolTip(_TIPS[name])
             button.setChecked(name == placement)
             button.toggled.connect(lambda checked, picked=name: self._on_toggled(picked, checked))
@@ -99,11 +111,5 @@ class LabelPlacementPicker(QWidget):
             self.placement_changed.emit(placement)
 
     def refresh_theme(self, theme: GuiTheme) -> None:
-        radius = _CELL_SIZE // 2
         for name, button in self._buttons.items():
-            button.setStyleSheet(
-                f"QToolButton {{ background-color: {theme.control_bg}; border: 1px solid {theme.control_border}; "
-                f"border-radius: {radius if name == 'center' else 2}px; padding: 0; }}"
-                f"QToolButton:hover {{ border-color: {theme.control_border_hover}; }}"
-                f"QToolButton:checked {{ background-color: {theme.accent_blue}; border-color: {theme.accent_blue}; }}"
-            )
+            button.setStyleSheet(cell_style(theme, round_cell=name == "center"))
