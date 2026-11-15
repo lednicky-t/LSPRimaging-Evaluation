@@ -1,8 +1,8 @@
 # Can `panels/image/panel.py` be split, simplified, cleaned up? (investigation, 2026-11-15)
 
-Maintainer asked: "investigate whether it can be split, simplify, clean up a bit to promote maintenance". Read-only investigation plus three zero-risk
-clean-ups (section 5). The big splits are **proposals, not built**: they change the structure of the panel, so they need a go-ahead (root `CLAUDE.md`:
-architecture changes; the earlier `ImagePanel` split was approved in three batches, `maintainability_audit_2026-11-01.md` item D).
+Maintainer asked: "investigate whether it can be split, simplify, clean up a bit to promote maintenance". Sections 1-6 are the investigation (done first, with
+three zero-risk clean-ups). **Maintainer's answer: do seams 1, 2, 3 and 5, not 4 (the render pipeline); trim the comments without losing information; commit and push
+everything. Section 7 records what was done.**
 
 ## 1. What it is today (measured with an AST script, 2026-11-15)
 
@@ -72,3 +72,31 @@ Rough result of 1 + 2 + 5: `panel.py` about 2,330 lines and ~110 methods; with 3
 5. Keep the habit that stopped today's growth: a new feature is a file of its own plus a builder (like `SelectionTools`), and `test_lspri_panel_size_budget.py` makes any growth a decision.
 
 Decisions for the maintainer: (a) go for 1 + 5? (b) is the +5 lines on the size budget (2,715) acceptable? (c) trim the narrative comments (about 150-200 lines)?
+
+## 7. Done 2026-11-15 (maintainer's go: seams 1, 2, 3, 5; not 4; trim comments)
+
+| | before | after |
+|---|---|---|
+| `panels/image/panel.py` | 2,723 lines (2,711 at the start of this section) | **2,016** |
+| `ImagePanel` methods | 121 | **115** |
+| `__init__` | 184 lines | **99** (two named steps taken out: `_init_display_state`, `_start_render_thread_and_timers`) |
+| new files | | `canvas_build.py` 233, `ribbon_build.py` 264, `navigation_build.py` 237, `panel_constants.py` 38 |
+| size budget (`test_lspri_panel_size_budget.py`) | 2,715 lines / 124 methods | **2,150 / 118** (about 3 % of room) |
+
+**How:** a *mechanical* move, done by one script, nothing retyped: each `_build_x(self)` became `build_x(panel)` in a new module, the body being the old text with `self`
+replaced by `panel` (seam 2 = the canvas, `build_canvas`; seam 1 = the ribbon tabs and the top bar, six functions; seam 3 = `build_navigation_bar`). The panel keeps every attribute
+name, so nothing else in the panel and no test had to change. Each function's docstring lists what it creates on, reads from and calls on the panel (generated from the code).
+The names the panel and the builders share moved to `panel_constants.py` (a builder cannot import them from the panel without a cycle). Seam 5 split `__init__` into named steps in the
+same order. A stale text found on the way: the Mask tab's "i" tooltip still listed the five tools that moved to the selection toolbar; it was rewritten.
+
+**Honest limit.** These builders still reach into the panel's private fields: the code is in files of its own and its dependencies are listed, but it is not decoupled.
+The step after this is objects that own what they create (for the navigation bar: a `NavigationBar` that owns the sliders, rows and ribbon and exposes signals, so
+`self._cube_slider` becomes `self._nav.cube_slider`), which needs the panel's handlers and the tests to follow. Not done: it changes names across the panel and ~30 test
+files. Seam 4 (the render pipeline) was left alone on purpose.
+
+**Comment trim.** 15 long narrative comment blocks (6-19 lines each) in the panel and the three builders were condensed to 2-6 lines each (about 130 lines in all): every
+decision, reason and constraint was kept (dates of decisions too), what went is the story of how a line got there. One comment named a timer that does not exist
+(`_view_range_debounce_timer`; the real one is `_view_range_persist_timer`): corrected.
+
+**Checked:** full LSPRi test run green after the move (242 files; two load-sensitive files passed alone on retry), `lint-imports` 5 kept, 0 broken, ruff and pyflakes clean;
+after the trim the image panel tests (111), the toolbar tests and the size budget again.

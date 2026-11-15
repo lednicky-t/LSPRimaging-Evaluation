@@ -51,12 +51,8 @@ def build_image_tools_tab(panel: ImagePanel) -> QWidget:
     reads: `_active_tool`, `_geometry`
     calls its methods: none
     """
-    # A second `TransformsSection` instance (2026-09-30, maintainer
-    # request - "duplicate transform tools and put them in image tools
-    # of image panel"), wired to the same `GeometryModule`/
-    # `ActiveToolModule` the Workflow panel's own Transforms row uses -
-    # see that class's module docstring for why this is a second front
-    # door onto the same backend, not a copy that can drift out of sync.
+    # A second `TransformsSection` (maintainer, 2026-09-30: "duplicate transform tools and put them in image tools of image panel"): a second front door
+    # onto the same `GeometryModule` / `ActiveToolModule` as the first one (see its docstring), so the two cannot drift apart.
     panel._transforms_section = TransformsSection(panel._geometry, panel._active_tool, panel)
 
     image_tools_content = QWidget(panel)
@@ -239,15 +235,9 @@ def build_top_bar(panel: ImagePanel, view_content: QWidget, image_tools_content:
     # minimum width is a little more than its natural one scrolled with half the bar empty. The ribbon now scrolls only when the panel is really too narrow.
     top_bar_layout.addWidget(panel._top_drawer, 1)
 
-    # Cursor-crosshair toggle (maintainer's request, 2026-09-29 - "copy
-    # all functions, as hiding, showing values" from the stable app's
-    # cursor-toggle overlay). Shares `cursor_overlay.CursorOverlay` with
-    # the Histogram plot; only `CursorReadout.value_at` (a pixel lookup here,
-    # a nearest-bin lookup there) differs. No `on_changed` callback
-    # (2026-09-30) - its icon used to need manual repositioning when its
-    # width changed (icon vs. live text); now that it is a normal
-    # `QHBoxLayout` item, Qt already re-lays-out this row for free
-    # whenever a child's size hint changes.
+    # Cursor-crosshair toggle (maintainer, 2026-09-29: copy the stable app's cursor overlay, hide / show the values). It shares `CursorOverlay` with the
+    # Histogram plot; only `CursorReadout.value_at` differs (a pixel lookup here, a nearest-bin lookup there). A plain `QHBoxLayout` item: Qt re-lays-out the
+    # row by itself when its size hint changes, so it needs no `on_changed` callback (since 2026-09-30).
     panel._cursor_overlay = CursorOverlay(
         scene_view=panel._view,
         plot_item=panel._plot,
@@ -256,37 +246,17 @@ def build_top_bar(panel: ImagePanel, view_content: QWidget, image_tools_content:
         theme=get_active_theme(),
         readout_sink=panel._cursor_readout.set_text,
     )
-    # Restyled to match Select/Add ROI (2026-09-30, maintainer request -
-    # "make cursor and i icon same as other icons in the bar... this
-    # apply for all icons later applied, they should have same style"):
-    # overrides the class's own default sizing (`theme.compact_icon_
-    # inner`, tuned instead for Histogram's settings-gear button, a
-    # different icon this class knows nothing about) with this bar's
-    # shared look. `fixed_width=False` - unlike a plain toggle, this
-    # button must still grow to show live text ("(38, 30) = 123.4")
-    # while enabled; only the height and icon size need to match.
-    # Now a fixed-size ribbon icon in "General" (2026-10-03): its live
-    # text goes to the canvas corner, so the button never changes width.
+    # Styled like Select / Add ROI (maintainer, 2026-09-30: "make cursor and i icon same as other icons in the bar ... they should have same style"): the bar's
+    # shared look overrides the class's own default sizing (tuned for the Histogram's settings-gear button). Since 2026-10-03 it is a fixed-size ribbon icon:
+    # its live text goes to the canvas corner, so the button never changes width.
     style_general_icon_button(panel._cursor_overlay.icon_label)
     panel._view_tab.add_image_icon(panel._cursor_overlay.icon_label)  # first icon of the View tab's "Image" group (2026-10-23)
 
-    # A permanent "i" icon (2026-09-29, replacing a text row that only
-    # appeared while a tool with canvas behavior was active): hovering
-    # it shows the active tool's controls - image_controls.py's single
-    # source of truth, so this can never drift from what is actually
-    # wired. Always visible, so the help is reachable with no tool
-    # active too (it then shows the plain-image controls). A live
-    # in-progress status (e.g. the rotate tool's angle readout) is not
-    # part of it - nobody is hovering a corner icon mid-gesture, so that
-    # goes to the status bar instead (`tool_status_changed`, wired in
-    # app_rewrite.py).
-    #
-    # A real `QToolButton` now, not a `QLabel` (2026-09-30, maintainer
-    # request - same size/chrome as every other icon in this bar, via
-    # `style_bar_icon_button`) - it does nothing on click (there is
-    # nothing to toggle, only a tooltip to show on hover), but a plain
-    # `QLabel` had no hover affordance at all and would have stood out
-    # as visually inconsistent next to Select/Add ROI/the cursor icon.
+    # The permanent "i" icon (2026-09-29; it replaced a text row that appeared only while a canvas tool was active): hovering it shows the active tool's controls
+    # from `image_controls.py` (the single source of truth, so it cannot drift from what is wired), or the plain-image controls with no tool; always visible.
+    # A live in-progress status (the rotate tool's angle readout) is not part of it, nobody hovers a corner icon mid-gesture: it goes to the status bar
+    # (`tool_status_changed`, wired in `app_rewrite.py`). A real `QToolButton` (2026-09-30), the size and chrome of the bar's other icons
+    # (`style_bar_icon_button`): it does nothing on click, but a `QLabel` had no hover affordance and looked out of place.
     panel._tool_info = QToolButton(panel._top_bar)
     style_bar_icon_button(panel._tool_info)
     panel._refresh_tool_info(None)

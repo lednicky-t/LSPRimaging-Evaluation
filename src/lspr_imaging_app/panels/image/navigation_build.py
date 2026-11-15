@@ -56,19 +56,10 @@ def build_navigation_bar(panel: ImagePanel) -> None:
     `_selection`, `_view`
     calls its methods: `_connect_frame_tools`, `_refresh_controls_bar_theme`, `_show_slider_menu`
     """
-    # Cube and Wavelength navigation - ported from the stable app's
-    # tick/axis-style redesign (docs/image_area_slider_redesign.md):
-    # each axis gets its own full-width row (title -> slider) rather than
-    # splitting one row, so each slider gets the full available width and
-    # the two axes read as parallel strips. The number fields that used to
-    # sit right of each slider (a typed cube / wavelength, with a
-    # wavelength autocomplete) were removed 2026-10-18 (maintainer request):
-    # the current cube, wavelength and time are in the dock title bar.
-    # The Cube/Time toggle title-button and the
-    # "exclude this image" icon button are *not* ported - see this
-    # panel's module docstring "Not built here, deliberately" note for
-    # why (no elapsed-time mapping / no exclusions subsystem exists on
-    # this branch yet).
+    # Cube and wavelength navigation (ported from the stable app's tick / axis redesign, `docs/image_area_slider_redesign.md`): each axis has its own full-width
+    # row (title, slider), so each slider gets the whole width and the two read as parallel strips. The number fields right of the sliders were removed
+    # 2026-10-18 (maintainer): the current cube, wavelength and time are in the dock title bar. Not ported, deliberately: the Cube / Time toggle title-button and
+    # the "exclude this image" button (the panel's module docstring, "Not built here, deliberately").
     panel._cube_slider = DataAxisSlider(Qt.Orientation.Horizontal, panel)
     panel._cube_slider.setEnabled(False)
     panel._cube_slider.set_accent_color(cube_color())
@@ -163,21 +154,13 @@ def build_navigation_bar(panel: ImagePanel) -> None:
     navigation.addLayout(wavelength_row)
     navigation.addWidget(panel._mask_rows.wavelength_row)
 
-    # No status row here anymore (2026-09-30, maintainer request) - the
-    # "Cube X, wl nm" text it used to show now lives in the dock title
-    # bar (`frame_status_changed`, wired to `PanelContainer.set_subtitle`
-    # in app_rewrite.py); the trailing "- WxH px" resolution text is not
-    # shown anywhere anymore.
+    # No status row (2026-09-30, maintainer): "Cube X, wl nm" lives in the dock title bar (`frame_status_changed`, wired to `PanelContainer.set_subtitle` in
+    # `app_rewrite.py`); the trailing "- WxH px" is shown nowhere.
     #
-    # Left/right margin only, no top/bottom (2026-09-30, maintainer
-    # request, "small stylish" follow-up - scoped to just this nav bar
-    # after an earlier pass put it on the whole panel by mistake): a
-    # bare 10px breathing room so the "Cube"/"λ (nm)" titles don't start
-    # flush against the dock's left edge. Top/bottom stay flush - nothing
-    # else in this bar needs the room. No right margin since 2026-10-18
-    # (maintainer: the gap between the sliders and the panel edge was too
-    # big): a slider already keeps 14 px inside itself (`SIDE_INSET`, room
-    # for half of an end tick label), and the dock's card gap adds 3 more.
+    # A margin on the left only (2026-09-30, a "small stylish" follow-up scoped to this bar after an earlier pass put it on the whole panel by mistake): 10 px so
+    # the "Cube" / "λ (nm)" titles do not start flush against the dock edge. None at the top and bottom (nothing needs the room) and none on the right since
+    # 2026-10-18 (maintainer: the gap to the panel edge was too big): a slider already keeps 14 px inside itself (`SIDE_INSET`, half of an end tick label) and
+    # the dock's card gap adds 3.
     controls = QVBoxLayout()
     controls.setContentsMargins(10, 0, 0, 0)
     controls.setSpacing(4)
@@ -246,13 +229,8 @@ def build_navigation_bar(panel: ImagePanel) -> None:
     controls.addWidget(panel._ribbon_drawer)
     controls.addLayout(navigation)
 
-    # A real QWidget, not a bare layout - QSS `border` only applies to
-    # widgets, and this bar needs one (see `_refresh_controls_bar_
-    # theme`) for the same reason the top bar does: its background
-    # and the canvas's are otherwise visually identical, so the seam
-    # where this bar ends and the canvas begins needs a boundary drawn
-    # explicitly, not left to two adjacent flat colors that happen to
-    # differ.
+    # A real QWidget, not a bare layout: QSS `border` applies only to widgets, and this bar needs one (`_refresh_controls_bar_theme`) for the same reason as the
+    # top bar: its background and the canvas's look the same, so the seam between them has to be drawn explicitly.
     panel._controls_bar = QWidget(panel)
     panel._controls_bar.setObjectName("imageNavigationBar")
     panel._refresh_controls_bar_theme()  # before its children arrive: same result, no re-styling of them (see the top bar)

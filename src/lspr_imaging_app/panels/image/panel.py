@@ -238,27 +238,15 @@ class ImagePanel(QWidget):
     """Renders the current processed image with ROI overlays. Owns no
     computation and no ROI/group state (CLAUDE.md)."""
 
-    # A tool's *live* status while a gesture is in progress (angle readout
-    # etc.) - relayed to the app's status bar (app_rewrite.py), the same
-    # place every other panel's transient status already goes. The tool's
-    # *static* "what do the buttons do" text is not a signal at all; it
-    # lives on the permanent info icon's tooltip instead (see
-    # `_refresh_tool_info`), because it only needs to be re-read, not pushed.
+    # A tool's *live* status while a gesture runs (angle readout, ...), relayed to the app's status bar (`app_rewrite.py`) like every other panel's transient status.
+    # The tool's *static* "what do the buttons do" text is not a signal: it is the tooltip of the permanent info icon (`_refresh_tool_info`).
     tool_status_changed = pyqtSignal(str)
 
-    # The currently displayed plane, exactly as shown (post crop/rotate/
-    # mask/CC/background, pre-overlay), plus the (cube_index, wavelength_nm)
-    # it belongs to - the one narrow read the Histogram panel needs (sketch
-    # §7's "pulls 'current displayed image' from Image panel"), added
-    # 2026-09-29 rather than having Histogram run its own second render of
-    # the same frame. The frame is carried alongside the array rather than
-    # left for the receiver to re-read from `SelectionModule` - by the time
-    # a render completes, `SelectionModule` may already have moved on to a
-    # different frame (a fast wavelength drag queues renders faster than
-    # they complete), and matching ROI/mask geometry against the wrong frame
-    # would be a real correctness bug, not just a cosmetic lag. `RenderResult
-    # .request` already carries the frame the array was actually requested
-    # for (see `_on_rendered` below), so this only forwards it.
+    # The plane exactly as shown (after crop / rotate / mask / chromatic correction / background, before the overlays) with the (cube, wavelength) it belongs to:
+    # the one narrow read the Histogram panel needs (sketch §7), added 2026-09-29 so the Histogram does not run its own second render of the frame. The frame
+    # travels with the array instead of being re-read from `SelectionModule`: by the time a render completes the selection may have moved on (a fast wavelength
+    # drag queues renders faster than they complete), and matching ROI / mask geometry to the wrong frame would be a correctness bug, not a cosmetic lag.
+    # `RenderResult.request` carries the frame the array was really requested for (`_on_rendered`); this only forwards it.
     playback_changed = pyqtSignal(bool)  # the slideshow started (True) or stopped (False); other panels lighten their live updates
     calm_histogram_changed = pyqtSignal(bool)  # Play is running with "calm histogram" on (True), or not (False)
     display_range_changed = pyqtSignal(bool, float, float)  # the user changed the View tab's Display range: (fixed, black, white)
@@ -277,16 +265,10 @@ class ImagePanel(QWidget):
     # narrow case `ImagePanel` already knows about.
     image_cleared = pyqtSignal()
 
-    # What frame is on screen ("Cube 0, 550 nm") - the old bottom status
-    # row's replacement (2026-09-30, maintainer request: that row, plus its
-    # trailing "- WxH px" resolution text, is gone; this is shown instead as
-    # the dock title bar's subtitle - since 2026-10-16 as fixed-place fields,
-    # see `frame_columns_changed`). Render *errors*
-    # ("Cannot show this frame: ...") deliberately do not go through this
-    # signal - they go through `tool_status_changed` instead (a transient
-    # status-bar message, the same convention every other guarded command in
-    # this panel already uses - see `CropMeasureControls.on_measure_apply_requested`), since an
-    # error is not "what frame is displayed", it's "why nothing is".
+    # What frame is on screen ("Cube 0, 550 nm"): shown as the dock title bar's subtitle (it replaced the old bottom status row and its "- WxH px" text, 2026-09-30),
+    # since 2026-10-16 as fixed-place fields (`frame_columns_changed`). Render *errors* ("Cannot show this frame: ...") deliberately do not go through this signal but
+    # through `tool_status_changed`, a transient status-bar message like every other guarded command of this panel (`CropMeasureControls.on_measure_apply_requested`):
+    # an error is not "what frame is displayed", it is "why nothing is".
     frame_status_changed = pyqtSignal(str, str)  # subtitle text, tooltip (the comment / why it is N/A)
     # The same status as fixed-place fields (2026-10-16, maintainer request: the dock title bar's
     # fields must not shift when a frame role or a comment appears): a tuple of `SubtitleColumn`
@@ -294,12 +276,8 @@ class ImagePanel(QWidget):
     # `PanelContainer.set_subtitle_columns`; `frame_status_changed` stays the one-line text.
     frame_columns_changed = pyqtSignal(object)
 
-    # The viewport's pan/zoom, as (x_min, x_max, y_min, y_max) in image pixel
-    # coordinates - `app_rewrite.py`'s other half of `initial_view_range`
-    # below, written back to `AppSettings` the same debounced-then-persist
-    # shape every other display panel already uses for its redraw (this is a
-    # settings write, not a redraw, so it uses its own slower timer - see
-    # `_view_range_debounce_timer`).
+    # The viewport's pan / zoom as (x_min, x_max, y_min, y_max) in image pixels: `app_rewrite.py`'s other half of `initial_view_range`, written back to `AppSettings`
+    # debounced like every display panel's redraw, but on its own slower timer (a settings write, not a redraw: `_view_range_persist_timer`).
     view_range_changed = pyqtSignal(float, float, float, float)
     # Label of the ribbon tab now shown ("Image tools"/"Mask"/"Histogram"/"ROIs") -
     # lets the Histogram plot honour the area selection only while its own tab is open.
@@ -432,14 +410,9 @@ class ImagePanel(QWidget):
         # here and not on MaskModule); what is cached and drawn is in `TintOverlays` (tint_overlays.py).
         self._mask_tint = OverlayTint(QColor(get_active_theme().mask_color), 0.5, initial_mask_overlay)
 
-        # Histogram highlight-overlay display state (cosmetic only - see
-        # histogram_highlight_overlay_controls.py's module docstring for why
-        # this lives here and not on `HighlightRangeModule`). Unlike the mask
-        # overlay above, there is nothing to "resolve" - the tint is just the
-        # already-displayed pixel array thresholded against
-        # `HighlightRangeModule.current_range()` - so `_current_display_image`
-        # caches that array instead of a resolved-mask tuple.
-        # 0.42 = the stable app's own literal (`_highlight_alpha`).
+        # Histogram highlight-overlay display state (cosmetic only; `histogram_highlight_overlay_controls.py` says why it lives here and not on
+        # `HighlightRangeModule`). Unlike the mask overlay there is nothing to "resolve": the tint is the already-displayed pixel array thresholded against
+        # `HighlightRangeModule.current_range()`, so `_current_display_image` caches that array. 0.42 = the stable app's own alpha literal.
         self._highlight_tint = OverlayTint(
             QColor(get_active_theme().highlight_color), 0.42, initial_highlight_overlay
         )
@@ -484,12 +457,8 @@ class ImagePanel(QWidget):
         """The render thread, its shutdown hooks and the redraw timers (a step of `__init__`, after the widgets exist)."""
         self._renderer = ImageRenderer(dataset.load_plane, parent=self)
         self._renderer.rendered.connect(self._on_rendered)
-        # `closeEvent` only reaches top-level windows, and this panel lives
-        # inside a tab strip - so on a normal application quit it would
-        # never fire, leaving the render thread emitting into a widget Qt is
-        # tearing down. That is the shape of this app's documented
-        # PyQt6-sip crash-on-close, so the shutdown hook is on the
-        # application, where it actually fires.
+        # `closeEvent` reaches only top-level windows and this panel lives in a tab strip, so on a normal quit it would never fire and the render thread would emit into
+        # a widget Qt is tearing down (this app's documented PyQt6-sip crash on close): the shutdown hook is on the application, where it does fire.
         app = QApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self._renderer.stop)
@@ -672,25 +641,10 @@ class ImagePanel(QWidget):
         self._build_toolbar_and_layout()
 
     def _build_toolbar_and_layout(self) -> None:
-        # Top toolbar (2026-09-30, flipped from a vertical strip along the
-        # canvas's left edge to a horizontal bar across its top - maintainer
-        # request, "since frames are usually landscapes" - a left rail
-        # wastes more of a landscape frame's width than a top bar wastes of
-        # its height). A category ribbon on the left (`ImageToolRibbon`,
-        # added 2026-09-30 - "Image tools"/"Mask"/"Histogram"/"ROIs" tabs over
-        # a fixed-height tool row, ribbon-style; "Histogram" is still a seeded
-        # placeholder - see `tool_ribbon.py`'s module docstring for why
-        # Select/Add ROI (`CanvasToolsBar`) landed under "ROIs" rather than
-        # "Image tools"); the cursor-readout and "i" info icons on the right
-        # - both used to float as manually `.move()`d overlays on the canvas
-        # itself (`_reposition_cursor_overlay`/`_reposition_tool_info`, both
-        # removed with an earlier change); now they're ordinary widgets in a
-        # real `QHBoxLayout`, so Qt repositions them on any resize for free.
-        #
-        # Split by ribbon tab on 2026-10-07 (one 554-line method before; no behaviour
-        # change). Each `_build_*_tab` returns the page the ribbon shows, in the order the
-        # tabs depend on each other: the View tab mirrors buttons of the Mask, Chromatic and
-        # Background tabs, so those are built first.
+        # The top bar holds the category ribbon (`ImageToolRibbon`: the "Image tools" / "Mask" / ... tabs over a fixed-height row; a horizontal bar since 2026-09-30
+        # because frames are usually landscapes, so a left rail wastes more width than a top bar wastes height) and, on the right, the cursor-readout and "i" info
+        # icons, ordinary `QHBoxLayout` items (they were once `.move()`d overlays on the canvas). Each tab page is built by its own function in `ribbon_build.py`, in the
+        # order the tabs depend on each other: the View tab mirrors buttons of the Mask, Chromatic and Background tabs, so those come first (split by tab 2026-10-07).
         image_tools_content = build_image_tools_tab(self)
         mask_content = build_mask_tab(self)
         build_chromatic_and_background_tabs(self)
@@ -720,24 +674,12 @@ class ImagePanel(QWidget):
         canvas_column.addWidget(self._top_bar)
         canvas_column.addLayout(canvas_row, 1)
 
-        # Navigation now sits below the canvas (2026-09-30, maintainer
-        # request) - `_refresh_controls_bar_theme` draws its border on
-        # whichever edge actually touches the canvas, so moving this bar
-        # means flipping that edge too (border-top now, was border-bottom).
+        # The navigation bar sits below the canvas (2026-09-30, maintainer): `_refresh_controls_bar_theme` draws its border on the edge that touches the canvas.
         #
-        # Zero margins/spacing (2026-09-30, real bug found via headless
-        # geometry probe, maintainer report of "wide borders around the
-        # image area, biggest from the top") - every *other* layout in this
-        # method explicitly zeroes its margins; this one, the outermost, was
-        # the one left at Qt's style-default ~11px on all four sides. That
-        # is invisible as a distinct line (this panel's own background and
-        # the canvas's are the same `toolbar_bg`), but it reads as extra
-        # dark space padding out the canvas, the toolbar strip, and the
-        # nav bar equally - worst at the top because it stacked on top of
-        # the dock's own title bar, which the other three sides have
-        # nothing equivalent to. (A 10px left/right margin was briefly
-        # added here too, then moved to just the nav bar's own `controls`
-        # layout above - the canvas/toolbar were meant to stay flush.)
+        # Zero margins and spacing on this outermost layout (2026-09-30, a real bug found with a headless geometry probe: "wide borders around the image area, biggest
+        # from the top"): every other layout here zeroes its margins, this one was left at Qt's style default of about 11 px on all four sides. It is invisible as a line
+        # (the panel's and the canvas's background are both `toolbar_bg`) but reads as extra dark padding, worst at the top where it stacked on the dock's own title
+        # bar. (A 10 px left / right margin was tried here and moved to the navigation bar's own `controls` layout: the canvas and the toolbar stay flush.)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -855,13 +797,8 @@ class ImagePanel(QWidget):
         # *every* ROI (`_redraw`'s request), not the selection, so this one is always overlay-only.
         self._selection.roi_selection_changed.connect(self._schedule_overlay_redraw)
 
-        # Keeps the nav widgets truthful for *any* source of a selection
-        # change, not just this panel's own spin/slider handlers - e.g. the
-        # "jump to reference" button below, or a future panel that also
-        # calls `SelectionModule.set_cube`/`set_wavelength`. Matches this
-        # panel's own "redraw because the module emitted a change" rule
-        # (module docstring) - these are the same rule applied to the nav
-        # widgets, not just the canvas.
+        # These keep the navigation widgets truthful for *any* source of a selection change, not just this panel's own slider handlers (the "jump to reference" button,
+        # another panel calling `SelectionModule.set_cube` / `set_wavelength`): the panel's rule "redraw because the module emitted a change", applied to the nav widgets.
         self._selection.cube_changed.connect(self._on_selection_cube_changed)
         self._selection.wavelength_changed.connect(self._on_selection_wavelength_changed)
         self._reference_frame.reference_frame_changed.connect(self._on_reference_frame_changed)
@@ -1036,13 +973,8 @@ class ImagePanel(QWidget):
             self._wavelength_slider.setMaximum(max(len(wavelengths) - 1, 0))
             self._wavelength_slider.setSingleStep(1)
             self._wavelength_slider.setPageStep(1)
-            # No caller-side wiring needed for the scale-break glyph -
-            # `DataAxisSlider` detects an unusually large consecutive gap in
-            # `wavelengths` itself (e.g. a real 0 nm dark/reference frame
-            # followed by the first real spectral wavelength) and draws it
-            # automatically. See that widget's module docstring for why an
-            # earlier same-day version that invented a synthetic "0" tick
-            # here was wrong.
+            # Nothing to wire for the scale-break glyph: `DataAxisSlider` finds an unusually large gap in `wavelengths` itself (a real 0 nm dark frame followed by the
+            # first spectral wavelength) and draws it (its module docstring says why a synthetic "0" tick here was wrong).
             self._wavelength_slider.set_ticks(
                 list(wavelengths),
                 self._slider_marks.wavelength_slider_major_ticks(wavelengths, self._wavelength_slider.axis_window().view_for(len(wavelengths))),
@@ -1481,13 +1413,8 @@ class ImagePanel(QWidget):
             self._tints.update_highlight()
             self._playback_stats.note_detail("highlight", time.perf_counter() - stage)
         if not self._view_range_restored:
-            # Once only, ever, on this panel's first successful render - a
-            # later frame navigation must never snap the view back to this
-            # saved position (that would fight the user's own panning/
-            # zooming for the rest of the session). `None` (first-ever
-            # launch, or a settings file with nothing saved yet) leaves
-            # pyqtgraph's own auto-range in charge, same as before this
-            # existed.
+            # Once, on this panel's first successful render: a later navigation must never snap the view back to the saved position (it would fight the user's own
+            # panning and zooming). `None` (first launch, nothing saved) leaves pyqtgraph's auto-range in charge, as before this existed.
             self._view_range_restored = True
             if self._initial_view_range is not None:
                 x_range, y_range = self._initial_view_range
@@ -1507,12 +1434,8 @@ class ImagePanel(QWidget):
             self._playback_stats.note_detail("prefetch_plan", time.perf_counter() - stage)
         self._last_image_shape = result.image.shape[:2]
         self._area_tool.set_image_shape(self._last_image_shape)
-        # The crop tool's clamp bound - correct the instant Crop is active
-        # (the frame it renders is the *uncropped* one, `_PREVIEW_TOOLS`),
-        # briefly stale (the smaller, cropped shape) right as the tool is
-        # first switched on, self-correcting once the next preview render
-        # lands ~100ms later (`_schedule_redraw` already runs on every
-        # active-tool change).
+        # The crop tool's clamp bound: right the moment Crop is active (it renders the *uncropped* frame, `_PREVIEW_TOOLS`), briefly the smaller cropped shape as
+        # the tool is first switched on, corrected by the next preview render ~100 ms later (`_schedule_redraw` runs on every active-tool change).
         self._crop_tool.set_frame_size(result.image.shape[1], result.image.shape[0])
         stage = time.perf_counter()
         self._decorations.update_chunk_grid()
