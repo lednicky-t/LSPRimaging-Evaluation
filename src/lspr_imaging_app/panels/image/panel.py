@@ -85,14 +85,11 @@ from dataclasses import replace
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import QEvent, QObject, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QFontMetrics
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QMenu,
     QApplication,
-    QGraphicsView,
     QHBoxLayout,
-    QLabel,
-    QToolButton,
     QVBoxLayout,
     QWidget,
     QWidgetAction,
@@ -127,10 +124,7 @@ from ...selection import (
 )
 from ...selection.cube_display_module import MODE_CUBE, MODE_TIME
 from ...selection.frame_roles_module import FrameRolesModule
-from ..cursor_overlay import CursorOverlay
-from ..ribbon_drawer import RibbonDrawer
 from ..subtitle_column import SubtitleColumn
-from .transforms_settings import TransformsSection
 from ...image_tools.chromatic_auto_task import ChromaticAutoDetect
 from ...image_tools.mask.mask_pointers import MaskPointersModule
 from ...image_tools.mask_auto_task import MaskAutoTask
@@ -141,52 +135,41 @@ from ...storage.session_carry_task import SessionCarry
 from ...roi.array_task import ArrayAction
 from ...roi.display_style import RoiDisplayStyle
 from ...roi.scope import RoiEditTarget, RoiScopeModule
-from .area_selection_tool import AreaSelectionTool
-from .background_tab import BACKGROUND_INFO_HTML, BackgroundTab
-from .chromatic_tab import ChromaticCorrectionTab, ChromaticUiValues
-from .canvas_tools import _ICON_SIZE, style_bar_icon_button
-from .crop_size_controls import CropSizeControls
-from .crop_tool import CropTool
+from .background_tab import BACKGROUND_INFO_HTML
+from .chromatic_tab import ChromaticUiValues
+from .canvas_tools import _ICON_SIZE
 from .data_axis_slider import DataAxisSlider
 from .frame_tools import FrameToolsState, FrameToolsWidget
-from .general_group import style_general_icon_button
 from .selection_regions import SelectionRegions
 from .selection_tools import SelectionTools
-from .gpu_view import apply_gpu_drawing, mark_opaque
-from .paint_census import PaintCensus
-from .play_repaint import PlayRepaint
-from .image_controls import ImageViewBox, controls_text
+from .canvas_build import build_canvas
+from .navigation_build import build_navigation_bar
+from .ribbon_build import (
+    build_chromatic_and_background_tabs,
+    build_image_tools_tab,
+    build_mask_tab,
+    build_roi_tab,
+    build_top_bar,
+    build_view_tab,
+)
+from .gpu_view import apply_gpu_drawing
+from .image_controls import controls_text
 from .interaction import CanvasInteraction
-from .edit_preview_layer import EditPreviewLayer
-from .lock_layer import LockLayer
-from .mask_tab import MaskTab
-from .measure_controls import MeasureCalibrationControls
-from .measure_line_tool import MeasureLineTool
 from .overlay_cache import environment_budget_mb
 from .overlay_style import OverlayStyle
 from .overlay_tint import OverlayTint
 from .tint_overlays import TintOverlays
-from .decoration_overlays import DecorationOverlays
 from .frame_status_text import FrameStatusText
-from .cursor_readout import CursorReadout
 from .roi_queries import RoiQueries
-from .crop_measure_controls import CropMeasureControls
-from .slider_marks import SliderMarks
 from .slideshow_state import restore_slideshow_settings
 from .prefetch import prefetch_order
 from .render import ImageRenderer, RenderRequest, RenderResult
 from .roi_gestures import RoiGestures
-from .roi_overlay import SAMPLE_WIDTH, SAMPLE_WIDTH_FAST, RoiOverlay, add_curve
+from .roi_overlay import SAMPLE_WIDTH, SAMPLE_WIDTH_FAST, add_curve
 from .array_actions import AutoCropReadiness
-from .roi_tab import RoiTab
-from .rotate_line_tool import RotateLineTool
 from .display_range_controls import FULL_16BIT_RANGE
-from .view_tab import ViewTab
 from .analysis_tab import AnalysisTab
-from .signal_map_display import SignalMapDisplay
-from .tuning_overlay import TuningOverlay
 from .tuning_tab import TuningTab
-from .export_tab import ExportTab
 from ...storage.ui_state_keys import (
     IMAGE_CURSOR_READOUT,
     IMAGE_MASK_EDIT_PREVIEW,
@@ -205,28 +188,25 @@ from ...storage.ui_state_keys import (
     read,
 )
 from ..ui_state import UiStateStore
-from .scale_bar_overlay import ScaleBarItem
-from .mark_colors import cube_color, wavelength_color
-from .mask_rows import MaskRows
-from .timeline_strip import TimelineStrip
-from .slider_colors import SliderColors
 from ...applog.events import log_event, timed
-from .playback_stats import PlaybackStats
-from .timed_canvas import TimedImageItem, TimedLayoutWidget
-from .slider_ribbon import SliderRibbon, SliderRibbonDrawer
 from .slideshow import (
-    MODE_ALL,
     MODE_EVENTS,
     MODE_MASK_STATES,
-    MODE_ROI_STATES,
     MODE_ROW_MARKS,
-    SlideshowController,
 )
-from .tool_ribbon import ROI_TAB, VIEW_TAB, ImageToolRibbon
+from .tool_ribbon import ROI_TAB, VIEW_TAB
+from .panel_constants import (
+    ANALYSIS_TAB,
+    BACKGROUND_TAB,
+    CHROMATIC_TAB,
+    EXPORT_TAB,
+    MASK_TAB,
+    _PREVIEW_TOOLS,
+    _REDRAW_COALESCE_MS,
+)
 
 logger = logging.getLogger(__name__)
 
-_REDRAW_COALESCE_MS = 100  # sketch §8 - the already-validated coalescing window
 _REDRAW_COALESCE_PLAYING_MS = 0  # while Play runs each step is one event: the redraw runs right after its handlers (0 ms still merges a cube + wavelength change into one)
 _PLAY_READ_AHEAD = 3  # frames read ahead while Play runs
 # Slower than the redraw coalesce above on purpose: this debounces a settings
@@ -234,28 +214,7 @@ _PLAY_READ_AHEAD = 3  # frames read ahead while Play runs
 # `app_rewrite.py`), not a redraw, so there is no reason to pay disk I/O on
 # every intermediate frame of a drag/zoom the way a 100ms redraw would.
 _VIEW_RANGE_PERSIST_DEBOUNCE_MS = 600
-_CHUNK_GRID_COLOR = "#84cc16"  # the lime of the Export tab's grid icon (`export_tab._GRID_ON_COLOR`)
-_SOURCE_GRID_COLOR = "#38bdf8"  # the blue of the View tab's grid icon (the loaded OME-Zarr's own chunks)
-_CROP_OUTLINE_COLOR = "#38bdf8"  # the crop button's active blue
 
-# Cube/Wavelength navigation rows (ported from the stable app's
-# docs/image_area_slider_redesign.md). The colours of the slider marks (reference,
-# dark, ...) are the user's pick or the theme's: `slider_colors.py`.
-
-
-def _slider_axis_title_style(color: str) -> str:
-    """Shared 11px/600 style for the Cube/λ slider-title labels - ported
-    from the stable app's `layout_builder._slider_axis_title_style` so both
-    titles use identical numbers instead of two hand-copied versions that
-    can drift."""
-    return f"color: {color}; font-size: 11px; font-weight: 600;"
-
-
-MASK_TAB = "Mask"  # ribbon tab label; the edit preview (the pixels the picked tool would change) is drawn only while it is open
-CHROMATIC_TAB = "Chromatic"  # ribbon tab label (full name "Chromatic Corrections" is its tooltip)
-BACKGROUND_TAB = "Background"  # ribbon tab label; green while background removal is applied
-ANALYSIS_TAB = "Analysis"  # the scan (moved here from the Workflow panel 2026-10-24); its "i" text is live (`info_html`)
-EXPORT_TAB = "Export"  # OME-Zarr export (moved here from the Workflow panel 2026-10-20); its "i" text is live (`info_html`)
 # The "i" icon's text per ribbon tab ("Image tools" and "ROIs" show the active tool's canvas controls instead).
 _TAB_INFO: dict[str, str] = {
     VIEW_TAB: (
@@ -265,7 +224,8 @@ _TAB_INFO: dict[str, str] = {
     "Mask": (
         "Mask: pixels to ignore (kept out of the background estimate and ROI sampling). "
         "State: edit scope (persistent / individual). Visibility: tint on/off, colour, transparency. "
-        "Manual edit: histogram selection, threshold, local contrast, morphology, draw. PNG: load/save the mask."
+        "Selection: add / subtract / replace the mask by the selection, or make the mask the selection (the selection tools are beside the image). "
+        "Manual edit: feature map, eraser. Scan, Auto mask: mark and mask frames where something crossed the field. PNG: load/save the mask."
     ),
     CHROMATIC_TAB: (
         "Chromatic correction: Run finds landmarks on the reference frame and follows them through the "
@@ -274,14 +234,6 @@ _TAB_INFO: dict[str, str] = {
     ),
     BACKGROUND_TAB: BACKGROUND_INFO_HTML,
 }
-_PREVIEW_TOOLS = frozenset({ImageTool.ROTATE, ImageTool.CROP})
-"""Tools that work on the *uncropped* image: while one is active the image is
-rendered without its crop, the crop is drawn as an outline, and the ROI
-overlay (cropped-space coordinates) is hidden. See the module docstring.
-Crop joined 2026-09-29: the whole point of the tool is choosing a new crop
-from the full available frame, not just the region an old crop already
-kept."""
-
 class ImagePanel(QWidget):
     """Renders the current processed image with ROI overlays. Owns no
     computation and no ROI/group state (CLAUDE.md)."""
@@ -452,6 +404,29 @@ class ImagePanel(QWidget):
         self._active_tool = active_tool
         self._tool_status = ""
 
+        self._init_display_state(highlight_range, frame_roles, initial_mask_overlay, initial_highlight_overlay)
+
+        self._build_ui()
+
+        self._start_render_thread_and_timers(dataset)
+
+        self._connect_modules()
+        self._refresh_navigation_ranges()
+        # No dataset yet at construction - same text `_on_dataset_cleared`
+        # emits later, so the dock title bar's subtitle never sits blank
+        # while genuinely nothing is loaded.
+        self._frame_text.set_status("No dataset loaded.")
+
+    def _init_display_state(
+        self,
+        highlight_range: HighlightRangeModule,
+        frame_roles: FrameRolesModule | None,
+        initial_mask_overlay: OverlayStyle | None,
+        initial_highlight_overlay: OverlayStyle | None,
+    ) -> None:
+        """What is tinted over the image, what the dock title says about the frame, and the render bookkeeping (a step of `__init__`, same order as
+        before it was split out)."""
+        dataset = self._dataset
         # Mask-overlay display state (cosmetic only - see
         # mask_overlay_controls.py's module docstring for why this lives
         # here and not on MaskModule); what is cached and drawn is in `TintOverlays` (tint_overlays.py).
@@ -505,8 +480,8 @@ class ImagePanel(QWidget):
         # The selection / lock as raw-space regions for the mask tools, and the Lock / Unlock commands (`selection_regions.py`).
         self.selection_regions = SelectionRegions(self._area_selection, self._geometry, lambda: self._last_image_shape, self._on_tool_status)
 
-        self._build_ui()
-
+    def _start_render_thread_and_timers(self, dataset: DatasetModule) -> None:
+        """The render thread, its shutdown hooks and the redraw timers (a step of `__init__`, after the widgets exist)."""
         self._renderer = ImageRenderer(dataset.load_plane, parent=self)
         self._renderer.rendered.connect(self._on_rendered)
         # `closeEvent` only reaches top-level windows, and this panel lives
@@ -541,13 +516,6 @@ class ImagePanel(QWidget):
         self._view_range_persist_timer.setInterval(_VIEW_RANGE_PERSIST_DEBOUNCE_MS)
         self._view_range_persist_timer.timeout.connect(self._emit_view_range_changed)
         self._plot.vb.sigRangeChanged.connect(self._on_view_range_changed)
-
-        self._connect_modules()
-        self._refresh_navigation_ranges()
-        # No dataset yet at construction - same text `_on_dataset_cleared`
-        # emits later, so the dock title bar's subtitle never sits blank
-        # while genuinely nothing is loaded.
-        self._frame_text.set_status("No dataset loaded.")
 
     def restore_ui_state(self, store: UiStateStore) -> None:
         """Put the cursor readout toggle and the Mask edit tool pick back as
@@ -700,182 +668,8 @@ class ImagePanel(QWidget):
     # -- construction -------------------------------------------------------
 
     def _build_ui(self) -> None:
-        self._build_canvas()
+        build_canvas(self)
         self._build_toolbar_and_layout()
-
-    def _build_canvas(self) -> None:
-        """The pyqtgraph canvas: view, plot, image/overlay items, canvas tools and
-        the cursor readout. Only creates `self._*` attributes, so the toolbar and
-        layout code in `_build_toolbar_and_layout` can rely on them."""
-        # Parent passed at construction, never set later via a layout that is
-        # not itself attached yet - see CLAUDE.md's phantom-top-level-window
-        # pitfall, which cost ~6 rounds of screen-recording analysis to find
-        # the last time it was hit.
-        self._view = TimedLayoutWidget(parent=self)
-        # Repaint the whole canvas on every change: the cursor crosshair's
-        # InfiniteLines span the full view, and Qt's partial-update rectangles
-        # left stale copies of them behind as ghost lines (2026-10-03).
-        self._view.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
-        mark_opaque(self._view.viewport())  # its background brush fills it: the widgets behind need no repaint (gpu_view.py)
-        self.refresh_theme()
-        # ImageViewBox: middle-drag pans, wheel zooms, left/right drags do
-        # nothing (image_controls.py).
-        self._plot = self._view.addPlot(viewBox=ImageViewBox())
-        self._plot.invertY(True)  # image row 0 at the top, like the old app
-        self._plot.setAspectLocked(True)
-        self._plot.hideAxis("left")
-        self._plot.hideAxis("bottom")
-        self._plot.setMenuEnabled(False)
-
-        # Pixels without a value (NaN, e.g. rotation corners) are transparent
-        # in `_image_item`; this checker sits underneath so they read as
-        # "no data" and never as black or a colormap colour.
-        self._no_data_item = pg.ImageItem(axisOrder="row-major")
-        self._no_data_item.setZValue(-1)
-        self._no_data_item.hide()
-        self._plot.addItem(self._no_data_item)
-
-        self._image_item = TimedImageItem(axisOrder="row-major")
-        self._plot.addItem(self._image_item)
-
-        # Mask-overlay tint, drawn between the image and the ROI curves
-        # below (so ROI markers stay legible over it). Row-major, matching
-        # `_image_item` - no transpose needed, unlike the stable app's
-        # `ignore_mask_item` (col-major `pg.ImageItem`, hence its transpose
-        # in `overlay_manager._update_ignore_mask_overlay`).
-        self._mask_tint.attach(self._plot)
-
-        # Histogram highlight-overlay tint (2026-10-02) - same row-major
-        # shape as `_mask_tint.item` just above, a separate item so the
-        # two tints can be shown/hidden/recolored independently.
-        self._highlight_tint.attach(self._plot)
-
-        # The Mask tab's edit preview (2026-10-29): the pixels the picked tool would select or change, one more tint above
-        # the two above and below the ROI curves. Fed by `MaskTab.edit_preview`, which exists once the tab is built.
-        self._edit_preview_layer = EditPreviewLayer(
-            self._plot, self._geometry, self._area_selection,
-            hidden=lambda: self._active_tool.active() in _PREVIEW_TOOLS,
-        )
-        # The selection lock (2026-11-15): everything outside it dimmed, its border a solid line. Above the tints, below the ROI curves.
-        self._lock_layer = LockLayer(
-            self._plot, self._area_selection,
-            hidden=lambda: self._active_tool.active() in _PREVIEW_TOOLS,
-            image_shape=lambda: self._last_image_shape,
-        )
-
-        # The ROI circles, reference rings, selection highlight and labels (roi_overlay.py).
-        # How they are drawn is the "ROIs" ribbon tab (`roi_overlay_controls.py`); display-only:
-        # this panel owns the values, no other module does.
-        self._roi_overlay = RoiOverlay(self._plot, self._roi_display)
-        self._roi_overlay_store: UiStateStore | None = None
-        # ROI position tuning (2026-10-29): the crosses of the tried centres, and the ROIs drawn at their best centres (`set_tuning_view`).
-        self._tuning_overlay = TuningOverlay(self._plot)
-        self._tuning_view: TuningView | None = None
-        # The signal map (2026-11-10): ROIs coloured by their response, its legend and hover text (`signal_map_display.py`); the owner calls `signal_map.set_view`.
-        self.signal_map = SignalMapDisplay(self._plot, self, lambda: self._draw_roi_overlay() if self._last_image_shape is not None else None, self.roi_at)
-        self._chunk_grid_curve = self._add_curve(_CHUNK_GRID_COLOR, width=1.0, dashed=True)
-        self._source_grid_curve = self._add_curve(_SOURCE_GRID_COLOR, width=1.0, dashed=True)
-        # Chromatic landmark overlay (2026-10-04): crosses = *estimated* (tracked
-        # on the image) positions, dots = *fitted* positions (what the correction
-        # model says), lines connect them, each in its wavelength's own colour
-        # (`wavelength_color.py`). Symbol sizes are screen pixels; styling is
-        # set per draw (`DecorationOverlays.draw_landmarks`).
-        self._landmark_line_item = pg.PlotDataItem(connect="finite")
-        self._plot.addItem(self._landmark_line_item)
-        self._landmark_observed_item = pg.ScatterPlotItem(pxMode=True)
-        self._landmark_fitted_item = pg.ScatterPlotItem(pxMode=True)
-        self._plot.addItem(self._landmark_observed_item)
-        self._plot.addItem(self._landmark_fitted_item)
-        # Scale bar (2026-10-06): a screen-space child of the ViewBox, see
-        # `scale_bar_overlay.py`; laid out by `DecorationOverlays.draw_scale_bar`.
-        self._scale_bar_item = ScaleBarItem(self._plot.vb)
-        # ROI labels (the ROIs tab's toggle): the same kind of item, see `roi_label_overlay.py`.
-        self._roi_overlay.attach_labels()
-        self._roi_overlay.layers.set_refresher(self._refresh_overlay_items)
-        # Drawn only while a preview tool is active (see `_draw_overlays`).
-        self._crop_outline_curve = self._add_curve(_CROP_OUTLINE_COLOR, width=1.5, dashed=True)
-        # The scale bar, landmarks, crop outline and chunk grids above are drawn by one object (decoration_overlays.py); the items stay
-        # created here, in this order, because it decides what paints over what.
-        self._decorations = DecorationOverlays(
-            self._dataset,
-            self._geometry,
-            self._chromatic,
-            view=self._view,
-            chunk_grid_curve=self._chunk_grid_curve,
-            source_grid_curve=self._source_grid_curve,
-            crop_outline_curve=self._crop_outline_curve,
-            landmark_line_item=self._landmark_line_item,
-            landmark_observed_item=self._landmark_observed_item,
-            landmark_fitted_item=self._landmark_fitted_item,
-            scale_bar_item=self._scale_bar_item,
-            preview_tool_active=lambda: self._active_tool.active() in _PREVIEW_TOOLS,
-            last_image_shape=lambda: self._last_image_shape,
-            current_cube=self._current_cube,
-            current_wavelength=self._current_wavelength,
-            schedule_redraw=self._schedule_redraw,
-            view_changed=self.chromatic_view_changed.emit,
-            landmarks_visible=self._initial_chromatic_view[0],
-            landmarks_all_wavelengths=self._initial_chromatic_view[1],
-        )
-        self._plot.vb.sigRangeChanged.connect(self._decorations.draw_scale_bar)
-        self._plot.vb.sigResized.connect(self._decorations.draw_scale_bar)
-
-        self._rotate_tool = RotateLineTool(self._plot, self._geometry, parent=self)
-        self._rotate_tool.status_changed.connect(self._on_tool_status)
-
-        self._crop_tool = CropTool(self._plot, self._geometry, parent=self)
-        self._crop_tool.status_changed.connect(self._on_tool_status)
-        # Left-button drags do nothing by default (image_controls.py); Crop
-        # is the first tool to claim them - declines (returns False) unless
-        # it is the active tool, so every other case is untouched.
-        self._plot.vb.set_left_drag_handler(self._on_left_drag_event)
-        self._plot.vb.set_right_drag_handler(lambda ev: self._interaction.on_right_drag(ev))  # the armed tool's numbers (tool_drag.py)
-
-        # A real QWidget (QSpinBox/QToolButton need actual input, unlike a
-        # painted overlay item - see crop_size_controls.py), parented to the
-        # viewport so it draws on top of the graphics content. Positioned in
-        # screen pixels by `CropMeasureControls.reposition_crop`; hidden until Crop is
-        # active and has a rectangle to show a size for.
-        self._crop_controls = CropSizeControls(self._view.viewport(), get_active_theme())
-        self._crop_controls.setVisible(False)
-        self._crop_controls.size_edited.connect(self._crop_tool.set_size)
-
-        self._measure_tool = MeasureLineTool(self._plot, self._geometry, parent=self)
-        self._measure_tool.status_changed.connect(self._on_tool_status)
-
-        self._measure_controls = MeasureCalibrationControls(self._view.viewport(), get_active_theme())
-        self._measure_controls.setVisible(False)
-        # Where the two floating control widgets sit and what the tools' results do to them (crop_measure_controls.py).
-        self._crop_measure = CropMeasureControls(
-            self._plot,
-            self._view,
-            self._geometry,
-            self._active_tool,
-            crop_tool=self._crop_tool,
-            crop_controls=self._crop_controls,
-            measure_tool=self._measure_tool,
-            measure_controls=self._measure_controls,
-            status=self._on_tool_status,
-        )
-        self._crop_tool.changed.connect(self._crop_measure.on_crop_tool_changed)
-        self._plot.vb.sigTransformChanged.connect(self._crop_measure.reposition_crop)
-        self._crop_controls.apply_requested.connect(self._crop_measure.on_crop_apply_requested)
-        self._measure_tool.measured.connect(self._crop_measure.on_measure_measured)
-        self._measure_controls.apply_requested.connect(self._crop_measure.on_measure_apply_requested)
-        self._plot.vb.sigTransformChanged.connect(self._crop_measure.reposition_measure)
-
-        # Area selection (2026-10-03): drag gesture + marching-ants outline.
-        # The state is `AreaSelectionModule`'s; this only draws/forwards.
-        self._area_tool = AreaSelectionTool(
-            self._plot, self._area_selection, parent=self, notify=self._on_tool_status,
-            brush_diameter=lambda: float(self._mask.settings().brush_size_px),
-        )
-
-        # Cursor readout text lives on the canvas, top-left (maintainer,
-        # 2026-10-03) - the toggle itself sits in the "General" group (cursor_readout.py).
-        self._cursor_readout = CursorReadout(
-            self._view.viewport(), self._image_item, value_changed=self.cursor_value_changed.emit
-        )
 
     def _build_toolbar_and_layout(self) -> None:
         # Top toolbar (2026-09-30, flipped from a vertical strip along the
@@ -897,14 +691,14 @@ class ImagePanel(QWidget):
         # change). Each `_build_*_tab` returns the page the ribbon shows, in the order the
         # tabs depend on each other: the View tab mirrors buttons of the Mask, Chromatic and
         # Background tabs, so those are built first.
-        image_tools_content = self._build_image_tools_tab()
-        mask_content = self._build_mask_tab()
-        self._build_chromatic_and_background_tabs()
-        roi_content = self._build_roi_tab()  # before the View tab, which carries copies of its controls
+        image_tools_content = build_image_tools_tab(self)
+        mask_content = build_mask_tab(self)
+        build_chromatic_and_background_tabs(self)
+        roi_content = build_roi_tab(self)  # before the View tab, which carries copies of its controls
         self._roi_tab.add_tuning(self._tuning_tab)  # ROI position tuning is the last section of the ROIs tab
-        view_content = self._build_view_tab()
-        self._build_top_bar(view_content, image_tools_content, mask_content, roi_content)
-        self._build_navigation_bar()
+        view_content = build_view_tab(self)
+        build_top_bar(self, view_content, image_tools_content, mask_content, roi_content)
+        build_navigation_bar(self)
 
         # The selection toolbar beside the image, its tools and their right-drag gestures (`selection_tools.py`).
         self._view.ci.setContentsMargins(0, 9, 9, 9)  # no pyqtgraph margin between the toolbar and the image (2026-11-15)
@@ -992,58 +786,6 @@ class ImagePanel(QWidget):
         # otherwise consume arrow keys itself to scroll.
         self._view.installEventFilter(self)
 
-    def _build_image_tools_tab(self) -> QWidget:
-        # A second `TransformsSection` instance (2026-09-30, maintainer
-        # request - "duplicate transform tools and put them in image tools
-        # of image panel"), wired to the same `GeometryModule`/
-        # `ActiveToolModule` the Workflow panel's own Transforms row uses -
-        # see that class's module docstring for why this is a second front
-        # door onto the same backend, not a copy that can drift out of sync.
-        self._transforms_section = TransformsSection(self._geometry, self._active_tool, self)
-
-        image_tools_content = QWidget(self)
-        image_tools_content_layout = QHBoxLayout(image_tools_content)
-        image_tools_content_layout.setContentsMargins(0, 0, 0, 0)
-        image_tools_content_layout.setSpacing(6)
-        image_tools_content_layout.addWidget(self._transforms_section)
-        image_tools_content_layout.addStretch(1)
-        return image_tools_content
-
-    def _build_mask_tab(self) -> QWidget:
-        self._mask_tab = MaskTab(
-            self._mask, self._geometry, self._chromatic, self._dataset,
-            self._mask_scope, self._mask_tint, self, self,
-            events=self._mask_pointers, scan=self._transient_scan, auto=self._mask_auto, export=self._mask_export,
-            features=self._feature_map, status=self._on_tool_status, visible_cubes=self._visible_cube_range,
-        )
-        self._mask_tab.overlay_visibility_changed.connect(self._tints.on_mask_visibility_changed)
-        self._mask_tab.overlay_color_changed.connect(self._tints.on_mask_color_changed)
-        self._mask_tab.overlay_alpha_changed.connect(self._tints.on_mask_alpha_changed)
-        self._edit_preview_layer.set_preview(self._mask_tab.edit_preview)
-        return self._mask_tab
-
-    def _build_roi_tab(self) -> QWidget:
-        self._roi_tab = RoiTab(
-            self._roi_overlay, self._roi_scope, self._geometry, self._background, self._chromatic, self._dataset,
-            self._roi_toolbox, self._selection, self._array_action, self._edit_target,
-            self._resolve_reference_frame, self,
-        )
-        self._roi_tab.overlay_changed.connect(self._on_roi_overlay_changed)
-        self._roi_tab.labels_toggled.connect(self._on_roi_labels_toggled)
-        self._roi_tab.label_placement_changed.connect(self._on_roi_label_placement_changed)
-        self._roi_tab.label_size_changed.connect(self._roi_overlay.set_label_point_size)
-        self._roi_tab.group_labels_changed.connect(self._on_group_labels_changed)
-        self._roi_tab.status.connect(self._on_tool_status)
-        # Auto rotate and Auto crop (Image tools tab) act through the ROI tab, which owns the array tools; that
-        # tab is built before this one. Auto crop also shows which of its dependencies are still missing, and its
-        # menu rows lead to the tab that fixes them.
-        self._transforms_section.auto_rotate_requested.connect(self._roi_tab.auto_rotate)
-        self._transforms_section.auto_crop_requested.connect(self._roi_tab.auto_crop)
-        self._transforms_section.navigate_requested.connect(self._on_transforms_navigate)
-        self._roi_tab.auto_crop_readiness_changed.connect(self._on_auto_crop_readiness)
-        self._on_auto_crop_readiness(self._roi_tab.auto_crop_readiness())
-        return self._roi_tab
-
     def _on_transforms_navigate(self, key: str) -> None:
         """A row of Auto crop's pick-up menu that lives in another ribbon tab: show that tab."""
         self._tool_ribbon.set_category(ROI_TAB if key == "rois" else CHROMATIC_TAB)
@@ -1054,369 +796,9 @@ class ImagePanel(QWidget):
             level_note=readiness.level_note,
         )
 
-    def _build_view_tab(self) -> QWidget:
-        self._view_tab = ViewTab(
-            self._geometry, self._highlight_tint, self._mask_tint, self._mask_tab.overlay_controls,
-            self._chromatic_tab, self._background_tab, self._roi_tab, self._scale_bar_item.color(),
-            self._dataset, self,
-        )
-        self._view_tab.highlight_visibility_changed.connect(self._tints.on_highlight_visibility_changed)
-        self._view_tab.highlight_color_changed.connect(self._tints.on_highlight_color_changed)
-        self._view_tab.highlight_alpha_changed.connect(self._tints.on_highlight_alpha_changed)
-        self._view_tab.mask_visibility_changed.connect(self._tints.on_mask_visibility_changed)
-        self._view_tab.mask_color_changed.connect(self._tints.on_mask_color_changed)
-        self._view_tab.mask_alpha_changed.connect(self._tints.on_mask_alpha_changed)
-        self._view_tab.roi_overlay_changed.connect(self._on_roi_overlay_changed)
-        self._view_tab.scale_bar_color_changed.connect(self._on_scale_bar_color_changed)
-        self._view_tab.display_range_changed.connect(self._on_display_range_edited)
-        return self._view_tab
-
-    def _build_chromatic_and_background_tabs(self) -> None:
-        self._chromatic_tab = ChromaticCorrectionTab(
-            self._chromatic,
-            self._chromatic_auto,
-            self._dataset,
-            self._geometry,
-            self._resolve_reference_frame,
-            self._image_aspect,
-            self,
-            initial_values=self._initial_chromatic_values,
-            initial_show_landmarks=self._initial_chromatic_view[0],
-            initial_all_wavelengths=self._initial_chromatic_view[1],
-            is_spectral=None if self._frame_roles is None else self._frame_roles.is_spectral,
-        )
-        self._chromatic_tab.show_landmarks_changed.connect(self._decorations.on_show_landmarks_changed)
-        self._chromatic_tab.landmark_scope_changed.connect(self._decorations.on_landmark_scope_changed)
-        self._chromatic_tab.settings_applied.connect(self.chromatic_settings_applied)
-        self._background_tab = BackgroundTab(
-            self._background, show_background=self._show_background, parent=self
-        )
-        self._background_tab.show_background_changed.connect(self._on_show_background_changed)
-        self._analysis_tab = AnalysisTab(self)
-        self._analysis_tab.info_changed.connect(self._on_analysis_info_changed)
-        self._analysis_tab.status_message.connect(self._on_tool_status)
-        self._tuning_tab = TuningTab(self)  # a section of the ROIs tab (it was a tab of its own until 2026-10-29), attached in `_build_toolbar_and_layout`
-        self._tuning_tab.status_message.connect(self._on_tool_status)
-        self._export_tab = ExportTab(
-            self._dataset, self, geometry=self._geometry, roi_toolbox=self._roi_toolbox, chromatic=self._chromatic,
-            status=self._on_tool_status, session_carry=self._session_carry,
-        )
-        self._export_tab.info_changed.connect(self._on_export_info_changed)
-
-    def _build_top_bar(
-        self, view_content: QWidget, image_tools_content: QWidget, mask_content: QWidget, roi_content: QWidget
-    ) -> None:
-        self._top_bar = QWidget(self)
-        self._top_bar.setObjectName("imageTopBar")
-        # Style sheet while the bar is still empty (2026-11-11): set after the ribbon was added it re-styled every widget in it
-        # (~150 ms at launch) for a rule that matches only the bar.
-        self._refresh_top_bar_theme()
-        top_bar_layout = QHBoxLayout(self._top_bar)
-        top_bar_layout.setContentsMargins(4, 2, 6, 2)
-        top_bar_layout.setSpacing(6)
-        # The always-visible "General" group is gone (2026-10-23): the cursor toggle is an icon of the View tab's
-        # "Image" group. The area-selection tools left the Mask / ROIs / View tabs on 2026-11-14: they are the
-        # always-visible selection toolbar beside the image (`selection_toolbar.py`, built in `_build_toolbar_and_layout`).
-
-        self._tool_ribbon = ImageToolRibbon(
-            [
-                ("Image tools", image_tools_content),
-                (MASK_TAB, mask_content),
-                (ROI_TAB, roi_content),
-                # Empty on purpose (2026-10-03): filled directly here, not in
-                # the Workflow panel (maintainer's plan for chromatic correction).
-                (CHROMATIC_TAB, self._chromatic_tab),
-                (BACKGROUND_TAB, self._background_tab),
-                (VIEW_TAB, view_content),
-                (ANALYSIS_TAB, self._analysis_tab),
-                (EXPORT_TAB, self._export_tab),
-            ],
-            self,
-        )
-        if self._initial_ribbon_category:
-            # "Histogram" was this tab's name before 2026-10-06 (settings saved then still say so).
-            restored = VIEW_TAB if self._initial_ribbon_category == "Histogram" else self._initial_ribbon_category
-            self._tool_ribbon.set_category(restored)  # before the connect: restoring is not a user change
-        self._tool_ribbon.category_changed.connect(self.ribbon_category_changed)
-        # The Mask tab's edit preview is drawn only while that tab is the open one.
-        edit_preview = self._mask_tab.edit_preview
-        edit_preview.set_tab_active(self._tool_ribbon.current_category() == MASK_TAB)
-        self._tool_ribbon.category_changed.connect(lambda label: edit_preview.set_tab_active(label == MASK_TAB))
-        self._tool_ribbon.category_changed.connect(lambda _label: self._show_current_tab())  # a tab scrolled half out of view comes into view
-        self._tool_ribbon.category_changed.connect(lambda _label: self._refresh_tool_info(self._active_tool.active()))
-        # Short tab label, full name in the tooltip; the tab is green while the correction is applied.
-        self._tool_ribbon.set_tab_tooltip(CHROMATIC_TAB, "Chromatic Corrections")
-        # The ribbon rolls up on a double-click on the bar's empty space (`eventFilter`), leaving
-        # a thin strip with a "..." handle, like the slider ribbon (2026-10-16). The "i" icon rolls
-        # up with it (see below).
-        self._top_drawer = RibbonDrawer(
-            self._tool_ribbon, "Show the tool ribbon.", self._top_bar, handle_alignment=Qt.AlignmentFlag.AlignTop
-        )
-        self._top_bar.installEventFilter(self)
-        # The drawer (and so the ribbon) takes all the room the bar has (2026-10-29): with a plain stretch after it the ribbon got only its natural width, so a page whose
-        # minimum width is a little more than its natural one scrolled with half the bar empty. The ribbon now scrolls only when the panel is really too narrow.
-        top_bar_layout.addWidget(self._top_drawer, 1)
-
-        # Cursor-crosshair toggle (maintainer's request, 2026-09-29 - "copy
-        # all functions, as hiding, showing values" from the stable app's
-        # cursor-toggle overlay). Shares `cursor_overlay.CursorOverlay` with
-        # the Histogram plot; only `CursorReadout.value_at` (a pixel lookup here,
-        # a nearest-bin lookup there) differs. No `on_changed` callback
-        # (2026-09-30) - its icon used to need manual repositioning when its
-        # width changed (icon vs. live text); now that it is a normal
-        # `QHBoxLayout` item, Qt already re-lays-out this row for free
-        # whenever a child's size hint changes.
-        self._cursor_overlay = CursorOverlay(
-            scene_view=self._view,
-            plot_item=self._plot,
-            overlay_parent=self._top_bar,
-            value_at=self._cursor_readout.value_at,
-            theme=get_active_theme(),
-            readout_sink=self._cursor_readout.set_text,
-        )
-        # Restyled to match Select/Add ROI (2026-09-30, maintainer request -
-        # "make cursor and i icon same as other icons in the bar... this
-        # apply for all icons later applied, they should have same style"):
-        # overrides the class's own default sizing (`theme.compact_icon_
-        # inner`, tuned instead for Histogram's settings-gear button, a
-        # different icon this class knows nothing about) with this bar's
-        # shared look. `fixed_width=False` - unlike a plain toggle, this
-        # button must still grow to show live text ("(38, 30) = 123.4")
-        # while enabled; only the height and icon size need to match.
-        # Now a fixed-size ribbon icon in "General" (2026-10-03): its live
-        # text goes to the canvas corner, so the button never changes width.
-        style_general_icon_button(self._cursor_overlay.icon_label)
-        self._view_tab.add_image_icon(self._cursor_overlay.icon_label)  # first icon of the View tab's "Image" group (2026-10-23)
-
-        # A permanent "i" icon (2026-09-29, replacing a text row that only
-        # appeared while a tool with canvas behavior was active): hovering
-        # it shows the active tool's controls - image_controls.py's single
-        # source of truth, so this can never drift from what is actually
-        # wired. Always visible, so the help is reachable with no tool
-        # active too (it then shows the plain-image controls). A live
-        # in-progress status (e.g. the rotate tool's angle readout) is not
-        # part of it - nobody is hovering a corner icon mid-gesture, so that
-        # goes to the status bar instead (`tool_status_changed`, wired in
-        # app_rewrite.py).
-        #
-        # A real `QToolButton` now, not a `QLabel` (2026-09-30, maintainer
-        # request - same size/chrome as every other icon in this bar, via
-        # `style_bar_icon_button`) - it does nothing on click (there is
-        # nothing to toggle, only a tooltip to show on hover), but a plain
-        # `QLabel` had no hover affordance at all and would have stood out
-        # as visually inconsistent next to Select/Add ROI/the cursor icon.
-        self._tool_info = QToolButton(self._top_bar)
-        style_bar_icon_button(self._tool_info)
-        self._refresh_tool_info(None)
-        top_bar_layout.addWidget(self._tool_info)
-        self._top_drawer.expanded_changed.connect(self._tool_info.setVisible)  # rolled up: only the handle is left
-
     def _show_current_tab(self) -> None:
         """Scroll the tool ribbon (it scrolls when the panel is narrower than its row) so the chosen tab is fully visible."""
         self._top_drawer.ensure_visible(self._tool_ribbon.tab_button(self._tool_ribbon.current_category()))
-
-    def _build_navigation_bar(self) -> None:
-        # Cube and Wavelength navigation - ported from the stable app's
-        # tick/axis-style redesign (docs/image_area_slider_redesign.md):
-        # each axis gets its own full-width row (title -> slider) rather than
-        # splitting one row, so each slider gets the full available width and
-        # the two axes read as parallel strips. The number fields that used to
-        # sit right of each slider (a typed cube / wavelength, with a
-        # wavelength autocomplete) were removed 2026-10-18 (maintainer request):
-        # the current cube, wavelength and time are in the dock title bar.
-        # The Cube/Time toggle title-button and the
-        # "exclude this image" icon button are *not* ported - see this
-        # panel's module docstring "Not built here, deliberately" note for
-        # why (no elapsed-time mapping / no exclusions subsystem exists on
-        # this branch yet).
-        self._cube_slider = DataAxisSlider(Qt.Orientation.Horizontal, self)
-        self._cube_slider.setEnabled(False)
-        self._cube_slider.set_accent_color(cube_color())
-        self._cube_slider.valueChanged.connect(self._on_cube_slider_changed)
-
-        self._cube_title = cube_title = QLabel(self._cube_display.axis_title(), self)
-        cube_title.setStyleSheet(_slider_axis_title_style(get_active_theme().text_muted))
-        cube_title.setToolTip("Double-click to switch between cube number and start time.")
-        cube_title.installEventFilter(self)
-        cube_row =QHBoxLayout()
-        cube_row.setContentsMargins(0, 0, 0, 0)
-        cube_row.setSpacing(5)
-        cube_row.addWidget(cube_title)
-        cube_row.addWidget(self._cube_slider, 1)
-
-        self._wavelength_slider = DataAxisSlider(Qt.Orientation.Horizontal, self)
-        self._wavelength_slider.setEnabled(False)
-        self._wavelength_slider.set_accent_color(wavelength_color())
-        self._wavelength_slider.valueChanged.connect(self._on_wavelength_slider_changed)
-
-        wavelength_title = QLabel("λ (nm)", self)
-        wavelength_title.setStyleSheet(_slider_axis_title_style(get_active_theme().text_muted))
-        wavelength_title.setToolTip("Wavelength (nm)")
-        wavelength_row = QHBoxLayout()
-        wavelength_row.setContentsMargins(0, 0, 0, 0)
-        wavelength_row.setSpacing(5)
-        wavelength_row.addWidget(wavelength_title)
-        wavelength_row.addWidget(self._wavelength_slider, 1)
-
-        # The ROI row (2026-10-16): a thin strip under the Cube slider, on the Cube axis, with a mark wherever the
-        # ROI layout changes (`timeline_strip.py`). Its title takes the width of the other rows' titles (below),
-        # so the strip's ticks line up with the Cube slider's.
-        self._roi_strip = TimelineStrip(self)
-        self._roi_strip.index_requested.connect(self._cube_slider.setValue)
-        # One zoom window for the Cube slider and the ROI row (their marks must stay under their ticks); λ has its own.
-        self._roi_strip.set_window(self._cube_slider.axis_window())
-        roi_title = QLabel("ROIs", self)
-        roi_title.setStyleSheet(_slider_axis_title_style(get_active_theme().text_muted))
-        roi_title.setToolTip(
-            "ROI layout. A mark wherever the ROIs change (position or size): > holds from that cube on, "
-            "a line is that cube only."
-        )
-        roi_row = QHBoxLayout()
-        roi_row.setContentsMargins(0, 0, 0, 0)
-        roi_row.setSpacing(5)
-        roi_row.addWidget(roi_title)
-        roi_row.addWidget(self._roi_strip, 1)
-        self._roi_row = QWidget(self)
-        self._roi_row.setLayout(roi_row)
-
-        # The two Mask rows (2026-10-16): one under the Cube slider, one under the wavelength slider (`mask_rows.py`).
-        # Each shares its slider's zoom window; titles are sized with the other rows' below.
-        self._mask_rows = MaskRows(
-            self, self._mask, self._dataset, self._selection, self._cube_display.label_for,
-            cube_window=self._cube_slider.axis_window(),
-            wavelength_window=self._wavelength_slider.axis_window(),
-            title_style=_slider_axis_title_style(get_active_theme().text_muted),
-            status=self._on_tool_status,
-            events=self._mask_pointers,
-            auto_mask=lambda records: self._mask_tab.auto_controls.start(records),
-        )
-        self._mask_rows.cube_strip.index_requested.connect(self._cube_slider.setValue)
-        self._mask_rows.wavelength_strip.index_requested.connect(self._wavelength_slider.setValue)
-
-        # All the rows' titles share one width (2026-09-30, maintainer request) -
-        # without this, "Cube" and "λ (nm)" size to their own text, so the two
-        # sliders started at slightly different x positions.
-        # Wide enough for either unit ("Cube #" / "Cube time"), so toggling never shifts the sliders.
-        title_metrics = QFontMetrics(cube_title.font())
-        title_width = max(
-            cube_title.sizeHint().width(),
-            wavelength_title.sizeHint().width(),
-            *(title_metrics.horizontalAdvance(text) + 4 for text in ("Cube (#)", "Cube (t)")),
-        )
-        cube_title.setFixedWidth(title_width)
-        wavelength_title.setFixedWidth(title_width)
-        roi_title.setFixedWidth(title_width)
-        for title in self._mask_rows.titles:
-            title.setFixedWidth(title_width)
-
-        for slider in (self._cube_slider, self._wavelength_slider):
-            slider.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-            slider.customContextMenuRequested.connect(lambda pos, s=slider: self._show_slider_menu(s, pos))
-        self._cube_display.mode_changed.connect(self._on_cube_display_changed)
-
-        navigation = QVBoxLayout()
-        navigation.setContentsMargins(0, 0, 0, 0)
-        navigation.setSpacing(4)
-        navigation.addLayout(cube_row)
-        navigation.addWidget(self._roi_row)
-        navigation.addWidget(self._mask_rows.cube_row)
-        navigation.addLayout(wavelength_row)
-        navigation.addWidget(self._mask_rows.wavelength_row)
-
-        # No status row here anymore (2026-09-30, maintainer request) - the
-        # "Cube X, wl nm" text it used to show now lives in the dock title
-        # bar (`frame_status_changed`, wired to `PanelContainer.set_subtitle`
-        # in app_rewrite.py); the trailing "- WxH px" resolution text is not
-        # shown anywhere anymore.
-        #
-        # Left/right margin only, no top/bottom (2026-09-30, maintainer
-        # request, "small stylish" follow-up - scoped to just this nav bar
-        # after an earlier pass put it on the whole panel by mistake): a
-        # bare 10px breathing room so the "Cube"/"λ (nm)" titles don't start
-        # flush against the dock's left edge. Top/bottom stay flush - nothing
-        # else in this bar needs the room. No right margin since 2026-10-18
-        # (maintainer: the gap between the sliders and the panel edge was too
-        # big): a slider already keeps 14 px inside itself (`SIDE_INSET`, room
-        # for half of an end tick label), and the dock's card gap adds 3 more.
-        controls = QVBoxLayout()
-        controls.setContentsMargins(10, 0, 0, 0)
-        controls.setSpacing(4)
-        # The slider ribbon (2026-10-13): frame icon controls, Play, slideshow settings, slider colours.
-        self._slider_colors = SliderColors()
-        self._slider_ribbon = SliderRibbon(self)
-        # What the two sliders mark besides the handle: reference, dark, ignored, the ROI row, the colours, the tick labels (slider_marks.py).
-        self._slider_marks = SliderMarks(
-            self._dataset,
-            self._selection,
-            self._roi_toolbox,
-            self._frame_roles,
-            self._cube_display,
-            cube_slider=self._cube_slider,
-            wavelength_slider=self._wavelength_slider,
-            roi_row=self._roi_row,
-            roi_strip=self._roi_strip,
-            slider_colors=self._slider_colors,
-            slider_ribbon=self._slider_ribbon,
-            menu_parent=self,
-            current_cube=self._current_cube,
-            current_wavelength=self._current_wavelength,
-            resolve_reference_frame=self._resolve_reference_frame,
-            roi_revision=lambda: self._roi_revision,
-            status=self._on_tool_status,
-            coalesce_ms=_REDRAW_COALESCE_MS,
-        )
-        self._cube_slider.axis_window().changed.connect(self._slider_marks.refresh_cube_labels)
-        self._wavelength_slider.axis_window().changed.connect(self._slider_marks.refresh_wavelength_labels)
-        self._slider_ribbon.slider_colors.set_colors(self._slider_colors)
-        self._slider_ribbon.slider_colors.color_changed.connect(self._on_slider_color_changed)
-        self._slideshow = SlideshowController(
-            self._dataset, self._selection, self._frame_roles, self, state_cubes=self._state_cubes_for_mode
-        )
-        self._slider_ribbon.set_roi_row(True, False)  # the defaults; `restore_ui_state` puts back what was saved
-        self._slider_ribbon.roi_row_toggled.connect(self._slider_marks.on_roi_row_toggled)
-        self._slider_ribbon.roi_selected_only_toggled.connect(self._slider_marks.on_roi_selected_only_toggled)
-        self._slider_ribbon.play_toggled.connect(self._slideshow.toggle)
-        # The wheel over the ROI row always hops between its marks, whatever Play steps through.
-        self._roi_strip.step_requested.connect(lambda direction: self._slideshow.step(direction, MODE_ROI_STATES))
-        self._roi_strip.mark_menu_requested.connect(self._slider_marks.on_mark_menu)
-        # The wheel over the Mask row under the Cube slider hops between ALL its marks, masks and standing scan pointers.
-        self._mask_rows.cube_strip.step_requested.connect(lambda direction: self._slideshow.step(direction, MODE_ROW_MARKS))
-        # The wheel turned on past the last / first wavelength goes on into the next / previous cube, as Play does in its
-        # "all wavelengths" order (first wavelength of the next cube / last of the previous), whatever mode Play is set to.
-        self._wavelength_slider.edge_step_requested.connect(lambda direction: self._slideshow.step(direction, MODE_ALL))
-        self._slider_ribbon.set_mask_rows(True)  # the default; `restore_ui_state` puts back what was saved
-        self._slider_ribbon.mask_rows_toggled.connect(self._mask_rows.set_shown)
-        self._slider_ribbon.settings_changed.connect(self._slideshow.set_settings)
-        self._slider_ribbon.settings_changed.connect(self._apply_play_outline)
-        self._slider_ribbon.settings_changed.connect(self._on_slideshow_speed_for_stats)  # after set_settings: new interval
-        self._slideshow.playing_changed.connect(self._slider_ribbon.set_playing)
-        # A Play frame that arrives just before the next step waits for it: image and step reach the screen in one repaint
-        # (`SlideshowController.hold_frame_s`).
-        self._held_result: RenderResult | None = None
-        self._slideshow.set_before_step(self._show_held_frame)
-        # Where the time goes while Play runs (status bar + one log line at the end).
-        self._playback_stats = PlaybackStats()
-        self._paint_census = PaintCensus()  # which widgets repaint during Play (`playback.paints` in the log)
-        self._play_repaint = PlayRepaint(self._view, self)  # one repaint of the canvas per frame while Play runs (`play_repaint.py`)
-        self._slideshow.playing_changed.connect(self._on_playback_changed)
-        self._slideshow.step_made.connect(lambda handlers_s: self._playback_stats.note_step(time.perf_counter(), handlers_s))
-        self._slideshow.step_made.connect(self._flush_redraw_for_step)
-        self._connect_frame_tools(self._slider_ribbon.frame_tools)
-        self._ribbon_drawer = SliderRibbonDrawer(self._slider_ribbon, self)
-        controls.addWidget(self._ribbon_drawer)
-        controls.addLayout(navigation)
-
-        # A real QWidget, not a bare layout - QSS `border` only applies to
-        # widgets, and this bar needs one (see `_refresh_controls_bar_
-        # theme`) for the same reason the top bar does: its background
-        # and the canvas's are otherwise visually identical, so the seam
-        # where this bar ends and the canvas begins needs a boundary drawn
-        # explicitly, not left to two adjacent flat colors that happen to
-        # differ.
-        self._controls_bar = QWidget(self)
-        self._controls_bar.setObjectName("imageNavigationBar")
-        self._refresh_controls_bar_theme()  # before its children arrive: same result, no re-styling of them (see the top bar)
-        self._controls_bar.setLayout(controls)
 
     def _add_curve(self, color_hex: str, *, width: float, dashed: bool = False) -> pg.PlotDataItem:
         return add_curve(self._plot, color_hex, width=width, dashed=dashed)
