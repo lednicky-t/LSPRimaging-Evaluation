@@ -14,11 +14,12 @@ from typing import TYPE_CHECKING, Any
 
 from PyQt6.QtWidgets import QGraphicsView
 
-from ...image_tools import ActiveToolModule, GeometryModule, MaskModule
+from ...image_tools import ActiveToolModule, GeometryModule, ImageTool, MaskModule
 from ...selection import AreaSelectionMode, AreaSelectionModule, HighlightRangeModule
 from ..mask_edit_preview import MaskEditPreview
 from .area_selection_tool import AreaSelectionTool
 from .brush_settings import BrushSettingsForm
+from .combine_badge import CombineBadge
 from .selection_by_value import MODE_METHODS, ByValueSelector
 from .selection_modify import ModifySelectionMenu
 from .selection_regions import SelectionRegions
@@ -57,6 +58,14 @@ class SelectionTools:
         self.toolbar = SelectionToolbar(
             area_selection, active_tool, panel, value_tool=self.value_selector, brush_form=self.brush_form, modify_menu=self.modify_menu
         )
+        # The + / - / x beside the pointer (Shift / Alt / Shift+Alt, or the mode picker): what the next selection will do. It also tells the
+        # toolbar's mode button which mode a held key gives.
+        self.combine_badge = CombineBadge(
+            plot, view, area_selection,
+            armed=lambda: active_tool.active() is ImageTool.SELECT_AREA and area_selection.mode() is not AreaSelectionMode.ALL,
+            gesture_how=area_tool.gesture_how, parent=panel,
+        )
+        self.combine_badge.held_mode_changed.connect(self.toolbar.show_held_mode)  # the mode button follows Shift / Alt
         self.wand = WandTask(area_selection, self.toolbar.wand_form.settings, status, panel)
         self.wand_drag = WandDragAdjuster(self.toolbar.wand_form, view)
         self.wand.busy_changed.connect(self.toolbar.set_wand_busy)

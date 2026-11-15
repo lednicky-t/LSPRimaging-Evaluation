@@ -7,15 +7,21 @@ different to each of them (`MODE_AREAS`, one table, checked against `AreaSelecti
 
 | mode | A only | both | B only | the picture |
 |---|---|---|---|---|
-| Replace   | dropped  | selected | selected | the right disc blue |
-| Add       | selected | selected | selected | both discs blue (the union) |
-| Subtract  | selected | **taken away** | - | the left disc blue, the overlap orange |
-| Intersect | dropped  | selected | dropped | the overlap blue |
+| Replace   | dropped  | selected | selected | the right disc grey |
+| Add       | selected | selected | selected | both discs grey (the union) |
+| Subtract  | selected | **taken away** | - | the left disc grey, the overlap empty |
+| Intersect | dropped  | selected | dropped | the overlap grey |
 
-**Colours.** Blue = ends up selected (the app's selection / Add colour, `ADD_COLOR`); orange = taken away from the old selection (the app's
-Subtract colour, `SUBTRACT_COLOR`); nothing = not selected. The two outlines follow the theme's text colour, so the empty parts stay readable
-on a dark and on a light theme. The fills do not change with the theme (the same rule as `mask_edit_tool_icons.py`: a colour that *means*
-something is not recoloured).
+**Colours** (`selection_palette.py`, 2026-11-16, the maintainer's design). The circle outlines keep the two colours the image uses for them: the left
+circle (the selection now) is pink, the right circle (the new region) green. The fill is the **result**, in **grey** (`ICON_SELECTED_FILL`): what ends
+up selected. **Everything else is the plain background**: not selected, and also what is taken away (it had an orange fill until 2026-11-16, which had
+almost no contrast with the pink and green lines: 1.1 and 1.6 : 1; the maintainer: "remove the red infill representing subtraction with normal
+background representing nothing"), so the Subtract icon is the left disc grey with an empty lens. (The fill was blue first, 1.2 : 1 against the lines.)
+The grey is a mid one, picked by measuring: 2.1 : 1 against the pink line, 3.2 : 1 against the green, 3.3 : 1 against the near-black toolbar, 5.5 : 1
+against a white one (a step lighter than the first grey `#525b69`, at the maintainer's request: that one was 2.6 / 3.9 / 2.6 / 6.9); pink and green
+themselves are 6.8 : 1 and 10.4 : 1 against the near-black toolbar, so a circle with no fill stays visible. The icon does not follow the theme (the
+same rule as `mask_edit_tool_icons.py`: a colour that *means* something is not recoloured). `MODE_AREAS` still tells "taken away" from "not
+selected" (the table is checked against the real combine rules); only the drawing no longer does.
 
 **The picked mode** is drawn into the icon itself as a rounded frame (the "on" state of the icon): the toolbar's buttons are 18 px wide with no
 room for a border or a background, and Qt picks the "on" picture for a checked button by itself.
@@ -33,7 +39,7 @@ from PyQt6.QtCore import QPointF, QRectF, Qt
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
 
 from ...selection.area_selection_module import ADD, INTERSECT, REPLACE, SUBTRACT
-from ..mask_edit_common import ADD_COLOR, SUBTRACT_COLOR
+from .selection_palette import ICON_SELECTED_FILL, PAST_COLOR, PRESENT_COLOR
 
 SELECTED = "selected"  # ends up in the selection
 REMOVED = "removed"  # was selected, is taken away
@@ -48,7 +54,7 @@ MODE_AREAS: dict[str, tuple[str, str, str]] = {
     INTERSECT: (NOT_SELECTED, SELECTED, NOT_SELECTED),
 }
 
-_FILL = {SELECTED: ADD_COLOR, REMOVED: SUBTRACT_COLOR}
+_FILL = {SELECTED: ICON_SELECTED_FILL}  # the other two states, removed and not selected, are drawn as the plain background
 
 _DESIGN = 24.0
 _RENDER = 48  # 2x
@@ -111,7 +117,7 @@ def framed_icon(key: str, base: Callable[[], QIcon]) -> QIcon:
     return icon
 
 
-def _venn(how: str, outline: str, framed: bool) -> QPixmap:
+def _venn(how: str, framed: bool) -> QPixmap:
     pixmap = QPixmap(_RENDER, _RENDER)
     painter = _painter(pixmap)
     painter.setPen(Qt.PenStyle.NoPen)
@@ -119,10 +125,10 @@ def _venn(how: str, outline: str, framed: bool) -> QPixmap:
         if state in _FILL:
             painter.setBrush(QColor(_FILL[state]))
             painter.drawPath(path)
-    pen = QPen(QColor(outline), _OUTLINE_WIDTH)
-    painter.setPen(pen)
     painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.setPen(QPen(QColor(PAST_COLOR), _OUTLINE_WIDTH))  # A, the selection as it stands
     painter.drawPath(_disc(_CENTRE_A))
+    painter.setPen(QPen(QColor(PRESENT_COLOR), _OUTLINE_WIDTH))  # B, the new region
     painter.drawPath(_disc(_CENTRE_B))
     if framed:
         _draw_frame(painter)
@@ -131,12 +137,11 @@ def _venn(how: str, outline: str, framed: bool) -> QPixmap:
 
 
 @functools.lru_cache(maxsize=None)
-def combine_mode_icon(how: str, outline: str) -> QIcon:
-    """The Venn icon of mode `how` (`REPLACE` / `ADD` / `SUBTRACT` / `INTERSECT`); `outline` is the colour of the two circle outlines (the
-    theme's text colour). The "on" picture (a checked button) has the frame."""
+def combine_mode_icon(how: str) -> QIcon:
+    """The Venn icon of mode `how` (`REPLACE` / `ADD` / `SUBTRACT` / `INTERSECT`). The "on" picture (a checked button) has the frame."""
     if how not in MODE_AREAS:
         raise ValueError(f"how must be one of {tuple(MODE_AREAS)}, got {how!r}")
     icon = QIcon()
-    icon.addPixmap(_venn(how, outline, framed=False), QIcon.Mode.Normal, QIcon.State.Off)
-    icon.addPixmap(_venn(how, outline, framed=True), QIcon.Mode.Normal, QIcon.State.On)
+    icon.addPixmap(_venn(how, framed=False), QIcon.Mode.Normal, QIcon.State.Off)
+    icon.addPixmap(_venn(how, framed=True), QIcon.Mode.Normal, QIcon.State.On)
     return icon

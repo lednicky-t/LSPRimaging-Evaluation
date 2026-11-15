@@ -26,8 +26,9 @@ from PyQt6.QtWidgets import QGraphicsView, QInputDialog, QWidget
 from ...image_tools import ActiveToolModule, ImageTool
 from ...roi import RoiToolbox
 from ...selection import AreaSelectionMode, AreaSelectionModule, SelectionModule
-from ...selection.area_selection_module import ADD, INTERSECT, REPLACE, VALUE_MODES, how_for_keys
+from ...selection.area_selection_module import VALUE_MODES, how_for_keys
 from .area_selection_tool import AreaSelectionTool
+from .combine_badge import CombineBadge
 from .context_menu import show_tool_context_menu
 from .crop_tool import CropTool
 from .measure_line_tool import MeasureLineTool
@@ -105,6 +106,7 @@ class CanvasInteraction:
         value_click: Callable[[AreaSelectionMode, str], object] | None = None,
         lock_to_selection: Callable[[], None] | None = None,
         unlock: Callable[[], None] | None = None,
+        combine_badge: CombineBadge | None = None,
     ) -> None:
         self._plot = plot
         self._view = view
@@ -133,6 +135,7 @@ class CanvasInteraction:
         self._value_click = value_click  # (armed select-by-value tool, how): a click on the image runs its method
         self._lock_to_selection = lock_to_selection  # the selection becomes the lock (the panel says so in the status bar)
         self._unlock = unlock
+        self._combine_badge = combine_badge  # the + / - / x beside the pointer; follows it while a selection tool is armed
         self._eraser_cursor = False  # whether the cursor on the canvas is the Eraser's cross
         self._roi_cursor: Qt.CursorShape | None | object = _NO_CURSOR_YET  # what the ROI hover last set
 
@@ -158,6 +161,8 @@ class CanvasInteraction:
             viewport.setCursor(shape)
 
     def on_scene_moved(self, scene_pos: object) -> None:
+        if self._combine_badge is not None:
+            self._combine_badge.follow(scene_pos)
         if self._roi_gestures_enabled():
             self._eraser_cursor = False  # the ROI hover sets (or clears) the cursor from here on
             self._update_roi_hover_cursor(scene_pos)
@@ -276,7 +281,7 @@ class CanvasInteraction:
             self._show_select_area_context_menu(scene_pos)
         elif button == Qt.MouseButton.LeftButton and self._brush_armed() and self._in_view(scene_pos):
             point = self._plot.vb.mapSceneToView(scene_pos)
-            self._area_tool.stamp_at(float(point.x()), float(point.y()), self._brush_how(modifiers))
+            self._area_tool.stamp_at(float(point.x()), float(point.y()), self.how_for(modifiers))
         elif button == Qt.MouseButton.LeftButton and self._value_armed() and self._in_view(scene_pos):
             mode = self._area_selection.mode()
             assert self._value_click is not None
@@ -292,12 +297,6 @@ class CanvasInteraction:
 
     def _brush_armed(self) -> bool:
         return self._active_tool.active() is ImageTool.SELECT_AREA and self._area_selection.mode() is AreaSelectionMode.BRUSH
-
-    def _brush_how(self, modifiers: object) -> str:
-        """The brush paints (Add) or, with Alt or the Subtract mode, erases (Subtract); Replace and Intersect make no sense for a
-        stroke, so they paint too (Shift+Alt, which is Intersect elsewhere, paints)."""
-        how = self.how_for(modifiers)
-        return how if how != REPLACE and how != INTERSECT else ADD
 
     def _wand_armed(self) -> bool:
         return (
@@ -643,7 +642,7 @@ class CanvasInteraction:
             if self._brush_armed():
                 # pyqtgraph reports a drag only after a few pixels: begin where the button went down, then go to where it is now
                 down = self._plot.vb.mapSceneToView(ev.buttonDownScenePos())
-                started = self._area_tool.begin_gesture(float(down.x()), float(down.y()), self._brush_how(ev.modifiers()))
+                started = self._area_tool.begin_gesture(float(down.x()), float(down.y()), self.how_for(ev.modifiers()))
                 if started:
                     self._area_tool.update_gesture(x, y)
                 return started

@@ -719,6 +719,7 @@ class ImagePanel(QWidget):
             erase_at=lambda x, y: self._mask_tab.grain_eraser.erase_at(x, y),
             wand_click=self._selection_tools.wand.click, rois_touching=self._roi_queries.rois_touching,
             drag_adjusters=self._selection_tools.drag_adjusters, value_click=self._selection_tools.run_value_tool,
+            combine_badge=self._selection_tools.combine_badge,
             lock_to_selection=self.selection_regions.lock_to_selection, unlock=self.selection_regions.unlock_selection,
         )
         scene.sigMouseClicked.connect(self._on_scene_clicked)

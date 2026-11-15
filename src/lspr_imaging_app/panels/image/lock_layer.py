@@ -25,7 +25,7 @@ from PyQt6.QtGui import QColor, QPen
 from PyQt6.QtWidgets import QGraphicsPathItem
 
 from ...selection.area_selection_module import AreaSelectionModule
-from .area_selection_tool import region_outline
+from .selection_outlines import region_outline
 from .overlay_tint import OverlayTint
 
 DIM_ALPHA = 0.55

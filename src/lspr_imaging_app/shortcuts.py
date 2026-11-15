@@ -152,7 +152,7 @@ BINDINGS: tuple[Binding, ...] = (
     ),
     Binding(
         "mouse.view.brush", "Mouse: image view",
-        "Draw, the selection brush (armed in the selection toolbar): paint into the selection; Alt erases from it (a click is one stamp)",
+        "Draw, the selection brush (armed in the selection toolbar): paint into the selection; Alt erases from it, Shift+Alt keeps only what the stroke covers (a click is one stamp)",
         gesture="Drag or click (Alt = erase)", scope=_VIEW,
     ),
     Binding(

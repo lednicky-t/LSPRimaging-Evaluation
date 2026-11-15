@@ -72,7 +72,6 @@ from dataclasses import dataclass
 
 import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal
-from skimage.draw import polygon2mask
 
 from ..diagnostics import instrumented
 from ..undo import FunctionCommand, undo_manager
@@ -123,16 +122,41 @@ def how_for_keys(shift: bool, alt: bool, sticky: str) -> str:
 
 
 def rasterize_polygon(vertices: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
-    """Boolean mask of the pixels whose *centers* lie inside the polygon.
+    """Boolean mask of the pixels whose *centers* lie inside the polygon (even-odd rule, so a self-crossing lasso leaves its loops out).
 
-    *vertices* is ``(N, 2)`` of ``(x, y)`` view coordinates. Pure
-    computation - no Qt - so it is unit-testable on its own."""
+    *vertices* is ``(N, 2)`` of ``(x, y)`` view coordinates (pixel ``(row, col)`` has its center at ``(col + 0.5, row + 0.5)``). Pure
+    computation - no Qt - so it is unit-testable on its own.
+
+    **Scanline fill** (2026-11-16; it was ``skimage.draw.polygon2mask``). That tests every pixel of the polygon's bounding box against every
+    vertex, so a hand-drawn lasso (hundreds to thousands of points) froze the window at every release: measured on 1275 x 800, 385 ms for 500
+    points over 400 x 300 px, 1.3 s for 2000 points, 3.1 s for 1500 points over 900 x 600 px, twice per release. Here each pixel row is cut by the
+    edges that cross it (numpy, rows x edges) and the stretches between the crossings are filled by counting crossings: 7, 12 and 18 ms for the same
+    three shapes. The masks are identical to skimage's for shapes with no pixel center exactly on an edge (checked on random polygons, also
+    self-crossing and reaching outside the image: `tests/unit/test_lspri_rasterize_polygon.py`), which is every shape dragged with the mouse. A
+    center exactly *on* an edge (integer corners on a slanted edge, or half-integer corners) belongs to the polygon on its top and left side only
+    (half-open, like most rasterizers: two shapes sharing an edge do not overlap); skimage kept the pixels on both sides. Axis-aligned rectangles
+    with integer corners have no such pixels, so they come out the same.
+    """
+    vertices = np.asarray(vertices, dtype=float)
+    height, width = int(shape[0]), int(shape[1])
     if len(vertices) < 3:
-        return np.zeros(shape, dtype=bool)
-    # polygon2mask wants (row, col) with integers at pixel centers; view
-    # coordinates have pixel centers at +0.5.
-    rows_cols = np.column_stack((vertices[:, 1] - 0.5, vertices[:, 0] - 0.5))
-    return polygon2mask(shape, rows_cols)
+        return np.zeros((height, width), dtype=bool)
+    x_from, y_from = vertices[:, 0] - 0.5, vertices[:, 1] - 0.5  # in pixel units: pixel (row, col) is the point (col, row)
+    x_to, y_to = np.roll(x_from, -1), np.roll(y_from, -1)
+    top = max(int(np.ceil(y_from.min())), 0)
+    bottom = min(int(np.floor(y_from.max())), height - 1)
+    mask = np.zeros((height, width), dtype=bool)
+    if bottom < top:
+        return mask
+    rows = np.arange(top, bottom + 1, dtype=float)
+    # A row's line cuts an edge when exactly one end of the edge is at or above it: no vertex on the line is counted twice.
+    cut = (y_from[None, :] <= rows[:, None]) != (y_to[None, :] <= rows[:, None])
+    row_index, edge = np.nonzero(cut)
+    x_at = x_from[edge] + (rows[row_index] - y_from[edge]) * (x_to[edge] - x_from[edge]) / (y_to[edge] - y_from[edge])
+    first_pixel = np.clip(np.ceil(x_at), 0, width).astype(np.int64)  # the first pixel center at or after the crossing
+    crossings = np.bincount(row_index * (width + 1) + first_pixel, minlength=rows.size * (width + 1)).reshape(rows.size, width + 1)
+    mask[top : bottom + 1] = (np.cumsum(crossings, axis=1) & 1).astype(bool)[:, :width]  # inside after an odd number of crossings
+    return mask
 
 
 @dataclass(frozen=True, slots=True, eq=False)

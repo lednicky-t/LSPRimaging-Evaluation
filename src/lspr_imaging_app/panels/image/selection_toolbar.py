@@ -15,7 +15,7 @@ Layout: a narrow column of icon buttons left of the image canvas, below the ribb
      (amber while a lock is on). They only ask (`lock_requested` / `unlock_requested`): the Image panel knows the image size and says in the
      status bar what happened.
   2. **Selection tools**: Rectangle, Lasso, Wand, Draw (the selection brush).
-  3. **Mode**: one button showing the Venn diagram of the picked mode (`combine_mode_icons.py`: blue = ends up selected, orange = taken away);
+  3. **Mode**: one button showing the Venn diagram of the picked mode (`combine_mode_icons.py`: pink circle = the selection now, green circle = the new region, grey fill = ends up selected);
      click = a menu of the four modes (Replace / Add / Subtract / Intersect), the wheel over it steps through them; remembered. Shift / Alt /
      Shift+Alt on the image override it for one selection.
   4. **Select by value**: Histogram range, Threshold, Local contrast (`selection_by_value.py`), with the Mask tab's old icons.
@@ -67,7 +67,7 @@ from ..scrolling_column import ScrollingColumn
 from ..ui_state import UiStateStore
 from .combine_mode_icons import combine_mode_icon, framed_icon
 from .lock_layer import BORDER_COLOR
-from .mask_edit_tool_icons import draw_icon, histogram_selection_icon, local_contrast_icon, morphology_icon, threshold_icon
+from .mask_edit_tool_icons import histogram_selection_icon, local_contrast_icon, morphology_icon, threshold_icon
 from .selection_by_value import MODE_METHODS, ByValueSelector
 from .wheel_tool_button import WheelToolButton
 
@@ -107,8 +107,10 @@ _TOOLS: dict[AreaSelectionMode, _Tool] = {
         "On the image, drag with the right button: right = bigger region (threshold), up = Grow.",
     ),
     AreaSelectionMode.BRUSH: _Tool(
-        draw_icon,
-        "Draw (selection brush): drag on the image to paint into the selection; Alt+drag erases from it (a click is one stamp). "
+        "pencil",  # a Tabler icon: blue while armed, like Rectangle / Lasso / Wand (it had a fixed grey pencil with a frame until 2026-11-16)
+        "Draw (selection brush): drag on the image to paint into the selection; Alt+drag erases from it, Shift+Alt+drag keeps only what the "
+        "stroke covers (a click is one stamp). With no key the mode picker's mode applies: Replace makes each stroke the new selection, so pick "
+        "Add (or hold Shift) to build a selection from several strokes. "
         "Size: right-click this button, or drag with the right button on the image (right = bigger). It paints the selection, not the mask: "
         "Add selection (Mask tab) puts it in the mask.",
     ),
@@ -141,16 +143,17 @@ _METHOD_ICONS = {
 }
 
 # The mode picker (2026-11-15): the Venn-diagram icon of the picked mode on the button and in its menu (`combine_mode_icons.py`).
-_MODE_LABELS = {
-    REPLACE: "Replace the selection",
-    ADD: "Add to the selection",
-    SUBTRACT: "Take away from the selection",
-    INTERSECT: "Keep only what overlaps the selection",
+_MODE_LABELS = {  # short on purpose (maintainer, 2026-11-16): the Venn picture says the rest
+    REPLACE: "Replace",
+    ADD: "Add",
+    SUBTRACT: "Subtract",
+    INTERSECT: "Intersect",
 }
 _MODE_TIP = (
     "How a new selection (rectangle, lasso, wand, brush, select by value) combines with the current one. Click for the four modes, or scroll the "
-    "wheel over this button. In the picture the left circle is the selection now, the right circle the new region, blue = what ends up selected, "
-    "orange = what is taken away. On the image, Shift adds, Alt takes away and Shift+Alt intersects, for one selection."
+    "wheel over this button. In the picture the pink circle is the selection now, the green circle the new region, grey = what ends up selected, "
+    "empty = not selected or taken away. On the image, Shift adds, Alt takes away and Shift+Alt intersects, for one "
+    "selection (this button shows it while the key is down); with no key the mode stays as picked."
 )
 
 _METHOD_LABELS = (
@@ -353,6 +356,7 @@ class SelectionToolbar(QFrame):
 
         self._wand_busy = False
         self._value_busy = False
+        self._held_mode: str | None = None  # the combine mode a held Shift / Alt gives (`show_held_mode`); None = the picked mode shows
         self._tool_buttons: dict[AreaSelectionMode, QToolButton] = {}
         self._separators: list[QFrame] = []
         self._popups: dict[AreaSelectionMode, QMenu] = {}
@@ -583,6 +587,22 @@ class SelectionToolbar(QFrame):
         self._selection.set_combine_mode(how)
         QToolTip.showText(self._mode_button.mapToGlobal(QPoint(self._mode_button.width(), 0)), f"Selection mode: {_MODE_LABELS[how]}", self._mode_button)
 
+    def show_held_mode(self, how: str | None) -> None:
+        """A held Shift / Alt (or the keys a drag began with) make the next selection combine as *how*: the mode button shows that mode's
+        picture while the keys are down (2026-11-16, maintainer: the mode "linked to the keyboard keys"). ``None`` = no key: the picked mode
+        shows again. The picked mode itself is not changed (the sticky choice stays what it was)."""
+        if how == self._held_mode:
+            return
+        self._held_mode = how
+        self._refresh_mode_button()
+
+    def _refresh_mode_button(self) -> None:
+        picked_mode = self._selection.combine_mode()
+        shown = self._held_mode or picked_mode
+        self._mode_button.setIcon(combine_mode_icon(shown))
+        held_note = "\n(a held key: Shift adds, Alt takes away, Shift+Alt intersects)" if self._held_mode else ""
+        self._mode_button.setToolTip(f"Selection mode: {_MODE_LABELS[shown]}{held_note}\n{_MODE_TIP}")
+
     # -- state -------------------------------------------------------------------------------------------------
 
     def _armed(self) -> bool:
@@ -621,10 +641,9 @@ class SelectionToolbar(QFrame):
                 button.setToolTip(("Working...\n" if self._value_busy and on else "") + _TOOLS[mode].tip)
 
         picked_mode = self._selection.combine_mode()
-        self._mode_button.setIcon(combine_mode_icon(picked_mode, theme.text_primary))
-        self._mode_button.setToolTip(f"Selection mode: {_MODE_LABELS[picked_mode]}\n{_MODE_TIP}")
+        self._refresh_mode_button()
         for how, action in self._mode_actions.items():
-            action.setIcon(combine_mode_icon(how, theme.text_primary))
+            action.setIcon(combine_mode_icon(how))
             action.setChecked(how == picked_mode)
 
         has_selection = self._selection.has_selection()
