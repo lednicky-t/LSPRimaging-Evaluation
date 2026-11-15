@@ -796,11 +796,12 @@ def _build_modules() -> _Modules:
     highlight_range = HighlightRangeModule()
     # The pointers a Mask-tab scan finds (cosmetic: never a mask, never a recompute); part of the session.
     mask_pointers = MaskPointersModule()
-    # Rectangle/lasso area selection limiting the Image panel's editing tools
-    # and the Histogram plot (transient, not persisted); lives in displayed
-    # pixel space, so it is dropped when rotate/flip/crop changes the grid.
+    # Rectangle/lasso/wand area selection limiting the Image panel's editing tools
+    # and the Histogram plot (not persisted; its changes are undo steps); lives in displayed
+    # pixel space, so it is dropped (`reset`: not an undo step, older steps become void)
+    # when rotate/flip/crop changes the grid.
     area_selection = AreaSelectionModule()
-    geometry.geometry_changed.connect(lambda _change: area_selection.clear())
+    geometry.geometry_changed.connect(lambda _change: area_selection.reset())
     analysis_settings = AnalysisSettingsModule()
 
     # SelectionModule holds no RoiToolbox reference of its own (CLAUDE.md,

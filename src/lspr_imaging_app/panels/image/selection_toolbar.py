@@ -10,21 +10,27 @@ Right-click with a tool armed: "Select ROIs in selection" (the ROIs inside or pa
 
 Screen purpose: make and refine a selection on the image from any ribbon tab.
 Main user actions: pick Rectangle / Lasso / Wand (picking the armed one again leaves the tool, the selection stays);
-the wand's settings (pop-up from the gear); Deselect. Invert stays in the image's right-click menu.
+the wand's settings (right-click the wand button: a pop-up beside it, 2026-11-15; there is no gear button); scroll the
+wheel over the wand button to switch its method (Contrast / Brightness / Edges, wrapping round; the button's icon shows
+the picked method: the wand with a half-filled disc, a sun or a dotted outline beside it); Deselect. Invert stays
+in the image's right-click menu. Dragging with the right button on the image (wand armed) sets the threshold and Grow
+(`wand_drag.py`). Every selection change is an undo step (Ctrl+Z, `selection/area_selection_module.py`).
 Layout: a narrow column of icon buttons left of the image canvas, below the ribbon.
 Important states: which tool is armed (blue icon); the wand computing (its icon shows the busy tool tip); no image
 (the wand says so in the status bar).
 Validation: the spin boxes bound every value; Background width is used only by the Contrast method (disabled
-otherwise); only the threshold of the picked method is shown.
+otherwise); only the threshold of the picked method is shown. There is no size limit (2026-11-15: the selection is
+undoable, so the "Max size" guard went).
 Error messages: from the wand (`selection_wand.WandResult.message`) in the status bar: nothing different from the
-background, region larger than Max size, no closed edge, outside the rotated image.
+background, no background found for an edge, outside the rotated image.
 
 Real `QToolButton`s (`.click()` works in tests, GUI rule). Every setting is remembered (`bind_ui_state`).
 """
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QPoint, Qt, pyqtSignal
+from PyQt6.QtGui import QWheelEvent
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -35,6 +41,7 @@ from PyQt6.QtWidgets import (
     QMenu,
     QSpinBox,
     QToolButton,
+    QToolTip,
     QVBoxLayout,
     QWidget,
     QWidgetAction,
@@ -62,6 +69,27 @@ def _style_button(button: QToolButton) -> None:
     style_general_icon_button(button)
     button.setFixedSize(_BAR_WIDTH, BUTTON_SIZE)
 
+
+class _ToolButton(QToolButton):
+    """A tool button that reports a turn of the mouse wheel over it as whole steps (`wheel_steps`: +1 / -1 per notch,
+    scrolling up is -1: back through a list). A smooth wheel or a touch pad sends many small deltas: they are added up
+    until a whole notch (120) is reached."""
+
+    wheel_steps = pyqtSignal(int)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._wheel_delta = 0
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        self._wheel_delta += event.angleDelta().y()
+        notches = int(self._wheel_delta / 120)
+        if notches:
+            self._wheel_delta -= notches * 120
+            self.wheel_steps.emit(-notches)
+        event.accept()
+
+
 _TOOLS: tuple[tuple[AreaSelectionMode, str, str], ...] = (
     (AreaSelectionMode.RECTANGLE, "select-rectangle", "Rectangular selection: drag on the image."),
     (AreaSelectionMode.LASSO, "select-lasso", "Lasso selection: draw around an area on the image."),
@@ -69,9 +97,19 @@ _TOOLS: tuple[tuple[AreaSelectionMode, str, str], ...] = (
         AreaSelectionMode.WAND,
         "wand",
         "Magic wand: click a feature to select it. Shift+click adds to the selection, Alt+click takes away. "
-        "Settings: the gear below.",
+        "Settings: right-click this button. Method: scroll the wheel over this button. "
+        "On the image, drag with the right button: right = bigger region (threshold), up = Grow.",
     ),
 )
+
+# The wand button shows the picked method (2026-11-15): the Tabler wand with a small glyph where its second sparkle was -
+# contrast = a half-filled disc, brightness = a sun, edges = a dotted outline. The three SVGs are drawn by hand in Tabler's
+# style (24 x 24, stroke 2), vendored in `lspr_ui/icon_assets/`; none is the Rectangle's or the Lasso's icon.
+_METHOD_ICONS = {
+    WandMethod.CONTRAST: "wand-contrast",
+    WandMethod.BRIGHTNESS: "wand-brightness",
+    WandMethod.EDGES: "wand-edges",
+}
 
 _METHOD_LABELS = (
     (WandMethod.CONTRAST, "Contrast to background"),
@@ -165,16 +203,7 @@ class WandSettingsForm(QWidget):
         self.fill_holes.setToolTip("Fill gaps inside the region (a ring-shaped particle becomes a solid one).")
         form.addRow("", self.fill_holes)
 
-        self.max_area = QSpinBox(self)
-        self.max_area.setRange(10, 10_000_000)
-        self.max_area.setSingleStep(1000)
-        self.max_area.setGroupSeparatorShown(True)
-        self.max_area.setSuffix(" px")
-        self.max_area.setValue(defaults.max_area_px)
-        self.max_area.setToolTip("A larger region is refused (it usually means the wand ran into the background).")
-        form.addRow("Max size", self.max_area)
-
-        for widget in (self.contrast_threshold, self.brightness_tolerance, self.edge_threshold, self.smoothing, self.background, self.max_area, self.grow):
+        for widget in (self.contrast_threshold, self.brightness_tolerance, self.edge_threshold, self.smoothing, self.background, self.grow):
             widget.valueChanged.connect(lambda _value: self.changed.emit())
         self.fill_holes.toggled.connect(lambda _on: self.changed.emit())
         self.method.currentIndexChanged.connect(lambda _index: self._on_method_changed())
@@ -182,6 +211,35 @@ class WandSettingsForm(QWidget):
 
     def _method(self) -> WandMethod:
         return WandMethod(self.method.currentData())
+
+    def method_label(self) -> str:
+        return self.method.currentText()
+
+    def picked_method(self) -> WandMethod:
+        return self._method()
+
+    def cycle_method(self, steps: int) -> str:
+        """Move `steps` places along the method list, wrapping round (the wheel over the wand button); returns the label of
+        the method now picked."""
+        count = self.method.count()
+        self.method.setCurrentIndex((self.method.currentIndex() + int(steps)) % count)
+        return self.method_label()
+
+    def threshold_box(self) -> QDoubleSpinBox:
+        """The spin box of the picked method's threshold (the one the form shows): what the right-drag on the image sets."""
+        return {
+            WandMethod.CONTRAST: self.contrast_threshold,
+            WandMethod.BRIGHTNESS: self.brightness_tolerance,
+            WandMethod.EDGES: self.edge_threshold,
+        }[self._method()]
+
+    def threshold_caption(self) -> str:
+        return self._threshold_label.text()
+
+    def grows_with_value(self) -> bool:
+        """Whether a higher number in `threshold_box` makes the region bigger. Brightness (tolerance) and Edges (the edge
+        strength that is still crossed) do; Contrast does not (a higher threshold keeps only the strongest part)."""
+        return self._method() is not WandMethod.CONTRAST
 
     def _on_method_changed(self) -> None:
         method = self._method()
@@ -204,7 +262,6 @@ class WandSettingsForm(QWidget):
             background_sigma_px=float(self.background.value()),
             grow_px=int(self.grow.value()),
             fill_holes=bool(self.fill_holes.isChecked()),
-            max_area_px=int(self.max_area.value()),
         )
 
     def bind_ui_state(self, store: UiStateStore) -> None:
@@ -216,11 +273,10 @@ class WandSettingsForm(QWidget):
         store.bind("selection/wand_background_px", self.background)
         store.bind("selection/wand_grow_px", self.grow)
         store.bind("selection/wand_fill_holes", self.fill_holes)
-        store.bind("selection/wand_max_area_px", self.max_area)
 
 
 class SelectionToolbar(QFrame):
-    """Rectangle / Lasso / Wand, the wand's settings, Deselect - one column beside the image."""
+    """Rectangle / Lasso / Wand (settings: right-click the wand), Deselect - one column beside the image."""
 
     def __init__(self, selection: AreaSelectionModule, active_tool: ActiveToolModule, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -231,9 +287,10 @@ class SelectionToolbar(QFrame):
         layout.setContentsMargins(0, 4, 0, 4)
         layout.setSpacing(2)
 
+        self._wand_busy = False
         self._tool_buttons: dict[AreaSelectionMode, QToolButton] = {}
         for mode, icon_name, tip in _TOOLS:
-            button = QToolButton(self)
+            button = _ToolButton(self)
             _style_button(button)
             button.setCheckable(True)
             button.setToolTip(tip)
@@ -242,17 +299,21 @@ class SelectionToolbar(QFrame):
             layout.addWidget(button)
             self._tool_buttons[mode] = button
 
+        # The wand's settings pop up beside the wand button on a right-click (no extra button, so no menu arrow either:
+        # the button has no `setMenu`, the pop-up is shown by hand).
         self.wand_form = WandSettingsForm(self)
-        self._settings_button = QToolButton(self)
-        _style_button(self._settings_button)
-        self._settings_button.setToolTip("Magic wand settings")
-        self._settings_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        menu = QMenu(self._settings_button)
-        form_action = QWidgetAction(menu)
+        self._wand_menu = QMenu(self)
+        form_action = QWidgetAction(self._wand_menu)
         form_action.setDefaultWidget(self.wand_form)
-        menu.addAction(form_action)
-        self._settings_button.setMenu(menu)
-        layout.addWidget(self._settings_button)
+        self._wand_menu.addAction(form_action)
+        wand_button = self._tool_buttons[AreaSelectionMode.WAND]
+        wand_button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        wand_button.customContextMenuRequested.connect(lambda _pos: self.show_wand_settings())
+        # The wheel over the wand button switches its method; the tool tip always names the method in use.
+        wand_button.wheel_steps.connect(self._on_wand_wheel)  # type: ignore[attr-defined]
+        self._icon_method = self.wand_form.picked_method()  # the method the wand button's icon was drawn for
+        self.wand_form.changed.connect(self._on_wand_form_changed)
+        self._refresh_wand_tip()
 
         self._deselect_button = QToolButton(self)
         _style_button(self._deselect_button)
@@ -271,16 +332,39 @@ class SelectionToolbar(QFrame):
         return self._tool_buttons[mode]
 
     @property
-    def settings_button(self) -> QToolButton:
-        return self._settings_button
+    def wand_menu(self) -> QMenu:
+        return self._wand_menu
+
+    def show_wand_settings(self) -> None:
+        """Open the wand's settings pop-up at the right edge of the wand button (what a right-click on it does)."""
+        button = self._tool_buttons[AreaSelectionMode.WAND]
+        self._wand_menu.popup(button.mapToGlobal(QPoint(button.width(), 0)))
 
     @property
     def deselect_button(self) -> QToolButton:
         return self._deselect_button
 
     def set_wand_busy(self, busy: bool) -> None:
+        self._wand_busy = busy
+        self._refresh_wand_tip()
+
+    def _on_wand_form_changed(self) -> None:
+        """Any wand setting changed (also every step of a right-drag): the tool tip is cheap; the icon is redrawn only when the
+        method itself changed."""
+        self._refresh_wand_tip()
+        if self.wand_form.picked_method() is not self._icon_method:
+            self._refresh()
+
+    def _refresh_wand_tip(self) -> None:
         button = self._tool_buttons[AreaSelectionMode.WAND]
-        button.setToolTip(("Magic wand: working...\n" if busy else "") + _TOOLS[2][2])
+        busy = "Magic wand: working...\n" if self._wand_busy else ""
+        button.setToolTip(f"{busy}Method: {self.wand_form.method_label()}\n{_TOOLS[2][2]}")
+
+    def _on_wand_wheel(self, steps: int) -> None:
+        """The wheel over the wand button: the previous / next method, said in a tool tip beside the button."""
+        label = self.wand_form.cycle_method(steps)
+        button = self._tool_buttons[AreaSelectionMode.WAND]
+        QToolTip.showText(button.mapToGlobal(QPoint(button.width(), 0)), f"Wand method: {label}", button)
 
     def _armed(self) -> bool:
         return self._active_tool.active() is ImageTool.SELECT_AREA
@@ -305,15 +389,16 @@ class SelectionToolbar(QFrame):
             finally:
                 button.blockSignals(blocked)
             color = _ACTIVE_COLOR if on else theme.text_primary
-            button.setIcon(load_tabler_icon(str(button.property("icon_name")), color=color, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH))
+            icon_name = str(button.property("icon_name"))
+            if mode is AreaSelectionMode.WAND:
+                self._icon_method = self.wand_form.picked_method()
+                icon_name = _METHOD_ICONS[self._icon_method]
+            button.setIcon(load_tabler_icon(icon_name, color=color, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH))
         self._deselect_button.setEnabled(self._selection.has_selection())
 
     def refresh_theme(self, theme: GuiTheme) -> None:
-        for button in (*self._tool_buttons.values(), self._settings_button, self._deselect_button):
+        for button in (*self._tool_buttons.values(), self._deselect_button):
             _style_button(button)
-        # No menu arrow on the gear: it would not fit the narrow button (and would push the icon off-centre).
-        self._settings_button.setStyleSheet(self._settings_button.styleSheet() + " QToolButton::menu-indicator { image: none; width: 0px; }")
-        self._settings_button.setIcon(load_tabler_icon("settings", color=theme.text_primary, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH))
         self._deselect_button.setIcon(load_tabler_icon("square-off", color=theme.text_primary, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH))
         self.setStyleSheet("#selectionToolbar { border: none; }")
         self._refresh()

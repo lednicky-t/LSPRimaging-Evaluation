@@ -151,6 +151,7 @@ from .data_axis_slider import DataAxisSlider
 from .frame_tools import FrameToolsState, FrameToolsWidget
 from .general_group import style_general_icon_button
 from .selection_toolbar import SelectionToolbar
+from .wand_drag import WandDragAdjuster
 from .wand_task import WandTask
 from .gpu_view import apply_gpu_drawing, mark_opaque
 from .paint_census import PaintCensus
@@ -821,6 +822,7 @@ class ImagePanel(QWidget):
         # is the first tool to claim them - declines (returns False) unless
         # it is the active tool, so every other case is untouched.
         self._plot.vb.set_left_drag_handler(self._on_left_drag_event)
+        self._plot.vb.set_right_drag_handler(lambda ev: self._interaction.on_right_drag(ev))  # the wand's threshold / Grow (wand_drag.py)
 
         # A real QWidget (QSpinBox/QToolButton need actual input, unlike a
         # painted overlay item - see crop_size_controls.py), parented to the
@@ -898,7 +900,9 @@ class ImagePanel(QWidget):
         self._view.ci.setContentsMargins(0, 9, 9, 9)  # no pyqtgraph margin between the toolbar and the image (2026-11-15)
         self._selection_toolbar = SelectionToolbar(self._area_selection, self._active_tool, self)
         self._wand = WandTask(self._area_selection, self._selection_toolbar.wand_form.settings, self._on_tool_status, self)
+        self._wand_drag = WandDragAdjuster(self._selection_toolbar.wand_form, self._view)
         self._wand.busy_changed.connect(self._selection_toolbar.set_wand_busy)
+        self._area_selection.undo_skipped.connect(self._on_tool_status)  # an undo meeting a changed pixel grid says why it did nothing
         self.image_rendered.connect(lambda image, _cube, _wavelength: self._wand.set_image(image))
         self.image_cleared.connect(lambda: self._wand.set_image(None))
 
@@ -969,7 +973,7 @@ class ImagePanel(QWidget):
             notify=self._on_tool_status,
             eraser_armed=self._eraser_armed,
             erase_at=lambda x, y: self._mask_tab.grain_eraser.erase_at(x, y),
-            wand_click=self._wand.click, rois_touching=self._roi_queries.rois_touching,
+            wand_click=self._wand.click, rois_touching=self._roi_queries.rois_touching, wand_adjust=self._wand_drag.on_right_drag,
         )
         scene.sigMouseClicked.connect(self._on_scene_clicked)
         scene.sigMouseMoved.connect(self._on_scene_moved)

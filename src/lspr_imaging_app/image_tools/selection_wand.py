@@ -22,9 +22,10 @@ impulse, root of the sum of squares). Pixel noise that is not white (correlated 
 resampling) makes the factor only approximate; the tolerance is then still consistent between images, just not an
 exact z-score.
 
-**Always connected, never leaking silently.** The result is the 8-connected region that contains the clicked pixel. A
-region larger than ``max_area_px`` is refused with a message (it usually means the wand ran out into the background)
-instead of being cut or returned. Pixels without a value (NaN: outside the rotated image) are never selected.
+**Always connected, no size limit.** The result is the 8-connected region that contains the clicked pixel. There is no
+maximum size (2026-11-15, maintainer: with the selection undoable, a wand that ran out into the background is one Ctrl+Z
+away, so the "Max size" leak guard that refused such a region was removed). Pixels without a value (NaN: outside the
+rotated image) are never selected.
 
 **Post-processing**: ``fill_holes`` (a ring-shaped particle becomes a solid disk) and ``grow_px`` (a margin to cover
 the faint halo; the binary-mask counterpart of Photoshop's feathering, which needs soft masks this app does not have).
@@ -67,7 +68,6 @@ class WandSettings:
     background_sigma_px: float = 24.0  # Contrast: width of the local background estimate
     grow_px: int = 0  # margin added around the region afterwards
     fill_holes: bool = True
-    max_area_px: int = 20000  # a larger region is refused (leak guard)
 
     def prepare_key(self) -> tuple[float, float | None]:
         """What `prepare_image` depends on (the cache key part besides the image). The background is only made for the
@@ -173,14 +173,6 @@ def _component(candidate: np.ndarray, row: int, col: int) -> np.ndarray | None:
     return labels == labels[row, col]
 
 
-def _too_big(area: int, settings: WandSettings) -> WandResult:
-    return WandResult(
-        None,
-        f"Wand: the region grew to {area:,} px, more than Max size ({int(settings.max_area_px):,} px); it probably ran "
-        "into the background. Lower the tolerance / threshold or raise Max size.",
-    )
-
-
 def _edges_region(prepared: PreparedImage, row: int, col: int, settings: WandSettings) -> np.ndarray | WandResult:
     from skimage.segmentation import watershed
 
@@ -188,60 +180,46 @@ def _edges_region(prepared: PreparedImage, row: int, col: int, settings: WandSet
     if prepared.gradient_noise <= 0.0:
         return WandResult(None, "Wand: the image has no measurable noise, so no edge strength can be judged.")
     walls = gradient >= float(settings.edge_threshold) * prepared.gradient_noise
-    height, width = gradient.shape
+    # The edge-free ground, in connected pieces (one label call serves the click's own piece and the background).
+    ground_labels, _count = ndimage.label(~walls, structure=_EIGHT)
     if walls[row, col]:
         # A small or rounded feature has no flat inside: everything under the click is slope. Start from the clicked
-        # pixel alone and let the watershed find the ridge between it and the background, within Max size's reach.
+        # pixel alone and let the watershed find the ridge between it and the background.
         inside = np.zeros(gradient.shape, dtype=bool)
         inside[row, col] = True
+        own_piece = 0
     else:
-        inside = _component(~walls, row, col)
-        assert inside is not None
-        area = int(np.count_nonzero(inside))
-        if area > int(settings.max_area_px):
-            return _too_big(area, settings)
-    # Put the border on the gradient's ridge: watershed between the inside and everything outside that is not an edge,
-    # in a box reaching as far as a disk of Max size's area would (the "reach" of the wand).
-    pad = int(np.ceil(np.sqrt(max(int(settings.max_area_px), 1) / np.pi))) + 2
-    rows, cols = np.nonzero(inside)
-    r0, r1 = max(rows.min() - pad, 0), min(rows.max() + pad + 1, height)
-    c0, c1 = max(cols.min() - pad, 0), min(cols.max() + pad + 1, width)
-    crop = (slice(r0, r1), slice(c0, c1))
-    # "Outside" is only the edge-free ground that reaches the side of the box: small islands enclosed by edges (the
-    # disks of an array lying inside a dust shadow) are not background and are left for the watershed to share out.
-    open_ground = ~walls[crop] & ~inside[crop]
-    ground_labels, _count = ndimage.label(open_ground, structure=_EIGHT)
+        own_piece = int(ground_labels[row, col])
+        inside = ground_labels == own_piece
+    # Put the border on the gradient's ridge: watershed between the inside and the background. "Background" is only the
+    # edge-free ground that reaches the image's side: islands enclosed by edges (the disks of an array lying inside a
+    # dust shadow) are not background and are left for the watershed to share out.
     rim = np.concatenate((ground_labels[0, :], ground_labels[-1, :], ground_labels[:, 0], ground_labels[:, -1]))
-    markers = np.zeros((r1 - r0, c1 - c0), dtype=np.int32)
-    markers[np.isin(ground_labels, rim[rim > 0])] = 2
-    markers[inside[crop]] = 1
-    if not np.any(markers == 2):
-        return WandResult(None, "Wand (edges): no background without edges was found around the click within Max size.")
-    finite_gradient = np.where(np.isfinite(gradient[crop]), gradient[crop], np.finfo(np.float32).max)
-    labels = watershed(finite_gradient, markers, connectivity=2)
-    inner = labels == 1
-    # Reaching the side of the box (where the box is not the image's own edge) means the edge is not closed nearby.
-    open_sides = (
-        (r0 > 0 and inner[0, :].any())
-        or (r1 < height and inner[-1, :].any())
-        or (c0 > 0 and inner[:, 0].any())
-        or (c1 < width and inner[:, -1].any())
-    )
-    if open_sides:
-        return WandResult(
-            None,
-            "Wand (edges): no closed edge was found around the click within Max size's reach; raise the edge value, "
-            "the smoothing or Max size, or use another method.",
-        )
-    region = np.zeros(gradient.shape, dtype=bool)
-    region[crop] = inner
-    region &= np.isfinite(prepared.smoothed)
+    on_rim = np.zeros(int(_count) + 1, dtype=bool)
+    on_rim[rim] = True
+    on_rim[0] = False  # label 0 = the walls
+    on_rim[own_piece] = False  # the click's own piece is `inside`, not background
+    background = on_rim[ground_labels]
+    if not background.any():
+        if own_piece == 0:
+            return WandResult(None, "Wand (edges): no background without edges was found around the click.")
+        # The click is on the open ground itself (the plain background): there is no outside to put a border against, so
+        # the region is that ground up to the edges - the same "whole background" the other methods give for such a click.
+        return inside
+    markers = np.zeros(gradient.shape, dtype=np.int32)
+    markers[background] = 2
+    markers[inside] = 1
+    finite_gradient = np.where(np.isfinite(gradient), gradient, np.finfo(np.float32).max)
+    # The flood only needs the pixels that are not deep inside the background (those can never decide a border): skipping
+    # them gives the very same labels, 86 ms instead of ~1 s on a 1.2 MP plane (measured 2026-11-15), so the wand looks at
+    # the whole image with no search window.
+    deep_background = ndimage.binary_erosion(background, structure=_EIGHT, border_value=1)
+    labels = watershed(finite_gradient, markers, mask=~deep_background, connectivity=2)
+    region = (labels == 1) & np.isfinite(prepared.smoothed)
     if not region[row, col]:
         return WandResult(None, "Wand (edges): nothing selected.")
     found = _component(region, row, col)
     assert found is not None
-    if int(np.count_nonzero(found)) > int(settings.max_area_px):
-        return _too_big(int(np.count_nonzero(found)), settings)
     return found
 
 
@@ -295,9 +273,6 @@ def wand_region(
         region = _component(candidate, row, col)
         if region is None:  # cannot happen for a finite seed, kept as a guard
             return WandResult(None, "Wand: nothing selected.")
-        area = int(np.count_nonzero(region))
-        if area > int(settings.max_area_px):
-            return _too_big(area, settings)
 
     if settings.fill_holes:
         region = ndimage.binary_fill_holes(region)

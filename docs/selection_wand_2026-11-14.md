@@ -10,12 +10,13 @@ an always-visible toolbar beside the image. All three wand methods at once. Mask
 
 | Piece | File | Notes |
 |---|---|---|
-| Wand computation (no Qt) | `image_tools/selection_wand.py` | 3 methods, noise units, leak guard; in the `lspri-science-no-qt` contract |
-| Pixel-map selection | `selection/area_selection_module.py` | `combine_region(region, replace/add/subtract)`, `region()`; mode `WAND` |
+| Wand computation (no Qt) | `image_tools/selection_wand.py` | 3 methods, noise units, no size limit; in the `lspri-science-no-qt` contract |
+| Pixel-map selection | `selection/area_selection_module.py` | `combine_region(region, replace/add/subtract)`, `region()`; mode `WAND`; every change an undo step, `reset()` for a new grid |
 | Pixel-edge outline | `panels/image/area_selection_tool.py` `region_outline` | outlines the smaller side; 13-18 ms on 1275 x 800 |
 | Click -> thread -> selection | `panels/image/wand_task.py` `WandTask` | plain thread, prepared-image cache, one pending click |
-| Toolbar + settings pop-up | `panels/image/selection_toolbar.py` | Rectangle / Lasso / Wand / gear / Deselect; settings remembered (`selection/wand_*`) |
+| Toolbar + settings pop-up | `panels/image/selection_toolbar.py` | Rectangle / Lasso / Wand / Deselect; the wand's settings open on a right-click of the wand button (2026-11-15, was a gear button below it); settings remembered (`selection/wand_*`) |
 | Click routing, cross cursor | `panels/image/interaction.py` `_click_wand` | Shift = add, Alt = subtract; rows in `shortcuts.py` |
+| Right-drag: threshold + Grow | `panels/image/wand_drag.py`, `image_controls.py` `set_right_drag_handler` | readout beside the cursor, no preview; wheel over the wand button switches the method (`selection_toolbar._ToolButton`) |
 | Mask tab "Selection" group | `panels/mask_selection_editor.py`, `panels/image/mask_selection_actions.py` | Add / Subtract selection, one undo step each |
 | Undoable mask edits | `image_tools/mask/module.py` `_commit_edit` | apply_candidate / apply_morphology / paint_brush |
 
@@ -32,6 +33,42 @@ The per-tab Select pickers were removed from the Mask, ROIs and View tabs; `pane
   left margin (plus the view box's 1 px), so `panel.py` sets `ci.setContentsMargins(0, 9, 9, 9)`. What remains left
   of the icons is the dock card's 3 px gap and the separator between docks, the same on every panel edge.
 
+**2026-11-15, second round (maintainer): gestures, undo, no Max size.**
+- **Right-drag on the image with the wand armed** sets the threshold (sideways, **right = a bigger region** for every
+  method: for Contrast that lowers the number; a log scale, 80 px = x2) and Grow (up = more, 6 px per pixel), with a
+  readout beside the cursor and **no preview** (maintainer: undo instead). `panels/image/wand_drag.py`
+  (`WandDragAdjuster`, `dragged_threshold`, `dragged_grow`), `ImageViewBox.set_right_drag_handler`,
+  `CanvasInteraction.on_right_drag`. It writes the settings form's own spin boxes, so the pop-up shows the same numbers
+  and they are remembered. A right *click* without movement still opens the image menu (pyqtgraph tells click from
+  drag; the view box ignored right drags before). Why these two: they are the only numbers that change the result of
+  the same click and need no new "prepare" (smoothing and background width redo the 0.1-2 s step, so they cannot follow
+  a mouse, and they are set once per dataset).
+- **Wheel over the wand button** switches the method (Contrast / Brightness / Edges, wrapping round), a tool tip names
+  it; the button's own tool tip always shows the method in use. A smooth wheel is summed to whole notches. The wand
+  button's **icon shows the method**: the Tabler wand with a small glyph in place of its second sparkle - Contrast =
+  `wand-contrast` (half-filled disc), Brightness = `wand-brightness` (sun), Edges = `wand-edges` (dotted outline). Drawn by
+  hand in Tabler's style (the glyphs are not Tabler icons, so the names are ours), vendored into `lspr_ui/icon_assets/`
+  (umbrella repo). A first try with plain Tabler `contrast` / `sun` / `circle-dotted` was dropped: without the wand the
+  button no longer said "wand". A shorter baton with a bigger badge was tried too and looked like a stub. `wand.svg` stays
+  vendored (the toolbar no longer uses it).
+- **The area selection is undoable** (every change: rectangle, lasso, wand replace / add / subtract, invert,
+  deselect; one step each, on the shared stack, so Ctrl+Z walks back through selection and mask edits in the order made).
+  Reverses the old rule "selection is never undoable" for *this* selection only (the ROI / cube `SelectionModule` stays
+  non-undoable). Steps hold zlib-packed snapshots (a few KB for a particle), and `reset()` (rotate / flip / crop) drops the
+  selection without a step and voids older steps (skipped with a status-bar message): a restored pixel map of the old
+  grid would not fit the new image. Record of the design: `selection/area_selection_module.py` docstring.
+- **Max size removed** (it was only a leak guard: with undo a wand that ran into the background is one Ctrl+Z away). The
+  Brightness / Contrast regions are just the connected component. **Edges** used Max size as the reach of its search
+  box; it now looks at the whole image. A plain watershed on 1.2 MP took ~1.07 s per click (vs ~80 ms in the box);
+  skipping the pixels deep inside the background marker (`mask=~deep_background`, they never decide a border) gives the
+  **same labels** in 86 ms, so a click costs ~0.1 s (measured 2026-11-15, synthetic 1000 x 1200 plane). Before / after on
+  47 clicks per method (random + disk / dust / scratch centres): every region the old code accepted is identical
+  (0 differences, all three methods); the ones it refused as too big are now returned (Contrast 25, Brightness 37, Edges
+  37 of 38). A click on the plain background of the Edges method now selects the connected open ground (it was
+  refused). Known, unchanged: a one-pixel start exactly on the crest of a large ring's edge gives ~1 px (the background
+  floods over the crest first); a click just inside the edge works. Enclosed islands still count as part of the region
+  around them for Edges (by design), so Fill holes has no effect there.
+
 ## The three methods (`selection_wand.py` docstring has the details)
 
 - **Contrast to background** (default): smoothed image minus a wide Gaussian background; pixels standing out by
@@ -39,11 +76,12 @@ The per-tab Select pickers were removed from the Mask, ROIs and View tabs; `pane
 - **Brightness**: smoothed value within tolerance x noise of the clicked value (classic wand). Bigger = bigger.
 - **Edges**: grow through edge-free pixels, then a watershed on the gradient puts the border on the edge's ridge; a
   click on a slope (small rounded feature) starts from the click alone. "Outside" markers are only edge-free ground
-  that reaches the side of the search box, so disks enclosed by a dust shadow are not counted as background.
+  that reaches the side of the image (2026-11-15; it was the side of a search box sized by Max size), so disks enclosed
+  by a dust shadow are not counted as background.
 
 Thresholds are in noise sigmas of the image the wand looks at: pixel noise from the MAD of neighbour differences, times
-the exact white-noise gain of the smoothing (and Sobel) filter. A region over Max size is refused with a message,
-never cut. Feathering is not offered: masks are on/off per pixel (soft masks would be a schema and scan change); Grow is
+the exact white-noise gain of the smoothing (and Sobel) filter. There is no size limit (see the 2026-11-15 round above;
+until then a region over Max size was refused with a message). Feathering is not offered: masks are on/off per pixel (soft masks would be a schema and scan change); Grow is
 the binary counterpart.
 
 ## Measurements

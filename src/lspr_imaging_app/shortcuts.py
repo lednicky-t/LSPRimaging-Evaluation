@@ -137,6 +137,19 @@ BINDINGS: tuple[Binding, ...] = (
     Binding("mouse.view.wand", "Mouse: image view", "Magic wand (armed in the selection toolbar): select the feature under the pointer", gesture="Click", scope=_VIEW),
     Binding("mouse.view.wand_add", "Mouse: image view", "Magic wand: add the feature to the selection", gesture="Shift+click", scope=_VIEW),
     Binding("mouse.view.wand_subtract", "Mouse: image view", "Magic wand: take the feature out of the selection", gesture="Alt+click", scope=_VIEW),
+    Binding(
+        "mouse.view.wand_adjust", "Mouse: image view",
+        "Magic wand: set the threshold (sideways, right = bigger region) and Grow (up = more) without opening the settings",
+        gesture="Right-drag", scope=_VIEW,
+    ),
+    Binding(
+        "mouse.toolbar.wand_settings", "Mouse: image view", "Open the magic wand's settings (on the wand button of the selection toolbar)",
+        gesture="Right-click", scope=_VIEW,
+    ),
+    Binding(
+        "mouse.toolbar.wand_method", "Mouse: image view", "Switch the magic wand's method: Contrast, Brightness, Edges (on the wand button)",
+        gesture="Wheel", scope=_VIEW,
+    ),
     Binding("mouse.view.zoom", "Mouse: image view", "Zoom the image", gesture="Wheel", scope=_VIEW),
     Binding("mouse.view.zoom_fine", "Mouse: image view", "Zoom the image in finer steps", gesture="Ctrl+wheel", scope=_VIEW),
     Binding("mouse.view.pan", "Mouse: image view", "Pan the image", gesture="Middle-drag", scope=_VIEW),

@@ -99,6 +99,7 @@ class CanvasInteraction:
         erase_at: Callable[[float, float], object] | None = None,
         wand_click: Callable[[float, float, str], object] | None = None,
         rois_touching: Callable[[Any], set[int]] | None = None,
+        wand_adjust: Callable[[Any], bool] | None = None,
     ) -> None:
         self._plot = plot
         self._view = view
@@ -122,6 +123,7 @@ class CanvasInteraction:
         self._erase_at = erase_at
         self._wand_click = wand_click  # the wand's click: (x, y, "replace" | "add" | "subtract")
         self._rois_touching = rois_touching  # display-space bool mask -> ids of the ROIs overlapping it
+        self._wand_adjust = wand_adjust  # a right-button drag event -> sets the wand's threshold and Grow (`wand_drag.py`)
         self._eraser_cursor = False  # whether the cursor on the canvas is the Eraser's cross
         self._roi_cursor: Qt.CursorShape | None | object = _NO_CURSOR_YET  # what the ROI hover last set
 
@@ -491,6 +493,12 @@ class CanvasInteraction:
             or self._on_select_area_drag(ev)
             or self._on_roi_drag(ev)
         )
+
+    def on_right_drag(self, ev: Any) -> bool:
+        """`ImageViewBox`'s right-drag handler slot: with the wand armed, holding the right button and moving sets the wand's
+        threshold (sideways) and Grow (up / down), see `wand_drag.py`. Any other tool declines, so the right button
+        stays as it was (a right click still opens the menus)."""
+        return self._wand_adjust is not None and self._wand_armed() and self._wand_adjust(ev)
 
     def _roi_gestures_enabled(self) -> bool:
         return self._active_tool.active() is None and self._roi_tab_active()

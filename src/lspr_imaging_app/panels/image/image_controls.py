@@ -104,6 +104,13 @@ class ImageViewBox(pg.ViewBox):
     def __init__(self, *args: object, **kwargs: object) -> None:
         super().__init__(*args, **kwargs)
         self._left_drag_handler: Callable[[object], bool] | None = None
+        self._right_drag_handler: Callable[[object], bool] | None = None
+
+    def set_right_drag_handler(self, handler: Callable[[object], bool] | None) -> None:
+        """Like `set_left_drag_handler`, for the right button (2026-11-15: the wand's right-drag sets its threshold and Grow,
+        `wand_drag.py`). A handler that declines (or none) leaves the right button as before: ignored. A right *click*
+        is not a drag and still reaches the scene's `sigMouseClicked` (the context menus)."""
+        self._right_drag_handler = handler
 
     def set_left_drag_handler(self, handler: Callable[[object], bool] | None) -> None:
         """*handler* gets every left-button drag event first and returns
@@ -127,6 +134,10 @@ class ImageViewBox(pg.ViewBox):
     def mouseDragEvent(self, ev, axis=None):
         if ev.button() == Qt.MouseButton.LeftButton and self._left_drag_handler is not None:
             if self._left_drag_handler(ev):
+                ev.accept()
+                return
+        if ev.button() == Qt.MouseButton.RightButton and self._right_drag_handler is not None:
+            if self._right_drag_handler(ev):
                 ev.accept()
                 return
         if ev.button() != Qt.MouseButton.MiddleButton:
