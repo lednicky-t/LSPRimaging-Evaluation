@@ -149,7 +149,9 @@ from .crop_size_controls import CropSizeControls
 from .crop_tool import CropTool
 from .data_axis_slider import DataAxisSlider
 from .frame_tools import FrameToolsState, FrameToolsWidget
-from .general_group import AreaSelectionPicker, style_general_icon_button
+from .general_group import style_general_icon_button
+from .selection_toolbar import SelectionToolbar
+from .wand_task import WandTask
 from .gpu_view import apply_gpu_drawing, mark_opaque
 from .paint_census import PaintCensus
 from .play_repaint import PlayRepaint
@@ -605,6 +607,7 @@ class ImagePanel(QWidget):
         self._mask_tab.scan_controls.bind_ui_state(store)
         self._mask_tab.auto_controls.bind_ui_state(store)
         self._mask_tab.features_panel.bind_ui_state(store)
+        self._selection_toolbar.wand_form.bind_ui_state(store)
         self._on_group_labels_changed()
         saved_scope = store.get(ROI_SCOPE.key)
         if saved_scope in ("persistent", "individual"):
@@ -891,13 +894,25 @@ class ImagePanel(QWidget):
         self._build_top_bar(view_content, image_tools_content, mask_content, roi_content)
         self._build_navigation_bar()
 
-        # Canvas column: top bar (Select/Add ROI + cursor/info icons, both
-        # built above), then the pyqtgraph view itself.
+        # The selection toolbar (2026-11-14): Rectangle / Lasso / Wand beside the image; the wand runs off the GUI thread.
+        self._view.ci.setContentsMargins(0, 9, 9, 9)  # no pyqtgraph margin between the toolbar and the image (2026-11-15)
+        self._selection_toolbar = SelectionToolbar(self._area_selection, self._active_tool, self)
+        self._wand = WandTask(self._area_selection, self._selection_toolbar.wand_form.settings, self._on_tool_status, self)
+        self._wand.busy_changed.connect(self._selection_toolbar.set_wand_busy)
+        self.image_rendered.connect(lambda image, _cube, _wavelength: self._wand.set_image(image))
+        self.image_cleared.connect(lambda: self._wand.set_image(None))
+
+        # Canvas column: top bar (built above), then the selection toolbar and the pyqtgraph view side by side.
+        canvas_row = QHBoxLayout()
+        canvas_row.setContentsMargins(0, 0, 0, 0)
+        canvas_row.setSpacing(0)
+        canvas_row.addWidget(self._selection_toolbar)
+        canvas_row.addWidget(self._view, 1)
         canvas_column = QVBoxLayout()
         canvas_column.setContentsMargins(0, 0, 0, 0)
         canvas_column.setSpacing(0)
         canvas_column.addWidget(self._top_bar)
-        canvas_column.addWidget(self._view, 1)
+        canvas_column.addLayout(canvas_row, 1)
 
         # Navigation now sits below the canvas (2026-09-30, maintainer
         # request) - `_refresh_controls_bar_theme` draws its border on
@@ -954,6 +969,7 @@ class ImagePanel(QWidget):
             notify=self._on_tool_status,
             eraser_armed=self._eraser_armed,
             erase_at=lambda x, y: self._mask_tab.grain_eraser.erase_at(x, y),
+            wand_click=self._wand.click, rois_touching=self._roi_queries.rois_touching,
         )
         scene.sigMouseClicked.connect(self._on_scene_clicked)
         scene.sigMouseMoved.connect(self._on_scene_moved)
@@ -1085,14 +1101,8 @@ class ImagePanel(QWidget):
         top_bar_layout.setContentsMargins(4, 2, 6, 2)
         top_bar_layout.setSpacing(6)
         # The always-visible "General" group is gone (2026-10-23): the cursor toggle is an icon of the View tab's
-        # "Image" group, and the area-selection picker is the first group of the Mask and ROIs tabs (and an icon
-        # of "Image"), one picker per place, all on the same `AreaSelectionModule`.
-        self._area_pickers = [
-            AreaSelectionPicker(self._area_selection, self._active_tool, parent) for parent in (mask_content, roi_content, view_content)
-        ]
-        self._area_picker = self._area_pickers[0]  # any of them; the Mask tab's
-        self._mask_tab.add_select_picker(self._area_pickers[0])
-        self._roi_tab.add_select_picker(self._area_pickers[1])
+        # "Image" group. The area-selection tools left the Mask / ROIs / View tabs on 2026-11-14: they are the
+        # always-visible selection toolbar beside the image (`selection_toolbar.py`, built in `_build_toolbar_and_layout`).
 
         self._tool_ribbon = ImageToolRibbon(
             [
@@ -1163,7 +1173,6 @@ class ImagePanel(QWidget):
         # text goes to the canvas corner, so the button never changes width.
         style_general_icon_button(self._cursor_overlay.icon_label)
         self._view_tab.add_image_icon(self._cursor_overlay.icon_label)  # first icon of the View tab's "Image" group (2026-10-23)
-        self._view_tab.add_image_icon(self._area_pickers[2], 1)  # and the picker right after it
 
         # A permanent "i" icon (2026-09-29, replacing a text row that only
         # appeared while a tool with canvas behavior was active): hovering
@@ -1502,8 +1511,8 @@ class ImagePanel(QWidget):
             self._tool_ribbon.refresh_theme(get_active_theme())
         if hasattr(self, "_top_drawer"):
             self._top_drawer.refresh_theme()
-        for picker in getattr(self, "_area_pickers", ()):
-            picker.refresh_theme(get_active_theme())
+        if hasattr(self, "_selection_toolbar"):
+            self._selection_toolbar.refresh_theme(get_active_theme())
         if hasattr(self, "_background_tab"):
             self._background_tab.refresh_theme(get_active_theme())
         if hasattr(self, "_analysis_tab"):

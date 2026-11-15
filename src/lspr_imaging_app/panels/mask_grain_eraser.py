@@ -11,8 +11,8 @@ in effect at the frame on screen with the same call Subtract uses (`MaskModule.a
 a Persistent erase is authored at this frame and carries on to the later cubes, an Individual one changes this frame only.
 
 **What it does not do.** A click on a pixel that is not masked does nothing (and says so). An **area selection** limits it like every
-other mask tool: a click outside the selection does nothing and only the part of the grain inside the selection is taken away. It is not
-on the undo stack, like the other tools' Add / Subtract (`MaskModule`'s docstring).
+other mask tool: a click outside the selection does nothing and only the part of the grain inside the selection is taken away. Each
+erase is one undo step (since 2026-11-14, like every mask edit: `MaskModule`'s docstring).
 
 Cost of a click (measured 2026-10-29 on a 1275 x 799 mask with 300 blobs): labelling 6-7 ms, mapping back to raw pixels 23 ms (37 ms
 with a 1.42 deg rotation), the mask as drawn 0.5 ms from the cache: 30-45 ms in all, so no worker thread.
@@ -99,7 +99,7 @@ class MaskGrainEraser:
             self._status("Eraser: there is no mask pixel under the click, nothing was erased.")
             return 0
         self._mask.apply_candidate(
-            base_mask, candidate, target_frame=frame, scope=self._mask_scope.scope().value, subtract=True
+            base_mask, candidate, target_frame=frame, scope=self._mask_scope.scope().value, subtract=True, label="Erase grain"
         )
         self._status(f"Eraser: removed a grain of {removed:,} px from the mask.")
         return removed

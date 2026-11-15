@@ -72,6 +72,11 @@ class _Slot:
 
 
 class StepStatsItem(DeviceSpaceItem):
+    # Class-level defaults: pyqtgraph's constructor already asks for `boundingRect`, before `__init__` below has set
+    # these - that printed "no attribute '_table'" tracebacks (2026-11-15).
+    _table: StatsTable | None = None
+    _settings = StatsTableSettings()
+
     def __init__(self) -> None:
         super().__init__()
         self._table: StatsTable | None = None

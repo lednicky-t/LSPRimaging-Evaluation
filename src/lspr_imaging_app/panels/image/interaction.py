@@ -25,7 +25,8 @@ from PyQt6.QtWidgets import QGraphicsView, QInputDialog, QWidget
 
 from ...image_tools import ActiveToolModule, ImageTool
 from ...roi import RoiToolbox
-from ...selection import AreaSelectionModule, SelectionModule
+from ...selection import AreaSelectionMode, AreaSelectionModule, SelectionModule
+from ...selection.area_selection_module import ADD, REPLACE, SUBTRACT
 from .area_selection_tool import AreaSelectionTool
 from .context_menu import show_tool_context_menu
 from .crop_tool import CropTool
@@ -60,6 +61,9 @@ separate handle graphics (see crop_tool.py's docstring), so the cursor
 shape is the only hint that an edge/corner/interior is grabbable."""
 
 
+SELECT_ROIS_IN_SELECTION = "Select ROIs in selection"
+"""The selection tools' right-click entry: the ROIs inside or partly inside the area selection become selected."""
+
 _NO_CURSOR_YET = object()
 """`_roi_cursor` before the ROI hover has set anything: distinct from `None`
 (= "default cursor"), so the first hover always sets the cursor explicitly."""
@@ -93,6 +97,8 @@ class CanvasInteraction:
         notify: Callable[[str], None],
         eraser_armed: Callable[[], bool] | None = None,
         erase_at: Callable[[float, float], object] | None = None,
+        wand_click: Callable[[float, float, str], object] | None = None,
+        rois_touching: Callable[[Any], set[int]] | None = None,
     ) -> None:
         self._plot = plot
         self._view = view
@@ -114,6 +120,8 @@ class CanvasInteraction:
         self._notify = notify
         self._eraser_armed = eraser_armed or (lambda: False)  # the Mask tab is open and its Eraser is picked
         self._erase_at = erase_at
+        self._wand_click = wand_click  # the wand's click: (x, y, "replace" | "add" | "subtract")
+        self._rois_touching = rois_touching  # display-space bool mask -> ids of the ROIs overlapping it
         self._eraser_cursor = False  # whether the cursor on the canvas is the Eraser's cross
         self._roi_cursor: Qt.CursorShape | None | object = _NO_CURSOR_YET  # what the ROI hover last set
 
@@ -147,8 +155,9 @@ class CanvasInteraction:
             self._roi_cursor = _NO_CURSOR_YET
             self._set_view_cursor(None)
         tool = self._active_tool.active()
-        if tool is None and self._eraser_armed():
-            # A cross over the image: "click a mask pixel". Set when the mouse moves, dropped when it stops being armed.
+        if (tool is None and self._eraser_armed()) or self._wand_armed():
+            # A cross over the image: "click a mask pixel" / "click a feature". Set when the mouse moves, dropped when it
+            # stops being armed.
             cross = self._in_view(scene_pos)
             if cross != self._eraser_cursor:
                 self._eraser_cursor = cross
@@ -199,7 +208,9 @@ class CanvasInteraction:
         }
         tool = self._active_tool.active()
         handler = handlers.get(tool) if tool is not None else None
-        if handler is not None:
+        if self._wand_armed() and button == Qt.MouseButton.LeftButton:
+            self._click_wand(event, scene_pos)
+        elif handler is not None:
             handler(scene_pos, button)
         elif tool is None and self._erase_at is not None and self._eraser_armed():
             self._click_erase(scene_pos, button)
@@ -239,6 +250,29 @@ class CanvasInteraction:
         # The drag draws (`_on_select_area_drag`); only the menu is a click.
         if button == Qt.MouseButton.RightButton and self._in_view(scene_pos):
             self._show_select_area_context_menu(scene_pos)
+
+    def _wand_armed(self) -> bool:
+        return (
+            self._wand_click is not None
+            and self._active_tool.active() is ImageTool.SELECT_AREA
+            and self._area_selection.mode() is AreaSelectionMode.WAND
+        )
+
+    def _click_wand(self, event: object, scene_pos: object) -> None:
+        """The wand: a left click selects the feature under it; Shift adds to the selection, Alt takes away (the
+        Photoshop keys; the gestures are rows of `shortcuts.py`)."""
+        if not self._in_view(scene_pos):
+            return
+        modifiers = getattr(event, "modifiers", lambda: Qt.KeyboardModifier.NoModifier)()
+        if modifiers & Qt.KeyboardModifier.AltModifier:
+            how = SUBTRACT
+        elif modifiers & Qt.KeyboardModifier.ShiftModifier:
+            how = ADD
+        else:
+            how = REPLACE
+        point = self._plot.vb.mapSceneToView(scene_pos)
+        assert self._wand_click is not None
+        self._wand_click(float(point.x()), float(point.y()), how)
 
     def _click_add_roi(self, scene_pos: object, button: object) -> None:
         if not self._in_view(scene_pos):
@@ -395,10 +429,26 @@ class CanvasInteraction:
             self._active_tool.set_active(ImageTool.ADD_ROI, False)
 
     def _show_select_area_context_menu(self, scene_pos: object) -> None:
-        """Right-click while a selection tool is armed: "Exit tool" (leaves the
-        draw tool, keeps the selection), plus Invert/Deselect inside it."""
-        if self._context_menu([("Exit tool", True)], scene_pos) == "Exit tool":
+        """Right-click while a selection tool is armed: "Select ROIs in selection" (2026-11-15, maintainer request: the
+        ROIs inside or partly inside it become the ROI selection), "Exit tool" (leaves the draw tool, keeps the
+        selection), plus Invert/Deselect inside it."""
+        can_pick = self._rois_touching is not None and self._area_selection.has_selection()
+        chosen = self._context_menu([(SELECT_ROIS_IN_SELECTION, can_pick), ("Exit tool", True)], scene_pos)
+        if chosen == "Exit tool":
             self._active_tool.set_active(ImageTool.SELECT_AREA, False)
+        elif chosen == SELECT_ROIS_IN_SELECTION:
+            self.select_rois_in_selection()
+
+    def select_rois_in_selection(self) -> None:
+        """Make the ROIs inside or partly inside the area selection the ROI selection (replacing it); the count goes to
+        the status bar. Follows an inverted selection (then: the ROIs touching the outside)."""
+        shape = self._image_shape()
+        mask = self._area_selection.mask(shape) if shape is not None else None
+        if mask is None or self._rois_touching is None:
+            return
+        ids = self._rois_touching(mask)
+        self._selection.set_roi_selection(ids)
+        self._notify(f"{len(ids)} ROI{'' if len(ids) == 1 else 's'} inside or partly inside the selection selected.")
 
     def _point_in_selection(self, scene_pos: object) -> bool:
         """True when a selection exists and the scene point lies inside the

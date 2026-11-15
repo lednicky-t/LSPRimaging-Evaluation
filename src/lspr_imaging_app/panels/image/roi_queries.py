@@ -1,5 +1,5 @@
-"""Questions the Image canvas asks about the ROIs at the frame on screen: which one is under a point, which are inside a rectangle,
-where the selected ones are, and how a display-space point maps to the reference frame.
+"""Questions the Image canvas asks about the ROIs at the frame on screen: which one is under a point, which are inside a rectangle
+or touch the area selection, where the selected ones are, and how a display-space point maps to the reference frame.
 
 Moved out of `panel.py` 2026-11-02 (maintainability audit item D, batch 2). The code is the code that was in `ImagePanel`; the panel still has
 `roi_at` and `rois_in_rect` as its public hit-testing API (tests drive them directly) and forwards to this class. Read-only: nothing here
@@ -70,6 +70,37 @@ class RoiQueries:
         centers = self._roi_toolbox.display_positions(frame, self._chromatic.affine_for(frame))
         inside = (centers[:, 0] >= x0) & (centers[:, 0] <= x1) & (centers[:, 1] >= y0) & (centers[:, 1] <= y1)
         return {roi.area_roi_id for roi, hit in zip(rois, inside, strict=True) if hit}
+
+    def rois_touching(self, mask: np.ndarray) -> set[int]:
+        """Ids of the ROIs (at the frame on screen) whose sample aperture overlaps at least one ``True`` pixel of *mask*
+        (display space, ``mask[row, col]`` covers x in [col, col + 1), y in [row, row + 1)) - inside or partly inside an
+        area selection (2026-11-15, maintainer request). Exact disc-square overlap: the point of each pixel's square
+        nearest to the ROI centre lies within the sample radius. Only a box around each ROI is looked at."""
+        frame = (self._current_cube(), self._current_wavelength())
+        rois = self._roi_toolbox.rois_at(frame[0])
+        if not rois or not mask.any():
+            return set()
+        centers = self._roi_toolbox.display_positions(frame, self._chromatic.affine_for(frame))
+        rows, cols = mask.shape[:2]
+        hits: set[int] = set()
+        for roi, (cx, cy) in zip(rois, centers, strict=True):
+            radius = float(roi.sample_diameter_px) / 2.0
+            if not (np.isfinite(cx) and np.isfinite(cy)):
+                continue
+            c0, c1 = max(int(np.floor(cx - radius)), 0), min(int(np.floor(cx + radius)) + 1, cols)
+            r0, r1 = max(int(np.floor(cy - radius)), 0), min(int(np.floor(cy + radius)) + 1, rows)
+            if c0 >= c1 or r0 >= r1:
+                continue
+            box_rows, box_cols = np.nonzero(mask[r0:r1, c0:c1])
+            if box_rows.size == 0:
+                continue
+            x = box_cols + c0
+            y = box_rows + r0
+            dx = np.clip(cx, x, x + 1) - cx  # nearest point of each pixel's square to the centre
+            dy = np.clip(cy, y, y + 1) - cy
+            if bool(np.any(dx * dx + dy * dy <= radius * radius)):
+                hits.add(roi.area_roi_id)
+        return hits
 
     def selected_apertures(self) -> SelectedApertures | None:
         """The selected ROIs' display centres and diameters, for the border/inside hit test; `None` with no selection."""

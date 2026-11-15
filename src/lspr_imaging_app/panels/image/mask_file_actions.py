@@ -135,7 +135,7 @@ class MaskClearAction(_FrameTrackingWidget):
             self,
             "Clear mask",
             "Clear the mask entirely, across every cube and wavelength? "
-            "This cannot be undone - Mask edits are not tracked by Undo.",
+            "Clearing cannot be undone (unlike the other mask edits).",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )

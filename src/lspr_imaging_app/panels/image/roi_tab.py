@@ -48,7 +48,6 @@ from .roi_overlay import RoiOverlay
 from .roi_overlay_controls import RoiOverlayControls
 from .roi_scope_toggle import RoiScopeToggle
 from .roi_shape_picker import RoiShapePicker
-from .select_group import SelectGroup, insert_select_group
 
 
 class RoiTab(QWidget):
@@ -150,7 +149,6 @@ class RoiTab(QWidget):
         # Sections left to right, a thin separator between neighbours (restyled on a theme switch).
         sections = (display_group, scope_group, shape_group, array_group, groups_group)
         self._separators = [ribbon_separator(self) for _ in sections[1:]]
-        self._select_group: SelectGroup | None = None  # added by `add_select_picker`
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
@@ -167,10 +165,6 @@ class RoiTab(QWidget):
         at = self.layout().count() - 1  # before the trailing stretch
         self.layout().insertWidget(at, separator)
         self.layout().insertWidget(at + 1, tuning)
-
-    def add_select_picker(self, picker: QWidget) -> None:
-        """The area-selection picker, as this tab's first group (it limits where ROIs may be added and moved)."""
-        self._select_group = insert_select_group(self, picker)
 
     def auto_rotate(self) -> None:
         """Image tools tab's Auto rotate: level the image by the detected array's tilt (`ArrayActions.auto_rotate`)."""
@@ -277,8 +271,6 @@ class RoiTab(QWidget):
         self._shape_picker.refresh_theme()
         self._array_controls.refresh_theme()
         self._scope_toggle.refresh_theme(theme)
-        if self._select_group is not None:
-            self._select_group.refresh_theme(theme.control_border)
         for separator in self._separators:
             separator.setStyleSheet(f"color: {theme.control_border};")
         for caption in (

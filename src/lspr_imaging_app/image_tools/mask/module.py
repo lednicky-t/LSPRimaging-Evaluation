@@ -80,6 +80,13 @@ from the scan's particle pointers, one individual mask per frame - as ONE undoab
 (`reason="mask_batch"`, the frames in `frames`). It uses the same version-token guard as the row commands, so its undo is skipped, with a
 message, if the timeline changed after it. Masks are stored compressed (`MaskChange`), so the undo entry of a batch of hundreds is a few KB.
 
+**Every edit is undoable since 2026-11-14 (maintainer: "yes, and if possible make also painting undoable")**: `apply_candidate`
+(Histogram selection / Threshold / Local contrast / Feature map Add and Subtract, the Eraser, the selection's Add / Subtract),
+`apply_morphology` and `paint_brush` commit through `_commit_edit`, one undo step each with the same version-token guard. What is still
+not undoable: `set_mask_change` (loading a PNG), `clear_all_masks` and `restore_state` (session load); they take a fresh token, so an
+older undo entry meeting them is skipped with a message. The brush has no canvas stroke yet; when it gets one, the drag wraps its
+stamps in `undo_manager.begin_batch` / `end_batch` so one stroke is one undo step.
+
 **Timeline redesign, 2026-09-21**: `set_file_mask`/`raw_mask` (one global
 array) are replaced by `set_mask_change`/`resolve_mask_source` (a frame-
 and-scope-tagged timeline - see `MaskChange`'s docstring in `model.py` for
@@ -293,6 +300,20 @@ class MaskModule(QObject):
 
         write(1)
         undo_manager.push(FunctionCommand(label, undo_fn=lambda: guarded(0), redo_fn=lambda: guarded(1)))
+
+    def _commit_edit(self, label: str, frame: tuple[int, float], scope: str, mask: np.ndarray) -> None:
+        """Store `mask` as the change at `frame` / `scope` as one undoable step (2026-11-14, maintainer: mask edits are
+        undoable). Nothing happens (no signal, no undo entry) when it equals what is stored there already."""
+        if scope not in _SCOPES:
+            raise ValueError(f"scope must be one of {_SCOPES}, got {scope!r}")
+        frame = (int(frame[0]), float(frame[1]))
+        key: object = frame if scope == "individual" else frame[0]
+        store = self._individual_changes if scope == "individual" else self._persistent_changes
+        before = store.get(key)
+        after = MaskChange(frame=frame, scope=scope, mask=mask)  # copies, and compresses
+        if before == after:
+            return
+        self._row_command(label, [(scope, key, before, after)])
 
     @instrumented("MaskModule.set_mask_changes")
     def set_mask_changes(
@@ -520,6 +541,7 @@ class MaskModule(QObject):
         target_frame: tuple[int, float],
         scope: str,
         subtract: bool = False,
+        label: str | None = None,
     ) -> None:
         """Merge an already-computed candidate mask onto `base_mask` and
         commit the result as a new mask change at `target_frame`/`scope` -
@@ -551,7 +573,7 @@ class MaskModule(QObject):
         if base_mask.shape != candidate.shape:
             raise ValueError(f"candidate shape {candidate.shape} does not match base_mask shape {base_mask.shape}")
         merged = raster_tools.merge_mask_candidate(base_mask, candidate, subtract=subtract)
-        self.set_mask_change(target_frame, scope, merged)
+        self._commit_edit(label or ("Subtract from mask" if subtract else "Add to mask"), target_frame, scope, merged)
 
     @instrumented("MaskModule.apply_morphology")
     def apply_morphology(
@@ -563,6 +585,7 @@ class MaskModule(QObject):
         target_frame: tuple[int, float],
         scope: str,
         restrict_to: np.ndarray | None = None,
+        label: str | None = None,
     ) -> None:
         """`restrict_to` (2026-10-03, area selection): a raw-space boolean mask;
         when given, only pixels where it is ``True`` may change - everywhere
@@ -600,7 +623,7 @@ class MaskModule(QObject):
         candidate = raster_tools.apply_morphology_to_mask(base_mask, operation, radius_px)
         if restrict_to is not None:
             candidate = np.where(restrict_to, candidate, np.asarray(base_mask, dtype=bool))
-        self.set_mask_change(target_frame, scope, candidate)
+        self._commit_edit(label or f"Mask {operation}", target_frame, scope, candidate)
 
     @instrumented("MaskModule.paint_brush")
     def paint_brush(
@@ -613,6 +636,7 @@ class MaskModule(QObject):
         scope: str,
         value: bool,
         restrict_to: np.ndarray | None = None,
+        label: str | None = None,
     ) -> None:
         """`restrict_to` (2026-10-03, area selection): raw-space mask; pixels
         outside it keep `base_mask`'s value. Not called yet - there is no
@@ -634,4 +658,6 @@ class MaskModule(QObject):
         painted = raster_tools.apply_brush_stamp(base_mask, center_xy, diameter_px, value=value)
         if restrict_to is not None:
             painted = np.where(restrict_to, painted, np.asarray(base_mask, dtype=bool))
-        self.set_mask_change(target_frame, scope, painted)
+        # One undo entry per stamp; a stroke (many stamps in one drag) is merged into one entry by the caller with
+        # `undo_manager.begin_batch` / `end_batch` around the drag.
+        self._commit_edit(label or ("Paint mask" if value else "Erase mask"), target_frame, scope, painted)

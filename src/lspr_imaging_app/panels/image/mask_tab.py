@@ -52,7 +52,8 @@ from .mask_overlay_controls import MaskOverlayControls
 from .mask_scan_panels import MaskAutoControls, MaskScanControls
 from .mask_scope_toggle import MaskScopeToggle
 from .overlay_tint import OverlayTint
-from .select_group import SelectGroup, insert_select_group
+from ..mask_selection_editor import MaskSelectionEditor
+from .mask_selection_actions import MaskSelectionActions
 
 if TYPE_CHECKING:
     from .panel import ImagePanel
@@ -154,6 +155,10 @@ class MaskTab(QWidget):
         self._clear_action = MaskClearAction(mask, image_panel, self)
         self._png_actions = MaskPngActions(mask, dataset, mask_scope, image_panel, self, export_task=export)
 
+        # "Selection" (2026-11-14): the area selection (selection toolbar beside the image) into / out of the mask.
+        self._selection_editor = MaskSelectionEditor(mask, chromatic, dataset, image_panel, mask_scope, status)
+        self._selection_actions = MaskSelectionActions(self._selection_editor, image_panel.area_selection(), self)
+        selection_group, self._selection_label = labeled_icon_group(self, self._selection_actions, "Selection")
         general_group, self._general_label = labeled_icon_group(self, self._clear_action, "General")
         state_group, self._state_label = labeled_icon_group(self, self._scope_toggle, "State")
         visibility_group, self._visibility_label = labeled_icon_group(self, self._overlay_controls, "Visibility")
@@ -176,11 +181,12 @@ class MaskTab(QWidget):
         self._auto_controls = MaskAutoControls(dataset, mask, chromatic, events, auto, scan, status, self)
         auto_group, self._auto_label = labeled_icon_group(self, self._auto_controls, "Auto mask")
 
-        self._separators = [ribbon_separator(self) for _ in range(6)]
-        self._select_group: SelectGroup | None = None  # added by `add_select_picker`
+        self._separators = [ribbon_separator(self) for _ in range(7)]
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
+        layout.addWidget(selection_group)
+        layout.addWidget(self._separators[6])
         layout.addWidget(general_group)
         layout.addWidget(self._separators[0])
         layout.addWidget(state_group)
@@ -196,9 +202,10 @@ class MaskTab(QWidget):
         layout.addWidget(png_group)
         layout.addStretch(1)
 
-    def add_select_picker(self, picker: QWidget) -> None:
-        """The area-selection picker, as this tab's first group (it limits the mask edits)."""
-        self._select_group = insert_select_group(self, picker)
+    @property
+    def selection_actions(self) -> MaskSelectionActions:
+        """The Selection group's Add / Subtract buttons."""
+        return self._selection_actions
 
     @property
     def overlay_controls(self) -> MaskOverlayControls:
@@ -247,12 +254,10 @@ class MaskTab(QWidget):
             self._threshold_panel, self._local_contrast_panel, self._morphology_panel, self._features_panel, self._eraser_panel
         ):
             panel.refresh_theme()
-        if self._select_group is not None:
-            self._select_group.refresh_theme(theme.control_border)
         for separator in self._separators:
             separator.setStyleSheet(f"color: {theme.control_border};")
         for label in (
-            self._general_label, self._state_label, self._visibility_label, self._edit_label, self._scan_label,
+            self._selection_label, self._general_label, self._state_label, self._visibility_label, self._edit_label, self._scan_label,
             self._auto_label, self._png_label
         ):
             label.setStyleSheet(group_label_style())

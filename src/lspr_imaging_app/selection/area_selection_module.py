@@ -24,6 +24,15 @@ A selection therefore stays where it was drawn when the wavelength changes
 **One query for every consumer**: ``mask(shape)`` returns a boolean array
 (``True`` = editable) or ``None`` when nothing restricts ("All"). Consumers
 never read the shape themselves, so inversion is handled in one place.
+
+**Pixel-map selections** (2026-11-14, the magic wand): besides a polygon the
+module can hold a boolean *region* of the displayed image (``combine_region``).
+A click replaces the selection, Shift+click adds to it and Alt+click takes away
+from it; adding to or taking from a rectangle / lasso first turns that shape into
+its pixels (so the result is always exactly what ``mask`` gave before, plus or
+minus the new pixels). A region made for one image size and asked for at another
+(it can only happen in the moment between a geometry change and the ``clear``
+that change triggers) restricts editing to *nothing*, never to everything.
 """
 
 from __future__ import annotations
@@ -43,6 +52,13 @@ class AreaSelectionMode(enum.Enum):
     ALL = "all"
     RECTANGLE = "rectangle"
     LASSO = "lasso"
+    WAND = "wand"  # 2026-11-14: a click selects the feature under it (image_tools/selection_wand.py)
+
+
+REPLACE = "replace"
+ADD = "add"
+SUBTRACT = "subtract"
+COMBINE_MODES = (REPLACE, ADD, SUBTRACT)
 
 
 def rasterize_polygon(vertices: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
@@ -68,6 +84,7 @@ class AreaSelectionModule(QObject):
         super().__init__(parent)
         self._mode = AreaSelectionMode.ALL
         self._vertices: np.ndarray | None = None  # (N, 2) x/y, open polygon
+        self._region: np.ndarray | None = None  # read-only boolean pixel map (the wand); never set together with _vertices
         self._inverted = False
         self._mask_cache: tuple[tuple[int, int], np.ndarray] | None = None
 
@@ -77,7 +94,7 @@ class AreaSelectionModule(QObject):
         return self._mode
 
     def has_selection(self) -> bool:
-        return self._vertices is not None
+        return self._vertices is not None or self._region is not None
 
     def is_inverted(self) -> bool:
         return self._inverted
@@ -86,16 +103,31 @@ class AreaSelectionModule(QObject):
         """The shape's outline vertices (copy), or ``None``."""
         return None if self._vertices is None else self._vertices.copy()
 
+    def region(self) -> np.ndarray | None:
+        """The pixel-map selection as made (not inverted; read-only), or ``None`` when the selection is a shape or there
+        is none."""
+        return self._region
+
     def mask(self, shape: tuple[int, ...]) -> np.ndarray | None:
         """``True`` where editing is allowed; ``None`` when unrestricted.
         Only the first two dimensions of *shape* are used. The returned array
         is shared - treat it as read-only."""
-        if self._vertices is None:
+        if not self.has_selection():
             return None
         shape_2d = (int(shape[0]), int(shape[1]))
         if self._mask_cache is not None and self._mask_cache[0] == shape_2d:
             return self._mask_cache[1]
-        inside = rasterize_polygon(self._vertices, shape_2d)
+        if self._region is not None:
+            # A stale region (other image size) restricts to nothing: inverted or not, never "edit everything".
+            if self._region.shape != shape_2d:
+                result = np.zeros(shape_2d, dtype=bool)
+                result.setflags(write=False)
+                self._mask_cache = (shape_2d, result)
+                return result
+            inside = self._region
+        else:
+            assert self._vertices is not None
+            inside = rasterize_polygon(self._vertices, shape_2d)
         result = ~inside if self._inverted else inside
         result.setflags(write=False)
         self._mask_cache = (shape_2d, result)
@@ -138,9 +170,42 @@ class AreaSelectionModule(QObject):
             return
         self._set_vertices(np.asarray(points, dtype=float))
 
+    @instrumented("AreaSelectionModule.combine_region")
+    def combine_region(self, region: np.ndarray, how: str = REPLACE) -> bool:
+        """Make *region* (boolean, the displayed image's shape) the selection (``REPLACE``), add it to the current one
+        (``ADD``) or take it away (``SUBTRACT``). The current selection is combined as it edits now (its inversion
+        included); the result is a plain, not inverted, pixel map. An empty result clears the selection. Returns whether
+        the selection changed."""
+        if how not in COMBINE_MODES:
+            raise ValueError(f"how must be one of {COMBINE_MODES}, got {how!r}")
+        new = np.asarray(region, dtype=bool)
+        if new.ndim != 2:
+            raise ValueError(f"region must be 2-D, got shape {new.shape}")
+        current = self.mask(new.shape) if how != REPLACE else None
+        if how == ADD and current is not None:
+            new = current | new
+        elif how == SUBTRACT:
+            if current is None:
+                return False  # nothing selected: nothing to take away from
+            new = current & ~new
+        if not new.any():
+            had = self.has_selection()
+            self.clear()
+            return had
+        if self._region is not None and not self._inverted and self._region.shape == new.shape and np.array_equal(self._region, new):
+            return False
+        stored = new.copy()
+        stored.setflags(write=False)
+        self._vertices = None
+        self._region = stored
+        self._inverted = False
+        self._mask_cache = None
+        self.selection_changed.emit()
+        return True
+
     @instrumented("AreaSelectionModule.invert")
     def invert(self) -> None:
-        if self._vertices is None:
+        if not self.has_selection():
             return
         self._inverted = not self._inverted
         self._mask_cache = None
@@ -149,15 +214,17 @@ class AreaSelectionModule(QObject):
     @instrumented("AreaSelectionModule.clear")
     def clear(self) -> None:
         """Drops the selection (the picker mode is left as it is)."""
-        if self._vertices is None:
+        if not self.has_selection():
             return
         self._vertices = None
+        self._region = None
         self._inverted = False
         self._mask_cache = None
         self.selection_changed.emit()
 
     def _set_vertices(self, vertices: np.ndarray) -> None:
         self._vertices = vertices
+        self._region = None
         self._inverted = False  # a fresh shape replaces, never inherits, inversion
         self._mask_cache = None
         self.selection_changed.emit()

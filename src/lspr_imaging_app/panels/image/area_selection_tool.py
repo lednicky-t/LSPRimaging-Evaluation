@@ -24,6 +24,12 @@ outside the image (maintainer, 2026-10-03: starting exactly on the image
 edge is too fiddly); the live preview follows the cursor unclamped, and on
 commit the points are clamped to the image, so only the part inside the image
 is selected and the outline runs along the image edge.
+
+A **pixel-map selection** (the wand, 2026-11-14) is outlined along the pixel
+edges themselves (`region_outline`: one rectangle per run of selected pixels in a
+row, merged by `QPainterPath.simplified`), so the ants run exactly around the
+pixels that are selected. Built once per selection change, never per frame. The
+wand has no drag: `begin_gesture` declines while it is the picked mode.
 """
 
 from __future__ import annotations
@@ -41,6 +47,40 @@ _ANT_INTERVAL_MS = 80
 _DASH = 4.0  # dash/gap length, in pen widths (cosmetic width 1 -> screen pixels)
 _Z_VALUE = 60  # above ROI curves and overlay tints
 _MIN_LASSO_STEP = 0.5  # view units; drops sub-pixel jitter from the trail
+
+
+def region_outline(editable: np.ndarray) -> QPainterPath:
+    """The outline of the ``True`` pixels of *editable* along pixel edges, in view units (pixel (row, col) covers
+    [col, col+1) x [row, row+1)). Only the bounding box of the pixels is walked. When most of the image is selected (an
+    inverted wand selection), the few unselected pixels are outlined and cut out of the image's rectangle instead
+    (measured on 1275 x 800: 249 ms walking the large side, a few ms this way)."""
+    if 2 * int(np.count_nonzero(editable)) > editable.size:
+        height, width = editable.shape
+        frame = QPainterPath()
+        frame.addRect(0.0, 0.0, float(width), float(height))
+        holes = _pixel_runs_path(~editable)
+        if holes.isEmpty():
+            return frame
+        # Boolean ops return subpaths that are not explicitly closed; a stroke would skip their last edge.
+        closed = QPainterPath()
+        for polygon in frame.subtracted(holes).toSubpathPolygons():
+            closed.addPolygon(polygon)
+            closed.closeSubpath()
+        return closed
+    return _pixel_runs_path(editable)
+
+
+def _pixel_runs_path(editable: np.ndarray) -> QPainterPath:
+    path = QPainterPath()
+    rows = np.flatnonzero(editable.any(axis=1))
+    if rows.size == 0:
+        return path
+    for row in range(int(rows[0]), int(rows[-1]) + 1):
+        line = editable[row].astype(np.int8)
+        edges = np.flatnonzero(np.diff(np.concatenate(([0], line, [0]))))
+        for start, stop in zip(edges[0::2], edges[1::2]):
+            path.addRect(float(start), float(row), float(stop - start), 1.0)
+    return path.simplified()
 
 
 def _ant_pen(color: str, *, dashed: bool) -> QPen:
@@ -120,6 +160,14 @@ class AreaSelectionTool(QObject):
         return path
 
     def _committed_path(self) -> QPainterPath | None:
+        if self._selection.region() is not None:
+            if self._image_shape is None:
+                return None
+            editable = self._selection.mask(self._image_shape)
+            if editable is None or not editable.any():
+                return None
+            path = region_outline(editable)
+            return None if path.isEmpty() else path
         vertices = self._selection.vertices()
         if vertices is None:
             return None
@@ -161,8 +209,9 @@ class AreaSelectionTool(QObject):
 
     def begin_gesture(self, x: float, y: float) -> bool:
         """Starts a drag at view point ``(x, y)``, which may be outside the
-        image. Declines (``False``) only when there is no image at all."""
-        if self._image_shape is None:
+        image. Declines (``False``) when there is no image at all, and while the
+        wand is picked (a click, not a drag, makes its selection)."""
+        if self._image_shape is None or self._selection.mode() is AreaSelectionMode.WAND:
             return False
         self._gesture_start = (x, y)
         self._gesture_points = [(x, y)]

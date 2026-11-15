@@ -94,6 +94,7 @@ Mask tab tools, mask rows, and the transient scan.
 - [`mask_rows_2026-10-16.md`](mask_rows_2026-10-16.md): Mask rows under the Cube and wavelength sliders (2026-10-16)
 - [`mask_edit_preview_2026-10-29.md`](mask_edit_preview_2026-10-29.md): Mask-tab edit preview, and Threshold / Local contrast Add / Subtract (2026-10-29)
 - [`mask_eraser_2026-10-29.md`](mask_eraser_2026-10-29.md): Mask tab: Eraser (2026-10-29)
+- [`selection_wand_2026-11-14.md`](selection_wand_2026-11-14.md): Selection toolbar beside the image, magic wand (3 methods), Mask tab Add / Subtract selection, undoable mask edits (2026-11-14)
 - [`area_selection_tool_2026-10-03.md`](area_selection_tool_2026-10-03.md): Area selection tool (rectangle / lasso) - 2026-10-03
 - [`auto_transient_mask_exploration_2026-10-16.md`](auto_transient_mask_exploration_2026-10-16.md): Auto mode for the Mask tab: finding flowing particles ("transients")
 - [`auto_transient_scan_and_mask_plan_2026-10-16.md`](auto_transient_scan_and_mask_plan_2026-10-16.md): Plan: "Scan for events" and "Auto mask" in the Mask tab (2026-10-16)
