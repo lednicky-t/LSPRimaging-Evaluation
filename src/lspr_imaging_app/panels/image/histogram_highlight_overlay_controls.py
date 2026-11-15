@@ -101,6 +101,10 @@ class HistogramHighlightOverlayControls(QWidget):
         self._refresh_toggle_icon()
         self._refresh_swatch()
 
+    def is_shown(self) -> bool:
+        """Whether the highlight tint is switched on (the toggle's checked state)."""
+        return self._toggle_button.isChecked()
+
     def set_visible(self, shown: bool) -> None:
         """Show or hide, exactly as a click on the toggle does: the change is reported (the View tab's All buttons)."""
         self._toggle_button.setChecked(bool(shown))

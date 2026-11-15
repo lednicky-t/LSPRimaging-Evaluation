@@ -20,6 +20,9 @@ Layout: a narrow column of icon buttons left of the image canvas, below the ribb
      Shift+Alt on the image override it for one selection.
   4. **Select by value**: Histogram range, Threshold, Local contrast (`selection_by_value.py`), with the Mask tab's old icons.
   5. **Modify selection**: Grow / Shrink / Open / Close / Fill holes / Invert (`selection_modify.py`), with the old Morphology icon.
+  6. **View** (2026-11-16): an eye button **pinned at the bottom** of the toolbar (under the scrolling column, so it never scrolls away). Its pop-up
+     (`selection_view_form.py`, like View -> Masks of the main ribbon) sets the colour of the selection's three outlines and an infill for each
+     (5 opacity steps, none by default); the Venn circles of the mode button wear the same colours (`selection_style.py`).
 Main user actions: pick a tool (picking the armed one again leaves it, the selection stays). **Every tool with numbers has them in a pop-up on a
 right-click of its button, and on the image a drag with the right button changes them** (`tool_drag.py`; the wand: threshold sideways, Grow up;
 Threshold / Local contrast: threshold sideways, sigma up; Draw: size sideways). The wand's method is switched by the wheel over its button (Contrast /
@@ -69,6 +72,9 @@ from .combine_mode_icons import combine_mode_icon, framed_icon
 from .lock_layer import BORDER_COLOR
 from .mask_edit_tool_icons import histogram_selection_icon, local_contrast_icon, morphology_icon, threshold_icon
 from .selection_by_value import MODE_METHODS, ByValueSelector
+from .selection_palette import PAST, PRESENT
+from .selection_style import SelectionStyle
+from .selection_view_form import SelectionViewForm
 from .wheel_tool_button import WheelToolButton
 
 _RENDER_SIZE = ICON_SIZE * 2
@@ -117,7 +123,7 @@ _TOOLS: dict[AreaSelectionMode, _Tool] = {
     AreaSelectionMode.HISTOGRAM: _Tool(
         histogram_selection_icon,
         "Select by Histogram range: pick this tool, then click the image to select the pixels inside the range highlighted on the Histogram "
-        f"panel. {_SHARED_MODE_TIP}",
+        f"panel. Right-click for the range and for showing or hiding it on the image. {_SHARED_MODE_TIP}",
     ),
     AreaSelectionMode.THRESHOLD: _Tool(
         threshold_icon,
@@ -151,7 +157,7 @@ _MODE_LABELS = {  # short on purpose (maintainer, 2026-11-16): the Venn picture 
 }
 _MODE_TIP = (
     "How a new selection (rectangle, lasso, wand, brush, select by value) combines with the current one. Click for the four modes, or scroll the "
-    "wheel over this button. In the picture the pink circle is the selection now, the green circle the new region, grey = what ends up selected, "
+    "wheel over this button. In the picture the left circle is the selection now, the right circle the new region (their colours: the View button below), grey = what ends up selected, "
     "empty = not selected or taken away. On the image, Shift adds, Alt takes away and Shift+Alt intersects, for one "
     "selection (this button shows it while the key is down); with no key the mode stays as picked."
 )
@@ -335,9 +341,11 @@ class SelectionToolbar(QFrame):
         value_tool: ByValueSelector | None = None,
         brush_form: QWidget | None = None,
         modify_menu: QMenu | None = None,
+        style: SelectionStyle | None = None,
     ) -> None:
         super().__init__(parent)
         self._value_tool = value_tool
+        self._style = style if style is not None else SelectionStyle(self)  # the outlines' colours and fills (the View pop-up writes it)
         self.setObjectName("selectionToolbar")
         self._selection = selection
         self._active_tool = active_tool
@@ -352,13 +360,13 @@ class SelectionToolbar(QFrame):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
         self._column = ScrollingColumn(self._content, self)
-        outer.addWidget(self._column)
+        outer.addWidget(self._column, 1)
 
         self._wand_busy = False
         self._value_busy = False
         self._held_mode: str | None = None  # the combine mode a held Shift / Alt gives (`show_held_mode`); None = the picked mode shows
         self._tool_buttons: dict[AreaSelectionMode, QToolButton] = {}
-        self._separators: list[QFrame] = []
+        self._separators: list[QFrame] = []  # the four dividers of the column, then the one above the pinned View button
         self._popups: dict[AreaSelectionMode, QMenu] = {}
 
         # 1. Lock / Unlock
@@ -428,9 +436,24 @@ class SelectionToolbar(QFrame):
             self._modify_button.clicked.connect(lambda _checked=False: self.show_modify_menu())
             layout.addWidget(self._modify_button)
         layout.addStretch(1)
+
+        # 6. View (2026-11-16): the pop-up that changes how the selection looks. Pinned under the scrolling column (`outer`), not inside it, so it
+        # is always at the bottom of the ribbon whether or not the column scrolls.
+        self._view_form = SelectionViewForm(self._style, self)
+        self._view_menu = QMenu(self)
+        view_action = QWidgetAction(self._view_menu)
+        view_action.setDefaultWidget(self._view_form)
+        self._view_menu.addAction(view_action)
+        self._add_separator(outer)
+        self._view_button = QToolButton(self)
+        _style_button(self._view_button)
+        self._view_button.clicked.connect(lambda _checked=False: self.show_view_menu())
+        outer.addWidget(self._view_button, 0, Qt.AlignmentFlag.AlignHCenter)
+        outer.addSpacing(4)
         self.setFixedWidth(_BAR_WIDTH)
         self._refresh_wand_tip()
 
+        self._style.changed.connect(self._refresh_mode_icons)  # the Venn circles wear the outlines' colours
         selection.mode_changed.connect(lambda _mode: self._refresh())
         selection.combine_mode_changed.connect(lambda _how: self._refresh())
         selection.selection_changed.connect(self._refresh)
@@ -477,6 +500,7 @@ class SelectionToolbar(QFrame):
         """Remember the wand's settings and the picked selection mode across restarts (`panels/ui_state.py`). The other tools' numbers are
         `MaskSettings`, saved with the session."""
         self.wand_form.bind_ui_state(store)
+        self._style.bind_ui_state(store)
         saved = store.get(SELECTION_COMBINE_MODE.key)
         if saved in COMBINE_MODES:
             self._selection.set_combine_mode(str(saved))
@@ -522,8 +546,30 @@ class SelectionToolbar(QFrame):
     def modify_button(self) -> QToolButton | None:
         return self._modify_button
 
+    @property
+    def view_button(self) -> QToolButton:
+        return self._view_button
+
+    @property
+    def view_menu(self) -> QMenu:
+        return self._view_menu
+
+    @property
+    def view_form(self) -> SelectionViewForm:
+        return self._view_form
+
+    @property
+    def style(self) -> SelectionStyle:
+        return self._style
+
     def _popup_beside(self, menu: QMenu, button: QToolButton) -> None:
         menu.popup(button.mapToGlobal(QPoint(button.width(), 0)))
+
+    def show_view_menu(self) -> None:
+        """Open the View pop-up beside its button (what a click on it does). The button is at the bottom of the ribbon, so the pop-up's bottom
+        edge is level with the button's, not its top (it would have to be pushed back up anyway)."""
+        height = self._view_menu.sizeHint().height()
+        self._view_menu.popup(self._view_button.mapToGlobal(QPoint(self._view_button.width(), self._view_button.height() - height)))
 
     def show_settings(self, mode: AreaSelectionMode) -> None:
         """Open the numbers of the tool `mode` beside its button (what a right-click on the button does)."""
@@ -596,10 +642,20 @@ class SelectionToolbar(QFrame):
         self._held_mode = how
         self._refresh_mode_button()
 
+    def _venn_icon(self, how: str) -> QIcon:
+        """The Venn icon of `how` with the circle colours the View pop-up picked."""
+        return combine_mode_icon(how, self._style.color(PAST), self._style.color(PRESENT))
+
+    def _refresh_mode_icons(self) -> None:
+        """The outlines' colours changed: redraw the mode button and the pictures in its menu."""
+        self._refresh_mode_button()
+        for how, action in self._mode_actions.items():
+            action.setIcon(self._venn_icon(how))
+
     def _refresh_mode_button(self) -> None:
         picked_mode = self._selection.combine_mode()
         shown = self._held_mode or picked_mode
-        self._mode_button.setIcon(combine_mode_icon(shown))
+        self._mode_button.setIcon(self._venn_icon(shown))
         held_note = "\n(a held key: Shift adds, Alt takes away, Shift+Alt intersects)" if self._held_mode else ""
         self._mode_button.setToolTip(f"Selection mode: {_MODE_LABELS[shown]}{held_note}\n{_MODE_TIP}")
 
@@ -643,7 +699,7 @@ class SelectionToolbar(QFrame):
         picked_mode = self._selection.combine_mode()
         self._refresh_mode_button()
         for how, action in self._mode_actions.items():
-            action.setIcon(combine_mode_icon(how))
+            action.setIcon(self._venn_icon(how))
             action.setChecked(how == picked_mode)
 
         has_selection = self._selection.has_selection()
@@ -672,9 +728,15 @@ class SelectionToolbar(QFrame):
 
     def refresh_theme(self, theme: GuiTheme) -> None:
         self._column.refresh_theme()
-        for button in (*self._tool_buttons.values(), self._mode_button, self._lock_button, self._unlock_button):
+        for button in (*self._tool_buttons.values(), self._mode_button, self._lock_button, self._unlock_button, self._view_button):
             _style_button(button)
         self._lock_button.setIcon(load_tabler_icon("lock", color=theme.text_primary, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH))
+        self._view_button.setIcon(load_tabler_icon("eye", color=theme.text_primary, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH))
+        self._view_button.setToolTip(
+            "View: how the selection looks on the image. The colour of its three outlines (the selection, the shape being dragged, the "
+            "result), also the colour of the Venn circles of the mode button, and an infill for each in five opacities (none by default)."
+        )
+        self._view_form.refresh_theme(theme)
         if self._modify_button is not None:
             _style_button(self._modify_button)
             self._modify_button.setIcon(morphology_icon())  # the old Morphology tool's icon (fixed colours)

@@ -45,6 +45,7 @@ from .roi_context_menu import (
 )
 from .roi_gestures import RoiGestures
 from .rotate_line_tool import RotateLineTool
+from .selection_menu_icons import DESELECT_ICON, INVERT_ICON, menu_icon
 
 _CURSOR_FOR_CROP_HANDLE: dict[str | None, Qt.CursorShape] = {
     "n": Qt.CursorShape.SizeVerCursor,
@@ -65,6 +66,9 @@ shape is the only hint that an edge/corner/interior is grabbable."""
 SELECT_ROIS_IN_SELECTION = "Select ROIs in selection"
 LOCK_TO_SELECTION = "Lock to selection"  # 2026-11-15: the selection becomes the fence (`AreaSelectionModule.lock_selection`)
 UNLOCK = "Unlock"
+INVERT_SELECTION = "Invert selection"
+DESELECT_SELECTION = "Deselect"
+EXIT_TOOL = "Exit tool"  # always the last entry of a tool's right-click menu (`_context_menu`)
 """The selection tools' right-click entry: the ROIs inside or partly inside the area selection become selected."""
 
 _NO_CURSOR_YET = object()
@@ -479,7 +483,7 @@ class CanvasInteraction:
         context_menu`), just not labeled "Cancel" since there is no
         in-progress point to drop - each click here is already a complete,
         independent action."""
-        if self._context_menu([("Exit tool", True)], scene_pos) == "Exit tool":
+        if self._context_menu([(EXIT_TOOL, True)], scene_pos) == EXIT_TOOL:
             self._active_tool.set_active(ImageTool.ADD_ROI, False)
 
     def _show_select_area_context_menu(self, scene_pos: object) -> None:
@@ -492,11 +496,11 @@ class CanvasInteraction:
                 (SELECT_ROIS_IN_SELECTION, can_pick),
                 (LOCK_TO_SELECTION, self._area_selection.has_selection() and self._lock_to_selection is not None),
                 (UNLOCK, self._area_selection.has_lock() and self._unlock is not None),
-                ("Exit tool", True),
+                (EXIT_TOOL, True),
             ],
             scene_pos,
         )
-        if chosen == "Exit tool":
+        if chosen == EXIT_TOOL:
             self._active_tool.set_active(ImageTool.SELECT_AREA, False)
         elif chosen == SELECT_ROIS_IN_SELECTION:
             self.select_rois_in_selection()  # (Lock / Unlock are handled in `_context_menu`)
@@ -527,24 +531,33 @@ class CanvasInteraction:
         the chosen *tool* action, or `None` if nothing or a selection entry was
         chosen. Selection entries are always enabled, so the menu never opens
         with nothing clickable (see `context_menu.py`)."""
-        entries = list(actions)
-        if self._point_in_selection(scene_pos):
-            entries += [("Invert selection", True), ("Deselect", True)]
-            if self._lock_to_selection is not None and all(label != LOCK_TO_SELECTION for label, _on in entries):
-                entries.append((LOCK_TO_SELECTION, True))
+        # Order (2026-11-16, maintainer): the tool's own entries, Lock / Unlock, Invert + Deselect together, and "Exit tool" always last.
+        entries = [entry for entry in actions if entry[0] != EXIT_TOOL]
+        exit_entries = [entry for entry in actions if entry[0] == EXIT_TOOL]
+        inside = self._point_in_selection(scene_pos)
+        if inside and self._lock_to_selection is not None and all(label != LOCK_TO_SELECTION for label, _on in entries):
+            entries.append((LOCK_TO_SELECTION, True))
+        if inside:
+            entries += [(INVERT_SELECTION, True), (DESELECT_SELECTION, True)]
+        entries += exit_entries
         if not entries:
             return None
-        chosen = show_tool_context_menu(self._menu_parent, entries)
+        chosen = show_tool_context_menu(
+            self._menu_parent,
+            entries,
+            icons={INVERT_SELECTION: menu_icon(INVERT_ICON), DESELECT_SELECTION: menu_icon(DESELECT_ICON)},
+            separate_before={INVERT_SELECTION, EXIT_TOOL},
+        )
         if chosen == LOCK_TO_SELECTION and self._lock_to_selection is not None:
             self._lock_to_selection()
             return None
         if chosen == UNLOCK and self._unlock is not None:
             self._unlock()
             return None
-        if chosen == "Invert selection":
+        if chosen == INVERT_SELECTION:
             self._area_selection.invert()
             return None
-        if chosen == "Deselect":
+        if chosen == DESELECT_SELECTION:
             self._area_selection.clear()
             return None
         return chosen

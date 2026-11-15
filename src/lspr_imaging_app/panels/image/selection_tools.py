@@ -20,6 +20,8 @@ from ..mask_edit_preview import MaskEditPreview
 from .area_selection_tool import AreaSelectionTool
 from .brush_settings import BrushSettingsForm
 from .combine_badge import CombineBadge
+from .histogram_highlight_overlay_controls import HistogramHighlightOverlayControls
+from .histogram_overlay_toggle import HistogramOverlayToggle
 from .selection_by_value import MODE_METHODS, ByValueSelector
 from .selection_modify import ModifySelectionMenu
 from .selection_regions import SelectionRegions
@@ -51,12 +53,16 @@ class SelectionTools:
         regions: SelectionRegions,
         image_shape: Callable[[], tuple[int, int] | None],
         status: Callable[[str], None],
+        highlight_controls: HistogramHighlightOverlayControls,
     ) -> None:
         self.value_selector = ByValueSelector(mask, geometry, highlight_range, panel, preview, area_selection, status, panel)
+        # The Histogram range's pop-up carries a copy of the View tab's show / hide switch for the highlight tint (`histogram_overlay_toggle.py`).
+        self.value_selector.form.add_overlay_toggle(HistogramOverlayToggle(highlight_controls, self.value_selector.form))
         self.brush_form = BrushSettingsForm(mask, panel)
         self.modify_menu = ModifySelectionMenu(mask, area_selection, image_shape, status, panel)
         self.toolbar = SelectionToolbar(
-            area_selection, active_tool, panel, value_tool=self.value_selector, brush_form=self.brush_form, modify_menu=self.modify_menu
+            area_selection, active_tool, panel, value_tool=self.value_selector, brush_form=self.brush_form, modify_menu=self.modify_menu,
+            style=area_tool.style,  # the outlines' colours and fills: the toolbar's View pop-up writes them, the outlines and the Venn icons follow
         )
         # The + / - / x beside the pointer (Shift / Alt / Shift+Alt, or the mode picker): what the next selection will do. It also tells the
         # toolbar's mode button which mode a held key gives.

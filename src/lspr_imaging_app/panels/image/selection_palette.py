@@ -36,7 +36,11 @@ RESULT_COLOR = ADD_COLOR  # sky-400, the toolbar's blue: "ends up selected" on t
 REMOVED_COLOR = SUBTRACT_COLOR  # orange: "take away", the colour of the - ring beside the pointer (the mode icons no longer fill anything with it)
 ICON_SELECTED_FILL = "#606977"  # grey: "ends up selected" on the mode icons (the image draws the result blue); contrast with the pink and green circle lines 2.1 / 3.2 : 1
 
-COLORS = {PAST: PAST_COLOR, PRESENT: PRESENT_COLOR, RESULT: RESULT_COLOR}
+COLORS = {PAST: PAST_COLOR, PRESENT: PRESENT_COLOR, RESULT: RESULT_COLOR}  # the defaults: `selection_style.SelectionStyle` starts from them
+
+# The infill of an outline (2026-11-16, maintainer: "opacity, only 5 steps, when 0 then no fill"): the share of its colour that tints the pixels
+# inside it. Step 0 = no fill (the default: the image shows borders only, as before). One tuple, so a different ladder is one edit.
+FILL_OPACITY_STEPS: tuple[float, ...] = (0.0, 0.25, 0.5, 0.75, 1.0)
 
 OUTLINES_FOR_MODE: dict[str, tuple[str, ...]] = {
     REPLACE: (PAST, PRESENT),

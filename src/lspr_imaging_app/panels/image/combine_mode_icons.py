@@ -23,6 +23,10 @@ themselves are 6.8 : 1 and 10.4 : 1 against the near-black toolbar, so a circle 
 same rule as `mask_edit_tool_icons.py`: a colour that *means* something is not recoloured). `MODE_AREAS` still tells "taken away" from "not
 selected" (the table is checked against the real combine rules); only the drawing no longer does.
 
+**The circle colours are the user's** (2026-11-16): the toolbar's View pop-up changes the outline colours (`selection_style.py`), and the icons follow:
+`combine_mode_icon(how, past, present)` draws the left circle in `past` and the right in `present` (the palette's pink and green by default). The
+fill stays the fixed grey whatever is picked.
+
 **The picked mode** is drawn into the icon itself as a rounded frame (the "on" state of the icon): the toolbar's buttons are 18 px wide with no
 room for a border or a background, and Qt picks the "on" picture for a checked button by itself.
 
@@ -117,7 +121,7 @@ def framed_icon(key: str, base: Callable[[], QIcon]) -> QIcon:
     return icon
 
 
-def _venn(how: str, framed: bool) -> QPixmap:
+def _venn(how: str, framed: bool, past: str, present: str) -> QPixmap:
     pixmap = QPixmap(_RENDER, _RENDER)
     painter = _painter(pixmap)
     painter.setPen(Qt.PenStyle.NoPen)
@@ -126,9 +130,9 @@ def _venn(how: str, framed: bool) -> QPixmap:
             painter.setBrush(QColor(_FILL[state]))
             painter.drawPath(path)
     painter.setBrush(Qt.BrushStyle.NoBrush)
-    painter.setPen(QPen(QColor(PAST_COLOR), _OUTLINE_WIDTH))  # A, the selection as it stands
+    painter.setPen(QPen(QColor(past), _OUTLINE_WIDTH))  # A, the selection as it stands
     painter.drawPath(_disc(_CENTRE_A))
-    painter.setPen(QPen(QColor(PRESENT_COLOR), _OUTLINE_WIDTH))  # B, the new region
+    painter.setPen(QPen(QColor(present), _OUTLINE_WIDTH))  # B, the new region
     painter.drawPath(_disc(_CENTRE_B))
     if framed:
         _draw_frame(painter)
@@ -136,12 +140,18 @@ def _venn(how: str, framed: bool) -> QPixmap:
     return pixmap
 
 
-@functools.lru_cache(maxsize=None)
-def combine_mode_icon(how: str) -> QIcon:
-    """The Venn icon of mode `how` (`REPLACE` / `ADD` / `SUBTRACT` / `INTERSECT`). The "on" picture (a checked button) has the frame."""
+def combine_mode_icon(how: str, past: str | None = None, present: str | None = None) -> QIcon:
+    """The Venn icon of mode `how` (`REPLACE` / `ADD` / `SUBTRACT` / `INTERSECT`). The "on" picture (a checked button) has the frame.
+    `past` and `present` are the border colours of the left and the right circle: the palette's pink and green unless the user picked others
+    in the toolbar's View pop-up (`SelectionStyle`; the toolbar passes them)."""
     if how not in MODE_AREAS:
         raise ValueError(f"how must be one of {tuple(MODE_AREAS)}, got {how!r}")
+    return _icon(how, QColor(past or PAST_COLOR).name(), QColor(present or PRESENT_COLOR).name())
+
+
+@functools.lru_cache(maxsize=128)  # four modes per pair of colours: a few dozen at most in a session
+def _icon(how: str, past: str, present: str) -> QIcon:
     icon = QIcon()
-    icon.addPixmap(_venn(how, framed=False), QIcon.Mode.Normal, QIcon.State.Off)
-    icon.addPixmap(_venn(how, framed=True), QIcon.Mode.Normal, QIcon.State.On)
+    icon.addPixmap(_venn(how, False, past, present), QIcon.Mode.Normal, QIcon.State.Off)
+    icon.addPixmap(_venn(how, True, past, present), QIcon.Mode.Normal, QIcon.State.On)
     return icon

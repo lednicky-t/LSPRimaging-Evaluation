@@ -660,6 +660,7 @@ class ImagePanel(QWidget):
             self, mask=self._mask, geometry=self._geometry, highlight_range=self._highlight_range, preview=self._mask_tab.edit_preview,
             area_selection=self._area_selection, active_tool=self._active_tool, area_tool=self._area_tool, plot=self._plot, view=self._view,
             regions=self.selection_regions, image_shape=lambda: self._last_image_shape, status=self._on_tool_status,
+            highlight_controls=self._view_tab.highlight_controls,
         )
 
         # Canvas column: top bar (built above), then the selection toolbar and the pyqtgraph view side by side.

@@ -25,6 +25,7 @@ from ...image_tools.brush_stroke import stroke_region
 from ...selection import AreaSelectionMode, AreaSelectionModule
 from ...selection.area_selection_module import ADD, CLICK_MODES, INTERSECT, REPLACE, SUBTRACT, rasterize_polygon
 from .selection_outlines import SelectionOutlines, polygon_path
+from .selection_style import SelectionStyle
 
 _Z_VALUE = 60  # the brush's ring (above the outlines)
 _MIN_LASSO_STEP = 0.5  # view units; drops sub-pixel jitter from the trail
@@ -71,6 +72,11 @@ class AreaSelectionTool(QObject):
         selection.selection_changed.connect(self._on_selection_changed)
 
     # -- display --------------------------------------------------------------
+
+    @property
+    def style(self) -> SelectionStyle:
+        """The outlines' colours and fills; the toolbar's View pop-up and the Venn icons share this one."""
+        return self._outlines.style
 
     @property
     def _ants_item(self) -> QGraphicsPathItem:

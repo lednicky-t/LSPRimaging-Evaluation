@@ -43,7 +43,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from PyQt6.QtCore import QObject, Qt, pyqtSignal
 from PyQt6.QtGui import QGuiApplication
-from PyQt6.QtWidgets import QDoubleSpinBox, QFormLayout, QLabel, QSpinBox, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel, QSpinBox, QVBoxLayout, QWidget
 
 from ...applog.events import log_event
 from ...image_tools import GeometryModule, MaskModule
@@ -111,6 +111,7 @@ class ByValueSettingsForm(QWidget):
         self.range_label = QLabel(self._histogram_box)
         self.range_label.setWordWrap(True)
         histogram_layout.addWidget(self.range_label)
+        self._histogram_layout = histogram_layout
 
         # Threshold
         self._threshold_box = QWidget(self)
@@ -160,6 +161,15 @@ class ByValueSettingsForm(QWidget):
         mask.mask_changed.connect(self._on_model_changed)
         highlight_range.range_changed.connect(self._refresh_range)
         self.set_method(ValueMethod.HISTOGRAM)
+
+    def add_overlay_toggle(self, toggle: QWidget) -> None:
+        """Put the show / hide button of the histogram highlight on the image (`HistogramOverlayToggle`) beside a caption, in the Histogram range's
+        part of the form (so only that method shows it). `toggle` is made with this form as its parent."""
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        row.addWidget(toggle)
+        row.addWidget(QLabel("Show the range on the image", self._histogram_box), 1)
+        self._histogram_layout.insertLayout(0, row)
 
     # -- the method ----------------------------------------------------------------------------------------
 

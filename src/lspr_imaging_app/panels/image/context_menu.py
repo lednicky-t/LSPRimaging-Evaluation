@@ -29,19 +29,36 @@ second action) is ever conditionally disabled, and never on its own.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Mapping, Sequence
 
-from PyQt6.QtGui import QCursor
+from PyQt6.QtGui import QCursor, QIcon
 from PyQt6.QtWidgets import QMenu, QWidget
 
 
-def show_tool_context_menu(parent: QWidget, actions: Sequence[tuple[str, bool]]) -> str | None:
+def show_tool_context_menu(
+    parent: QWidget,
+    actions: Sequence[tuple[str, bool]],
+    *,
+    icons: Mapping[str, QIcon] | None = None,
+    separate_before: Collection[str] = (),
+) -> str | None:
     """Pop a menu at the current cursor position with one action per
     *(label, enabled)* pair. Returns the chosen label, or `None` if the
     menu was dismissed without a choice (Esc or a click elsewhere) - never
-    call this with every action disabled, see the module docstring."""
+    call this with every action disabled, see the module docstring.
+
+    `icons` gives a label its icon; `separate_before` puts a separator line
+    above those labels (never above the first entry), so a caller can group
+    its entries (2026-11-16: the selection menu's Invert / Deselect pair and
+    its last entry, Exit tool)."""
     menu = QMenu(parent)
-    action_by_label = {label: menu.addAction(label) for label, _enabled in actions}
+    action_by_label = {}
+    for index, (label, _enabled) in enumerate(actions):
+        if index > 0 and label in separate_before:
+            menu.addSeparator()
+        action_by_label[label] = menu.addAction(label)
+        if icons is not None and label in icons:
+            action_by_label[label].setIcon(icons[label])
     for label, enabled in actions:
         action_by_label[label].setEnabled(enabled)
     chosen = menu.exec(QCursor.pos())

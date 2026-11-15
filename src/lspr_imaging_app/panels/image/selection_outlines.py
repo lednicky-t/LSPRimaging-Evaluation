@@ -21,6 +21,18 @@ a piece inside another one has a bounding box inside it, so a hole or island is 
 computation is followed by a pause of twice its own length (`_PAUSE_FACTOR`), after which one trailing update catches the picture up with the
 pointer, so the preview never takes more than a third of the GUI thread however big the selection is.
 
+**Colours and infill** (2026-11-16): each outline's colour is the user's (`SelectionStyle`, set in the toolbar's View pop-up; the defaults are the
+palette's), and under each outline lies an **infill**, a third ``QGraphicsPathItem`` with the same path and the colour at the picked opacity (5 steps,
+step 0 = none, the default). The fill sits under every line (z), so it never hides an outline; it follows the outline (not its border) and costs
+nothing at step 0 (hidden, and it does not take the path). **The border can be switched off per outline** (same pop-up): then only the fill is
+drawn, and since the crawl is what repaints the picture under the outline 6 times a second, the timer stops once no border is visible (`_update_timer`):
+a static infill is repainted only when the view changes (pan, zoom, a new frame).
+
+**Drawing the lines** (2026-11-16): both lines of an outline are `CachedLineItem`s (`cached_line_item.py`). The dash pattern repeats, so once the view holds
+still a dense outline is drawn from four pictures of its phases (and one of the white line) instead of being stroked again at every tick and at every
+repaint of the view; pixel-identical, used only where it is cheaper (many path elements, a view of modest size), so a rectangle or a lasso is stroked
+as before. A tick is `_advance_ants` -> `setPen` -> a repaint of what is under the outline's bounding box; the cost left is that repaint.
+
 The outline is always the boundary of the *editable region*: the shape clipped to the image, or - inverted - the image minus the shape. So it
 follows the shape's edge inside the image and the image border only where the region actually touches it (never along an edge the shape covers,
 when inverted). A **pixel-map selection** (the wand) is outlined along the pixel edges themselves (`region_outline`: one rectangle per run of
@@ -39,7 +51,9 @@ from PyQt6.QtWidgets import QGraphicsPathItem
 
 from ...selection import AreaSelectionModule
 from ...selection.area_selection_module import SUBTRACT
+from .cached_line_item import CachedLineItem
 from .selection_palette import COLORS, OUTLINES_FOR_MODE, PAST, PRESENT, RESULT
+from .selection_style import SelectionStyle
 
 # The dashes crawl 12.5 px/s: 2 px every 160 ms (it was 1 px every 80 ms: the same speed with half the repaints; each tick repaints everything
 # under the outline's bounding box, 4 ms for 300 particles and 12 ms for 1500, measured 2026-11-16). A dash period is 2 * _DASH = 8 px, so
@@ -47,6 +61,7 @@ from .selection_palette import COLORS, OUTLINES_FOR_MODE, PAST, PRESENT, RESULT
 _ANT_INTERVAL_MS = 160
 _ANT_STEP = 2.0
 _DASH = 4.0  # dash/gap length, in screen pixels (a cosmetic pen)
+_ANT_PHASES = int(2 * _DASH / _ANT_STEP)  # the crawl repeats every 2 dashes: 4 different pictures of the line
 _Z_VALUE = 60  # above ROI curves and overlay tints; the result is drawn over the present shape, that over the past
 _Z_STEP = {PAST: 0.0, PRESENT: 0.1, RESULT: 0.2}
 _PAUSE_FACTOR = 2.0  # after a result took T, the next one waits 2 T
@@ -174,16 +189,30 @@ def _ant_pen(color: str, *, dashed: bool) -> QPen:
 class SelectionOutlines(QObject):
     """Draws the past / present / result outlines on *plot*. The tool says what is being dragged (`update`); this decides what shows."""
 
-    def __init__(self, plot: pg.PlotItem, selection: AreaSelectionModule, parent: QObject | None = None) -> None:
+    def __init__(
+        self, plot: pg.PlotItem, selection: AreaSelectionModule, parent: QObject | None = None, style: SelectionStyle | None = None
+    ) -> None:
         super().__init__(parent)
         self._selection = selection
         self._image_shape: tuple[int, int] | None = None
-        self._pens = {role: _ant_pen(COLORS[role], dashed=True) for role in COLORS}
+        self.style = style if style is not None else SelectionStyle(self)  # the colours and fills (the toolbar's View pop-up changes them)
+        self._pens = {role: _ant_pen(self.style.color(role), dashed=True) for role in COLORS}
         self._items: dict[str, tuple[QGraphicsPathItem, QGraphicsPathItem]] = {}
+        self._fills: dict[str, QGraphicsPathItem] = {}  # the infill under each outline, shown only above fill step 0
+        self._fill_stale = {role: False for role in COLORS}  # the outline's path changed since the fill got it
+        self._active = {role: False for role in COLORS}  # the role has an outline to show now (a path, and the drag's mode shows it)
         for role in COLORS:
-            base = QGraphicsPathItem()
+            fill = QGraphicsPathItem()
+            fill.setPen(QPen(Qt.PenStyle.NoPen))
+            fill.setBrush(self.style.fill_color(role))
+            fill.setZValue(_Z_VALUE - 0.5 + _Z_STEP[role])  # under every line, so a fill never hides an outline
+            fill.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            fill.hide()
+            plot.addItem(fill, ignoreBounds=True)
+            self._fills[role] = fill
+            base = CachedLineItem(phases=1)  # drawn from pictures when that is cheaper than stroking (`cached_line_item.py`)
             base.setPen(_ant_pen("#ffffff", dashed=False))
-            ants = QGraphicsPathItem()
+            ants = CachedLineItem(phases=_ANT_PHASES)
             ants.setPen(self._pens[role])
             for item in (base, ants):
                 item.setZValue(_Z_VALUE + _Z_STEP[role])
@@ -204,8 +233,13 @@ class SelectionOutlines(QObject):
         self._ants = QTimer(self)
         self._ants.setInterval(_ANT_INTERVAL_MS)
         self._ants.timeout.connect(self._advance_ants)
+        self.style.changed.connect(self._on_style_changed)
 
     # -- what the tool and the tests ask -------------------------------------------------------------------
+
+    def fill_item(self, role: str) -> QGraphicsPathItem:
+        """The infill of the *role* outline (hidden at fill step 0)."""
+        return self._fills[role]
 
     def past_items(self) -> tuple[QGraphicsPathItem, QGraphicsPathItem]:
         """(solid, dashed) of the committed selection's outline."""
@@ -247,25 +281,62 @@ class SelectionOutlines(QObject):
         self._set_visible(PAST, self._committed is not None and PAST in shown)
         self._put(PRESENT, present if PRESENT in shown else None)
         self._update_result(present, how, RESULT in shown)
-        if self._committed is None and present is None:
+        self._update_timer()
+
+    def _update_timer(self) -> None:
+        """The dashes crawl only while a *line* is drawn: with every border switched off (View pop-up) the timer stops, and what is left, the
+        infill, is static and repainted only when the view itself changes."""
+        if any(self._active[role] and self.style.border_shown(role) for role in COLORS):
+            if not self._ants.isActive():
+                self._ants.start()
+        else:
             self._ants.stop()
-        elif not self._ants.isActive():
-            self._ants.start()
 
     def _put(self, role: str, path: QPainterPath | None) -> None:
-        base, ants = self._items[role]
+        """Give the role a new path (``None`` = nothing to show). The line items always hold the path, hidden or not, so a border switched on
+        later needs no rebuild."""
         if path is None:
-            base.hide()
-            ants.hide()
-            return
-        base.setPath(path)
-        ants.setPath(path)
-        base.show()
-        ants.show()
+            self._active[role] = False
+        else:
+            base, ants = self._items[role]
+            base.setPath(path)
+            ants.setPath(path)
+            self._fill_stale[role] = True
+            self._active[role] = True
+        self._apply(role)
 
     def _set_visible(self, role: str, visible: bool) -> None:
+        self._active[role] = visible
+        self._apply(role)
+
+    def _apply(self, role: str) -> None:
+        """Show what the role should show: the line (when it is active and its border is on) and the infill (when active, above fill step 0)."""
+        lines = self._active[role] and self.style.border_shown(role)
         for item in self._items[role]:
-            item.setVisible(visible)
+            item.setVisible(lines)
+        self._sync_fill(role)
+
+    def _sync_fill(self, role: str) -> None:
+        """The infill follows its outline (shown when the outline is active, above fill step 0), whether or not the border is drawn. At step 0
+        it costs nothing: it is hidden and does not even take the path; the path is handed over when a step above 0 is picked (`_fill_stale`)."""
+        fill = self._fills[role]
+        if self.style.fill_alpha(role) <= 0.0 or not self._active[role]:
+            fill.hide()
+            return
+        if self._fill_stale[role]:
+            fill.setPath(self._items[role][0].path())  # the outline's even-odd path (holes have the opposite orientation), a shared copy
+            self._fill_stale[role] = False
+        fill.show()
+
+    def _on_style_changed(self) -> None:
+        """A colour, fill step or border switch was picked: recolour the dashes and the infill and show / hide the parts now."""
+        for role in COLORS:
+            pen = self._pens[role]
+            pen.setColor(QColor(self.style.color(role)))
+            self._items[role][1].setPen(pen)
+            self._fills[role].setBrush(self.style.fill_color(role))
+            self._apply(role)
+        self._update_timer()
 
     def _advance_ants(self) -> None:
         self._dash_offset = (self._dash_offset + _ANT_STEP) % (2 * _DASH)
@@ -283,7 +354,7 @@ class SelectionOutlines(QObject):
             self._put(RESULT, None)
             return
         wait = self._ready_at - time.monotonic()
-        if wait > 0 and self._items[RESULT][1].isVisible():
+        if wait > 0 and self._active[RESULT]:
             self._catch_up.start(int(wait * 1000) + 1)  # keep the last picture; one more update once the pause is over
             return
         started = time.monotonic()

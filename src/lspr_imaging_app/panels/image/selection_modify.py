@@ -33,14 +33,16 @@ from ...selection import AreaSelectionModule
 from ...selection.area_selection_module import REPLACE
 from ..mask_tool_settings import push_tool_settings
 from ..ribbon_icon_size import ICON_SIZE
+from .selection_menu_icons import FILL_HOLES_ICON, INVERT_ICON
 
-# (operation, menu text, icon, what it does). The icons are the old Morphology tool's: the maintainer knows them from the stable app.
+# (operation, menu text, icon, what it does). The first four icons are the old Morphology tool's: the maintainer knows them from the stable app;
+# Fill holes and Invert (2026-11-16) have a new one (`selection_menu_icons.py`).
 OPERATIONS: tuple[tuple[str, str, str | None, str], ...] = (
     ("dilate", "Grow", "arrows-maximize", "Grow the selection by the radius."),
     ("erode", "Shrink", "arrows-minimize", "Shrink the selection by the radius."),
     ("open", "Open", "book", "Shrink then grow: removes small isolated specks."),
     ("close", "Close", "book-2", "Grow then shrink: fills small gaps and notches."),
-    ("fill_holes", "Fill holes", None, "Fill every hole inside the selection (a ring becomes a disk)."),
+    ("fill_holes", "Fill holes", FILL_HOLES_ICON, "Fill every hole inside the selection (a ring becomes a disk)."),
 )
 _LABEL = {operation: text for operation, text, _icon, _tip in OPERATIONS}
 
@@ -98,6 +100,7 @@ class ModifySelectionMenu(QMenu):
         for operation, _text, icon, _tip in OPERATIONS:
             if icon is not None:
                 self.actions_by_operation[operation].setIcon(load_tabler_icon(icon, color=color, size=ICON_SIZE * 2, stroke_width=2.1))
+        self.invert_action.setIcon(load_tabler_icon(INVERT_ICON, color=color, size=ICON_SIZE * 2, stroke_width=2.1))
 
     def _refresh_enabled(self) -> None:
         on = self._selection.has_selection()

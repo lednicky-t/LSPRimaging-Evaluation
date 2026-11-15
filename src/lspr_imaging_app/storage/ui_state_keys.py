@@ -105,6 +105,17 @@ IMAGE_MASK_EDIT_PREVIEW = UiKey("image/mask_edit_preview", True, bool)  # the ey
 IMAGE_SCALE_BAR_COLOR = UiKey("image/scale_bar_color", None, str)
 SELECTION_COMBINE_MODE = UiKey("selection/combine_mode", "replace", str)  # the selection toolbar's mode button: replace / add / subtract / intersect
 IMAGE_ROI_LABELS = UiKey("image/roi_labels", False, bool)
+# The selection toolbar's View pop-up (panels/image/selection_style.py): per outline role ("past" / "present" / "result", the names of
+# selection_palette.py: storage may not import panels) a colour (None = the palette's), a fill step (0 = no fill) and whether the border (the
+# crawling dashes) is drawn at all (2026-11-16: with every border off nothing animates).
+SELECTION_STYLE_KEYS = {
+    role: {
+        "color": UiKey(f"selection/{role}_color", None, str),
+        "fill": UiKey(f"selection/{role}_fill_step", 0, int),
+        "border": UiKey(f"selection/{role}_border", True, bool),
+    }
+    for role in ("past", "present", "result")
+}
 ROI_OVERLAY_KEYS = {
     kind: {
         "visible": UiKey(f"image/roi_{kind}_visible", True, bool),
@@ -211,6 +222,7 @@ HAND_WIRED_KEYS: tuple[UiKey, ...] = (
     IMAGE_SCALE_BAR_COLOR, IMAGE_ROI_LABELS, SELECTION_COMBINE_MODE,
     IMAGE_OVERLAY_CACHE_MB, IMAGE_GPU_DRAWING, RI_WAVELENGTH_NM, RI_AGE_WARNING_DAYS, DISPLAY_RESOLUTION, PERF_MODE, PERF_MANUAL_WORKERS, PERF_RESERVED_CORES, PERF_LOW_PRIORITY, ANALYSIS_MODE,
     *(key for keys_for_kind in ROI_OVERLAY_KEYS.values() for key in keys_for_kind.values()),
+    *(key for keys_for_role in SELECTION_STYLE_KEYS.values() for key in keys_for_role.values()),
     CUBE_DISPLAY_MODE, MASK_SCOPE, ROI_SCOPE, ROI_ROW_VISIBLE, ROI_ROW_SELECTED_ONLY, MASK_ROWS_VISIBLE, EXPORT_SHARD,
     *ARRAY_KEYS.values(), *SLIDER_COLOR_KEYS.values(),
 )
