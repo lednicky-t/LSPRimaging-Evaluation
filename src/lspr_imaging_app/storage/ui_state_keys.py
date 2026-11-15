@@ -103,6 +103,7 @@ IMAGE_CURSOR_READOUT = UiKey("image/cursor_readout", False, bool)
 IMAGE_MASK_EDIT_TOOL = UiKey("image/mask_edit_tool", None, str)  # a `MaskEditTool` value
 IMAGE_MASK_EDIT_PREVIEW = UiKey("image/mask_edit_preview", True, bool)  # the eye toggle of the Mask tab's edit-preview tint
 IMAGE_SCALE_BAR_COLOR = UiKey("image/scale_bar_color", None, str)
+SELECTION_COMBINE_MODE = UiKey("selection/combine_mode", "replace", str)  # the selection toolbar's mode button: replace / add / subtract / intersect
 IMAGE_ROI_LABELS = UiKey("image/roi_labels", False, bool)
 ROI_OVERLAY_KEYS = {
     kind: {
@@ -207,7 +208,7 @@ ARRAY_KEYS = {  # ROIs tab, "Array" group (panels/image/array_controls.py); leng
 }
 HAND_WIRED_KEYS: tuple[UiKey, ...] = (
     HISTOGRAM_CURSOR_READOUT, HISTOGRAM_CURVE_STYLES, IMAGE_CURSOR_READOUT, IMAGE_MASK_EDIT_TOOL, IMAGE_MASK_EDIT_PREVIEW,
-    IMAGE_SCALE_BAR_COLOR, IMAGE_ROI_LABELS,
+    IMAGE_SCALE_BAR_COLOR, IMAGE_ROI_LABELS, SELECTION_COMBINE_MODE,
     IMAGE_OVERLAY_CACHE_MB, IMAGE_GPU_DRAWING, RI_WAVELENGTH_NM, RI_AGE_WARNING_DAYS, DISPLAY_RESOLUTION, PERF_MODE, PERF_MANUAL_WORKERS, PERF_RESERVED_CORES, PERF_LOW_PRIORITY, ANALYSIS_MODE,
     *(key for keys_for_kind in ROI_OVERLAY_KEYS.values() for key in keys_for_kind.values()),
     CUBE_DISPLAY_MODE, MASK_SCOPE, ROI_SCOPE, ROI_ROW_VISIBLE, ROI_ROW_SELECTED_ONLY, MASK_ROWS_VISIBLE, EXPORT_SHARD,

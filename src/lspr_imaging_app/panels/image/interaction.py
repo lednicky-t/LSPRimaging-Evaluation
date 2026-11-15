@@ -16,7 +16,7 @@ view, the modules, the four tools, and three small callbacks (`image_shape`,
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, Protocol
 
 import pyqtgraph as pg
@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import QGraphicsView, QInputDialog, QWidget
 from ...image_tools import ActiveToolModule, ImageTool
 from ...roi import RoiToolbox
 from ...selection import AreaSelectionMode, AreaSelectionModule, SelectionModule
-from ...selection.area_selection_module import ADD, REPLACE, SUBTRACT
+from ...selection.area_selection_module import ADD, INTERSECT, REPLACE, VALUE_MODES, how_for_keys
 from .area_selection_tool import AreaSelectionTool
 from .context_menu import show_tool_context_menu
 from .crop_tool import CropTool
@@ -62,6 +62,8 @@ shape is the only hint that an edge/corner/interior is grabbable."""
 
 
 SELECT_ROIS_IN_SELECTION = "Select ROIs in selection"
+LOCK_TO_SELECTION = "Lock to selection"  # 2026-11-15: the selection becomes the fence (`AreaSelectionModule.lock_selection`)
+UNLOCK = "Unlock"
 """The selection tools' right-click entry: the ROIs inside or partly inside the area selection become selected."""
 
 _NO_CURSOR_YET = object()
@@ -99,7 +101,10 @@ class CanvasInteraction:
         erase_at: Callable[[float, float], object] | None = None,
         wand_click: Callable[[float, float, str], object] | None = None,
         rois_touching: Callable[[Any], set[int]] | None = None,
-        wand_adjust: Callable[[Any], bool] | None = None,
+        drag_adjusters: Mapping[AreaSelectionMode, Callable[[Any], bool]] | None = None,
+        value_click: Callable[[AreaSelectionMode, str], object] | None = None,
+        lock_to_selection: Callable[[], None] | None = None,
+        unlock: Callable[[], None] | None = None,
     ) -> None:
         self._plot = plot
         self._view = view
@@ -123,7 +128,11 @@ class CanvasInteraction:
         self._erase_at = erase_at
         self._wand_click = wand_click  # the wand's click: (x, y, "replace" | "add" | "subtract")
         self._rois_touching = rois_touching  # display-space bool mask -> ids of the ROIs overlapping it
-        self._wand_adjust = wand_adjust  # a right-button drag event -> sets the wand's threshold and Grow (`wand_drag.py`)
+        # armed tool -> its right-button drag handler (a drag event -> the tool's numbers: `tool_drag.py`, `wand_drag.py`)
+        self._drag_adjusters = dict(drag_adjusters or {})
+        self._value_click = value_click  # (armed select-by-value tool, how): a click on the image runs its method
+        self._lock_to_selection = lock_to_selection  # the selection becomes the lock (the panel says so in the status bar)
+        self._unlock = unlock
         self._eraser_cursor = False  # whether the cursor on the canvas is the Eraser's cross
         self._roi_cursor: Qt.CursorShape | None | object = _NO_CURSOR_YET  # what the ROI hover last set
 
@@ -157,7 +166,18 @@ class CanvasInteraction:
             self._roi_cursor = _NO_CURSOR_YET
             self._set_view_cursor(None)
         tool = self._active_tool.active()
-        if (tool is None and self._eraser_armed()) or self._wand_armed():
+        if self._brush_armed():
+            # The brush ring follows the mouse over the image (the stamp's size); the cross cursor is dropped, the ring is the cursor.
+            if self._in_view(scene_pos):
+                point = self._plot.vb.mapSceneToView(scene_pos)
+                self._area_tool.show_brush_cursor(float(point.x()), float(point.y()))
+                self._set_view_cursor(Qt.CursorShape.BlankCursor)
+                self._eraser_cursor = True
+            else:
+                self._area_tool.hide_brush_cursor()
+            return
+        self._area_tool.hide_brush_cursor()
+        if (tool is None and self._eraser_armed()) or self._wand_armed() or self._value_armed():
             # A cross over the image: "click a mask pixel" / "click a feature". Set when the mouse moves, dropped when it
             # stops being armed.
             cross = self._in_view(scene_pos)
@@ -201,11 +221,12 @@ class CanvasInteraction:
         except AttributeError:  # pragma: no cover - defensive against pyqtgraph versions
             return
         button = getattr(event, "button", lambda: Qt.MouseButton.LeftButton)()
+        modifiers = getattr(event, "modifiers", lambda: Qt.KeyboardModifier.NoModifier)()
         handlers = {
             ImageTool.ROTATE: self._click_rotate,
             ImageTool.MEASURE: self._click_measure,
             ImageTool.CROP: self._click_crop,
-            ImageTool.SELECT_AREA: self._click_select_area,
+            ImageTool.SELECT_AREA: lambda pos, btn: self._click_select_area(pos, btn, modifiers),
             ImageTool.ADD_ROI: self._click_add_roi,
         }
         tool = self._active_tool.active()
@@ -248,10 +269,35 @@ class CanvasInteraction:
         if button == Qt.MouseButton.RightButton and self._in_view(scene_pos):
             self._show_crop_context_menu(scene_pos)
 
-    def _click_select_area(self, scene_pos: object, button: object) -> None:
-        # The drag draws (`_on_select_area_drag`); only the menu is a click.
+    def _click_select_area(self, scene_pos: object, button: object, modifiers: object = Qt.KeyboardModifier.NoModifier) -> None:
+        # The drag draws (`_on_select_area_drag`); only the menu is a click - and, for the brush, one stamp, for a select-by-value tool its run.
+        # `modifiers` are the keys held at the click (Shift / Alt / Shift+Alt: how the result combines).
         if button == Qt.MouseButton.RightButton and self._in_view(scene_pos):
             self._show_select_area_context_menu(scene_pos)
+        elif button == Qt.MouseButton.LeftButton and self._brush_armed() and self._in_view(scene_pos):
+            point = self._plot.vb.mapSceneToView(scene_pos)
+            self._area_tool.stamp_at(float(point.x()), float(point.y()), self._brush_how(modifiers))
+        elif button == Qt.MouseButton.LeftButton and self._value_armed() and self._in_view(scene_pos):
+            mode = self._area_selection.mode()
+            assert self._value_click is not None
+            self._value_click(mode, self.how_for(modifiers))
+
+    def _value_armed(self) -> bool:
+        """A select-by-value tool (Histogram range, Threshold, Local contrast) is armed: a click anywhere on the image runs it."""
+        return (
+            self._value_click is not None
+            and self._active_tool.active() is ImageTool.SELECT_AREA
+            and self._area_selection.mode() in VALUE_MODES
+        )
+
+    def _brush_armed(self) -> bool:
+        return self._active_tool.active() is ImageTool.SELECT_AREA and self._area_selection.mode() is AreaSelectionMode.BRUSH
+
+    def _brush_how(self, modifiers: object) -> str:
+        """The brush paints (Add) or, with Alt or the Subtract mode, erases (Subtract); Replace and Intersect make no sense for a
+        stroke, so they paint too (Shift+Alt, which is Intersect elsewhere, paints)."""
+        how = self.how_for(modifiers)
+        return how if how != REPLACE and how != INTERSECT else ADD
 
     def _wand_armed(self) -> bool:
         return (
@@ -260,18 +306,21 @@ class CanvasInteraction:
             and self._area_selection.mode() is AreaSelectionMode.WAND
         )
 
+    def how_for(self, modifiers: object) -> str:
+        """How a selection gesture combines with the selection: Shift adds, Alt takes away, Shift+Alt intersects (the
+        Photoshop keys; rows of `shortcuts.py`); with no key, the sticky mode of the toolbar's mode button (Replace /
+        Add / Subtract / Intersect)."""
+        shift = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)  # type: ignore[operator]
+        alt = bool(modifiers & Qt.KeyboardModifier.AltModifier)  # type: ignore[operator]
+        return how_for_keys(shift, alt, self._area_selection.combine_mode())
+
     def _click_wand(self, event: object, scene_pos: object) -> None:
-        """The wand: a left click selects the feature under it; Shift adds to the selection, Alt takes away (the
-        Photoshop keys; the gestures are rows of `shortcuts.py`)."""
+        """The wand: a left click selects the feature under it, combined as the mode button says (Shift adds, Alt takes
+        away, Shift+Alt intersects: `how_for`)."""
         if not self._in_view(scene_pos):
             return
         modifiers = getattr(event, "modifiers", lambda: Qt.KeyboardModifier.NoModifier)()
-        if modifiers & Qt.KeyboardModifier.AltModifier:
-            how = SUBTRACT
-        elif modifiers & Qt.KeyboardModifier.ShiftModifier:
-            how = ADD
-        else:
-            how = REPLACE
+        how = self.how_for(modifiers)
         point = self._plot.vb.mapSceneToView(scene_pos)
         assert self._wand_click is not None
         self._wand_click(float(point.x()), float(point.y()), how)
@@ -283,6 +332,10 @@ class CanvasInteraction:
             p = self._plot.vb.mapSceneToView(scene_pos)
             if self.in_selection(float(p.x()), float(p.y())):
                 self._roi_toolbox.add_roi(float(p.x()), float(p.y()))
+            elif self._area_selection.has_lock() and not self._area_selection.has_selection():
+                self._notify("ROI not added: it is outside the lock (Unlock in the selection toolbar to place it there).")
+            else:
+                self._notify("ROI not added: it is outside the selection (Deselect to place it anywhere).")
         elif button == Qt.MouseButton.RightButton:
             self._show_add_roi_context_menu(scene_pos)
 
@@ -435,11 +488,19 @@ class CanvasInteraction:
         ROIs inside or partly inside it become the ROI selection), "Exit tool" (leaves the draw tool, keeps the
         selection), plus Invert/Deselect inside it."""
         can_pick = self._rois_touching is not None and self._area_selection.has_selection()
-        chosen = self._context_menu([(SELECT_ROIS_IN_SELECTION, can_pick), ("Exit tool", True)], scene_pos)
+        chosen = self._context_menu(
+            [
+                (SELECT_ROIS_IN_SELECTION, can_pick),
+                (LOCK_TO_SELECTION, self._area_selection.has_selection() and self._lock_to_selection is not None),
+                (UNLOCK, self._area_selection.has_lock() and self._unlock is not None),
+                ("Exit tool", True),
+            ],
+            scene_pos,
+        )
         if chosen == "Exit tool":
             self._active_tool.set_active(ImageTool.SELECT_AREA, False)
         elif chosen == SELECT_ROIS_IN_SELECTION:
-            self.select_rois_in_selection()
+            self.select_rois_in_selection()  # (Lock / Unlock are handled in `_context_menu`)
 
     def select_rois_in_selection(self) -> None:
         """Make the ROIs inside or partly inside the area selection the ROI selection (replacing it); the count goes to
@@ -470,9 +531,17 @@ class CanvasInteraction:
         entries = list(actions)
         if self._point_in_selection(scene_pos):
             entries += [("Invert selection", True), ("Deselect", True)]
+            if self._lock_to_selection is not None and all(label != LOCK_TO_SELECTION for label, _on in entries):
+                entries.append((LOCK_TO_SELECTION, True))
         if not entries:
             return None
         chosen = show_tool_context_menu(self._menu_parent, entries)
+        if chosen == LOCK_TO_SELECTION and self._lock_to_selection is not None:
+            self._lock_to_selection()
+            return None
+        if chosen == UNLOCK and self._unlock is not None:
+            self._unlock()
+            return None
         if chosen == "Invert selection":
             self._area_selection.invert()
             return None
@@ -495,10 +564,13 @@ class CanvasInteraction:
         )
 
     def on_right_drag(self, ev: Any) -> bool:
-        """`ImageViewBox`'s right-drag handler slot: with the wand armed, holding the right button and moving sets the wand's
-        threshold (sideways) and Grow (up / down), see `wand_drag.py`. Any other tool declines, so the right button
-        stays as it was (a right click still opens the menus)."""
-        return self._wand_adjust is not None and self._wand_armed() and self._wand_adjust(ev)
+        """`ImageViewBox`'s right-drag handler slot: with a selection tool armed, holding the right button and moving changes that tool's numbers
+        (the wand: threshold sideways, Grow up; Threshold / Local contrast: threshold sideways, sigma up; Draw: size sideways: `tool_drag.py`).
+        A tool without numbers declines, so the right button stays as it was (a right click still opens the menus)."""
+        if self._active_tool.active() is not ImageTool.SELECT_AREA:
+            return False
+        adjust = self._drag_adjusters.get(self._area_selection.mode())
+        return adjust is not None and bool(adjust(ev))
 
     def _roi_gestures_enabled(self) -> bool:
         return self._active_tool.active() is None and self._roi_tab_active()
@@ -568,7 +640,14 @@ class CanvasInteraction:
         point = self._plot.vb.mapSceneToView(ev.scenePos())
         x, y = float(point.x()), float(point.y())
         if ev.isStart():
-            return self._area_tool.begin_gesture(x, y)
+            if self._brush_armed():
+                # pyqtgraph reports a drag only after a few pixels: begin where the button went down, then go to where it is now
+                down = self._plot.vb.mapSceneToView(ev.buttonDownScenePos())
+                started = self._area_tool.begin_gesture(float(down.x()), float(down.y()), self._brush_how(ev.modifiers()))
+                if started:
+                    self._area_tool.update_gesture(x, y)
+                return started
+            return self._area_tool.begin_gesture(x, y, self.how_for(ev.modifiers()))
         if ev.isFinish():
             self._area_tool.end_gesture()
             return True

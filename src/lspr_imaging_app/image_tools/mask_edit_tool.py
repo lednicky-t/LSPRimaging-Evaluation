@@ -18,6 +18,11 @@ which tool is picked, promote this module to `app_rewrite.py`-level
 construction (same move already made for `MaskScopeModule`/
 `HighlightRangeModule`) rather than letting a second copy exist.
 
+**2026-11-15: reduced to two tools.** The Histogram selection, Threshold, Local contrast, Morphology and Draw tools moved into the
+selection toolbar (they make / modify a *selection* now: `panels/image/selection_by_value.py`, `selection_modify.py`, the brush;
+record `docs/selection_lock_and_tool_move_2026-11-15.md`). What stays in the Mask tab's picker acts on the mask itself or is a
+two-stage process: the Feature map and the Eraser. A saved choice of a removed tool is ignored at start-up (`ImagePanel.restore_ui_state`).
+
 Mirrors `mask_scope.py`'s `MaskScope`/`MaskScopeModule` shape exactly - same
 "one tiny shared object" pattern, same "transient interaction state, not
 undoable/persisted" category as `ActiveToolModule`/`MaskScopeModule` (see
@@ -34,29 +39,20 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 
 class MaskEditTool(enum.Enum):
-    HISTOGRAM_SELECTION = "histogram_selection"
-    THRESHOLD = "threshold"
-    LOCAL_CONTRAST = "local_contrast"
-    MORPHOLOGY = "morphology"
     # 2026-11-04: the Feature map (every small feature of the image, no ROIs; docs/roi_feature_detection_2026-10-29.md s.10-11). It
     # replaced the ROI features tool of 2026-10-29; the stored value stays "roi_features" so a remembered tool choice still loads.
     FEATURE_MAP = "roi_features"
-    DRAW = "draw"
     ERASER = "eraser"  # added 2026-10-29: a click on the image removes the connected blob of mask pixels under it
 
 
 class MaskEditToolModule(QObject):
-    """Holds the currently-picked `MaskEditTool` and announces changes.
-    Defaults to `HISTOGRAM_SELECTION` - the one tool kind with a fully wired
-    Add/Subtract action (`HistogramHighlightMaskEditor`) at the time this was
-    built, so the picker opens on something that actually works rather than
-    on a tool whose panel is still settings-only."""
+    """Holds the currently-picked `MaskEditTool` and announces changes. Defaults to `FEATURE_MAP` (the first entry of the picker)."""
 
     tool_changed = pyqtSignal(object)  # emits the new MaskEditTool
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
-        self._tool = MaskEditTool.HISTOGRAM_SELECTION
+        self._tool = MaskEditTool.FEATURE_MAP
 
     def tool(self) -> MaskEditTool:
         return self._tool

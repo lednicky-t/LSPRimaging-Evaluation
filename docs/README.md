@@ -94,6 +94,8 @@ Mask tab tools, mask rows, and the transient scan.
 - [`mask_rows_2026-10-16.md`](mask_rows_2026-10-16.md): Mask rows under the Cube and wavelength sliders (2026-10-16)
 - [`mask_edit_preview_2026-10-29.md`](mask_edit_preview_2026-10-29.md): Mask-tab edit preview, and Threshold / Local contrast Add / Subtract (2026-10-29)
 - [`mask_eraser_2026-10-29.md`](mask_eraser_2026-10-29.md): Mask tab: Eraser (2026-10-29)
+- [`image_panel_split_investigation_2026-11-15.md`](image_panel_split_investigation_2026-11-15.md): can `panels/image/panel.py` be split, simplified, cleaned up? measurements, five seams ranked, what was done (2026-11-15)
+- [`selection_lock_and_tool_move_2026-11-15.md`](selection_lock_and_tool_move_2026-11-15.md): Selection lock (one level, dimmed outside), Replace / Add / Subtract / Intersect mode button, and the Mask tab's Histogram / Threshold / Local contrast / Morphology / Draw tools moved into the selection toolbar (2026-11-15)
 - [`selection_wand_2026-11-14.md`](selection_wand_2026-11-14.md): Selection toolbar beside the image, magic wand (3 methods), Mask tab Add / Subtract selection, undoable mask edits (2026-11-14)
 - [`area_selection_tool_2026-10-03.md`](area_selection_tool_2026-10-03.md): Area selection tool (rectangle / lasso) - 2026-10-03
 - [`auto_transient_mask_exploration_2026-10-16.md`](auto_transient_mask_exploration_2026-10-16.md): Auto mode for the Mask tab: finding flowing particles ("transients")

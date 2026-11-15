@@ -230,3 +230,9 @@ def merge_mask_candidate(current: np.ndarray, candidate: np.ndarray, *, subtract
     if subtract:
         return np.logical_and(current, ~candidate)
     return np.logical_or(current, candidate)
+
+
+def fill_mask_holes(mask: np.ndarray) -> np.ndarray:
+    """`mask` with every hole filled: the background pixels that cannot reach the border of the array through background pixels
+    (4-connected) become part of the mask (a ring becomes a disk). Non-mutating. 2026-11-15: for the selection's Fill holes."""
+    return ndimage.binary_fill_holes(np.asarray(mask, dtype=bool))

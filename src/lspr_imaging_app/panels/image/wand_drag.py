@@ -21,16 +21,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from PyQt6.QtCore import QPoint, Qt
 from PyQt6.QtWidgets import QGraphicsView, QLabel
 
-from lspr_ui import get_active_theme
-
 from .selection_toolbar import WandSettingsForm
+from .tool_drag import DragReadout
 
 PX_PER_DOUBLING = 80.0  # sideways screen pixels that double (or halve) the threshold
 PX_PER_GROW_STEP = 6.0  # upward screen pixels that add one pixel of Grow
-_READOUT_OFFSET = QPoint(18, 18)
 
 
 def dragged_threshold(start: float, dx: float, grows_with_value: bool, low: float, high: float) -> float:
@@ -55,13 +52,11 @@ class WandDragAdjuster:
         self._form = form
         self._view = view
         self._start: tuple[float, int] | None = None  # (threshold, grow) when the button went down
-        self._readout = QLabel(view.viewport())  # a child of the viewport: never a stray top-level window
-        self._readout.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)  # never takes the drag's events
-        self._readout.hide()
+        self._readout = DragReadout(view)  # shared with the other tools' right-drag (`tool_drag.py`)
 
     @property
     def readout(self) -> QLabel:
-        return self._readout
+        return self._readout.label
 
     def on_right_drag(self, ev: Any) -> bool:
         """One pyqtgraph drag event of the right button. Always claims it (returns `True`)."""
@@ -83,17 +78,6 @@ class WandDragAdjuster:
 
     def _show_readout(self, scene_pos: Any) -> None:
         box = self._form.threshold_box()
-        theme = get_active_theme()
-        self._readout.setStyleSheet(
-            f"QLabel {{ background: {theme.control_bg}; color: {theme.text_primary}; border: 1px solid {theme.control_border};"
-            " border-radius: 3px; padding: 2px 6px; }"
+        self._readout.show(
+            f"{self._form.threshold_caption()} {box.value():.1f}{box.suffix()}   ·   Grow {self._form.grow.value()}{self._form.grow.suffix()}", scene_pos
         )
-        self._readout.setText(f"{self._form.threshold_caption()} {box.value():.1f}{box.suffix()}   ·   Grow {self._form.grow.value()}{self._form.grow.suffix()}")
-        self._readout.adjustSize()
-        point = self._view.mapFromScene(scene_pos) + _READOUT_OFFSET
-        viewport = self._view.viewport()
-        x = min(max(point.x(), 0), max(viewport.width() - self._readout.width(), 0))
-        y = min(max(point.y(), 0), max(viewport.height() - self._readout.height(), 0))
-        self._readout.move(x, y)
-        self._readout.show()
-        self._readout.raise_()

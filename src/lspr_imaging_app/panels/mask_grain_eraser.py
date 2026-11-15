@@ -78,7 +78,8 @@ class MaskGrainEraser:
         if not (0 <= row < shape[0] and 0 <= col < shape[1]):
             return 0  # off the image: not a click on the mask
         if not self._image_panel.area_selection().contains(x, y, shape):
-            self._status("Eraser: the click is outside the area selection, nothing was erased.")
+            where = "area selection" if self._image_panel.area_selection().has_selection() else "lock"
+            self._status(f"Eraser: the click is outside the {where}, nothing was erased.")
             return 0
         base_mask = resolve_mask_edit_base(self._mask, self._chromatic, frame, raw_shape)
         settings = self._geometry.settings()
@@ -91,7 +92,7 @@ class MaskGrainEraser:
             self._status("Eraser: there is no mask pixel under the click, nothing was erased.")
             return 0
         candidate = area_selection_to_raw(grain, raw_shape, settings)
-        region = self._image_panel.selection_raw_mask(raw_shape)
+        region = self._image_panel.selection_regions.selection_raw_mask(raw_shape)
         if region is not None:
             candidate = candidate & region
         removed = int(np.count_nonzero(candidate & base_mask))

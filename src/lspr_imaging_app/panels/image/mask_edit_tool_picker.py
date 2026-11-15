@@ -1,11 +1,9 @@
 """The "Edit" group's tool picker (2026-10-02, maintainer request):
 "something like dropdown menu but without scroll feature... a pickup menu"
 offering the `MaskEditTool` kinds (five at first, seven since 2026-10-29's ROI
-features and Eraser). A plain `QToolButton` +
-`QMenu(InstantPopup)` *is* exactly that in Qt terms - a menu with seven
-entries never needs to scroll, so no extra "no-scroll" handling is needed;
-asking for one is really asking not to reach for a scrollable list widget
-(`QComboBox`) for a five-item choice.
+features and Eraser, two since 2026-11-15, when the others moved into the selection toolbar). A plain `QToolButton` +
+`QMenu(InstantPopup)` *is* exactly that in Qt terms - a short menu never needs to scroll, so no extra "no-scroll" handling is needed;
+asking for one is really asking not to reach for a scrollable list widget (`QComboBox`).
 
 The button's own face always shows the currently-picked tool's icon (the
 same "icon face reflects current state" convention `MaskScopeToggle`'s
@@ -32,16 +30,9 @@ from . import mask_edit_tool_icons as icons
 from ..ribbon_icon_size import BUTTON_SIZE as _BUTTON_SIZE  # the ribbon's one icon-button size
 from .general_group import ICON_SIZE as _ICON_SIZE
 
-# Ordered exactly as the maintainer listed them. Each entry: the icon
-# function (mask_edit_tool_icons.py) and the label shown in the menu and as
-# the button's tooltip.
+# Each entry: the icon function (mask_edit_tool_icons.py) and the label shown in the menu and as the button's tooltip.
 _TOOL_SPECS: tuple[tuple[MaskEditTool, str, str], ...] = (
-    (MaskEditTool.HISTOGRAM_SELECTION, "Histogram selection", "histogram_selection_icon"),
-    (MaskEditTool.THRESHOLD, "Threshold", "threshold_icon"),
-    (MaskEditTool.LOCAL_CONTRAST, "Local contrast", "local_contrast_icon"),
-    (MaskEditTool.MORPHOLOGY, "Morphology", "morphology_icon"),
     (MaskEditTool.FEATURE_MAP, "Feature map", "roi_features_icon"),
-    (MaskEditTool.DRAW, "Draw", "draw_icon"),
     (MaskEditTool.ERASER, "Eraser", "eraser_icon"),
 )
 
@@ -61,7 +52,7 @@ def _label_for(tool: MaskEditTool) -> str:
 
 
 class MaskEditToolPicker(QToolButton):
-    """A seven-option icon picker for `MaskEditToolModule` - the Edit group's
+    """A two-option icon picker for `MaskEditToolModule` - the Edit group's
     "which mask-editing tool is active" selector."""
 
     def __init__(self, tool_module: MaskEditToolModule, parent: QWidget | None = None) -> None:

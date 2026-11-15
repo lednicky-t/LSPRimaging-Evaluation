@@ -11,7 +11,7 @@ the merge is dropped, with a message, if the frame on screen changed meanwhile (
 the old app did the same).
 
 **Area selection**: pixels outside it are never touched, as for Morphology and the Histogram selection - the candidate is cut to the
-selection (raw space, `ImagePanel.selection_raw_mask`) before it is merged.
+selection (raw space, `ImagePanel.selection_regions.selection_raw_mask`) before it is merged.
 
 The mask in effect at the frame is resolved when the pixels arrive, not when the button is pressed, so a stroke made in between is
 kept.
@@ -105,7 +105,7 @@ class MaskCandidateEditor:
         if candidate.shape != tuple(raw_shape):
             self._status(f"{label} mask not applied: the image size changed.")
             return
-        region = self._image_panel.selection_raw_mask(raw_shape)
+        region = self._image_panel.selection_regions.selection_raw_mask(raw_shape)
         if region is not None:
             candidate = candidate & region
         base_mask = resolve_mask_edit_base(self._mask, self._chromatic, frame, raw_shape)

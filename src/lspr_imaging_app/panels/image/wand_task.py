@@ -12,6 +12,10 @@ background, gradient: 0.1-1 s on a 1.2 MP plane) is cached for the image on scre
 second click on the same image costs only the region itself (20-60 ms). At most one computation runs; a click made
 meanwhile waits in a single slot (a newer click replaces it).
 
+**The lock (2026-11-15)**: the wand looks at the whole image, then the result is cut to the lock (the module does it), so a feature
+inside a lock is the same as without one. A click outside the lock does nothing (the status bar says so), and a feature that lies
+wholly outside it selects nothing.
+
 **Stale results**: a result is dropped, with a message, if the image size changed while it was computed (the selection
 is in that image's pixels). A result for the same size but an older frame is still used: the user clicked on what was
 on screen then.
@@ -80,6 +84,10 @@ class WandTask(QObject):
         col, row = int(np.floor(x)), int(np.floor(y))
         if not (0 <= row < self._image.shape[0] and 0 <= col < self._image.shape[1]):
             return  # off the image: not a click on anything
+        fence = self._selection.lock_mask(self._image.shape)
+        if fence is not None and not fence[row, col]:
+            self._status("Wand: that point is outside the lock (Unlock in the selection toolbar to select there).")
+            return
         if self._running:
             self._pending = (row, col, how)
             return
@@ -124,9 +132,14 @@ class WandTask(QObject):
         elif self._image is None or tuple(self._image.shape) != tuple(shape):
             self._status("Wand: the image size changed while it was working; click again.")
         else:
-            self._selection.combine_region(result.region, how)
-            verb = {"add": "added", "subtract": "took away"}.get(how, "selected")
-            self._status(f"{result.message.split(':')[0]}: {verb} {result.area_px:,} px.")
+            fence = self._selection.lock_mask(shape)
+            area = result.area_px if fence is None else int(np.count_nonzero(result.region & fence))
+            if area == 0:
+                self._status("Wand: the feature lies outside the lock (Unlock in the selection toolbar to select there).")
+            else:
+                self._selection.combine_region(result.region, how)  # cut to the lock inside
+                verb = {"add": "added", "subtract": "took away", "intersect": "kept the overlap of"}.get(how, "selected")
+                self._status(f"{result.message.split(':')[0]}: {verb} {area:,} px.")
         pending, self._pending = self._pending, None
         if pending is not None and self._image is not None:
             self._start(*pending)

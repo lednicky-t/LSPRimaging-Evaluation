@@ -115,7 +115,7 @@ from ...analysis.roi_tuning_module import TuningView
 from ...image_tools.chromatic.affine import apply_affine_to_points
 from ...image_tools.geometry.model import CropDefinition
 from ...diagnostics.thread_times import thread_cpu_times
-from ...image_tools.preprocess import area_selection_to_raw, resolve_external_mask
+from ...image_tools.preprocess import resolve_external_mask
 from ...roi import RoiToolbox
 from .no_data import no_data_overlay_rgba
 from ...selection import (
@@ -150,15 +150,15 @@ from .crop_tool import CropTool
 from .data_axis_slider import DataAxisSlider
 from .frame_tools import FrameToolsState, FrameToolsWidget
 from .general_group import style_general_icon_button
-from .selection_toolbar import SelectionToolbar
-from .wand_drag import WandDragAdjuster
-from .wand_task import WandTask
+from .selection_regions import SelectionRegions
+from .selection_tools import SelectionTools
 from .gpu_view import apply_gpu_drawing, mark_opaque
 from .paint_census import PaintCensus
 from .play_repaint import PlayRepaint
 from .image_controls import ImageViewBox, controls_text
 from .interaction import CanvasInteraction
 from .edit_preview_layer import EditPreviewLayer
+from .lock_layer import LockLayer
 from .mask_tab import MaskTab
 from .measure_controls import MeasureCalibrationControls
 from .measure_line_tool import MeasureLineTool
@@ -497,12 +497,13 @@ class ImagePanel(QWidget):
         self._calm_histogram = False
         self._roi_revision = 0  # bumped by every ROI-toolbox change; part of the ROI overlay's "unchanged" test
         self._roi_draw_key: tuple | None = None
-        self._drag_roi_id: int | None = None
         # (height, width) of the last successfully rendered plane - the
         # chunk-grid preview needs real pixel dimensions and only this
         # panel's own render result has them (`DatasetModule` holds no
         # per-frame shape query - see its query-surface docstring).
         self._last_image_shape: tuple[int, int] | None = None
+        # The selection / lock as raw-space regions for the mask tools, and the Lock / Unlock commands (`selection_regions.py`).
+        self.selection_regions = SelectionRegions(self._area_selection, self._geometry, lambda: self._last_image_shape, self._on_tool_status)
 
         self._build_ui()
 
@@ -608,7 +609,7 @@ class ImagePanel(QWidget):
         self._mask_tab.scan_controls.bind_ui_state(store)
         self._mask_tab.auto_controls.bind_ui_state(store)
         self._mask_tab.features_panel.bind_ui_state(store)
-        self._selection_toolbar.wand_form.bind_ui_state(store)
+        self._selection_tools.toolbar.bind_ui_state(store)
         self._on_group_labels_changed()
         saved_scope = store.get(ROI_SCOPE.key)
         if saved_scope in ("persistent", "individual"):
@@ -755,6 +756,12 @@ class ImagePanel(QWidget):
             self._plot, self._geometry, self._area_selection,
             hidden=lambda: self._active_tool.active() in _PREVIEW_TOOLS,
         )
+        # The selection lock (2026-11-15): everything outside it dimmed, its border a solid line. Above the tints, below the ROI curves.
+        self._lock_layer = LockLayer(
+            self._plot, self._area_selection,
+            hidden=lambda: self._active_tool.active() in _PREVIEW_TOOLS,
+            image_shape=lambda: self._last_image_shape,
+        )
 
         # The ROI circles, reference rings, selection highlight and labels (roi_overlay.py).
         # How they are drawn is the "ROIs" ribbon tab (`roi_overlay_controls.py`); display-only:
@@ -822,7 +829,7 @@ class ImagePanel(QWidget):
         # is the first tool to claim them - declines (returns False) unless
         # it is the active tool, so every other case is untouched.
         self._plot.vb.set_left_drag_handler(self._on_left_drag_event)
-        self._plot.vb.set_right_drag_handler(lambda ev: self._interaction.on_right_drag(ev))  # the wand's threshold / Grow (wand_drag.py)
+        self._plot.vb.set_right_drag_handler(lambda ev: self._interaction.on_right_drag(ev))  # the armed tool's numbers (tool_drag.py)
 
         # A real QWidget (QSpinBox/QToolButton need actual input, unlike a
         # painted overlay item - see crop_size_controls.py), parented to the
@@ -859,7 +866,10 @@ class ImagePanel(QWidget):
 
         # Area selection (2026-10-03): drag gesture + marching-ants outline.
         # The state is `AreaSelectionModule`'s; this only draws/forwards.
-        self._area_tool = AreaSelectionTool(self._plot, self._area_selection, parent=self)
+        self._area_tool = AreaSelectionTool(
+            self._plot, self._area_selection, parent=self, notify=self._on_tool_status,
+            brush_diameter=lambda: float(self._mask.settings().brush_size_px),
+        )
 
         # Cursor readout text lives on the canvas, top-left (maintainer,
         # 2026-10-03) - the toggle itself sits in the "General" group (cursor_readout.py).
@@ -896,21 +906,19 @@ class ImagePanel(QWidget):
         self._build_top_bar(view_content, image_tools_content, mask_content, roi_content)
         self._build_navigation_bar()
 
-        # The selection toolbar (2026-11-14): Rectangle / Lasso / Wand beside the image; the wand runs off the GUI thread.
+        # The selection toolbar beside the image, its tools and their right-drag gestures (`selection_tools.py`).
         self._view.ci.setContentsMargins(0, 9, 9, 9)  # no pyqtgraph margin between the toolbar and the image (2026-11-15)
-        self._selection_toolbar = SelectionToolbar(self._area_selection, self._active_tool, self)
-        self._wand = WandTask(self._area_selection, self._selection_toolbar.wand_form.settings, self._on_tool_status, self)
-        self._wand_drag = WandDragAdjuster(self._selection_toolbar.wand_form, self._view)
-        self._wand.busy_changed.connect(self._selection_toolbar.set_wand_busy)
-        self._area_selection.undo_skipped.connect(self._on_tool_status)  # an undo meeting a changed pixel grid says why it did nothing
-        self.image_rendered.connect(lambda image, _cube, _wavelength: self._wand.set_image(image))
-        self.image_cleared.connect(lambda: self._wand.set_image(None))
+        self._selection_tools = SelectionTools(
+            self, mask=self._mask, geometry=self._geometry, highlight_range=self._highlight_range, preview=self._mask_tab.edit_preview,
+            area_selection=self._area_selection, active_tool=self._active_tool, area_tool=self._area_tool, plot=self._plot, view=self._view,
+            regions=self.selection_regions, image_shape=lambda: self._last_image_shape, status=self._on_tool_status,
+        )
 
         # Canvas column: top bar (built above), then the selection toolbar and the pyqtgraph view side by side.
         canvas_row = QHBoxLayout()
         canvas_row.setContentsMargins(0, 0, 0, 0)
         canvas_row.setSpacing(0)
-        canvas_row.addWidget(self._selection_toolbar)
+        canvas_row.addWidget(self._selection_tools.toolbar)
         canvas_row.addWidget(self._view, 1)
         canvas_column = QVBoxLayout()
         canvas_column.setContentsMargins(0, 0, 0, 0)
@@ -973,7 +981,9 @@ class ImagePanel(QWidget):
             notify=self._on_tool_status,
             eraser_armed=self._eraser_armed,
             erase_at=lambda x, y: self._mask_tab.grain_eraser.erase_at(x, y),
-            wand_click=self._wand.click, rois_touching=self._roi_queries.rois_touching, wand_adjust=self._wand_drag.on_right_drag,
+            wand_click=self._selection_tools.wand.click, rois_touching=self._roi_queries.rois_touching,
+            drag_adjusters=self._selection_tools.drag_adjusters, value_click=self._selection_tools.run_value_tool,
+            lock_to_selection=self.selection_regions.lock_to_selection, unlock=self.selection_regions.unlock_selection,
         )
         scene.sigMouseClicked.connect(self._on_scene_clicked)
         scene.sigMouseMoved.connect(self._on_scene_moved)
@@ -1001,7 +1011,7 @@ class ImagePanel(QWidget):
 
     def _build_mask_tab(self) -> QWidget:
         self._mask_tab = MaskTab(
-            self._mask, self._geometry, self._chromatic, self._dataset, self._highlight_range,
+            self._mask, self._geometry, self._chromatic, self._dataset,
             self._mask_scope, self._mask_tint, self, self,
             events=self._mask_pointers, scan=self._transient_scan, auto=self._mask_auto, export=self._mask_export,
             features=self._feature_map, status=self._on_tool_status, visible_cubes=self._visible_cube_range,
@@ -1515,8 +1525,8 @@ class ImagePanel(QWidget):
             self._tool_ribbon.refresh_theme(get_active_theme())
         if hasattr(self, "_top_drawer"):
             self._top_drawer.refresh_theme()
-        if hasattr(self, "_selection_toolbar"):
-            self._selection_toolbar.refresh_theme(get_active_theme())
+        if hasattr(self, "_selection_tools"):
+            self._selection_tools.toolbar.refresh_theme(get_active_theme())
         if hasattr(self, "_background_tab"):
             self._background_tab.refresh_theme(get_active_theme())
         if hasattr(self, "_analysis_tab"):
@@ -1539,16 +1549,6 @@ class ImagePanel(QWidget):
         """The shared area selection - editors read it from here so each
         front door needs no extra constructor argument."""
         return self._area_selection
-
-    def selection_raw_mask(self, raw_shape: tuple[int, int]) -> np.ndarray | None:
-        """The area selection as a raw-space editable mask (the space mask
-        edits are authored in), or `None` when nothing is selected."""
-        if self._last_image_shape is None:
-            return None
-        region = self._area_selection.mask(self._last_image_shape)
-        if region is None:
-            return None
-        return area_selection_to_raw(region, raw_shape, self._geometry.settings())
 
     def active_ribbon_category(self) -> str:
         return self._tool_ribbon.current_category()
@@ -1846,6 +1846,7 @@ class ImagePanel(QWidget):
             self._current_display_image = None
             self._highlight_tint.item.hide()
             self._edit_preview_layer.refresh()
+            self._lock_layer.refresh()
             return
         cube_index = self._current_cube()
         wavelength_nm = self._current_wavelength()
@@ -1915,6 +1916,7 @@ class ImagePanel(QWidget):
         # `_draw_overlays` already applies to the ROI overlay.
         self._tints.update_mask(authored_mask, geometry, warp_affine, hidden=preview_active)
         self._edit_preview_layer.refresh()  # a geometry change moves where the previewed raw pixels land
+        self._lock_layer.refresh()
         self._playback_stats.note_detail("mask", time.perf_counter() - mask_started)
 
     def _play_config_fields(self) -> dict[str, float | int | bool]:
@@ -2458,6 +2460,7 @@ class ImagePanel(QWidget):
     # -- interaction --------------------------------------------------------
 
     def _on_active_tool_changed(self, tool: ImageTool | None) -> None:
+        self._lock_layer.refresh()  # hidden over Rotate's / Crop's uncropped canvas
         self._rotate_tool.set_active(tool is ImageTool.ROTATE)
         self._crop_tool.set_active(tool is ImageTool.CROP)
         self._measure_tool.set_active(tool is ImageTool.MEASURE)
@@ -2652,14 +2655,8 @@ class ImagePanel(QWidget):
         self.signal_map.hover(scene_pos)  # the value of the ROI under the cursor, while the map is on
 
     def _on_left_drag_event(self, ev: object) -> bool:
+        # (the view box is built before `_interaction` exists, so it is handed this late-binding method)
         return self._interaction.on_left_drag(ev)
-
-
-    def _on_crop_drag_event(self, ev: object) -> bool:
-        return self._interaction.on_crop_drag(ev)
-
-    def _on_measure_drag_event(self, ev: object) -> bool:
-        return self._interaction.on_measure_drag(ev)
 
     def _in_selection(self, x: float, y: float) -> bool:
         """Whether display point (x, y) may be edited under the current area

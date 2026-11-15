@@ -34,19 +34,24 @@ wand has no drag: `begin_gesture` declines while it is the picked mode.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import QObject, QPointF, Qt, QTimer
-from PyQt6.QtGui import QColor, QPainterPath, QPen, QPolygonF
-from PyQt6.QtWidgets import QGraphicsPathItem
+from PyQt6.QtGui import QColor, QPainterPath, QPainterPathStroker, QPen, QPolygonF
+from PyQt6.QtWidgets import QGraphicsEllipseItem, QGraphicsPathItem
+
+from ...image_tools.brush_stroke import stroke_region
 
 from ...selection import AreaSelectionMode, AreaSelectionModule
-from ...selection.area_selection_module import rasterize_polygon
+from ...selection.area_selection_module import ADD, CLICK_MODES, SUBTRACT, REPLACE, rasterize_polygon
 
 _ANT_INTERVAL_MS = 80
 _DASH = 4.0  # dash/gap length, in pen widths (cosmetic width 1 -> screen pixels)
 _Z_VALUE = 60  # above ROI curves and overlay tints
 _MIN_LASSO_STEP = 0.5  # view units; drops sub-pixel jitter from the trail
+_MAX_PREVIEW_POINTS = 200  # a long brush stroke is outlined from at most this many points while it is dragged (the stroke itself uses all)
 
 
 def region_outline(editable: np.ndarray) -> QPainterPath:
@@ -96,13 +101,23 @@ def _ant_pen(color: str, *, dashed: bool) -> QPen:
 class AreaSelectionTool(QObject):
     """Draws the selection outline on *plot* and runs the drag gesture."""
 
-    def __init__(self, plot: pg.PlotItem, selection: AreaSelectionModule, parent: QObject | None = None) -> None:
+    def __init__(
+        self,
+        plot: pg.PlotItem,
+        selection: AreaSelectionModule,
+        parent: QObject | None = None,
+        notify: Callable[[str], None] | None = None,
+        brush_diameter: Callable[[], float] | None = None,
+    ) -> None:
         super().__init__(parent)
         self._plot = plot
         self._selection = selection
+        self._brush_diameter = brush_diameter or (lambda: 10.0)  # image pixels; the selection brush's size (`brush_settings.py`)
+        self._notify = notify or (lambda _text: None)  # the status bar: says why a drag selected nothing
         self._image_shape: tuple[int, int] | None = None
         self._gesture_start: tuple[float, float] | None = None
         self._gesture_points: list[tuple[float, float]] = []
+        self._gesture_how = REPLACE  # the combine mode of the drag in progress (the sticky mode or a Shift / Alt override)
 
         self._base_item = QGraphicsPathItem()
         self._base_item.setPen(_ant_pen("#ffffff", dashed=False))
@@ -114,6 +129,20 @@ class AreaSelectionTool(QObject):
             item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)  # purely visual, never eats clicks
             item.hide()
             plot.addItem(item, ignoreBounds=True)
+
+        # The brush's cursor: a white ring under a black one, the size of the stamp, following the mouse while the brush is armed.
+        self._cursor_items: list[QGraphicsEllipseItem] = []
+        for color, width in (("#ffffff", 3.0), ("#000000", 1.0)):
+            ring = QGraphicsEllipseItem()
+            pen = QPen(QColor(color))
+            pen.setWidthF(width)
+            pen.setCosmetic(True)
+            ring.setPen(pen)
+            ring.setZValue(_Z_VALUE + 1)
+            ring.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            ring.hide()
+            plot.addItem(ring, ignoreBounds=True)
+            self._cursor_items.append(ring)
 
         self._dash_offset = 0.0
         self._timer = QTimer(self)
@@ -160,10 +189,12 @@ class AreaSelectionTool(QObject):
         return path
 
     def _committed_path(self) -> QPainterPath | None:
-        if self._selection.region() is not None:
+        if self._selection.region() is not None or self._selection.has_lock():
+            # A pixel map, or any selection made under a lock (its pixels are clipped to the lock): the outline of the
+            # selection itself. A lock alone selects nothing, so it has no ants (the Image panel dims what is outside it).
             if self._image_shape is None:
                 return None
-            editable = self._selection.mask(self._image_shape)
+            editable = self._selection.selected_mask(self._image_shape)
             if editable is None or not editable.any():
                 return None
             path = region_outline(editable)
@@ -195,9 +226,28 @@ class AreaSelectionTool(QObject):
             closed.closeSubpath()
         return closed
 
+    def _brush_path(self, points: list[tuple[float, float]]) -> QPainterPath:
+        """The outline of a brush stroke through `points` (round ends and joins, merged into one shape)."""
+        if len(points) > _MAX_PREVIEW_POINTS:
+            step = len(points) // _MAX_PREVIEW_POINTS + 1
+            points = points[::step] + [points[-1]]
+        path = QPainterPath()
+        path.moveTo(*points[0])
+        for x, y in points[1:]:
+            path.lineTo(x, y)
+        if len(points) == 1:
+            path.lineTo(points[0][0] + 1e-3, points[0][1])  # a click: one round stamp
+        stroker = QPainterPathStroker()
+        stroker.setWidth(max(float(self._brush_diameter()), 1e-3))
+        stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
+        stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        return stroker.createStroke(path).simplified()
+
     def _preview_path(self) -> QPainterPath | None:
         if not self._gesture_points:
             return None
+        if self._selection.mode() is AreaSelectionMode.BRUSH:
+            return self._brush_path(self._gesture_points)
         if self._selection.mode() is AreaSelectionMode.RECTANGLE:
             (x0, y0), (x1, y1) = self._gesture_points[0], self._gesture_points[-1]
             return self._polygon_path([(x0, y0), (x1, y0), (x1, y1), (x0, y1)])
@@ -207,12 +257,14 @@ class AreaSelectionTool(QObject):
 
     # -- gesture --------------------------------------------------------------
 
-    def begin_gesture(self, x: float, y: float) -> bool:
+    def begin_gesture(self, x: float, y: float, how: str = REPLACE) -> bool:
         """Starts a drag at view point ``(x, y)``, which may be outside the
         image. Declines (``False``) when there is no image at all, and while the
-        wand is picked (a click, not a drag, makes its selection)."""
-        if self._image_shape is None or self._selection.mode() is AreaSelectionMode.WAND:
+        wand is picked (a click, not a drag, makes its selection). ``how`` is how the
+        finished shape combines with the selection (Replace / Add / Subtract / Intersect)."""
+        if self._image_shape is None or self._selection.mode() in CLICK_MODES:
             return False
+        self._gesture_how = how
         self._gesture_start = (x, y)
         self._gesture_points = [(x, y)]
         self.refresh()
@@ -222,7 +274,11 @@ class AreaSelectionTool(QObject):
         if self._gesture_start is None:
             return
         point = (x, y)  # unclamped while previewing; clamped on commit
-        if self._selection.mode() is AreaSelectionMode.RECTANGLE:
+        if self._selection.mode() is AreaSelectionMode.BRUSH:
+            last = self._gesture_points[-1]
+            if np.hypot(point[0] - last[0], point[1] - last[1]) >= _MIN_LASSO_STEP:
+                self._gesture_points.append(point)
+        elif self._selection.mode() is AreaSelectionMode.RECTANGLE:
             self._gesture_points = [self._gesture_start, point]
         else:
             last = self._gesture_points[-1]
@@ -239,6 +295,10 @@ class AreaSelectionTool(QObject):
         points = self._gesture_points
         self._gesture_start = None
         self._gesture_points = []
+        if self._selection.mode() is AreaSelectionMode.BRUSH:
+            self._commit_stroke(points, self._gesture_how)
+            self.refresh()
+            return
         # Committed *unclamped* (maintainer, 2026-10-03): clamping each point
         # onto the image edge would turn an excursion outside the image into
         # spurious outline along the edge, and could change the selected area.
@@ -246,28 +306,73 @@ class AreaSelectionTool(QObject):
         # (`AreaSelectionModule.mask`, the outline), so only the part really
         # inside the image counts.
         if self._image_shape is not None and self._reaches_image(points):
+            how, shape = self._gesture_how, self._image_shape
             if self._selection.mode() is AreaSelectionMode.RECTANGLE:
                 if len(points) == 2:
                     (x0, y0), (x1, y1) = points
-                    self._selection.set_rectangle(x0, y0, x1, y1)
+                    self._selection.set_rectangle(x0, y0, x1, y1, how, shape)
             else:
-                self._selection.set_polygon(points)
+                self._selection.set_polygon(points, how, shape)
         self.refresh()  # also covers the "nothing committed" case (restores the old outline)
 
     def _reaches_image(self, points: list[tuple[float, float]]) -> bool:
         """Whether the dragged shape covers any image pixel - a drag wholly
         outside the image selects nothing, so it must not replace (or create)
-        a selection."""
+        a selection. With a lock on it must also cover a pixel *inside the lock*; the status bar says when it does not."""
         assert self._image_shape is not None
         if self._selection.mode() is AreaSelectionMode.RECTANGLE:
             if len(points) != 2:
                 return False
             (x0, y0), (x1, y1) = points
             height, width = self._image_shape
-            return max(min(x0, x1), 0.0) < min(max(x0, x1), float(width)) and max(min(y0, y1), 0.0) < min(
-                max(y0, y1), float(height)
-            )
-        return bool(rasterize_polygon(np.asarray(points, dtype=float), self._image_shape).any())
+            if not (
+                max(min(x0, x1), 0.0) < min(max(x0, x1), float(width)) and max(min(y0, y1), 0.0) < min(max(y0, y1), float(height))
+            ):
+                return False
+            vertices = np.array([[x0, y0], [x1, y0], [x1, y1], [x0, y1]], dtype=float)
+        else:
+            vertices = np.asarray(points, dtype=float)
+        covered = rasterize_polygon(vertices, self._image_shape)
+        if not covered.any():
+            return False
+        lock = self._selection.lock_mask(self._image_shape)
+        if lock is not None and not (covered & lock).any():
+            self._notify("Selection: the shape is outside the lock (Unlock to select there).")
+            return False
+        return True
+
+    # -- the brush ------------------------------------------------------------
+
+    def stamp_at(self, x: float, y: float, how: str = ADD) -> None:
+        """A click with the brush: one stamp at view point ``(x, y)``."""
+        self._commit_stroke([(x, y)], how)
+
+    def _commit_stroke(self, points: list[tuple[float, float]], how: str) -> None:
+        """Paint (``ADD``) or erase (``SUBTRACT``) the stroke through `points` in the selection: one undo step. A stroke that
+        reaches no pixel of the lock selects nothing and says so."""
+        if self._image_shape is None or not points:
+            return
+        stroke = stroke_region(points, float(self._brush_diameter()), self._image_shape)
+        if not stroke.any():
+            return
+        lock = self._selection.lock_mask(self._image_shape)
+        if lock is not None and not (stroke & lock).any():
+            self._notify("Brush: the stroke is outside the lock (Unlock to paint there).")
+            return
+        how = SUBTRACT if how == SUBTRACT else ADD
+        self._selection.combine_region(stroke, how, "Brush erase" if how == SUBTRACT else "Brush stroke")
+
+    def show_brush_cursor(self, x: float, y: float) -> None:
+        """Put the brush ring (the stamp's size) at view point ``(x, y)``."""
+        radius = max(float(self._brush_diameter()), 1.0) / 2.0
+        for ring in self._cursor_items:
+            ring.setRect(x - radius, y - radius, 2.0 * radius, 2.0 * radius)
+            ring.show()
+
+    def hide_brush_cursor(self) -> None:
+        for ring in self._cursor_items:
+            if ring.isVisible():
+                ring.hide()
 
     def cancel_gesture(self) -> None:
         if self._gesture_start is None:

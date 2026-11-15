@@ -135,8 +135,47 @@ BINDINGS: tuple[Binding, ...] = (
         gesture="Right-click", scope=_VIEW,
     ),
     Binding("mouse.view.wand", "Mouse: image view", "Magic wand (armed in the selection toolbar): select the feature under the pointer", gesture="Click", scope=_VIEW),
-    Binding("mouse.view.wand_add", "Mouse: image view", "Magic wand: add the feature to the selection", gesture="Shift+click", scope=_VIEW),
-    Binding("mouse.view.wand_subtract", "Mouse: image view", "Magic wand: take the feature out of the selection", gesture="Alt+click", scope=_VIEW),
+    Binding(
+        "mouse.view.select_add", "Mouse: image view",
+        "Rectangle, Lasso, Wand, Draw, select by value: add the new selection to the current one (for one selection; the mode picker sets it for all)",
+        gesture="Shift+drag or Shift+click", scope=_VIEW,
+    ),
+    Binding(
+        "mouse.view.select_subtract", "Mouse: image view",
+        "Rectangle, Lasso, Wand, Draw, select by value: take the new selection out of the current one (for one selection)",
+        gesture="Alt+drag or Alt+click", scope=_VIEW,
+    ),
+    Binding(
+        "mouse.view.select_intersect", "Mouse: image view",
+        "Rectangle, Lasso, Wand, Draw, select by value: keep only what the new selection and the current one share (for one selection)",
+        gesture="Shift+Alt+drag or Shift+Alt+click", scope=_VIEW,
+    ),
+    Binding(
+        "mouse.view.brush", "Mouse: image view",
+        "Draw, the selection brush (armed in the selection toolbar): paint into the selection; Alt erases from it (a click is one stamp)",
+        gesture="Drag or click (Alt = erase)", scope=_VIEW,
+    ),
+    Binding(
+        "mouse.toolbar.tool_settings", "Mouse: image view",
+        "Open the numbers of a tool (the brush's size, the wand's settings, Threshold, Local contrast, the Histogram range) beside its button of the selection toolbar",
+        gesture="Right-click", scope=_VIEW,
+    ),
+    Binding(
+        "mouse.view.tool_adjust", "Mouse: image view",
+        "Draw: set the brush size (sideways, right = bigger). Threshold, Local contrast: set the threshold (sideways, right = a bigger region) "
+        "and the sigma (up = bigger), with the tool armed",
+        gesture="Right-drag", scope=_VIEW,
+    ),
+    Binding(
+        "mouse.view.select_by_value", "Mouse: image view",
+        "Select by value (Histogram range, Threshold, Local contrast: pick the tool in the selection toolbar): select what the method finds",
+        gesture="Click on the image", scope=_VIEW,
+    ),
+    Binding(
+        "mouse.toolbar.select_mode", "Mouse: image view",
+        "Pick the selection mode: Replace, Add, Subtract, Intersect (the Venn-diagram button of the selection toolbar: click for the menu, wheel to step)",
+        gesture="Click or wheel", scope=_VIEW,
+    ),
     Binding(
         "mouse.view.wand_adjust", "Mouse: image view",
         "Magic wand: set the threshold (sideways, right = bigger region) and Grow (up = more) without opening the settings",

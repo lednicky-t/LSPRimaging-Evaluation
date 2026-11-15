@@ -1,5 +1,9 @@
 # Mask-tab edit preview, and Threshold / Local contrast Add / Subtract (2026-10-29)
 
+> **Superseded in part, 2026-11-15:** the Threshold, Local contrast, Morphology (and Histogram selection, Draw) tools moved into the selection
+> toolbar and make selections now; their Mask-tab previews and Add / Subtract buttons are gone. What is left of this record: the candidate worker
+> (`MaskCandidates`, `request_candidate`, used by "Select by value") and the Feature map's tint. See `selection_lock_and_tool_move_2026-11-15.md` section 9.
+
 Maintainer request: "mask editing tools are not showing the changes that would come with applying the tool (pixels of
 selection). It is as for Threshold, Local contrast or Morphology." Built the same day, **uncommitted, not yet seen by eye**.
 

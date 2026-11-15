@@ -5,8 +5,11 @@ by hand or automatically, and load/save it as a PNG.
 
 Layout (one ribbon row, captioned icon groups):
 
-    [Clear] | [scope toggle] | [overlay show/colour/transparency] | [tool picker][its controls] | [scan controls] | [wand][px] | [PNG load/save]
-     General      State                 Visibility                   Manual edit                     Scan         Auto mask       PNG
+    [Add/Subtract/Replace/From mask] | [Clear] | [scope toggle] | [overlay show/colour/transparency] | [tool picker][its controls] | [scan] | [wand][px] | [PNG]
+     Selection                          General   State                 Visibility                   Manual edit (Feature map / Eraser)  Scan   Auto mask   PNG
+
+(2026-11-15: the Histogram selection, Threshold, Local contrast, Morphology and Draw tools moved to the selection toolbar beside the image;
+"Manual edit" keeps the Feature map and the Eraser, which act on the mask itself.)
 
 Display only (CLAUDE.md "panels/"): every button calls a module
 (`MaskModule`, `MaskScopeModule`, `MaskEditToolModule`). The overlay's own
@@ -33,19 +36,10 @@ from ...image_tools.mask_auto_task import MaskAutoTask
 from ...image_tools.mask_export_task import MaskExportTask
 from ...image_tools.mask_scan_task import TransientScanTask
 from ..feature_map_task import FeatureMapTask
-from ...selection import HighlightRangeModule
 from ..mask_edit_preview import MaskEditPreview
 from ..mask_grain_eraser import MaskGrainEraser
 from ..ribbon_group import group_label_style, labeled_icon_group, ribbon_separator
-from .mask_edit_panels import (
-    DrawEditPanel,
-    HistogramSelectionEditPanel,
-    EraserEditPanel,
-    LocalContrastEditPanel,
-    MorphologyEditPanel,
-    FeatureMapEditPanel,
-    ThresholdEditPanel,
-)
+from .mask_edit_panels import EraserEditPanel, FeatureMapEditPanel
 from .mask_edit_tool_picker import MaskEditToolPicker
 from .mask_file_actions import MaskClearAction, MaskPngActions
 from .mask_overlay_controls import MaskOverlayControls
@@ -71,7 +65,6 @@ class MaskTab(QWidget):
         geometry: GeometryModule,
         chromatic: ChromaticModule,
         dataset: DatasetModule,
-        highlight_range: HighlightRangeModule,
         mask_scope: MaskScopeModule,
         tint: OverlayTint,
         image_panel: ImagePanel,
@@ -117,33 +110,11 @@ class MaskTab(QWidget):
         self._edit_preview.set_tool(self._edit_tool.tool())
         self._edit_tool.tool_changed.connect(self._edit_preview.set_tool)
         self._edit_stack = QStackedWidget(self)
-        self._edit_panel_order: tuple[MaskEditTool, ...] = (
-            MaskEditTool.HISTOGRAM_SELECTION,
-            MaskEditTool.THRESHOLD,
-            MaskEditTool.LOCAL_CONTRAST,
-            MaskEditTool.MORPHOLOGY,
-            MaskEditTool.FEATURE_MAP,
-            MaskEditTool.DRAW,
-            MaskEditTool.ERASER,
-        )
-        self._edit_stack.addWidget(
-            HistogramSelectionEditPanel(mask, geometry, chromatic, dataset, highlight_range, image_panel, mask_scope)
-        )
-        self._threshold_panel = ThresholdEditPanel(
-            mask, chromatic, dataset, image_panel, mask_scope, self._edit_preview, status
-        )
-        self._local_contrast_panel = LocalContrastEditPanel(
-            mask, chromatic, dataset, image_panel, mask_scope, self._edit_preview, status
-        )
-        self._morphology_panel = MorphologyEditPanel(mask, chromatic, dataset, image_panel, mask_scope, self._edit_preview)
-        self._edit_stack.addWidget(self._threshold_panel)
-        self._edit_stack.addWidget(self._local_contrast_panel)
-        self._edit_stack.addWidget(self._morphology_panel)
+        self._edit_panel_order: tuple[MaskEditTool, ...] = (MaskEditTool.FEATURE_MAP, MaskEditTool.ERASER)
         self._features_panel = FeatureMapEditPanel(
             mask, chromatic, dataset, image_panel, mask_scope, self._edit_preview, features, status
         )
         self._edit_stack.addWidget(self._features_panel)
-        self._edit_stack.addWidget(DrawEditPanel(mask))
         # The Eraser is a click on the image (the panel routes it to `erase_at`); its row only says so.
         self._grain_eraser = MaskGrainEraser(mask, geometry, chromatic, dataset, image_panel, mask_scope, status)
         self._eraser_panel = EraserEditPanel(self)
@@ -156,7 +127,7 @@ class MaskTab(QWidget):
         self._png_actions = MaskPngActions(mask, dataset, mask_scope, image_panel, self, export_task=export)
 
         # "Selection" (2026-11-14): the area selection (selection toolbar beside the image) into / out of the mask.
-        self._selection_editor = MaskSelectionEditor(mask, chromatic, dataset, image_panel, mask_scope, status)
+        self._selection_editor = MaskSelectionEditor(mask, chromatic, dataset, image_panel, mask_scope, status, geometry=geometry)
         self._selection_actions = MaskSelectionActions(self._selection_editor, image_panel.area_selection(), self)
         selection_group, self._selection_label = labeled_icon_group(self, self._selection_actions, "Selection")
         general_group, self._general_label = labeled_icon_group(self, self._clear_action, "General")
@@ -250,9 +221,7 @@ class MaskTab(QWidget):
         self._overlay_controls.refresh_theme(theme)
         self._scope_toggle.refresh_theme(theme)
         self._edit_picker.refresh_theme(theme)
-        for panel in (
-            self._threshold_panel, self._local_contrast_panel, self._morphology_panel, self._features_panel, self._eraser_panel
-        ):
+        for panel in (self._features_panel, self._eraser_panel):
             panel.refresh_theme()
         for separator in self._separators:
             separator.setStyleSheet(f"color: {theme.control_border};")

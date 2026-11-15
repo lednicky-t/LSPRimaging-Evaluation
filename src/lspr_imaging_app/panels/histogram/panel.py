@@ -423,11 +423,12 @@ class HistogramPanel(QWidget):
             self._plot.refit_y()
 
     def _selection_region(self, image_shape: tuple[int, ...]) -> np.ndarray | None:
-        """The area selection's editable region at `image_shape`, or `None`
-        when there is none or the ribbon's Histogram tab is not open."""
+        """The canvas at `image_shape` (the lock if there is one, else the area selection: `AreaSelectionModule.canvas_mask`), or
+        `None` when there is none or the ribbon's Histogram tab is not open. A lock keeps the histogram on its area while
+        selections are made inside it (2026-11-15)."""
         if self._image_panel.active_ribbon_category() != VIEW_TAB:
             return None
-        return self._image_panel.area_selection().mask(image_shape)
+        return self._image_panel.area_selection().canvas_mask(image_shape)
 
     def _set_curve_from_mask(
         self,

@@ -1,6 +1,8 @@
-"""Seven pictograms for the "Edit" tool picker's menu
-(`mask_edit_tool_picker.py`) - one per `MaskEditTool` member, each meant to
-show *what the tool does* at a glance, not just label it.
+"""Pictograms for the Mask tab's "Edit" tool picker (`mask_edit_tool_picker.py`: the Feature map and the Eraser) and for the tools of the selection
+toolbar beside the image that used to be Mask-tab tools (2026-11-15: Histogram range, Threshold, Local contrast, Modify selection = the old
+Morphology, and the brush = the old Draw; the maintainer asked for "the previous icons"; `panels/image/selection_toolbar.py` draws a frame
+into their "on" picture when the tool is armed, `combine_mode_icons.framed_icon`). `histogram_selection_icon` is also the Histogram tab's highlight
+toggle. Each is meant to show *what the tool does* at a glance, not just label it.
 
 **Hand-painted with `QPainter` onto a `QPixmap`, the same technique
 `lspr_ui/icons.py`'s own bespoke composite icons already use**

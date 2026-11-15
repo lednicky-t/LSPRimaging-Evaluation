@@ -129,6 +129,23 @@ def resolve_external_mask(
     return mask
 
 
+def histogram_highlight_region(
+    processed_image: np.ndarray, min_value: float | None, max_value: float | None
+) -> np.ndarray:
+    """The finite pixels of the displayed image whose value lies in ``[min_value, max_value]`` (the Histogram panel's highlight
+    range), in **displayed** space: what the toolbar's "Select by value" turns into a selection. Either bound may be ``None``
+    (open on that side); both ``None`` selects nothing. The very test `histogram_highlight_mask_to_raw` applies before it maps the
+    pixels back to raw space (it calls this)."""
+    if min_value is None and max_value is None:
+        return np.zeros(processed_image.shape, dtype=bool)
+    selection = np.isfinite(processed_image)
+    if min_value is not None:
+        selection &= processed_image >= float(min_value)
+    if max_value is not None:
+        selection &= processed_image <= float(max_value)
+    return selection
+
+
 def histogram_highlight_mask_to_raw(
     processed_image: np.ndarray,
     min_value: float | None,
@@ -156,11 +173,7 @@ def histogram_highlight_mask_to_raw(
     reason `resolve_external_mask` above does."""
     if min_value is None and max_value is None:
         return np.zeros(raw_shape, dtype=bool)
-    selection = np.isfinite(processed_image)
-    if min_value is not None:
-        selection &= processed_image >= float(min_value)
-    if max_value is not None:
-        selection &= processed_image <= float(max_value)
+    selection = histogram_highlight_region(processed_image, min_value, max_value)
     raw_mask = np.zeros(raw_shape, dtype=bool)
     x_map, y_map = spatial_coordinate_maps(raw_shape, geometry_settings)
     if x_map.shape != selection.shape:
