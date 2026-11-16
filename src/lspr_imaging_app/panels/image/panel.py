@@ -140,6 +140,7 @@ from .canvas_tools import _ICON_SIZE
 from .data_axis_slider import DataAxisSlider
 from .frame_tools import FrameToolsState, FrameToolsWidget
 from .selection_regions import SelectionRegions
+from .layers_build import build_layers
 from .selection_tools import SelectionTools
 from .canvas_build import build_canvas
 from .navigation_build import build_navigation_bar
@@ -639,11 +640,16 @@ class ImagePanel(QWidget):
 
         # The selection toolbar beside the image, its tools and their right-drag gestures (`selection_tools.py`).
         self._view.ci.setContentsMargins(0, 9, 9, 9)  # no pyqtgraph margin between the toolbar and the image (2026-11-15)
+        self.layers, self._image_cover = build_layers(self)  # Image / ROI / Ignore mask layers, the active one is what the wand reads (layers.py)
+        display = self._roi_display
         self._selection_tools = SelectionTools(
             self, mask=self._mask, geometry=self._geometry, highlight_range=self._highlight_range, preview=self._mask_tab.edit_preview,
             area_selection=self._area_selection, active_tool=self._active_tool, area_tool=self._area_tool, plot=self._plot, view=self._view,
             regions=self.selection_regions, image_shape=lambda: self._last_image_shape, status=self._on_tool_status,
-            highlight_controls=self._view_tab.highlight_controls,
+            highlight_controls=self._view_tab.highlight_controls, layers=self.layers, displayed_mask=self._tints.displayed_mask,
+            roi_region=lambda x, y, shape: self._roi_queries.region_at(
+                x, y, shape, sample=display.sample.visible, reference=display.reference.visible
+            ),
         )
 
         # Canvas column: top bar (built above), then the selection toolbar and the pyqtgraph view side by side.
@@ -699,7 +705,7 @@ class ImagePanel(QWidget):
             roi_tab_active=lambda: self._tool_ribbon.current_category() == ROI_TAB,
             to_reference=self._roi_queries.display_to_reference,
             notify=self._on_tool_status,
-            wand_click=self._selection_tools.wand.click, rois_touching=self._roi_queries.rois_touching,
+            wand_click=self._selection_tools.layer_wand.click, rois_touching=self._roi_queries.rois_touching,
             drag_adjusters=self._selection_tools.drag_adjusters, value_click=self._selection_tools.run_value_tool,
             combine_badge=self._selection_tools.combine_badge,
             lock_to_selection=self.selection_regions.lock_to_selection, unlock=self.selection_regions.unlock_selection,

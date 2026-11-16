@@ -15,6 +15,9 @@ of it (`panels/scrolling_column.py`). Top to bottom:
   1. **View** (2026-11-16): an eye button **pinned at the top** of the toolbar (above the scrolling column, so it never scrolls away). Its pop-up
      (`selection_view_form.py`, like View -> Masks of the main ribbon) sets the colour of the selection's three outlines and an infill for each
      (5 opacity steps, none by default); the Venn circles of the mode button wear the same colours (`selection_style.py`).
+  1b. **Layers** (2026-11-16, `layers.py`, `layers_button.py`, `docs/image_layers_2026-11-16.md`): pinned under View. Its face is the active
+     layer's icon (Image / ROI / Ignore mask); the wheel changes the active layer, a click opens the layers with an eye each. The wand reads
+     the active layer; Histogram range / Threshold / Local contrast are greyed out unless Image is active (`set_value_tools_allowed`).
   2. **Mode**: one button showing the Venn diagram of the picked mode (`combine_mode_icons.py`: pink circle = the selection now, green circle = the new region, grey fill = ends up selected);
      click = a menu of the four modes (Replace / Add / Subtract / Intersect), the wheel over it steps through them; remembered. Shift / Alt /
      Shift+Alt on the image override it for one selection.
@@ -83,6 +86,9 @@ from .selection_style import SelectionStyle
 from .selection_view_form import SelectionViewForm
 from .wheel_tool_button import WheelToolButton
 
+_VALUE_NEEDS_IMAGE = (
+    "Works on the Image layer only (it reads image brightness): make Image the active layer (Layers button, top of this toolbar)."
+)
 LOCK_ACTION = "lock"  # what the one Lock / Unlock button does (`SelectionToolbar.lock_action`)
 UNLOCK_ACTION = "unlock"
 _RENDER_SIZE = ICON_SIZE * 2
@@ -412,9 +418,12 @@ class SelectionToolbar(QFrame):
         brush_form: QWidget | None = None,
         modify_menu: QMenu | None = None,
         style: SelectionStyle | None = None,
+        layers_button: QToolButton | None = None,
     ) -> None:
         super().__init__(parent)
         self._value_tool = value_tool
+        self._layers_button = layers_button  # pinned under View (`layers_button.py`)
+        self._value_allowed = True  # False while a layer other than Image is active: the select-by-value tools read image brightness
         self._style = style if style is not None else SelectionStyle(self)  # the outlines' colours and fills (the View pop-up writes it)
         self.setObjectName("selectionToolbar")
         self._selection = selection
@@ -451,6 +460,11 @@ class SelectionToolbar(QFrame):
         self._view_button.clicked.connect(lambda _checked=False: self.show_view_menu())
         outer.addSpacing(4)
         outer.addWidget(self._view_button, 0, Qt.AlignmentFlag.AlignHCenter)
+        if layers_button is not None:  # 1b. Layers (2026-11-16): the active layer and the layers' eyes, pinned under View
+            layers_button.setParent(self)
+            _style_button(layers_button)
+            outer.addSpacing(2)
+            outer.addWidget(layers_button, 0, Qt.AlignmentFlag.AlignHCenter)
         self._add_separator(outer)
         outer.addWidget(self._column, 1)
 
@@ -578,6 +592,9 @@ class SelectionToolbar(QFrame):
         if self._value_tool is not None:
             self._value_tool.form.bind_ui_state(store)  # the Threshold's side
         self._style.bind_ui_state(store)
+        layers_bind = getattr(self._layers_button, "bind_ui_state", None)
+        if callable(layers_bind):  # the Image layer's eye and the active layer (`layers.py`)
+            layers_bind(store)
         saved = store.get(SELECTION_COMBINE_MODE.key)
         if saved in COMBINE_MODES:
             self._selection.set_combine_mode(str(saved))
@@ -769,6 +786,12 @@ class SelectionToolbar(QFrame):
 
     # -- state -------------------------------------------------------------------------------------------------
 
+    def set_value_tools_allowed(self, allowed: bool) -> None:
+        """Histogram range / Threshold / Local contrast read image brightness: enabled only while the Image layer is active (`layers.py`)."""
+        if bool(allowed) != self._value_allowed:
+            self._value_allowed = bool(allowed)
+            self._refresh()
+
     def _armed(self) -> bool:
         return self._active_tool.active() is ImageTool.SELECT_AREA
 
@@ -809,6 +832,10 @@ class SelectionToolbar(QFrame):
                 side = ""
                 if mode is AreaSelectionMode.THRESHOLD and self._value_tool is not None:
                     side = f"Threshold: {self._value_tool.form.threshold_side_label()}\n"
+                button.setEnabled(self._value_allowed)
+                if not self._value_allowed:
+                    button.setToolTip(f"{_VALUE_NEEDS_IMAGE}\n\n{_TOOLS[mode].tip}")
+                    continue
                 button.setToolTip(("Working...\n" if self._value_busy and on else "") + side + _TOOLS[mode].tip)
 
         picked_mode = self._selection.combine_mode()
@@ -864,6 +891,11 @@ class SelectionToolbar(QFrame):
         self._column.refresh_theme()
         for button in (*self._tool_buttons.values(), self._mode_button, self._lock_button, self._view_button):
             _style_button(button)
+        if self._layers_button is not None:
+            _style_button(self._layers_button)
+            refresh = getattr(self._layers_button, "refresh", None)
+            if callable(refresh):
+                refresh(theme)
         self._view_button.setIcon(load_tabler_icon("eye", color=theme.text_primary, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH))
         self._view_button.setToolTip(
             "View: how the selection looks on the image. The colour of the selection and of the shape being dragged, also the colour of the "

@@ -14,7 +14,7 @@ import numpy as np
 
 from ...image_tools import ChromaticModule
 from ...roi import RoiToolbox
-from ...roi.rasterize import effective_reference_diameters
+from ...roi.rasterize import effective_reference_diameters, rasterize_reference, rasterize_sample
 from ...selection import SelectionModule
 from .roi_gestures import SelectedApertures
 
@@ -59,6 +59,44 @@ class RoiQueries:
         distances = np.where(distances <= radii, distances, np.inf)
         nearest = int(np.argmin(distances))  # first of equal distances wins, as before
         return rois[nearest].area_roi_id if np.isfinite(distances[nearest]) else None
+
+    def region_at(
+        self, x: float, y: float, shape: tuple[int, int], *, sample: bool = True, reference: bool = True
+    ) -> tuple[np.ndarray, str] | None:
+        """The ROI layer's wand (2026-11-16, `layer_wand.py`): the pixels of the sample disk under display point (x, y), or, when the point
+        is on no disk, of the reference ring under it; ``(mask of shape, what it is)`` or ``None``. Only the parts drawn are looked at
+        (``sample`` / ``reference``: the ROIs tab's show switches). The pixels are the scan's own (`rasterize_sample` / `rasterize_reference`
+        at the frame's chromatic affine), so a selection from them covers what the ROI measures."""
+        frame = (self._current_cube(), self._current_wavelength())
+        rois = self._roi_toolbox.rois_at(frame[0])
+        if not rois:
+            return None
+        affine = self._chromatic.affine_for(frame)
+        if sample:
+            roi_id = self.roi_at(x, y)
+            if roi_id is not None:
+                roi = next(r for r in rois if r.area_roi_id == roi_id)
+                return rasterize_sample(roi, shape, affine), f"ROI {roi_id} disk"
+        if not reference:
+            return None
+        detection = self._roi_toolbox.detection_settings()
+        inner_default, outer_default = detection.reference_inner_diameter_px, detection.reference_outer_diameter_px
+        centers = self._roi_toolbox.display_positions(frame, affine)
+        distances = np.hypot(x - centers[:, 0], y - centers[:, 1])
+        best: tuple[float, int] | None = None
+        for index, roi in enumerate(rois):
+            if roi.reference_geometry_type == "none":
+                continue
+            inner, outer = effective_reference_diameters(roi, inner_default, outer_default)
+            if outer > inner and inner / 2.0 <= distances[index] <= outer / 2.0 and (best is None or distances[index] < best[0]):
+                best = (float(distances[index]), index)
+        if best is None:
+            return None
+        roi = rois[best[1]]
+        ring = rasterize_reference(
+            roi, shape, affine, default_inner_diameter_px=inner_default, default_outer_diameter_px=outer_default
+        )
+        return ring, f"ROI {roi.area_roi_id} reference ring"
 
     def rois_in_rect(self, x0: float, y0: float, x1: float, y1: float) -> set[int]:
         """Ids of the ROIs whose display-space *centre* lies in the rectangle

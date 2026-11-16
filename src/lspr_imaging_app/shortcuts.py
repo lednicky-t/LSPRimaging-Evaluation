@@ -173,6 +173,12 @@ BINDINGS: tuple[Binding, ...] = (
         gesture="Click on the image", scope=_VIEW,
     ),
     Binding(
+        "mouse.toolbar.layers", "Mouse: image view",
+        "Layers (Image / ROI / Ignore mask): the wheel over the Layers button changes the active layer the wand works on; a click shows "
+        "the layers with an eye each (show / hide) and picks the active one",
+        gesture="Click or wheel", scope=_VIEW,
+    ),
+    Binding(
         "mouse.toolbar.select_mode", "Mouse: image view",
         "Pick the selection mode: Replace, Add, Subtract, Intersect (the Venn-diagram button of the selection toolbar: click for the menu, wheel to step)",
         gesture="Click or wheel", scope=_VIEW,

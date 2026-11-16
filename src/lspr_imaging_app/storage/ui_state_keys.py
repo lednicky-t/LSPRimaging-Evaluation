@@ -104,6 +104,9 @@ IMAGE_MASK_EDIT_PREVIEW = UiKey("image/mask_edit_preview", True, bool)  # the ey
 IMAGE_SCALE_BAR_COLOR = UiKey("image/scale_bar_color", None, str)
 SELECTION_COMBINE_MODE = UiKey("selection/combine_mode", "replace", str)  # the selection toolbar's mode button: replace / add / subtract / intersect
 IMAGE_ROI_LABELS = UiKey("image/roi_labels", False, bool)
+# The Image panel's layers (panels/image/layers.py, 2026-11-16): the Image layer's eye and the active layer ("image" / "roi" / "mask").
+IMAGE_LAYER_IMAGE_VISIBLE = UiKey("image/layer_image_visible", True, bool)
+IMAGE_ACTIVE_LAYER = UiKey("image/active_layer", "image", str)
 # The selection toolbar's View pop-up (panels/image/selection_style.py): per look ("past" / "present", the names of selection_palette.py:
 # storage may not import panels) a colour (None = the palette's), a fill step (0 = no fill) and whether the border (the crawling dashes) is
 # drawn at all (2026-11-16: with every border off nothing animates). The drag's "result" outline wears the past's look; it had keys of its own
@@ -219,7 +222,7 @@ ARRAY_KEYS = {  # ROIs tab, "Array" group (panels/image/array_controls.py); leng
 }
 HAND_WIRED_KEYS: tuple[UiKey, ...] = (
     HISTOGRAM_CURSOR_READOUT, HISTOGRAM_CURVE_STYLES, IMAGE_CURSOR_READOUT, IMAGE_MASK_EDIT_PREVIEW,
-    IMAGE_SCALE_BAR_COLOR, IMAGE_ROI_LABELS, SELECTION_COMBINE_MODE,
+    IMAGE_SCALE_BAR_COLOR, IMAGE_ROI_LABELS, SELECTION_COMBINE_MODE, IMAGE_LAYER_IMAGE_VISIBLE, IMAGE_ACTIVE_LAYER,
     IMAGE_OVERLAY_CACHE_MB, IMAGE_GPU_DRAWING, RI_WAVELENGTH_NM, RI_AGE_WARNING_DAYS, DISPLAY_RESOLUTION, PERF_MODE, PERF_MANUAL_WORKERS, PERF_RESERVED_CORES, PERF_LOW_PRIORITY, ANALYSIS_MODE,
     *(key for keys_for_kind in ROI_OVERLAY_KEYS.values() for key in keys_for_kind.values()),
     *(key for keys_for_role in SELECTION_STYLE_KEYS.values() for key in keys_for_role.values()),

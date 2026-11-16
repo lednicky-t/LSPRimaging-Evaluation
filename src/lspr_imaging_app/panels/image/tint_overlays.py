@@ -102,6 +102,16 @@ class TintOverlays:
         self._mask_tint.paint(mask)
         self._mask_painted = (mask, style[0], style[1])
 
+    def displayed_mask(self) -> np.ndarray | None:
+        """The mask as the tint draws it at the frame on screen (display space; the Ignore mask layer's wand reads it), whether or not the
+        tint is shown. ``None`` when there is no mask. `resolve_external_mask` caches its result, so this is cheap after a draw."""
+        if self.mask_state is None:
+            return None
+        authored_mask, geometry, warp_affine, _hidden = self.mask_state
+        if authored_mask is None or geometry is None:
+            return None
+        return resolve_external_mask(authored_mask, geometry, warp_affine)
+
     def redraw_mask_from_cache(self) -> None:
         if self.mask_state is not None:
             authored_mask, geometry, warp_affine, hidden = self.mask_state

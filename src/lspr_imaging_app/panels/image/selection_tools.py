@@ -12,16 +12,21 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 from PyQt6.QtWidgets import QGraphicsView
 
 from ...image_tools import ActiveToolModule, GeometryModule, ImageTool, MaskModule
 from ...selection import AreaSelectionMode, AreaSelectionModule, HighlightRangeModule
+from ...selection.area_selection_module import VALUE_MODES
 from ..mask_edit_preview import KIND_THRESHOLD, MaskEditPreview
 from .area_selection_tool import AreaSelectionTool
 from .brush_settings import BrushSettingsForm
 from .combine_badge import CombineBadge
 from .histogram_highlight_overlay_controls import HistogramHighlightOverlayControls
 from .histogram_overlay_toggle import HistogramOverlayToggle
+from .layer_wand import LayerWand
+from .layers import IMAGE, LAYER_NAMES, ImageLayers
+from .layers_button import LayersButton
 from .selection_by_value import MODE_METHODS, ByValueSelector
 from .selection_modify import ModifySelectionMenu
 from .selection_regions import SelectionRegions
@@ -54,7 +59,13 @@ class SelectionTools:
         image_shape: Callable[[], tuple[int, int] | None],
         status: Callable[[str], None],
         highlight_controls: HistogramHighlightOverlayControls,
+        layers: ImageLayers,
+        displayed_mask: Callable[[], np.ndarray | None],
+        roi_region: Callable[[float, float, tuple[int, int]], tuple[np.ndarray, str] | None],
     ) -> None:
+        self.layers = layers
+        self._status = status
+        self.layers_button = LayersButton(layers, panel)  # pinned under the View eye; the active layer is what the wand reads
         self.value_selector = ByValueSelector(mask, geometry, highlight_range, panel, preview, area_selection, status, panel)
         # The Histogram range's pop-up carries a copy of the View tab's show / hide switch for the highlight tint (`histogram_overlay_toggle.py`).
         self.value_selector.form.add_overlay_toggle(HistogramOverlayToggle(highlight_controls, self.value_selector.form))
@@ -63,6 +74,7 @@ class SelectionTools:
         self.toolbar = SelectionToolbar(
             area_selection, active_tool, panel, value_tool=self.value_selector, brush_form=self.brush_form, modify_menu=self.modify_menu,
             style=area_tool.style,  # the outlines' colours and fills: the toolbar's View pop-up writes them, the outlines and the Venn icons follow
+            layers_button=self.layers_button,
         )
         # The + / - / x beside the pointer (Shift / Alt / Shift+Alt, or the mode picker): what the next selection will do. It also tells the
         # toolbar's mode button which mode a held key gives.
@@ -75,6 +87,11 @@ class SelectionTools:
         self.wand = WandTask(area_selection, self.toolbar.wand_form.settings, status, panel)
         self.wand_drag = WandDragAdjuster(self.toolbar.wand_form, view)
         self.wand.busy_changed.connect(self.toolbar.set_wand_busy)
+        # The wand reads the active layer (`layer_wand.py`): the image (the wand above), the mask blob or the ROI disk / ring under the click.
+        self.layer_wand = LayerWand(
+            layers, self.wand.click, area_selection,
+            image_shape=image_shape, displayed_mask=displayed_mask, roi_region=roi_region, status=status,
+        )
         area_selection.undo_skipped.connect(status)  # an undo meeting a changed pixel grid says why it did nothing
         self.toolbar.lock_requested.connect(regions.lock_to_selection)
         self.toolbar.unlock_requested.connect(regions.unlock_selection)
@@ -107,14 +124,35 @@ class SelectionTools:
         form = self.value_selector.form
 
         def sync_live_preview(*_args: object) -> None:
-            armed = active_tool.active() is ImageTool.SELECT_AREA and area_selection.mode() is AreaSelectionMode.THRESHOLD
+            armed = (
+                active_tool.active() is ImageTool.SELECT_AREA and area_selection.mode() is AreaSelectionMode.THRESHOLD
+                and layers.active() == IMAGE
+            )
             preview.set_value_tool(KIND_THRESHOLD if armed else None, form.threshold_side())
 
         active_tool.active_tool_changed.connect(sync_live_preview)
         area_selection.mode_changed.connect(sync_live_preview)
         form.threshold_side_changed.connect(sync_live_preview)
-        sync_live_preview()
+
+        # The select-by-value tools read image brightness: only with the Image layer active. Making another layer active greys them out and
+        # puts an armed one down (the status line says so); the other tools stay as they are.
+        def on_active_layer(layer: str) -> None:
+            allowed = layer == IMAGE
+            self.toolbar.set_value_tools_allowed(allowed)
+            if not allowed and active_tool.active() is ImageTool.SELECT_AREA and area_selection.mode() in VALUE_MODES:
+                active_tool.set_active(ImageTool.SELECT_AREA, False)
+                status(f"Select by value put down: it works on the Image layer only (the active layer is now {LAYER_NAMES[layer]}).")
+            sync_live_preview()
+
+        layers.active_changed.connect(on_active_layer)
+        on_active_layer(layers.active())
 
     def run_value_tool(self, mode: AreaSelectionMode, how: str) -> None:
-        """A click on the image with a select-by-value tool armed (`CanvasInteraction`)."""
+        """A click on the image with a select-by-value tool armed (`CanvasInteraction`). Only on the Image layer, and only while it is shown."""
+        if self.layers.active() != IMAGE:
+            self._status(f"Select by value works on the Image layer only; the active layer is {LAYER_NAMES[self.layers.active()]}.")
+            return
+        if not self.layers.is_visible(IMAGE):
+            self._status("Select by value: the Image layer is hidden. Show it in Layers to select by value.")
+            return
         self.value_selector.run_for_mode(mode, how)
