@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import QGraphicsView
 
 from ...image_tools import ActiveToolModule, GeometryModule, ImageTool, MaskModule
 from ...selection import AreaSelectionMode, AreaSelectionModule, HighlightRangeModule
-from ..mask_edit_preview import MaskEditPreview
+from ..mask_edit_preview import KIND_THRESHOLD, MaskEditPreview
 from .area_selection_tool import AreaSelectionTool
 from .brush_settings import BrushSettingsForm
 from .combine_badge import CombineBadge
@@ -100,6 +100,20 @@ class SelectionTools:
             AreaSelectionMode.CONTRAST: contrast.on_right_drag,
         }
         self.value_drag = {AreaSelectionMode.THRESHOLD: threshold, AreaSelectionMode.CONTRAST: contrast, AreaSelectionMode.BRUSH: brush}
+
+        # The Threshold's live preview (2026-11-16): while its tool is armed the pixels a click would select are tinted on the image
+        # (`MaskEditPreview.set_value_tool`; the tint layer draws them), for the side the form says. The preview watches the numbers and the
+        # frame itself.
+        form = self.value_selector.form
+
+        def sync_live_preview(*_args: object) -> None:
+            armed = active_tool.active() is ImageTool.SELECT_AREA and area_selection.mode() is AreaSelectionMode.THRESHOLD
+            preview.set_value_tool(KIND_THRESHOLD if armed else None, form.threshold_side())
+
+        active_tool.active_tool_changed.connect(sync_live_preview)
+        area_selection.mode_changed.connect(sync_live_preview)
+        form.threshold_side_changed.connect(sync_live_preview)
+        sync_live_preview()
 
     def run_value_tool(self, mode: AreaSelectionMode, how: str) -> None:
         """A click on the image with a select-by-value tool armed (`CanvasInteraction`)."""

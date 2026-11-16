@@ -78,26 +78,60 @@ def _normalized_gaussian(image: np.ndarray, valid: np.ndarray, sigma: float) -> 
     return out
 
 
+# Which side of the local background `create_relative_contrast_mask` selects (2026-11-16, maintainer: the toolbar's Threshold has two modes,
+# brighter and darker, switched by the wheel over its icon; "both" is what the tool did before and what the Mask tab's callers still get).
+SIDE_BOTH = "both"
+SIDE_BRIGHTER = "brighter"
+SIDE_DARKER = "darker"
+SIDES = (SIDE_BOTH, SIDE_BRIGHTER, SIDE_DARKER)
+
+
+def relative_deviation(image: np.ndarray, *, sigma_px: float) -> np.ndarray:
+    """How far each pixel is from its own local (Gaussian-blurred) background, as a share of that background: ``(pixel - background) /
+    background``, float32; positive = brighter than the background, negative = darker, NaN where the pixel has no value.
+
+    **The slow half** of `create_relative_contrast_mask` (the blur: 0.2 to 4 s on a 1.2 MP plane, depending on sigma); it depends on the
+    image and the sigma only, not on the threshold, so the toolbar's live preview keeps it (`image_tools/mask_candidates.py` `PlaneCache`) and
+    only repeats `relative_deviation_mask` (milliseconds) while the threshold is dragged."""
+    sigma = max(float(sigma_px), 1.0)
+    image_f32 = image.astype(np.float32, copy=False)
+    valid = np.isfinite(image_f32)
+    profile = _normalized_gaussian(image_f32, valid, sigma)
+    safe_profile = np.maximum(profile, 1e-6)
+    return (image_f32 - safe_profile) / safe_profile
+
+
+def relative_deviation_mask(deviation: np.ndarray, *, threshold_fraction: float, side: str = SIDE_BOTH) -> np.ndarray:
+    """The pixels of a `relative_deviation` plane that pass `threshold_fraction` (0.18 = 18 % of the background): ``brighter`` = more than that
+    above the background, ``darker`` = more than that below it, ``both`` = either. A pixel without a value (NaN) is never selected."""
+    if side not in SIDES:
+        raise ValueError(f"unknown side {side!r}: expected one of {SIDES}")
+    fraction = max(float(threshold_fraction), 0.0)
+    # NaN compares False, so pixels without a value are never marked.
+    with np.errstate(invalid="ignore"):
+        if side == SIDE_BRIGHTER:
+            return deviation >= fraction
+        if side == SIDE_DARKER:
+            return deviation <= -fraction
+        return np.abs(deviation) >= fraction
+
+
 def create_relative_contrast_mask(
     image: np.ndarray,
     *,
     sigma_px: float,
     threshold_fraction: float,
+    side: str = SIDE_BOTH,
 ) -> np.ndarray:
     """Mask pixels whose intensity deviates from their own local
     (Gaussian-blurred) background by more than `threshold_fraction` of that
     background's value - catches bright/dark features regardless of the
-    image's overall intensity level, unlike a fixed absolute threshold."""
-    sigma = max(float(sigma_px), 1.0)
-    image_f32 = image.astype(np.float32, copy=False)
-    valid = np.isfinite(image_f32)
-    profile = _normalized_gaussian(image_f32, valid, sigma)
-    fraction = max(float(threshold_fraction), 0.0)
-    safe_profile = np.maximum(profile, 1e-6)
-    relative_delta = (image_f32 - safe_profile) / safe_profile
-    # NaN compares False, so pixels without a value are never marked.
-    with np.errstate(invalid="ignore"):
-        return np.abs(relative_delta) >= fraction
+    image's overall intensity level, unlike a fixed absolute threshold.
+    `side` says which way: ``"both"`` (the default, as before), ``"brighter"``
+    or ``"darker"`` than the background. The two halves are
+    `relative_deviation` (blur) and `relative_deviation_mask` (compare)."""
+    deviation = relative_deviation(image, sigma_px=sigma_px)
+    return relative_deviation_mask(deviation, threshold_fraction=threshold_fraction, side=side)
 
 
 def create_local_contrast_mask(

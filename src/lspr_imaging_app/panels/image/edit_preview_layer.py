@@ -6,7 +6,8 @@ they were made for the frame on screen). Drawn above the mask and histogram tint
 
 Cut to the **area selection** when there is one, because an edit never reaches outside it. That cut is made on the screen side
 (cheap); the edit itself cuts the raw-space pixels, which can differ from this by a pixel along the selection's edge under a rotation
-(the selection is mapped to raw pixels by nearest-pixel scatter).
+(the selection is mapped to raw pixels by nearest-pixel scatter). A *selection* tool's pixels (the toolbar's Threshold, live preview,
+`PreviewPixels.only_lock`) are cut to the **lock** only: the selection they are about to change is not a fence for them.
 
 Hidden while a preview tool (Rotate / Crop) shows the uncropped canvas, the same "other coordinate space" reason the mask overlay
 hides then. Colour and opacity are fixed for now (`edit_preview_toggle.preview_color`, 0.55)."""
@@ -79,7 +80,9 @@ class EditPreviewLayer:
         if painted is not None and painted[0] is mask and painted[1:] == state[1:]:
             self._tint.item.show()
             return
-        region = self._area_selection.mask(mask.shape)
+        # An edit tool's pixels are cut to the area selection (lock included); a selection tool's (the Threshold's live preview, `only_lock`) only
+        # to the lock: the selection it is about to change is not a fence for it.
+        region = self._area_selection.lock_mask(mask.shape) if shown.only_lock else self._area_selection.mask(mask.shape)
         if region is not None:
             mask = mask & region
             if not np.any(mask):

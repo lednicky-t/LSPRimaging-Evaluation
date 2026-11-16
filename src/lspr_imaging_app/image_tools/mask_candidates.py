@@ -173,3 +173,57 @@ class MaskCandidates(QObject):
             pending_key, compute, on_ready, cache = self._pending
             self._pending = None
             self.request(pending_key, compute, on_ready, preview=True, cache=cache)
+
+
+class PlaneCache:
+    """The **slow half** of a two-stage candidate, kept (2026-11-16, for the Threshold tool's live preview): a few float planes computed from a
+    frame by a worker thread and reused while only the cheap second stage changes (the Threshold's percentage: the blur does not depend on
+    it, so dragging it costs milliseconds, not the 0.2 to 4 s of the blur).
+
+    `get_or_compute(key, compute)` is for **worker threads only** (it may wait for seconds): a hit returns the plane at once, a miss computes
+    it. A lock is held while computing, on purpose: two slow stages never run at the same time (they would only fight over the cores), and a
+    second asker for the same key waits and then finds it cached instead of computing it again. Planes are shared, not copied: never
+    modify one in place. `invalidate()` (the dataset or session was replaced; called on the GUI thread) drops them all and never waits for a
+    computation: it takes only the short lock of the dictionary, so a computation already running still finishes but its plane is not kept."""
+
+    def __init__(self, size: int = 2) -> None:
+        self._size = max(int(size), 1)
+        self._compute_lock = threading.Lock()  # held for the whole slow stage: one at a time
+        self._planes_lock = threading.Lock()  # held for a dictionary access only: the GUI thread may take it
+        self._planes: OrderedDict[Hashable, np.ndarray] = OrderedDict()
+        self._generation = 0
+
+    def _find(self, key: Hashable) -> np.ndarray | None:
+        with self._planes_lock:
+            found = self._planes.get(key)
+            if found is not None:
+                self._planes.move_to_end(key)
+            return found
+
+    def get_or_compute(self, key: Hashable, compute: Callable[[], np.ndarray]) -> np.ndarray:
+        found = self._find(key)
+        if found is not None:
+            return found
+        with self._compute_lock:
+            found = self._find(key)  # another thread may have made it while this one waited
+            if found is not None:
+                return found
+            with self._planes_lock:
+                generation = self._generation
+            plane = compute()
+            with self._planes_lock:
+                if generation == self._generation:
+                    self._planes[key] = plane
+                    while len(self._planes) > self._size:
+                        self._planes.popitem(last=False)
+            return plane
+
+    def cached(self, key: Hashable) -> bool:
+        """Whether `key` is in the cache now (a peek: it does not reorder; for tests)."""
+        with self._planes_lock:
+            return key in self._planes
+
+    def invalidate(self) -> None:
+        with self._planes_lock:
+            self._generation += 1
+            self._planes.clear()

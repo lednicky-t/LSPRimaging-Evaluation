@@ -26,7 +26,9 @@ Layout: a narrow column of icon buttons left of the image canvas, below the ribb
 Main user actions: pick a tool (picking the armed one again leaves it, the selection stays). **Every tool with numbers has them in a pop-up on a
 right-click of its button, and on the image a drag with the right button changes them** (`tool_drag.py`; the wand: threshold sideways, Grow up;
 Threshold / Local contrast: threshold sideways, sigma up; Draw: size sideways). The wand's method is switched by the wheel over its button (Contrast /
-Brightness / Edges; its icon shows it). Every selection change is an undo step (Ctrl+Z, `selection/area_selection_module.py`).
+Brightness / Edges; its icon shows it); so is the Threshold's side (Brighter / Darker than the background: the coloured part of its icon is over
+or under its line), and while it is armed the pixels a click would select are tinted on the image, live (`mask_edit_preview.py`). Every selection
+change is an undo step (Ctrl+Z, `selection/area_selection_module.py`).
 Important states: which tool is armed (blue icon, or a frame round a multi-colour icon); a tool computing (its tool tip says so); no image (the tool
 says so in the status bar).
 Validation: the spin boxes bound every value. Error messages: from the tools, in the status bar.
@@ -60,6 +62,7 @@ from PyQt6.QtWidgets import (
 from lspr_ui import GuiTheme, get_active_theme, load_tabler_icon
 
 from ...image_tools import ActiveToolModule, ImageTool
+from ...image_tools.mask import raster_tools
 from ...image_tools.selection_wand import WandMethod, WandSettings
 from ...selection import AreaSelectionMode, AreaSelectionModule
 from ...selection.area_selection_module import ADD, COMBINE_MODES, INTERSECT, REPLACE, SUBTRACT, VALUE_MODES
@@ -127,7 +130,9 @@ _TOOLS: dict[AreaSelectionMode, _Tool] = {
     ),
     AreaSelectionMode.THRESHOLD: _Tool(
         threshold_icon,
-        "Select by Threshold: pick this tool, then click the image to select the pixels that stand out of their blurred local background. "
+        "Select by Threshold: pick this tool, then click the image to select the pixels that are brighter (or darker) than their blurred local "
+        "background by the threshold. The tinted pixels on the image are what a click would select; they follow the numbers. "
+        "Brighter / Darker: scroll the wheel over this button (the coloured part of the icon is over or under its line). "
         "Numbers: right-click this button, or drag with the right button on the image (right = bigger region, up = bigger sigma). "
         f"{_SHARED_MODE_TIP}",
     ),
@@ -425,6 +430,10 @@ class SelectionToolbar(QFrame):
                 button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
                 button.customContextMenuRequested.connect(lambda _pos, picked=mode: self.show_value_settings(picked))
             value_tool.busy_changed.connect(self._set_value_busy)
+            # The Threshold's side: the wheel over its button flips Brighter / Darker (the form holds the state, like the wand's method); the icon
+            # and the tool tip follow it.
+            self._tool_buttons[AreaSelectionMode.THRESHOLD].wheel_steps.connect(self._on_threshold_wheel)  # type: ignore[attr-defined]
+            value_tool.form.threshold_side_changed.connect(self._refresh)
         self._add_separator(layout)
 
         # 5. Modify selection: Grow / Shrink / Open / Close / Fill holes / Invert and their radius, in a menu.
@@ -463,8 +472,10 @@ class SelectionToolbar(QFrame):
     # -- building ------------------------------------------------------------------------------------------
 
     def _add_tool(self, layout: QVBoxLayout, mode: AreaSelectionMode) -> None:
-        """An armed tool's button (checkable; a click arms it, a second click leaves it). Only the wand's reads the wheel (its method)."""
-        button: QToolButton = WheelToolButton(self) if mode is AreaSelectionMode.WAND else QToolButton(self)
+        """An armed tool's button (checkable; a click arms it, a second click leaves it). Only the wand's (its method) and the Threshold's (its
+        side) read the wheel."""
+        wheel = mode in (AreaSelectionMode.WAND, AreaSelectionMode.THRESHOLD)
+        button: QToolButton = WheelToolButton(self) if wheel else QToolButton(self)
         _style_button(button)
         button.setCheckable(True)
         button.setToolTip(_TOOLS[mode].tip)
@@ -497,9 +508,11 @@ class SelectionToolbar(QFrame):
     # -- parts (tests and the panel use them) -----------------------------------------------------------------
 
     def bind_ui_state(self, store: UiStateStore) -> None:
-        """Remember the wand's settings and the picked selection mode across restarts (`panels/ui_state.py`). The other tools' numbers are
-        `MaskSettings`, saved with the session."""
+        """Remember the wand's settings, the Threshold's side and the picked selection mode across restarts (`panels/ui_state.py`). The other
+        tools' numbers are `MaskSettings`, saved with the session."""
         self.wand_form.bind_ui_state(store)
+        if self._value_tool is not None:
+            self._value_tool.form.bind_ui_state(store)  # the Threshold's side
         self._style.bind_ui_state(store)
         saved = store.get(SELECTION_COMBINE_MODE.key)
         if saved in COMBINE_MODES:
@@ -627,6 +640,14 @@ class SelectionToolbar(QFrame):
         button = self._tool_buttons[AreaSelectionMode.WAND]
         QToolTip.showText(button.mapToGlobal(QPoint(button.width(), 0)), f"Wand method: {label}", button)
 
+    def _on_threshold_wheel(self, steps: int) -> None:
+        """The wheel over the Threshold button: the other side (Brighter / Darker, wrapping round), said in a tool tip beside the button."""
+        if self._value_tool is None:
+            return
+        label = self._value_tool.form.cycle_threshold_side(steps)
+        button = self._tool_buttons[AreaSelectionMode.THRESHOLD]
+        QToolTip.showText(button.mapToGlobal(QPoint(button.width(), 0)), f"Threshold: {label}", button)
+
     def _on_mode_wheel(self, steps: int) -> None:
         """The wheel over the mode button: the previous / next combine mode (wrapping), said in a tool tip beside the button."""
         how = COMBINE_MODES[(COMBINE_MODES.index(self._selection.combine_mode()) + int(steps)) % len(COMBINE_MODES)]
@@ -676,6 +697,10 @@ class SelectionToolbar(QFrame):
     def _tool_icon(self, mode: AreaSelectionMode, on: bool, theme: GuiTheme) -> QIcon:
         icon = _TOOLS[mode].icon
         if callable(icon):  # a fixed multi-colour icon: its "on" picture has the frame
+            if mode is AreaSelectionMode.THRESHOLD and self._value_tool is not None:
+                # Two pictures, one per side (the coloured part is over or under the line); cached under a key of its own each.
+                darker = self._value_tool.form.threshold_side() == raster_tools.SIDE_DARKER
+                return framed_icon(f"{mode.value}-{'darker' if darker else 'brighter'}", lambda: threshold_icon(darker))
             return framed_icon(mode.value, icon)
         if mode is AreaSelectionMode.WAND:
             self._icon_method = self.wand_form.picked_method()
@@ -694,7 +719,10 @@ class SelectionToolbar(QFrame):
                 button.blockSignals(blocked)
             button.setIcon(self._tool_icon(mode, on, theme))
             if mode in VALUE_MODES:
-                button.setToolTip(("Working...\n" if self._value_busy and on else "") + _TOOLS[mode].tip)
+                side = ""
+                if mode is AreaSelectionMode.THRESHOLD and self._value_tool is not None:
+                    side = f"Threshold: {self._value_tool.form.threshold_side_label()}\n"
+                button.setToolTip(("Working...\n" if self._value_busy and on else "") + side + _TOOLS[mode].tip)
 
         picked_mode = self._selection.combine_mode()
         self._refresh_mode_button()
@@ -733,8 +761,8 @@ class SelectionToolbar(QFrame):
         self._lock_button.setIcon(load_tabler_icon("lock", color=theme.text_primary, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH))
         self._view_button.setIcon(load_tabler_icon("eye", color=theme.text_primary, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH))
         self._view_button.setToolTip(
-            "View: how the selection looks on the image. The colour of its three outlines (the selection, the shape being dragged, the "
-            "result), also the colour of the Venn circles of the mode button, and an infill for each in five opacities (none by default)."
+            "View: how the selection looks on the image. The colour of the selection and of the shape being dragged, also the colour of the "
+            "Venn circles of the mode button, and an infill for each in five opacities (none by default)."
         )
         self._view_form.refresh_theme(theme)
         if self._modify_button is not None:

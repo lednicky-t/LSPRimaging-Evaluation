@@ -168,7 +168,8 @@ BINDINGS: tuple[Binding, ...] = (
     ),
     Binding(
         "mouse.view.select_by_value", "Mouse: image view",
-        "Select by value (Histogram range, Threshold, Local contrast: pick the tool in the selection toolbar): select what the method finds",
+        "Select by value (Histogram range, Threshold, Local contrast: pick the tool in the selection toolbar): select what the method finds "
+        "(with the Threshold armed, the pixels a click would select are tinted on the image)",
         gesture="Click on the image", scope=_VIEW,
     ),
     Binding(
@@ -187,6 +188,11 @@ BINDINGS: tuple[Binding, ...] = (
     ),
     Binding(
         "mouse.toolbar.wand_method", "Mouse: image view", "Switch the magic wand's method: Contrast, Brightness, Edges (on the wand button)",
+        gesture="Wheel", scope=_VIEW,
+    ),
+    Binding(
+        "mouse.toolbar.threshold_side", "Mouse: image view",
+        "Switch the Threshold between Brighter and Darker than the local background (on the Threshold button; its icon shows which)",
         gesture="Wheel", scope=_VIEW,
     ),
     Binding("mouse.view.zoom", "Mouse: image view", "Zoom the image", gesture="Wheel", scope=_VIEW),

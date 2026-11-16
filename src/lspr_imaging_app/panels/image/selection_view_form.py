@@ -3,11 +3,11 @@
 Screen purpose: change the colour of the selection's outlines and give them an infill, without leaving the image.
 Main user actions: click the eye button at the bottom of the selection toolbar; in the pop-up click a swatch to pick a colour, click or drag
 on a wedge to pick the infill's opacity (5 steps; the first, empty position = no fill, the default).
-Layout: compact, like View -> Masks of the main ribbon (`masks_menu.py`): one row per outline, a caption, a border switch (a square, crossed out
+Layout: compact, like View -> Masks of the main ribbon (`masks_menu.py`): one row per look, a caption, a border switch (a square, crossed out
 when the border is hidden), a colour swatch and a wedge. With the border off only the infill is drawn and nothing animates.
-  * **Selection** (past): the selection as it stands. Its colour is the left circle of the Venn mode icons.
+  * **Selection** (past): the selection as it stands, and also what a Subtract or Intersect drag will leave of it (the "result" outline wears this
+    look: it was a third row until the maintainer found it confusing, 2026-11-16). Its colour is the left circle of the Venn mode icons.
   * **Drawn shape** (present): the rectangle, lasso or brush stroke being dragged. The right circle of the Venn icons.
-  * **Result**: what a Subtract or Intersect drag will leave selected. (The Venn icons fill it with a fixed grey, so it has no circle there.)
 Important states: fill step 0 = no fill (the default, borders only as before); the colours start as the palette's (`selection_palette.py`).
 Validation: the opacity has five positions; a colour the dialog cancels changes nothing.
 Error messages: none. Everything is remembered (`SelectionStyle.bind_ui_state`).
@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import QColorDialog, QGridLayout, QLabel, QToolButton, QWid
 
 from lspr_ui import CompactWedgeSlider, GuiTheme, get_active_theme, load_tabler_icon, transparent_icon_button_stylesheet
 
-from .selection_palette import FILL_OPACITY_STEPS, PAST, PRESENT, RESULT
+from .selection_palette import FILL_OPACITY_STEPS, PAST, PRESENT
 from .selection_style import MAX_FILL_STEP, SelectionStyle
 
 _BORDER_BUTTON = 18
@@ -32,9 +32,8 @@ _BORDER_ICON = 14
 _SWATCH_SIZE = 14
 _WEDGE_WIDTH = 44  # five positions, about 9 px apart: the Masks menu's 18 px wedge would be too fiddly
 _ROWS = (
-    (PAST, "Selection", "The selection as it stands. This colour is also the left circle of the mode icons."),
+    (PAST, "Selection", "The selection as it stands, and what a Subtract or Intersect drag will leave of it. This colour is also the left circle of the mode icons."),
     (PRESENT, "Drawn shape", "The rectangle, lasso or brush stroke being dragged. This colour is also the right circle of the mode icons."),
-    (RESULT, "Result", "What a Subtract or Intersect drag will leave selected."),
 )
 
 

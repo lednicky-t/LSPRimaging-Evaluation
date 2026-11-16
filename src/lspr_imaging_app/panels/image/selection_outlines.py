@@ -22,7 +22,8 @@ computation is followed by a pause of twice its own length (`_PAUSE_FACTOR`), af
 pointer, so the preview never takes more than a third of the GUI thread however big the selection is.
 
 **Colours and infill** (2026-11-16): each outline's colour is the user's (`SelectionStyle`, set in the toolbar's View pop-up; the defaults are the
-palette's), and under each outline lies an **infill**, a third ``QGraphicsPathItem`` with the same path and the colour at the picked opacity (5 steps,
+palette's). The pop-up has two looks, Selection and Drawn shape; **the result wears the selection's** (`LOOK_OF`), so every `style` call below goes
+through it. Under each outline lies an **infill**, a third ``QGraphicsPathItem`` with the same path and the colour at the picked opacity (5 steps,
 step 0 = none, the default). The fill sits under every line (z), so it never hides an outline; it follows the outline (not its border) and costs
 nothing at step 0 (hidden, and it does not take the path). **The border can be switched off per outline** (same pop-up): then only the fill is
 drawn, and since the crawl is what repaints the picture under the outline 6 times a second, the timer stops once no border is visible (`_update_timer`):
@@ -52,7 +53,7 @@ from PyQt6.QtWidgets import QGraphicsPathItem
 from ...selection import AreaSelectionModule
 from ...selection.area_selection_module import SUBTRACT
 from .cached_line_item import CachedLineItem
-from .selection_palette import COLORS, OUTLINES_FOR_MODE, PAST, PRESENT, RESULT
+from .selection_palette import LOOK_OF, OUTLINE_ROLES, OUTLINES_FOR_MODE, PAST, PRESENT, RESULT
 from .selection_style import SelectionStyle
 
 # The dashes crawl 12.5 px/s: 2 px every 160 ms (it was 1 px every 80 ms: the same speed with half the repaints; each tick repaints everything
@@ -196,15 +197,15 @@ class SelectionOutlines(QObject):
         self._selection = selection
         self._image_shape: tuple[int, int] | None = None
         self.style = style if style is not None else SelectionStyle(self)  # the colours and fills (the toolbar's View pop-up changes them)
-        self._pens = {role: _ant_pen(self.style.color(role), dashed=True) for role in COLORS}
+        self._pens = {role: _ant_pen(self.style.color(LOOK_OF[role]), dashed=True) for role in OUTLINE_ROLES}
         self._items: dict[str, tuple[QGraphicsPathItem, QGraphicsPathItem]] = {}
         self._fills: dict[str, QGraphicsPathItem] = {}  # the infill under each outline, shown only above fill step 0
-        self._fill_stale = {role: False for role in COLORS}  # the outline's path changed since the fill got it
-        self._active = {role: False for role in COLORS}  # the role has an outline to show now (a path, and the drag's mode shows it)
-        for role in COLORS:
+        self._fill_stale = {role: False for role in OUTLINE_ROLES}  # the outline's path changed since the fill got it
+        self._active = {role: False for role in OUTLINE_ROLES}  # the role has an outline to show now (a path, and the drag's mode shows it)
+        for role in OUTLINE_ROLES:
             fill = QGraphicsPathItem()
             fill.setPen(QPen(Qt.PenStyle.NoPen))
-            fill.setBrush(self.style.fill_color(role))
+            fill.setBrush(self.style.fill_color(LOOK_OF[role]))
             fill.setZValue(_Z_VALUE - 0.5 + _Z_STEP[role])  # under every line, so a fill never hides an outline
             fill.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
             fill.hide()
@@ -286,7 +287,7 @@ class SelectionOutlines(QObject):
     def _update_timer(self) -> None:
         """The dashes crawl only while a *line* is drawn: with every border switched off (View pop-up) the timer stops, and what is left, the
         infill, is static and repainted only when the view itself changes."""
-        if any(self._active[role] and self.style.border_shown(role) for role in COLORS):
+        if any(self._active[role] and self.style.border_shown(LOOK_OF[role]) for role in OUTLINE_ROLES):
             if not self._ants.isActive():
                 self._ants.start()
         else:
@@ -311,7 +312,7 @@ class SelectionOutlines(QObject):
 
     def _apply(self, role: str) -> None:
         """Show what the role should show: the line (when it is active and its border is on) and the infill (when active, above fill step 0)."""
-        lines = self._active[role] and self.style.border_shown(role)
+        lines = self._active[role] and self.style.border_shown(LOOK_OF[role])
         for item in self._items[role]:
             item.setVisible(lines)
         self._sync_fill(role)
@@ -320,7 +321,7 @@ class SelectionOutlines(QObject):
         """The infill follows its outline (shown when the outline is active, above fill step 0), whether or not the border is drawn. At step 0
         it costs nothing: it is hidden and does not even take the path; the path is handed over when a step above 0 is picked (`_fill_stale`)."""
         fill = self._fills[role]
-        if self.style.fill_alpha(role) <= 0.0 or not self._active[role]:
+        if self.style.fill_alpha(LOOK_OF[role]) <= 0.0 or not self._active[role]:
             fill.hide()
             return
         if self._fill_stale[role]:
@@ -330,11 +331,11 @@ class SelectionOutlines(QObject):
 
     def _on_style_changed(self) -> None:
         """A colour, fill step or border switch was picked: recolour the dashes and the infill and show / hide the parts now."""
-        for role in COLORS:
+        for role in OUTLINE_ROLES:
             pen = self._pens[role]
-            pen.setColor(QColor(self.style.color(role)))
+            pen.setColor(QColor(self.style.color(LOOK_OF[role])))
             self._items[role][1].setPen(pen)
-            self._fills[role].setBrush(self.style.fill_color(role))
+            self._fills[role].setBrush(self.style.fill_color(LOOK_OF[role]))
             self._apply(role)
         self._update_timer()
 

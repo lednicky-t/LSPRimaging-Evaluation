@@ -20,7 +20,11 @@ Error messages (status bar): no image on screen; no range on the Histogram; the 
 - **Histogram range**: the finite pixels of the image on screen whose value is inside the range highlighted on the Histogram panel
   (`image_tools.preprocess.histogram_highlight_region`). Pointwise: instant, on the GUI thread (a comparison over the plane).
 - **Threshold** (`relative`): pixels that deviate from their own blurred local background by more than the given share
-  (`raster_tools.create_relative_contrast_mask`), computed on the **raw** plane of the frame on screen.
+  (`raster_tools.create_relative_contrast_mask`), computed on the **raw** plane of the frame on screen. **Two modes, Brighter and Darker**
+  (2026-11-16, maintainer: until then it took both signs at once, which the icon never said): Brighter = more than that share *above* the
+  background, Darker = more than that share *below* it. The wheel over the button flips them (the coloured part of the icon is over or
+  under its line), the form has the same switch (`side_combo`), the choice is remembered (`selection/threshold_side`, a UI state, not a
+  session field). Both signs at once is Local contrast (`both` in the maths, not offered here) or two clicks in Add mode.
 - **Local contrast**: pixels more than `z` local standard deviations from their local mean
   (`raster_tools.create_local_contrast_mask`), also on the raw plane.
 Threshold and Local contrast go through `MaskEditPreview.request_candidate` (a plain thread, cached by frame and numbers, GIL released
@@ -29,8 +33,11 @@ mask overlay does (exact without rotation, about one pixel at the edge under one
 
 **The lock** (maintainer's rule, 2026-11-15): the tool computes on the whole image and the result is cut to the lock afterwards
 (`AreaSelectionModule.combine_region`), so a result inside a lock equals the unlocked result AND the lock, and a cached candidate stays
-valid when the lock moves. **No preview** (the wand's decision of 2026-11-15: the selection is undoable, so the answer to a wrong
-result is Ctrl+Z, not a preview). The numbers are `MaskSettings` (saved with the session), the same fields the Mask tab's panels edited.
+valid when the lock moves. **No preview, except for the Threshold** (the wand's decision of 2026-11-15: the selection is undoable, so the
+answer to a wrong result is Ctrl+Z, not a preview; the maintainer reversed it for the Threshold on 2026-11-16: "make selection by
+threshold live"). While the Threshold is armed the pixels a click would select are tinted on the image and follow its numbers, its side
+and the frame (`MaskEditPreview.set_value_tool`, `EditPreviewLayer`; the tint is cut to the lock only, and is the tool's own region, not
+how it would combine). The numbers are `MaskSettings` (saved with the session), the same fields the Mask tab's panels edited.
 """
 
 from __future__ import annotations
@@ -43,16 +50,18 @@ from typing import TYPE_CHECKING
 import numpy as np
 from PyQt6.QtCore import QObject, Qt, pyqtSignal
 from PyQt6.QtGui import QGuiApplication
-from PyQt6.QtWidgets import QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel, QSpinBox, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QComboBox, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel, QSpinBox, QVBoxLayout, QWidget
 
 from ...applog.events import log_event
 from ...image_tools import GeometryModule, MaskModule
+from ...image_tools.mask import raster_tools
 from ...image_tools.mask.model import MaskSettings
 from ...image_tools.preprocess import histogram_highlight_region, resolve_external_mask
 from ...selection import AreaSelectionMode, AreaSelectionModule, HighlightRangeModule
 from ...selection.area_selection_module import how_for_keys
 from ..mask_edit_preview import KIND_LOCAL_CONTRAST, KIND_THRESHOLD, MaskEditPreview
 from ..mask_tool_settings import push_tool_settings
+from ..ui_state import UiStateStore
 from .tool_drag import DragAxis
 
 if TYPE_CHECKING:
@@ -84,6 +93,9 @@ _NOUN = {  # how a method is named in a sentence ("Threshold: selected 40 px")
     ValueMethod.LOCAL_CONTRAST: "Local contrast",
 }
 _KIND = {ValueMethod.THRESHOLD: KIND_THRESHOLD, ValueMethod.LOCAL_CONTRAST: KIND_LOCAL_CONTRAST}
+# The Threshold's two modes (2026-11-16): which way from the local background it selects. Brighter first = the default (and the picture the
+# button always had: the area over the line coloured).
+THRESHOLD_SIDE_LABELS = ((raster_tools.SIDE_BRIGHTER, "Brighter than the background"), (raster_tools.SIDE_DARKER, "Darker than the background"))
 
 
 class ByValueSettingsForm(QWidget):
@@ -91,6 +103,7 @@ class ByValueSettingsForm(QWidget):
     so the form follows them (also a session restore) and writes them back."""
 
     changed = pyqtSignal()  # the method shown changed
+    threshold_side_changed = pyqtSignal()  # the Threshold's Brighter / Darker switch changed (the wheel over its button, or this form)
 
     def __init__(self, mask: MaskModule, highlight_range: HighlightRangeModule, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -118,17 +131,28 @@ class ByValueSettingsForm(QWidget):
         threshold_form = QFormLayout(self._threshold_box)
         threshold_form.setContentsMargins(0, 0, 0, 0)
         threshold_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        self.side_combo = QComboBox(self._threshold_box)
+        for side, label in THRESHOLD_SIDE_LABELS:
+            self.side_combo.addItem(label, side)
+        self.side_combo.setToolTip(
+            "Which way from the local background: Brighter = pixels above it by the threshold, Darker = pixels below it by the threshold. "
+            "The wheel over the Threshold button on the toolbar switches it too."
+        )
         self.threshold_spin = QDoubleSpinBox(self._threshold_box)
         self.threshold_spin.setRange(0.1, 500.0)
         self.threshold_spin.setDecimals(1)
         self.threshold_spin.setSingleStep(1.0)
         self.threshold_spin.setSuffix(" %")
-        self.threshold_spin.setToolTip("Relative threshold: how far a pixel must deviate from its local background (share of the background).")
+        self.threshold_spin.setToolTip(
+            "Relative threshold: how far a pixel must be from its local background, in the direction picked above (share of the background). "
+            "For Darker, 100 % means black: nothing is more than 100 % below a positive background, so a higher number selects nothing."
+        )
         self.profile_sigma_spin = QSpinBox(self._threshold_box)
         self.profile_sigma_spin.setRange(3, 2000)
         self.profile_sigma_spin.setSuffix(" px")
         self.profile_sigma_spin.setKeyboardTracking(False)
         self.profile_sigma_spin.setToolTip("Profile sigma: the blur radius of the local background.")
+        threshold_form.addRow("Select", self.side_combo)
         threshold_form.addRow("Threshold", self.threshold_spin)
         threshold_form.addRow("Sigma", self.profile_sigma_spin)
 
@@ -157,6 +181,7 @@ class ByValueSettingsForm(QWidget):
         self._refresh_range(highlight_range.current_range())
         for spin in (self.threshold_spin, self.profile_sigma_spin, self.contrast_sigma_spin, self.z_spin):
             spin.valueChanged.connect(self._on_spin_changed)
+        self.side_combo.currentIndexChanged.connect(lambda _index: self.threshold_side_changed.emit())
         mask.cosmetic_changed.connect(self._on_model_changed)
         mask.mask_changed.connect(self._on_model_changed)
         highlight_range.range_changed.connect(self._refresh_range)
@@ -188,6 +213,30 @@ class ByValueSettingsForm(QWidget):
         self._threshold_box.setVisible(method is ValueMethod.THRESHOLD)
         self._contrast_box.setVisible(method is ValueMethod.LOCAL_CONTRAST)
         self.changed.emit()
+
+    # -- the Threshold's side ----------------------------------------------------------------------------------
+
+    def threshold_side(self) -> str:
+        """``"brighter"`` or ``"darker"``: which way from the local background the Threshold tool selects."""
+        return str(self.side_combo.currentData())
+
+    def threshold_side_label(self) -> str:
+        return self.side_combo.currentText()
+
+    def set_threshold_side(self, side: str) -> None:
+        index = self.side_combo.findData(side)
+        if index >= 0:
+            self.side_combo.setCurrentIndex(index)
+
+    def cycle_threshold_side(self, steps: int) -> str:
+        """Move `steps` places along the two sides, wrapping round (the wheel over the Threshold button); returns the label now picked."""
+        self.side_combo.setCurrentIndex((self.side_combo.currentIndex() + int(steps)) % self.side_combo.count())
+        return self.threshold_side_label()
+
+    def bind_ui_state(self, store: UiStateStore) -> None:
+        """Remember the side across restarts (`panels/ui_state.py`). The numbers are `MaskSettings`, saved with the session; the side is not
+        one of them (nothing stored in a session changed for it), so it is remembered like any other control of the panel."""
+        store.bind("selection/threshold_side", self.side_combo)
 
     # -- the numbers (MaskSettings) ----------------------------------------------------------------------------
 
@@ -320,10 +369,17 @@ class ByValueSelector(QObject):
             return
         self._commit(histogram_highlight_region(self._image, *range_), how, ValueMethod.HISTOGRAM)
 
+    def noun(self, method: ValueMethod) -> str:
+        """How `method` is named in a sentence and on the undo step; the Threshold says which side it selects ("Threshold (darker)")."""
+        if method is ValueMethod.THRESHOLD:
+            return f"{_NOUN[method]} ({self.form.threshold_side()})"
+        return _NOUN[method]
+
     def _run_candidate(self, method: ValueMethod, how: str) -> None:
         frame = self._frame
         assert frame is not None
-        noun = _NOUN[method]
+        noun = self.noun(method)  # said now: a wheel turn while it computes must not rename what was computed
+        side = self.form.threshold_side() if method is ValueMethod.THRESHOLD else raster_tools.SIDE_BOTH
         self._set_busy(True)
         self._status(f"{noun}: computing...")
 
@@ -339,18 +395,18 @@ class ByValueSelector(QObject):
             if region is None or region.shape != self._image.shape:
                 self._status(f"{noun}: not applied, the image size changed.")
                 return
-            self._commit(region, how, method)
+            self._commit(region, how, method, noun)
 
-        self._preview.request_candidate(_KIND[method], frame, finish)
+        self._preview.request_candidate(_KIND[method], frame, finish, side=side)
 
     def _set_busy(self, busy: bool) -> None:
         if busy != self._busy:
             self._busy = busy
             self.busy_changed.emit(busy)
 
-    def _commit(self, region: np.ndarray, how: str, method: ValueMethod) -> None:
+    def _commit(self, region: np.ndarray, how: str, method: ValueMethod, noun: str | None = None) -> None:
         """Combine `region` (displayed space) into the selection. A result with no pixel (inside the lock) changes nothing."""
-        noun = _NOUN[method]
+        noun = noun if noun is not None else _NOUN[method]
         fence = self._selection.lock_mask(region.shape)
         count = int(np.count_nonzero(region if fence is None else region & fence))
         if count == 0:
@@ -358,5 +414,5 @@ class ByValueSelector(QObject):
             return
         changed = self._selection.combine_region(region, how, f"Select by {noun.lower()}")  # cut to the lock inside
         verb = {"add": "added", "subtract": "took away", "intersect": "kept the overlap of"}.get(how, "selected")
-        log_event(logger, "selection.by_value", logging.DEBUG, method=method.value, how=how, area_px=count, changed=changed)
+        log_event(logger, "selection.by_value", logging.DEBUG, method=method.value, label=noun, how=how, area_px=count, changed=changed)
         self._status(f"{noun}: {verb} {count:,} px." if changed else f"{noun}: the selection is unchanged.")

@@ -105,16 +105,17 @@ IMAGE_MASK_EDIT_PREVIEW = UiKey("image/mask_edit_preview", True, bool)  # the ey
 IMAGE_SCALE_BAR_COLOR = UiKey("image/scale_bar_color", None, str)
 SELECTION_COMBINE_MODE = UiKey("selection/combine_mode", "replace", str)  # the selection toolbar's mode button: replace / add / subtract / intersect
 IMAGE_ROI_LABELS = UiKey("image/roi_labels", False, bool)
-# The selection toolbar's View pop-up (panels/image/selection_style.py): per outline role ("past" / "present" / "result", the names of
-# selection_palette.py: storage may not import panels) a colour (None = the palette's), a fill step (0 = no fill) and whether the border (the
-# crawling dashes) is drawn at all (2026-11-16: with every border off nothing animates).
+# The selection toolbar's View pop-up (panels/image/selection_style.py): per look ("past" / "present", the names of selection_palette.py:
+# storage may not import panels) a colour (None = the palette's), a fill step (0 = no fill) and whether the border (the crawling dashes) is
+# drawn at all (2026-11-16: with every border off nothing animates). The drag's "result" outline wears the past's look; it had keys of its own
+# (`selection/result_*`) for a few hours on 2026-11-16, which are no longer read.
 SELECTION_STYLE_KEYS = {
     role: {
         "color": UiKey(f"selection/{role}_color", None, str),
         "fill": UiKey(f"selection/{role}_fill_step", 0, int),
         "border": UiKey(f"selection/{role}_border", True, bool),
     }
-    for role in ("past", "present", "result")
+    for role in ("past", "present")
 }
 ROI_OVERLAY_KEYS = {
     kind: {

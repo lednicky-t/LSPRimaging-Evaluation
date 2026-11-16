@@ -117,12 +117,17 @@ def histogram_selection_icon(active: bool = True) -> QIcon:
 
 
 @functools.lru_cache(maxsize=None)
-def threshold_icon() -> QIcon:
+def threshold_icon(darker: bool = False) -> QIcon:
     """Same 5-bar base as `histogram_selection_icon`, but the "selection" is
     a threshold *line* rather than a range: everything above the red
     horizontal line (per spec: "a red horizontal line on y axis... everything
     over mark different color") is colored, everything below stays muted -
-    showing a value threshold rather than a bounded range."""
+    showing a value threshold rather than a bounded range.
+
+    `darker` (2026-11-16, the Threshold tool's second mode, switched by the
+    wheel over its button): the same picture the other way round - the part of
+    the bars *under* the line is colored and what is over it stays muted (the
+    tool then selects what is darker than the background, not brighter)."""
     threshold_y = 11.0
     pixmap = QPixmap(_RENDER_SIZE, _RENDER_SIZE)
     painter = _new_painter(pixmap)
@@ -132,8 +137,10 @@ def threshold_icon() -> QIcon:
         top_y = _BASELINE_Y - height
         painter.setBrush(QColor(_MUTED))
         painter.drawRoundedRect(QRectF(x, top_y, _BAR_WIDTH, height), 0.8, 0.8)
-        if top_y < threshold_y:
-            painter.setBrush(QColor(_SELECTED))
+        painter.setBrush(QColor(_SELECTED))
+        if darker:
+            painter.drawRect(QRectF(x, max(top_y, threshold_y), _BAR_WIDTH, _BASELINE_Y - max(top_y, threshold_y)))
+        elif top_y < threshold_y:
             painter.drawRect(QRectF(x, top_y, _BAR_WIDTH, threshold_y - top_y))
     pen = QPen(QColor(_THRESHOLD_LINE), 1.6)
     pen.setStyle(Qt.PenStyle.DashLine)

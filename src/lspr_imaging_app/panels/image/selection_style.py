@@ -2,14 +2,14 @@
 toolbar, "able to change the colour of the Venn borders, and the opacity, only 5 steps, when 0 then no fill; the colours are for the borders and
 also the infill; the defaults are the colours the borders have now; synced with the Venn icons").
 
-State only: per role (`selection_palette.PAST` / `PRESENT` / `RESULT`) a colour, a fill step (0 .. `len(FILL_OPACITY_STEPS) - 1`, step 0 = no
+State only: per look (`selection_palette.PAST` / `PRESENT`; the drag's result outline wears the past's, `LOOK_OF`) a colour, a fill step (0 .. `len(FILL_OPACITY_STEPS) - 1`, step 0 = no
 fill) and whether the border is drawn (the maintainer's addition the same day: with the borders off only the static infill is left and the crawl
 stops, which is what makes a big filled selection cheap). It is display state, owned by whoever draws, like the overlay tints (`histogram_highlight_overlay_controls.py` says why): no selection logic
 reads it. Three listeners, all through `changed`:
 
 * the outlines on the image (`selection_outlines.py`): dashes and fill,
 * the Venn mode icons of the toolbar (`combine_mode_icons.py`): the left circle's border is the *past* colour, the right circle's the *present* one
-  (the *result* has no colour on the icons: their fill is a fixed grey, chosen for contrast),
+  (their fill is a fixed grey, chosen for contrast),
 * the View pop-up (`selection_view_form.py`), the only writer.
 
 Remembered across restarts (`bind_ui_state`; keys `ui_state_keys.SELECTION_STYLE_KEYS`).
@@ -34,7 +34,7 @@ def normalized(color: str) -> str | None:
 
 
 class SelectionStyle(QObject):
-    changed = pyqtSignal()  # a colour or a fill step changed (the new values are read back with `color` / `step`)
+    changed = pyqtSignal()  # a colour, a fill step or a border switch changed (the new values are read back with `color` / `step`)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
