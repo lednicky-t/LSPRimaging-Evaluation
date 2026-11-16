@@ -25,8 +25,6 @@ __all__ = [
     "ImageTool",
     "MaskScope",
     "MaskScopeModule",
-    "MaskEditTool",
-    "MaskEditToolModule",
 ]
 
 # Qt classes load lazily (2026-10-19): importing a pure sub-module of this package (settings, geometry maths) must not
@@ -39,8 +37,6 @@ _LAZY = {
     "ChromaticModule": ".chromatic",
     "GeometryModule": ".geometry",
     "MaskModule": ".mask",
-    "MaskEditTool": ".mask_edit_tool",
-    "MaskEditToolModule": ".mask_edit_tool",
     "MaskScope": ".mask_scope",
     "MaskScopeModule": ".mask_scope",
 }

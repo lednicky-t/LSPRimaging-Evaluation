@@ -81,7 +81,7 @@ from the scan's particle pointers, one individual mask per frame - as ONE undoab
 message, if the timeline changed after it. Masks are stored compressed (`MaskChange`), so the undo entry of a batch of hundreds is a few KB.
 
 **Every edit is undoable since 2026-11-14 (maintainer: "yes, and if possible make also painting undoable")**: `apply_candidate`
-(Histogram selection / Threshold / Local contrast / Feature map Add and Subtract, the Eraser, the selection's Add / Subtract),
+(Histogram selection / Threshold / Local contrast / Feature map Add and Subtract, the selection's Add / Subtract),
 `apply_morphology` and `paint_brush` commit through `_commit_edit`, one undo step each with the same version-token guard. What is still
 not undoable: `set_mask_change` (loading a PNG), `clear_all_masks` and `restore_state` (session load); they take a fresh token, so an
 older undo entry meeting them is skipped with a message. The brush has no canvas stroke yet; when it gets one, the drag wraps its

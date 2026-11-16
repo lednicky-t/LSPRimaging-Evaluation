@@ -2,7 +2,7 @@
 
 The button face is the icon of the current mode: a car (Auto: drives itself), half a car
 (Semi: only half automatic) and a walking pedestrian (Manual: you do it on foot). Same
-design as the other pick-up menus of this ribbon (`MaskEditToolPicker`): an instant-popup
+design as the other pick-up menus of this ribbon (`MaskScopeToggle`'s buttons): an instant-popup
 menu with a checkmark on the current entry. Real `QAction`s, so tests can `.trigger()` them.
 """
 

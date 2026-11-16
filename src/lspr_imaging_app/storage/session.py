@@ -128,7 +128,9 @@ from ..domain.roi_model import (
 logger = logging.getLogger(__name__)
 
 SESSION_SCHEMA_NAME = "lspri_rewrite_session"
-SESSION_SCHEMA_VERSION = "1.9"
+SESSION_SCHEMA_VERSION = "1.10"
+# 1.10 (2026-11-16): the "selection" block may also hold "locked": true - the ROI selection lock (selection/module.py). Written only when the selection is locked, so a
+# session without a lock is written exactly as before; a 1.9 (or older) file has none and loads unlocked. (The version compare is on the major number only, so "1.10" > "1.9" needs no care.)
 # 1.9 (2026-11-13): the "refractive_index" block may also hold "rows" - the user's working table (edited, added, removed rows, rows assigned to steps by hand), plan/refractive_index.py;
 # "solutions" stays the imported copy and is never changed. Optional: a 1.8 file has none (the working table is then the imported one) and a table nobody edited is written exactly as before.
 # 1.8 (2026-11-12): the "plan" block may also hold "bulk" (the steps of the S_bulk set: the bulk sensitivity's steps), plan/state.py. Optional: a 1.7 file has none, and
@@ -427,6 +429,7 @@ class SessionState:
     selected_cube: int = 0
     selected_wavelength: float = 0.0
     selected_roi_ids: tuple[int, ...] = ()
+    selection_locked: bool = False  # the ROI selection lock (schema 1.10)
     frame_roles: FrameRolesState = field(default_factory=FrameRolesState)
     mask_pointers: MaskPointersState = field(default_factory=MaskPointersState)
     plan_edits: PlanEditsState = field(default_factory=PlanEditsState)
@@ -730,6 +733,7 @@ def prepare_session(state: SessionState, naming: FrameNamingScheme) -> PreparedS
             "cube_index": int(state.selected_cube),
             "wavelength_nm": float(state.selected_wavelength),
             "selected_roi_ids": sorted(int(roi_id) for roi_id in state.selected_roi_ids),
+            **({"locked": True} if state.selection_locked else {}),  # absent = free: a session without a lock is written as before
         },
     }
     return PreparedSession(
@@ -828,6 +832,7 @@ def load_session(
         selected_cube=int(selection_block.get("cube_index", 0)),
         selected_wavelength=float(selection_block.get("wavelength_nm", 0.0)),
         selected_roi_ids=tuple(int(roi_id) for roi_id in selection_block.get("selected_roi_ids", ())),
+        selection_locked=selection_block.get("locked", False) is True,  # a missing key (schema < 1.10), or anything but a true, is "free"
         frame_roles=FrameRolesState.from_payload(payload.get("frames")),
         mask_pointers=mask_pointers_from_payload(payload.get("mask_pointers")),
         plan_edits=PlanEditsState.from_payload(payload.get("plan")),

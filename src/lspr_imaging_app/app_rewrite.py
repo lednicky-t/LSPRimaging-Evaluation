@@ -438,6 +438,7 @@ def capture_session(
         selected_cube=selection.current_cube(),
         selected_wavelength=selection.current_wavelength(),
         selected_roi_ids=tuple(sorted(selection.selected_roi_ids())),
+        selection_locked=selection.roi_selection_locked(),
         **({} if frame_roles is None else {"frame_roles": frame_roles.state()}),
         **({} if mask_pointers is None else {"mask_pointers": mask_pointers.state()}),
         **({} if experiment_plan is None else {"plan_edits": experiment_plan.state(), "refractive_index": experiment_plan.ri_table()}),
@@ -485,7 +486,8 @@ def apply_session(
 
     selection.set_cube(state.selected_cube)
     selection.set_wavelength(state.selected_wavelength)
-    selection.set_roi_selection(set(state.selected_roi_ids))
+    selection.restore_roi_selection(set(state.selected_roi_ids))  # a session load passes the ROI selection lock (see SelectionModule)
+    selection.set_roi_selection_locked(state.selection_locked)  # and brings its own: a blank session is unlocked
 
     undo_manager.clear()
 
@@ -577,7 +579,7 @@ def _build_session_autosave(
         # reads as relative shift rather than absolute value, so losing the
         # setting changes what the plot means on the next open.
         analysis_settings.settings_changed,
-        selection.cube_changed, selection.wavelength_changed, selection.roi_selection_changed,
+        selection.cube_changed, selection.wavelength_changed, selection.roi_selection_changed, selection.roi_selection_lock_changed,
     ]
     if frame_roles is not None:
         signals.append(frame_roles.roles_changed)

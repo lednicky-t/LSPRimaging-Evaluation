@@ -1,5 +1,8 @@
 # Mask tab: Eraser (2026-10-29)
 
+> **Retired 2026-11-16** (maintainer's request; with the "Manual edit" picker). Kept as history. What is left of it: `raster_tools.connected_grain` and its unit tests
+> (nothing calls it). Record: `manual_edit_retired_and_roi_selection_lock_2026-11-16.md`.
+
 Maintainer request: "add to the tools also an eraser with an appropriate icon. Simple: when clicked on a mask pixel it removes it from the
 mask. The pixels need to be connected, forming a grain."
 

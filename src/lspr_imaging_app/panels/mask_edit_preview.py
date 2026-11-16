@@ -23,7 +23,7 @@ decision of 2026-11-15) and the three previews went. What remains here:
   tint stays until the new one arrives).
 
 The Feature map's tint is shown only while the eye toggle is on (one state shared by the Feature map panel, remembered), the Mask ribbon tab
-is the open one, the Feature map tool is picked, and Play is not running. The Threshold's live tint needs only the armed tool (and no Play).
+is the open one, and Play is not running (the Feature map is the Mask tab's only tool since 2026-11-16, so no tool is "picked"). The Threshold's live tint needs only the armed tool (and no Play).
 
 Display state plus the request logic, widget-free like `mask_candidate_editor.py`; it changes no mask. Pixels are **raw-space** booleans
 as authored at the displayed frame, the space `MaskModule` stores masks in; the layer maps them onto the screen with the same call the
@@ -39,7 +39,7 @@ import numpy as np
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 from ..dataset import DatasetModule
-from ..image_tools import ChromaticModule, MaskEditTool, MaskModule
+from ..image_tools import ChromaticModule, MaskModule
 from ..image_tools.mask import raster_tools
 from ..image_tools.mask_candidates import MaskCandidates, PlaneCache, Ready
 
@@ -58,7 +58,6 @@ KIND_NOUNS = {  # how a tool's pixels are called in the middle of a sentence ("A
 
 _FRAME_DELAY_MS = 250  # after the last frame change (scrubbing a slider passes many frames)
 _VALUE_DELAY_MS = 40  # after the last change of a number of the armed Threshold tool (a right-drag on the image changes them many times a second)
-_TOOL_KINDS = {MaskEditTool.FEATURE_MAP: KIND_FEATURE_MAP}
 
 
 @dataclass(frozen=True)
@@ -93,7 +92,6 @@ class MaskEditPreview(QObject):
         self._shown = True
         self._tab_active = False
         self._playing = False
-        self._tool = MaskEditTool.FEATURE_MAP
         self._frame: Frame | None = None
         self._result: PreviewPixels | None = None
         # The toolbar's armed Threshold tool (live preview): its kind (None = none armed), the side it selects, what was last asked for, and the
@@ -125,12 +123,6 @@ class MaskEditPreview(QObject):
             return
         self._shown = shown
         self.shown_changed.emit(shown)
-        self._schedule(0)
-
-    def set_tool(self, tool: MaskEditTool) -> None:
-        if tool is self._tool:
-            return
-        self._tool = tool
         self._schedule(0)
 
     def set_tab_active(self, active: bool) -> None:
@@ -253,7 +245,7 @@ class MaskEditPreview(QObject):
             return self._value_kind
         if not self._shown or not self._tab_active:
             return None
-        return _TOOL_KINDS.get(self._tool)
+        return KIND_FEATURE_MAP
 
     def _hide_result(self) -> None:
         self._value_key = None  # re-arming asks again

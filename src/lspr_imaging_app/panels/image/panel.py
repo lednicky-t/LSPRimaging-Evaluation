@@ -104,7 +104,6 @@ from ...image_tools import (
     ChromaticModule,
     GeometryModule,
     ImageTool,
-    MaskEditTool,
     MaskModule,
     MaskScopeModule,
 )
@@ -173,7 +172,6 @@ from .tuning_tab import TuningTab
 from ...storage.ui_state_keys import (
     IMAGE_CURSOR_READOUT,
     IMAGE_MASK_EDIT_PREVIEW,
-    IMAGE_MASK_EDIT_TOOL,
     IMAGE_GPU_DRAWING,
     IMAGE_OVERLAY_CACHE_MB,
     IMAGE_ROI_LABELS,
@@ -200,7 +198,6 @@ from .panel_constants import (
     BACKGROUND_TAB,
     CHROMATIC_TAB,
     EXPORT_TAB,
-    MASK_TAB,
     _PREVIEW_TOOLS,
     _REDRAW_COALESCE_MS,
 )
@@ -225,7 +222,7 @@ _TAB_INFO: dict[str, str] = {
         "Mask: pixels to ignore (kept out of the background estimate and ROI sampling). "
         "State: edit scope (persistent / individual). Visibility: tint on/off, colour, transparency. "
         "Selection: add / subtract / replace the mask by the selection, or make the mask the selection (the selection tools are beside the image). "
-        "Manual edit: feature map, eraser. Scan, Auto mask: mark and mask frames where something crossed the field. PNG: load/save the mask."
+        "Feature map: find the small features of the image and add them to the mask. Scan, Auto mask: mark and mask frames where something crossed the field. PNG: load/save the mask."
     ),
     CHROMATIC_TAB: (
         "Chromatic correction: Run finds landmarks on the reference frame and follows them through the "
@@ -487,16 +484,11 @@ class ImagePanel(QWidget):
         self._plot.vb.sigRangeChanged.connect(self._on_view_range_changed)
 
     def restore_ui_state(self, store: UiStateStore) -> None:
-        """Put the cursor readout toggle and the Mask edit tool pick back as
+        """Put the cursor readout toggle and the Feature map preview's eye back as
         last left, and keep saving them (see `panels/ui_state.py`). Called
         once by the app shell after construction."""
         self._cursor_overlay.set_enabled(read(store, IMAGE_CURSOR_READOUT) is True)
         self._cursor_overlay.toggled.connect(lambda on: store.set(IMAGE_CURSOR_READOUT.key, bool(on)))
-        try:
-            self._mask_tab.edit_tool.set_tool(MaskEditTool(store.get(IMAGE_MASK_EDIT_TOOL.key)))
-        except ValueError:  # nothing saved yet, or a tool that no longer exists
-            pass
-        self._mask_tab.edit_tool.tool_changed.connect(lambda tool: store.set(IMAGE_MASK_EDIT_TOOL.key, tool.value))
         edit_preview = self._mask_tab.edit_preview
         edit_preview.set_shown(read(store, IMAGE_MASK_EDIT_PREVIEW) is not False)
         edit_preview.shown_changed.connect(lambda on: store.set(IMAGE_MASK_EDIT_PREVIEW.key, bool(on)))
@@ -583,15 +575,6 @@ class ImagePanel(QWidget):
     def mask_auto(self) -> MaskAutoTask:
         """The Auto mask task (the app shell connects it to the task indicator)."""
         return self._mask_auto
-
-    def _eraser_armed(self) -> bool:
-        """The Mask tab is the open ribbon tab and its Eraser is the picked tool: a left click on the image erases the blob under it."""
-        mask_tab = getattr(self, "_mask_tab", None)  # the tab is built after the canvas router that asks
-        return (
-            mask_tab is not None
-            and self._tool_ribbon.current_category() == MASK_TAB
-            and mask_tab.edit_tool.tool() is MaskEditTool.ERASER
-        )
 
     @property
     def feature_map(self) -> FeatureMapTask:
@@ -716,8 +699,6 @@ class ImagePanel(QWidget):
             roi_tab_active=lambda: self._tool_ribbon.current_category() == ROI_TAB,
             to_reference=self._roi_queries.display_to_reference,
             notify=self._on_tool_status,
-            eraser_armed=self._eraser_armed,
-            erase_at=lambda x, y: self._mask_tab.grain_eraser.erase_at(x, y),
             wand_click=self._selection_tools.wand.click, rois_touching=self._roi_queries.rois_touching,
             drag_adjusters=self._selection_tools.drag_adjusters, value_click=self._selection_tools.run_value_tool,
             combine_badge=self._selection_tools.combine_badge,

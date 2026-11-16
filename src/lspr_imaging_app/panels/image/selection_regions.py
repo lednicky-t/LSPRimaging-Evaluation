@@ -5,8 +5,8 @@ Widget-free. The Image panel owns one (`ImagePanel.selection_regions`) and the m
 pixels (the space masks are authored in): the displayed-space selection is mapped back with `area_selection_to_raw` (exact without a rotation,
 about one pixel at the edge under one). Three different questions, three methods:
 
-- `selection_raw_mask`: the region editing may reach (the selection if there is one, else the lock, else nothing restricts: `None`). What the Eraser
-  and the Feature map's Apply stay inside.
+- `selection_raw_mask`: the region editing may reach (the selection if there is one, else the lock, else nothing restricts: `None`). What the Feature map's
+  Apply (and, until 2026-11-16, the Eraser) stays inside.
 - `selected_raw_mask`: the *selection itself*, clipped to the lock (`None` when nothing is selected: a lock alone selects nothing, so "Add selection to
   the mask" with only a lock adds nothing).
 - `lock_raw_mask`: the lock (`None` with no lock): what "Replace mask with selection" keeps the mask's own pixels outside of.

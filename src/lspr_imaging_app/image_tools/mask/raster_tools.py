@@ -184,7 +184,8 @@ def morphology_changed_pixels(mask: np.ndarray, operation: str, radius_px: int) 
 
 def connected_grain(mask: np.ndarray, row: int, col: int, *, diagonal: bool = True) -> np.ndarray | None:
     """The "grain" of `mask` that contains pixel (`row`, `col`): all the masked pixels connected to it through masked neighbours
-    (2026-10-29, for the Mask tab's Eraser). ``diagonal=True`` (the default) counts the four diagonal neighbours too (8-connected),
+    (2026-10-29, for the Mask tab's Eraser, retired 2026-11-16: nothing calls it now; kept, with its tests, as the base of a possible
+    "mask grain" wand method). ``diagonal=True`` (the default) counts the four diagonal neighbours too (8-connected),
     so two squares touching only at a corner are one grain; ``False`` needs a shared edge (4-connected). ``None`` when the pixel is
     not masked or lies outside the array. The result is a new boolean array of the same shape; `mask` is not changed."""
     mask = np.asarray(mask, dtype=bool)

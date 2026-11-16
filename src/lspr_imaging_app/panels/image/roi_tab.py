@@ -1,12 +1,17 @@
 """The Image panel's "ROIs" ribbon tab (split out of `panel.py` 2026-10-10).
 
 Screen purpose: choose how ROIs look on the image, where ROI edits land, what
-shape a new ROI has, and create / arrange ROIs in arrays and groups.
+shape a new ROI has, create / arrange ROIs in arrays and groups, and lock the ROI selection.
 
 Layout (one ribbon row, captioned groups, thin separators between them):
 
-    [display menu] | [scope toggle] | [shape picker] | [array controls] | [group controls]
-       Display          Scope            Shape             Array              Groups
+    [display menu] | [scope toggle] | [shape picker] | [array controls] | [group controls] | [lock]
+       Display          Scope            Shape             Array              Groups          Selection
+
+**Selection** (2026-11-16, maintainer request): one lock button. While it is on, clicks on the image and in the ROI table no longer change
+which ROIs are selected (`SelectionModule.set_roi_selection_locked`, which says what is blocked and what is not); the same switch is the
+"Lock selection" entry of both ROI context menus. A change that was refused says so in the status line (the module's `roi_selection_refused`).
+The lock is saved in the session with the selection it holds (schema 1.10) and comes back with it; it is not a remembered UI setting.
 
 Display only (CLAUDE.md "panels/"): the colours and visibility are reported
 through `overlay_changed` / `labels_toggled`, where the labels sit through
@@ -32,6 +37,7 @@ from ...roi import RoiToolbox
 from ...roi.array_task import ArrayAction
 from ...roi.scope import RoiEditTarget, RoiScopeModule
 from ...selection import SelectionModule
+from .. import roi_selection_lock
 from ..ribbon_group import group_label_style, labeled_icon_group, ribbon_separator
 from ..ui_state import UiStateStore
 from .array_actions import ArrayActions
@@ -146,8 +152,21 @@ class RoiTab(QWidget):
         self._group_actions.status.connect(self.status)
         self._group_controls.label_menu.changed.connect(self.group_labels_changed)
 
+        # "Selection": the lock. The button and the module's flag follow each other (the context menus flip the flag too).
+        self._selection = selection
+        self._lock_button = QToolButton(self)
+        self._lock_button.setCheckable(True)
+        self._lock_button.setChecked(selection.roi_selection_locked())
+        self._lock_button.setToolTip(roi_selection_lock.TIP)
+        style_general_icon_button(self._lock_button)
+        self._lock_button.toggled.connect(self._on_lock_toggled)
+        selection.roi_selection_lock_changed.connect(self._lock_button.setChecked)
+        selection.roi_selection_refused.connect(lambda: self.status.emit(roi_selection_lock.REFUSED_TEXT))
+        self._refresh_lock_icon()
+        selection_group, self._selection_caption = labeled_icon_group(self, self._lock_button, "Selection")
+
         # Sections left to right, a thin separator between neighbours (restyled on a theme switch).
-        sections = (display_group, scope_group, shape_group, array_group, groups_group)
+        sections = (display_group, scope_group, shape_group, array_group, groups_group, selection_group)
         self._separators = [ribbon_separator(self) for _ in sections[1:]]
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -195,6 +214,11 @@ class RoiTab(QWidget):
         return self._labels_button
 
     @property
+    def lock_button(self) -> QToolButton:
+        """The ROI selection lock (checked = locked)."""
+        return self._lock_button
+
+    @property
     def label_placement_picker(self) -> LabelPlacementPicker:
         return self._label_placement_picker
 
@@ -240,6 +264,25 @@ class RoiTab(QWidget):
         self._label_placement_picker.bind_ui_state(store, "image/roi_label_placement")
         store.bind("image/roi_label_point_size", self._label_size_box)
         self._group_controls.label_menu.bind_ui_state(store)
+        # (The lock is not bound here: it belongs to the session, next to the selection it holds - `SessionState.selection_locked`.)
+
+    def _on_lock_toggled(self, locked: bool) -> None:
+        self._selection.set_roi_selection_locked(bool(locked))
+        self._refresh_lock_icon()
+
+    def _refresh_lock_icon(self) -> None:
+        """An open padlock while the selection is free, a closed one in the accent colour while it is locked (the ribbon's
+        toggles are accent-coloured when on; the area selection's lock on the toolbar beside the image is amber)."""
+        theme = get_active_theme()
+        on = self._lock_button.isChecked()
+        self._lock_button.setIcon(
+            load_tabler_icon(
+                "lock" if on else "lock-open",
+                color=theme.accent_blue if on else theme.text_secondary,
+                size=_RIBBON_ICON_SIZE * 2,
+                stroke_width=2.1,
+            )
+        )
 
     def _on_labels_toggled(self, shown: bool) -> None:
         self._refresh_labels_icon()
@@ -264,6 +307,8 @@ class RoiTab(QWidget):
         self._reference_controls.refresh_theme(theme)
         style_general_icon_button(self._labels_button)
         self._refresh_labels_icon()
+        style_general_icon_button(self._lock_button)
+        self._refresh_lock_icon()
         self._label_placement_picker.refresh_theme(theme)
         self._label_size_box.refresh_theme()
         self._display_menu.refresh_theme(theme)
@@ -279,5 +324,6 @@ class RoiTab(QWidget):
             self._shape_caption,
             self._array_caption,
             self._groups_caption,
+            self._selection_caption,
         ):
             caption.setStyleSheet(group_label_style())

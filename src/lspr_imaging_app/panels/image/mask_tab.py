@@ -5,14 +5,15 @@ by hand or automatically, and load/save it as a PNG.
 
 Layout (one ribbon row, captioned icon groups):
 
-    [Add/Subtract/Replace/From mask] | [Clear] | [scope toggle] | [overlay show/colour/transparency] | [tool picker][its controls] | [scan] | [wand][px] | [PNG]
-     Selection                          General   State                 Visibility                   Manual edit (Feature map / Eraser)  Scan   Auto mask   PNG
+    [Add/Subtract/Replace/From mask] | [Clear] | [scope toggle] | [overlay show/colour/transparency] | [Feature map controls] | [scan] | [wand][px] | [PNG]
+     Selection                          General   State                 Visibility                   Feature map                    Scan   Auto mask   PNG
 
 (2026-11-15: the Histogram selection, Threshold, Local contrast, Morphology and Draw tools moved to the selection toolbar beside the image;
-"Manual edit" keeps the Feature map and the Eraser, which act on the mask itself.)
+2026-11-16: the Eraser went and with it the "Manual edit" picker: the Feature map, which acts on the mask itself, is the one tool left and its
+section carries its name.)
 
 Display only (CLAUDE.md "panels/"): every button calls a module
-(`MaskModule`, `MaskScopeModule`, `MaskEditToolModule`). The overlay's own
+(`MaskModule`, `MaskScopeModule`). The overlay's own
 look (colour, transparency, visibility) is the panel's `OverlayTint`; this tab
 only reports changes through its three `overlay_*_changed` signals and the
 panel redraws.
@@ -23,24 +24,22 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtGui import QColor
-from PyQt6.QtWidgets import QHBoxLayout, QStackedWidget, QWidget
+from PyQt6.QtWidgets import QHBoxLayout, QWidget
 
 from lspr_ui import get_active_theme
 
 from ...dataset import DatasetModule
-from ...image_tools import ChromaticModule, GeometryModule, MaskEditTool, MaskEditToolModule, MaskModule, MaskScopeModule
+from ...image_tools import ChromaticModule, GeometryModule, MaskModule, MaskScopeModule
 from ...image_tools.mask.mask_pointers import MaskPointersModule
 from ...image_tools.mask_auto_task import MaskAutoTask
 from ...image_tools.mask_export_task import MaskExportTask
 from ...image_tools.mask_scan_task import TransientScanTask
 from ..feature_map_task import FeatureMapTask
 from ..mask_edit_preview import MaskEditPreview
-from ..mask_grain_eraser import MaskGrainEraser
 from ..ribbon_group import group_label_style, labeled_icon_group, ribbon_separator
-from .mask_edit_panels import EraserEditPanel, FeatureMapEditPanel
-from .mask_edit_tool_picker import MaskEditToolPicker
+from .mask_edit_panels import FeatureMapEditPanel
 from .mask_file_actions import MaskClearAction, MaskPngActions
 from .mask_overlay_controls import MaskOverlayControls
 from .mask_scan_panels import MaskAutoControls, MaskScanControls
@@ -95,32 +94,16 @@ class MaskTab(QWidget):
         self._overlay_controls.color_changed.connect(self.overlay_color_changed)
         self._overlay_controls.alpha_changed.connect(self.overlay_alpha_changed)
 
-        # "Manual edit": a tool picker, and under it one small control row per
-        # tool swapped in. `MaskEditToolModule` is owned privately here (see
-        # that module's docstring for why nothing else shares it).
-        self._edit_tool = MaskEditToolModule(self)
-        self._edit_picker = MaskEditToolPicker(self._edit_tool, self)
-        # What the picked tool would select or change, previewed on the image (the panel draws it: `EditPreviewLayer`).
+        # "Feature map": what the tool would add, previewed on the image (the panel draws it: `EditPreviewLayer`).
         # The frame on screen comes from the same signal the editors use; whether this tab is the open one and whether Play
         # runs are told by the panel (`ImagePanel` owns the ribbon and the slideshow).
         self._edit_preview = MaskEditPreview(mask, chromatic, dataset, parent=self, features=features)
         self._edit_preview.status.connect(status)
         image_panel.image_rendered.connect(lambda _image, cube, wavelength: self._edit_preview.set_frame((cube, wavelength)))
         image_panel.image_cleared.connect(lambda: self._edit_preview.set_frame(None))
-        self._edit_preview.set_tool(self._edit_tool.tool())
-        self._edit_tool.tool_changed.connect(self._edit_preview.set_tool)
-        self._edit_stack = QStackedWidget(self)
-        self._edit_panel_order: tuple[MaskEditTool, ...] = (MaskEditTool.FEATURE_MAP, MaskEditTool.ERASER)
         self._features_panel = FeatureMapEditPanel(
             mask, chromatic, dataset, image_panel, mask_scope, self._edit_preview, features, status
         )
-        self._edit_stack.addWidget(self._features_panel)
-        # The Eraser is a click on the image (the panel routes it to `erase_at`); its row only says so.
-        self._grain_eraser = MaskGrainEraser(mask, geometry, chromatic, dataset, image_panel, mask_scope, status)
-        self._eraser_panel = EraserEditPanel(self)
-        self._edit_stack.addWidget(self._eraser_panel)
-        self._on_edit_tool_changed(self._edit_tool.tool())
-        self._edit_tool.tool_changed.connect(self._on_edit_tool_changed)
 
         # "General" (Clear) and "PNG" (Load/Save): plain action rows, not part of the picker/stack.
         self._clear_action = MaskClearAction(mask, image_panel, self)
@@ -133,17 +116,7 @@ class MaskTab(QWidget):
         general_group, self._general_label = labeled_icon_group(self, self._clear_action, "General")
         state_group, self._state_label = labeled_icon_group(self, self._scope_toggle, "State")
         visibility_group, self._visibility_label = labeled_icon_group(self, self._overlay_controls, "Visibility")
-        # The caption wraps the picker and the stack together, so it is centred
-        # on the whole "Manual edit" section. The stack reserves the widest
-        # panel's width, so the caption stays put when the tool is switched.
-        edit_content = QWidget(self)
-        edit_content_layout = QHBoxLayout(edit_content)
-        edit_content_layout.setContentsMargins(0, 0, 0, 0)
-        edit_content_layout.setSpacing(6)
-        # Top-aligned so the stack's icon row lines up with the picker's and every other group's icon row.
-        edit_content_layout.addWidget(self._edit_picker, 0, Qt.AlignmentFlag.AlignTop)
-        edit_content_layout.addWidget(self._edit_stack, 0, Qt.AlignmentFlag.AlignTop)
-        edit_group, self._edit_label = labeled_icon_group(self, edit_content, "Manual edit")
+        features_group, self._features_label = labeled_icon_group(self, self._features_panel, "Feature map")
         png_group, self._png_label = labeled_icon_group(self, self._png_actions, "PNG")
         # "Scan": marks the frames where something dark crossed the field with pointers on the Mask rows (no mask is changed).
         self._scan_controls = MaskScanControls(dataset, events, scan, status, self, visible_cubes=visible_cubes)
@@ -164,7 +137,7 @@ class MaskTab(QWidget):
         layout.addWidget(self._separators[1])
         layout.addWidget(visibility_group)
         layout.addWidget(self._separators[2])
-        layout.addWidget(edit_group)
+        layout.addWidget(features_group)
         layout.addWidget(self._separators[3])
         layout.addWidget(scan_group)
         layout.addWidget(self._separators[4])
@@ -194,16 +167,6 @@ class MaskTab(QWidget):
         return self._auto_controls
 
     @property
-    def edit_tool(self) -> MaskEditToolModule:
-        """Which manual-edit tool is picked (the panel remembers it across restarts)."""
-        return self._edit_tool
-
-    @property
-    def grain_eraser(self) -> MaskGrainEraser:
-        """The Eraser's logic (the Image panel hands it the clicks it gets while the Eraser is armed)."""
-        return self._grain_eraser
-
-    @property
     def features_panel(self) -> FeatureMapEditPanel:
         """The Feature map tool's panel (the Image panel remembers its settings across restarts)."""
         return self._features_panel
@@ -213,20 +176,15 @@ class MaskTab(QWidget):
         """The preview of what the picked tool would select (the panel draws it and remembers the eye toggle)."""
         return self._edit_preview
 
-    def _on_edit_tool_changed(self, tool: MaskEditTool) -> None:
-        self._edit_stack.setCurrentIndex(self._edit_panel_order.index(tool))
-
     def refresh_theme(self) -> None:
         theme = get_active_theme()
         self._overlay_controls.refresh_theme(theme)
         self._scope_toggle.refresh_theme(theme)
-        self._edit_picker.refresh_theme(theme)
-        for panel in (self._features_panel, self._eraser_panel):
-            panel.refresh_theme()
+        self._features_panel.refresh_theme()
         for separator in self._separators:
             separator.setStyleSheet(f"color: {theme.control_border};")
         for label in (
-            self._selection_label, self._general_label, self._state_label, self._visibility_label, self._edit_label, self._scan_label,
+            self._selection_label, self._general_label, self._state_label, self._visibility_label, self._features_label, self._scan_label,
             self._auto_label, self._png_label
         ):
             label.setStyleSheet(group_label_style())

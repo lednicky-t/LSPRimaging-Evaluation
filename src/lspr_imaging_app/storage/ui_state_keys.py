@@ -100,7 +100,6 @@ HISTOGRAM_CURSOR_READOUT = UiKey("histogram/cursor_readout", False, bool)
 # Per-curve legend style overrides, one JSON object as text (see panels/histogram/curve_style_menu.py).
 HISTOGRAM_CURVE_STYLES = UiKey("histogram/curve_styles", "{}", str)
 IMAGE_CURSOR_READOUT = UiKey("image/cursor_readout", False, bool)
-IMAGE_MASK_EDIT_TOOL = UiKey("image/mask_edit_tool", None, str)  # a `MaskEditTool` value
 IMAGE_MASK_EDIT_PREVIEW = UiKey("image/mask_edit_preview", True, bool)  # the eye toggle of the Mask tab's edit-preview tint
 IMAGE_SCALE_BAR_COLOR = UiKey("image/scale_bar_color", None, str)
 SELECTION_COMBINE_MODE = UiKey("selection/combine_mode", "replace", str)  # the selection toolbar's mode button: replace / add / subtract / intersect
@@ -219,7 +218,7 @@ ARRAY_KEYS = {  # ROIs tab, "Array" group (panels/image/array_controls.py); leng
     "ring_size_mode": UiKey("array/ring_size_mode", "uniform", str),
 }
 HAND_WIRED_KEYS: tuple[UiKey, ...] = (
-    HISTOGRAM_CURSOR_READOUT, HISTOGRAM_CURVE_STYLES, IMAGE_CURSOR_READOUT, IMAGE_MASK_EDIT_TOOL, IMAGE_MASK_EDIT_PREVIEW,
+    HISTOGRAM_CURSOR_READOUT, HISTOGRAM_CURVE_STYLES, IMAGE_CURSOR_READOUT, IMAGE_MASK_EDIT_PREVIEW,
     IMAGE_SCALE_BAR_COLOR, IMAGE_ROI_LABELS, SELECTION_COMBINE_MODE,
     IMAGE_OVERLAY_CACHE_MB, IMAGE_GPU_DRAWING, RI_WAVELENGTH_NM, RI_AGE_WARNING_DAYS, DISPLAY_RESOLUTION, PERF_MODE, PERF_MANUAL_WORKERS, PERF_RESERVED_CORES, PERF_LOW_PRIORITY, ANALYSIS_MODE,
     *(key for keys_for_kind in ROI_OVERLAY_KEYS.values() for key in keys_for_kind.values()),

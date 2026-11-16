@@ -40,6 +40,7 @@ from .roi_context_menu import (
     GROUP,
     REMOVE_CUBE_EDIT,
     SELECT_GROUP,
+    TOGGLE_LOCK,
     UNGROUP,
     show_roi_context_menu,
 )
@@ -102,8 +103,6 @@ class CanvasInteraction:
         roi_tab_active: Callable[[], bool],
         to_reference: Callable[[float, float], tuple[float, float]],
         notify: Callable[[str], None],
-        eraser_armed: Callable[[], bool] | None = None,
-        erase_at: Callable[[float, float], object] | None = None,
         wand_click: Callable[[float, float, str], object] | None = None,
         rois_touching: Callable[[Any], set[int]] | None = None,
         drag_adjusters: Mapping[AreaSelectionMode, Callable[[Any], bool]] | None = None,
@@ -130,8 +129,6 @@ class CanvasInteraction:
         self._roi_tab_active = roi_tab_active
         self._to_reference = to_reference
         self._notify = notify
-        self._eraser_armed = eraser_armed or (lambda: False)  # the Mask tab is open and its Eraser is picked
-        self._erase_at = erase_at
         self._wand_click = wand_click  # the wand's click: (x, y, "replace" | "add" | "subtract")
         self._rois_touching = rois_touching  # display-space bool mask -> ids of the ROIs overlapping it
         # armed tool -> its right-button drag handler (a drag event -> the tool's numbers: `tool_drag.py`, `wand_drag.py`)
@@ -140,7 +137,7 @@ class CanvasInteraction:
         self._lock_to_selection = lock_to_selection  # the selection becomes the lock (the panel says so in the status bar)
         self._unlock = unlock
         self._combine_badge = combine_badge  # the + / - / x beside the pointer; follows it while a selection tool is armed
-        self._eraser_cursor = False  # whether the cursor on the canvas is the Eraser's cross
+        self._armed_cursor = False  # whether the cursor on the canvas is a selection tool's (the cross, or the brush's blank)
         self._roi_cursor: Qt.CursorShape | None | object = _NO_CURSOR_YET  # what the ROI hover last set
 
     def handle_key(self, key: int, modifiers: Qt.KeyboardModifier) -> bool:
@@ -168,7 +165,7 @@ class CanvasInteraction:
         if self._combine_badge is not None:
             self._combine_badge.follow(scene_pos)
         if self._roi_gestures_enabled():
-            self._eraser_cursor = False  # the ROI hover sets (or clears) the cursor from here on
+            self._armed_cursor = False  # the ROI hover sets (or clears) the cursor from here on
             self._update_roi_hover_cursor(scene_pos)
             return
         if self._roi_cursor is not _NO_CURSOR_YET:  # left the ROI gestures: drop the cursor they set
@@ -181,21 +178,20 @@ class CanvasInteraction:
                 point = self._plot.vb.mapSceneToView(scene_pos)
                 self._area_tool.show_brush_cursor(float(point.x()), float(point.y()))
                 self._set_view_cursor(Qt.CursorShape.BlankCursor)
-                self._eraser_cursor = True
+                self._armed_cursor = True
             else:
                 self._area_tool.hide_brush_cursor()
             return
         self._area_tool.hide_brush_cursor()
-        if (tool is None and self._eraser_armed()) or self._wand_armed() or self._value_armed():
-            # A cross over the image: "click a mask pixel" / "click a feature". Set when the mouse moves, dropped when it
-            # stops being armed.
+        if self._wand_armed() or self._value_armed():
+            # A cross over the image: "click a feature". Set when the mouse moves, dropped when it stops being armed.
             cross = self._in_view(scene_pos)
-            if cross != self._eraser_cursor:
-                self._eraser_cursor = cross
+            if cross != self._armed_cursor:
+                self._armed_cursor = cross
                 self._set_view_cursor(Qt.CursorShape.CrossCursor if cross else None)
             return
-        if self._eraser_cursor:
-            self._eraser_cursor = False
+        if self._armed_cursor:
+            self._armed_cursor = False
             self._set_view_cursor(None)
         rotate_pending = self._rotate_tool.first_point() is not None
         measure_pending = self._measure_tool.first_point() is not None
@@ -244,8 +240,6 @@ class CanvasInteraction:
             self._click_wand(event, scene_pos)
         elif handler is not None:
             handler(scene_pos, button)
-        elif tool is None and self._erase_at is not None and self._eraser_armed():
-            self._click_erase(scene_pos, button)
         else:
             self._click_select(event, scene_pos, button)
 
@@ -342,18 +336,6 @@ class CanvasInteraction:
         elif button == Qt.MouseButton.RightButton:
             self._show_add_roi_context_menu(scene_pos)
 
-    def _click_erase(self, scene_pos: object, button: object) -> None:
-        """Mask tab with the Eraser picked: a left click on the image removes the blob of mask pixels under it. It does not also select
-        the ROI under the cursor (the click belongs to the Eraser); the other buttons are left to the menus below as before."""
-        if button == Qt.MouseButton.LeftButton:
-            if self._in_view(scene_pos):
-                point = self._plot.vb.mapSceneToView(scene_pos)
-                assert self._erase_at is not None
-                self._erase_at(float(point.x()), float(point.y()))
-            return
-        if button == Qt.MouseButton.RightButton and self._point_in_selection(scene_pos):
-            self._context_menu([], scene_pos)  # the plain Invert/Deselect menu, as with no tool
-
     def _click_select(self, event: object, scene_pos: object, button: object) -> None:
         """No tool active: select the ROI under the cursor. On the ROIs tab a
         right click opens the ROI menu instead."""
@@ -384,11 +366,13 @@ class CanvasInteraction:
     def _show_roi_menu(self, scene_pos: object) -> None:
         """Right click on the ROIs tab: add a ROI here, group / ungroup / delete
         the selection. A click on an unselected ROI selects it first, so the
-        menu always acts on what the cursor is on."""
+        menu always acts on what the cursor is on. While the ROI selection is locked (2026-11-16) the click selects
+        nothing: the menu acts on the locked ROIs (its entries say how many) and carries the "Lock selection" check."""
         point = self._plot.vb.mapSceneToView(scene_pos)
         x, y = float(point.x()), float(point.y())
         roi_id = self._roi_at(x, y)
-        if roi_id is not None and roi_id not in self._selection.selected_roi_ids():
+        locked = self._selection.roi_selection_locked()
+        if roi_id is not None and roi_id not in self._selection.selected_roi_ids() and not locked:
             self._selection.set_roi_selection({roi_id})
         ids = tuple(sorted(self._selection.selected_roi_ids()))
         toolbox = self._roi_toolbox
@@ -404,8 +388,12 @@ class CanvasInteraction:
             can_remove_cube_edit=any(
                 toolbox.roi_by_id(i).timeline and int(self._selection.current_cube()) in toolbox.roi_by_id(i).timeline.cubes() for i in ids
             ),
+            locked=locked,
         )
         if choice is None:
+            return
+        if choice.action == TOGGLE_LOCK:
+            self._selection.set_roi_selection_locked(not locked)
             return
         if choice.action == SELECT_GROUP and clicked_group is not None:
             self._selection.set_roi_selection(set(clicked_group.area_roi_ids))
@@ -490,7 +478,9 @@ class CanvasInteraction:
         """Right-click while a selection tool is armed: "Select ROIs in selection" (2026-11-15, maintainer request: the
         ROIs inside or partly inside it become the ROI selection), "Exit tool" (leaves the draw tool, keeps the
         selection), plus Invert/Deselect inside it."""
-        can_pick = self._rois_touching is not None and self._area_selection.has_selection()
+        can_pick = (
+            self._rois_touching is not None and self._area_selection.has_selection() and not self._selection.roi_selection_locked()
+        )
         chosen = self._context_menu(
             [
                 (SELECT_ROIS_IN_SELECTION, can_pick),

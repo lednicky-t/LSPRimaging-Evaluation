@@ -79,6 +79,7 @@ from ...storage.ui_state_keys import (
     ROI_TABLE_SORT,
     ROI_TABLE_VIEW_MODE,
 )
+from .. import roi_selection_lock
 from ..icon_button_style import style_general_icon_button
 from ..panel_task import PanelTask
 from ..ribbon_icon_size import ICON_SIZE
@@ -557,7 +558,11 @@ class RoiTablePanel(QWidget):
             self._selection.set_roi_selection(ids)
         finally:
             self._syncing = False
-        self._model.set_selected_ids(self._selection.selected_roi_ids())
+        shown = self._selection.selected_roi_ids()
+        self._model.set_selected_ids(shown)
+        if self._selection.roi_selection_locked() and set(shown) != ids:
+            # A locked selection does not follow a click: the module refused (and said so); put the view back on the locked rows.
+            self._apply_selection_to_view(shown, reveal=False)
         self._update_toolbar_state()
         self._show_counts()
 
@@ -1112,11 +1117,18 @@ class RoiTablePanel(QWidget):
             self._fill_group_menu(menu, index)
         else:
             roi_id = self._model.roi_id(index)
-            if roi_id is not None and roi_id not in self._selection.selected_roi_ids():
+            # (A locked selection stays as it is: the menu then acts on the locked ROIs, and says how many in its entries.)
+            if roi_id is not None and roi_id not in self._selection.selected_roi_ids() and not self._selection.roi_selection_locked():
                 self._selection.set_roi_selection({roi_id})
             self._fill_roi_menu(menu)
         if not menu.isEmpty():
             menu.addSeparator()
+        lock_selection = menu.addAction(roi_selection_lock.MENU_TEXT)
+        lock_selection.setCheckable(True)
+        lock_selection.setChecked(self._selection.roi_selection_locked())
+        lock_selection.setToolTip(roi_selection_lock.TIP)
+        lock_selection.toggled.connect(self._selection.set_roi_selection_locked)
+        menu.setToolTipsVisible(True)
         lock = menu.addAction("Groups-only view (groups stay collapsed)")
         lock.setCheckable(True)
         lock.setChecked(self._group_only)

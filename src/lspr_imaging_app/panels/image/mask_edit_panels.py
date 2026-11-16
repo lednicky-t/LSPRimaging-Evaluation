@@ -1,18 +1,16 @@
-"""The "Manual edit" group's two per-tool control panels - `FeatureMapEditPanel` and `EraserEditPanel` - swapped by `MaskEditToolPicker`
-via a `QStackedWidget` (`mask_tab.py`).
+"""The Mask tab's "Feature map" section: `FeatureMapEditPanel` (`mask_tab.py`).
 
-**2026-11-15: five panels left.** The Histogram selection, Threshold, Local contrast, Morphology and Draw panels (2026-10-02 / 2026-10-29)
-moved into the selection toolbar beside the image: they make or modify a *selection* now, and the Mask tab's Selection group turns a
-selection into mask pixels (`panels/image/selection_by_value.py`, `selection_modify.py`, `brush_settings.py`,
-`mask_selection_editor.py`; record `docs/selection_lock_and_tool_move_2026-11-15.md`). What stays acts on the mask itself or is a
-two-stage process:
-- **Feature map** (2026-11-04, replaced the ROI features tool of 2026-10-29): `FeatureMapEditPanel`. Not a live preview but a Process button
-  (~20-30 s, worker processes, progress and Cancel in the status bar), a settings popup with the search limits and the cubes, then
-  (2026-11-05) a kinds popup (one check box per kind) and a margin field that act on the finished map at once, and an Apply button that adds
-  the enabled kinds at the Persistent / Individual scope. No ROIs: the result stays right when ROIs move.
-  Record: `docs/roi_feature_detection_2026-10-29.md` sections 10-11.
-- **Eraser** (2026-10-29): `EraserEditPanel` is only a hint icon; the tool is a click on the image (`panels/mask_grain_eraser.py`, routed by
-  `CanvasInteraction`), which removes the connected blob of mask pixels under it.
+**History.** The section was "Manual edit" (a tool picker over per-tool panels). 2026-11-15: the Histogram selection, Threshold, Local contrast,
+Morphology and Draw panels moved into the selection toolbar beside the image (they make or modify a *selection* now, and the Mask tab's
+Selection group turns a selection into mask pixels: `panels/image/selection_by_value.py`, `selection_modify.py`, `brush_settings.py`,
+`mask_selection_editor.py`; record `docs/selection_lock_and_tool_move_2026-11-15.md`). 2026-11-16: the Eraser went too (maintainer's
+request; a wand click plus the Selection group's Subtract does a similar job), the picker with it, so the Feature map is the one tool left and the section carries its name.
+
+**Feature map** (2026-11-04, replaced the ROI features tool of 2026-10-29): not a live preview but a Process button
+(~20-30 s, worker processes, progress and Cancel in the status bar), a settings popup with the search limits and the cubes, then
+(2026-11-05) a kinds popup (one check box per kind) and a margin field that act on the finished map at once, and an Apply button that adds
+the enabled kinds at the Persistent / Individual scope. No ROIs: the result stays right when ROIs move.
+Record: `docs/roi_feature_detection_2026-10-29.md` sections 10-11.
 
 Every panel keeps this ribbon's established sizing: 28px-tall icon buttons/spinboxes, `transparent_icon_button_stylesheet()` chrome, no
 inline text labels (tooltips only) - these panels live inside `ImageToolRibbon`'s fixed-height content row.
@@ -24,7 +22,7 @@ import dataclasses
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
     QDoubleSpinBox,
@@ -40,14 +38,14 @@ from PyQt6.QtWidgets import (
     QWidgetAction,
 )
 
-from lspr_ui import get_active_theme, load_tabler_icon
+from lspr_ui import get_active_theme
 
 from ...dataset import DatasetModule
 from ...image_tools import ChromaticModule, MaskModule, MaskScopeModule
 from ...image_tools.mask import feature_map as fm
 from ..feature_map_task import DEFAULT_CUBES, FeatureMapResult, FeatureMapSummary, FeatureMapTask, choose_cubes
 from ..mask_candidate_editor import MaskCandidateEditor
-from ..mask_edit_common import ADD_COLOR, BUTTON_SIZE, ICON_SIZE, action_button, disabled_safe_icon
+from ..mask_edit_common import ADD_COLOR, action_button, disabled_safe_icon
 from ..mask_edit_preview import KIND_FEATURE_MAP, MaskEditPreview
 from ..ribbon_fields import style_ribbon_number_field
 from .edit_preview_toggle import EditPreviewToggle
@@ -486,33 +484,3 @@ class FeatureMapEditPanel(QWidget):
             f"The eye shows the {summary.pixels:,} px of the enabled kinds ({added}); the + button adds them to the mask."
         )
         self._status(text)
-
-
-class EraserEditPanel(QWidget):
-    """The Eraser's row (2026-10-29): nothing to set, so one passive "click on the image" icon whose tooltip says what the tool does.
-
-    The tool itself is not here: while it is picked and the Mask tab is open, a left click on the image goes to
-    `MaskGrainEraser.erase_at` (`CanvasInteraction`, which also shows a cross cursor). Screen purpose: remove one blob of the mask by
-    clicking it. Main action: click a masked pixel. States: armed (this row is shown and the Mask tab is open) / not. Error messages
-    (status line): no mask pixel under the click; the click is outside the area selection."""
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._hint = QLabel(self)
-        self._hint.setFixedSize(BUTTON_SIZE, BUTTON_SIZE)
-        self._hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._hint.setToolTip(
-            "Eraser: click a mask pixel on the image and the whole blob of connected mask pixels (a grain; touching at a corner "
-            "counts) leaves the mask. It acts at the scope chosen under State (Persistent or Individual) and stays inside the area "
-            "selection, if there is one."
-        )
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(2)
-        layout.addWidget(self._hint)
-        layout.addStretch(1)
-        self.refresh_theme()
-
-    def refresh_theme(self) -> None:
-        icon = load_tabler_icon("pointer", color=get_active_theme().text_dim, size=ICON_SIZE * 2, stroke_width=2.1)
-        self._hint.setPixmap(icon.pixmap(ICON_SIZE, ICON_SIZE))
