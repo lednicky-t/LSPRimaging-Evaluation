@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import QHBoxLayout, QToolButton, QWidget
 from ...selection import AreaSelectionModule
 from ..mask_edit_common import ADD_COLOR, SUBTRACT_COLOR, action_button
 from ..mask_selection_editor import MaskSelectionEditor
+from .mask_selection_icons import mask_to_selection_icon, selection_to_mask_icon
 
 _PLAIN_COLOR = "#f8fafc"  # GuiTheme.text_primary, like the other real, active actions of this ribbon
 
@@ -38,6 +39,8 @@ class MaskSelectionActions(QWidget):
             "Selection from mask: the mask at this frame becomes the selection (the mode button, or Shift / Alt, say how it combines with "
             "the current one). Then Modify selection, then Replace.",
         )
+        self.replace_button.setIcon(selection_to_mask_icon(_PLAIN_COLOR))  # source first: selection -> mask
+        self.from_mask_button.setIcon(mask_to_selection_icon(_PLAIN_COLOR))  # mask -> selection
         self.replace_button.clicked.connect(lambda _checked=False: self._editor.replace())
         self.from_mask_button.clicked.connect(lambda _checked=False: self._editor.from_mask())
         self.add_button.clicked.connect(lambda _checked=False: self._editor.apply(subtract=False))
