@@ -5,24 +5,27 @@ map); the mask and the ROIs are layers over the image. The selection does nothin
 editing tools act; turning it into something is an explicit action of the layer: the Mask tab's *Add selection* /
 *Subtract selection* / *Replace* / *Selection from mask* (and, later, an ROI made from a selection - its reference region and "one ROI per
 blob or one for all" are decisions still open, `docs/selection_wand_2026-11-14.md`).
-Right-click with a tool armed: "Select ROIs in selection" (the ROIs inside or partly inside it, `interaction.py`), Lock to selection, Invert,
+Right-click with a tool armed: "Select ROIs in selection" (the ROIs inside or partly inside it, `interaction.py`), Lock, Unlock, Invert,
 Deselect (there is no Deselect button: it is in this menu).
 
 Screen purpose: make and refine a selection on the image from any ribbon tab.
-Layout: a narrow column of icon buttons left of the image canvas, below the ribbon, in **five sections divided by horizontal lines** (maintainer,
-2026-11-15); it scrolls (arrows at its ends) when the panel is too short for all of them (`panels/scrolling_column.py`):
-  1. **Lock / Unlock**: Lock turns the selection into the fence (`AreaSelectionModule.lock_selection`; enabled with a selection), Unlock leaves it
-     (amber while a lock is on). They only ask (`lock_requested` / `unlock_requested`): the Image panel knows the image size and says in the
-     status bar what happened.
-  2. **Selection tools**: Rectangle, Lasso, Wand, Draw (the selection brush).
-  3. **Mode**: one button showing the Venn diagram of the picked mode (`combine_mode_icons.py`: pink circle = the selection now, green circle = the new region, grey fill = ends up selected);
-     click = a menu of the four modes (Replace / Add / Subtract / Intersect), the wheel over it steps through them; remembered. Shift / Alt /
-     Shift+Alt on the image override it for one selection.
-  4. **Select by value**: Histogram range, Threshold, Local contrast (`selection_by_value.py`), with the Mask tab's old icons.
-  5. **Modify selection**: Grow / Shrink / Open / Close / Fill holes / Invert (`selection_modify.py`), with the old Morphology icon.
-  6. **View** (2026-11-16): an eye button **pinned at the bottom** of the toolbar (under the scrolling column, so it never scrolls away). Its pop-up
+Layout: a narrow column of icon buttons left of the image canvas, below the ribbon, in **sections divided by horizontal lines** (maintainer,
+2026-11-15; reordered 2026-11-16: View first, Lock last); the part under View scrolls (arrows at its ends) when the panel is too short for all
+of it (`panels/scrolling_column.py`). Top to bottom:
+  1. **View** (2026-11-16): an eye button **pinned at the top** of the toolbar (above the scrolling column, so it never scrolls away). Its pop-up
      (`selection_view_form.py`, like View -> Masks of the main ribbon) sets the colour of the selection's three outlines and an infill for each
      (5 opacity steps, none by default); the Venn circles of the mode button wear the same colours (`selection_style.py`).
+  2. **Mode**: one button showing the Venn diagram of the picked mode (`combine_mode_icons.py`: pink circle = the selection now, green circle = the new region, grey fill = ends up selected);
+     click = a menu of the four modes (Replace / Add / Subtract / Intersect), the wheel over it steps through them; remembered. Shift / Alt /
+     Shift+Alt on the image override it for one selection.
+  3. **Selection tools**: Rectangle, Lasso, Wand, Draw (the selection brush).
+  4. **Select by value**: Histogram range, Threshold, Local contrast (`selection_by_value.py`), with the Mask tab's old icons.
+  5. **Modify selection**: Grow / Shrink / Open / Close / Fill holes / Invert (`selection_modify.py`), with the old Morphology icon.
+  6. **Lock / Unlock, one button** (2026-11-16): Lock turns the selection into the fence (`AreaSelectionModule.lock_selection`; enabled with a
+     selection); while a lock is on the same button is Unlock (open padlock, amber) and leaves it. Locking the selection *inside* a lock (to
+     narrow it) is the button's second face: the wheel over it flips Unlock <-> Lock (`lock_action()`; needs a selection, goes back to Unlock after
+     a click); the right-click menu on the image has both entries too. They only ask (`lock_requested` / `unlock_requested`): the Image panel
+     knows the image size and says in the status bar what happened.
 Main user actions: pick a tool (picking the armed one again leaves it, the selection stays). **Every tool with numbers has them in a pop-up on a
 right-click of its button, and on the image a drag with the right button changes them** (`tool_drag.py`; the wand: threshold sideways, Grow up;
 Threshold / Local contrast: threshold sideways, sigma up; Draw: size sideways). The wand's method is switched by the wheel over its button (Contrast /
@@ -41,14 +44,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from PyQt6.QtCore import QPoint, Qt, pyqtSignal
+from PyQt6.QtCore import QPoint, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QIcon
 from PyQt6.QtWidgets import (
-    QCheckBox,
-    QComboBox,
     QDoubleSpinBox,
     QFormLayout,
     QFrame,
+    QHBoxLayout,
     QLabel,
     QMenu,
     QSpinBox,
@@ -74,12 +76,15 @@ from ..ui_state import UiStateStore
 from .combine_mode_icons import combine_mode_icon, framed_icon
 from .lock_layer import BORDER_COLOR
 from .mask_edit_tool_icons import histogram_selection_icon, local_contrast_icon, morphology_icon, threshold_icon
-from .selection_by_value import MODE_METHODS, ByValueSelector
+from .selection_by_value import ICON_CHOICE_STYLE, MODE_METHODS, ByValueSelector
+from .selection_menu_icons import FILL_HOLES_ICON
 from .selection_palette import PAST, PRESENT
 from .selection_style import SelectionStyle
 from .selection_view_form import SelectionViewForm
 from .wheel_tool_button import WheelToolButton
 
+LOCK_ACTION = "lock"  # what the one Lock / Unlock button does (`SelectionToolbar.lock_action`)
+UNLOCK_ACTION = "unlock"
 _RENDER_SIZE = ICON_SIZE * 2
 _STROKE_WIDTH = 2.1
 _ACTIVE_COLOR = "#38bdf8"  # the ribbon's tool blue (as the old picker)
@@ -172,6 +177,11 @@ _METHOD_LABELS = (
     (WandMethod.BRIGHTNESS, "Brightness (similar value)"),
     (WandMethod.EDGES, "Edges (stop at an outline)"),
 )
+_METHOD_TIPS = {
+    WandMethod.CONTRAST: "pixels that stand out from the smooth local background (bright or dark features, uneven light).",
+    WandMethod.BRIGHTNESS: "pixels with a value close to the clicked one (the classic wand).",
+    WandMethod.EDGES: "grows from the click until a strong edge, the border placed on the steepest point of the edge.",
+}
 
 
 class WandSettingsForm(QWidget):
@@ -186,15 +196,27 @@ class WandSettingsForm(QWidget):
         form.setContentsMargins(10, 8, 10, 8)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
-        self.method = QComboBox(self)
+        # The method: three icon buttons, one checked (2026-11-16, maintainer: "replace dropdown menu with icons"); the pictures are the wand
+        # button's own for each method. The wheel over the wand button steps through them too.
+        self._picked = _METHOD_LABELS[0][0]
+        self.method_buttons: dict[WandMethod, QToolButton] = {}
+        method_row = QWidget(self)
+        method_layout = QHBoxLayout(method_row)
+        method_layout.setContentsMargins(0, 0, 0, 0)
+        method_layout.setSpacing(4)
         for method, label in _METHOD_LABELS:
-            self.method.addItem(label, method.value)
-        self.method.setToolTip(
-            "Contrast: pixels that stand out from the smooth local background (bright or dark features, uneven light).\n"
-            "Brightness: pixels with a value close to the clicked one (the classic wand).\n"
-            "Edges: grows from the click until a strong edge, the border placed on the steepest point of the edge."
-        )
-        form.addRow("Method", self.method)
+            button = QToolButton(method_row)
+            button.setCheckable(True)
+            button.setAutoRaise(True)
+            button.setFixedSize(BUTTON_SIZE, BUTTON_SIZE)
+            button.setIconSize(QSize(ICON_SIZE, ICON_SIZE))
+            button.setStyleSheet(ICON_CHOICE_STYLE)
+            button.setToolTip(f"{label}: {_METHOD_TIPS[method]}\nThe wheel over the wand button on the toolbar switches the method too.")
+            button.clicked.connect(lambda _checked=False, picked=method: self.set_method(picked))
+            method_layout.addWidget(button)
+            self.method_buttons[method] = button
+        method_layout.addStretch(1)
+        form.addRow(method_row)
 
         def sigma_box(value: float, tip: str) -> QDoubleSpinBox:
             box = QDoubleSpinBox(self)
@@ -254,31 +276,69 @@ class WandSettingsForm(QWidget):
         self.grow.setToolTip("Margin added around the region (covers a faint halo). Masks are on/off per pixel, so this replaces feathering.")
         form.addRow("Grow", self.grow)
 
-        self.fill_holes = QCheckBox("Fill holes", self)
+        # Fill holes: an icon that is on (coloured, with a plate) or off (grey), not a check box with a caption; its picture is the Modify menu's.
+        self.fill_holes = QToolButton(self)
+        self.fill_holes.setCheckable(True)
         self.fill_holes.setChecked(defaults.fill_holes)
-        self.fill_holes.setToolTip("Fill gaps inside the region (a ring-shaped particle becomes a solid one).")
-        form.addRow("", self.fill_holes)
+        self.fill_holes.setAutoRaise(True)
+        self.fill_holes.setFixedSize(BUTTON_SIZE, BUTTON_SIZE)
+        self.fill_holes.setIconSize(QSize(ICON_SIZE, ICON_SIZE))
+        self.fill_holes.setStyleSheet(ICON_CHOICE_STYLE)
+        self.fill_holes.setToolTip("Fill holes: fill gaps inside the region (a ring-shaped particle becomes a solid one). Coloured = on.")
+        fill_row = QWidget(self)
+        fill_layout = QHBoxLayout(fill_row)
+        fill_layout.setContentsMargins(0, 0, 0, 0)
+        fill_layout.addWidget(self.fill_holes)
+        fill_layout.addStretch(1)
+        form.addRow(fill_row)
 
         for widget in (self.contrast_threshold, self.brightness_tolerance, self.edge_threshold, self.smoothing, self.background, self.grow):
             widget.valueChanged.connect(lambda _value: self.changed.emit())
-        self.fill_holes.toggled.connect(lambda _on: self.changed.emit())
-        self.method.currentIndexChanged.connect(lambda _index: self._on_method_changed())
+        self.fill_holes.toggled.connect(lambda _on: self._on_fill_holes_toggled())
+        self.refresh_theme(get_active_theme())
         self._on_method_changed()
 
+    def refresh_theme(self, theme: GuiTheme) -> None:
+        """Draw the icons in the theme's colours (the method pictures; Fill holes is blue when on, muted when off)."""
+        for method, button in self.method_buttons.items():
+            button.setIcon(load_tabler_icon(_METHOD_ICONS[method], color=theme.text_primary, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH))
+        self._paint_fill_holes(theme)
+
+    def _paint_fill_holes(self, theme: GuiTheme | None = None) -> None:
+        theme = theme if theme is not None else get_active_theme()
+        color = _ACTIVE_COLOR if self.fill_holes.isChecked() else theme.text_muted
+        self.fill_holes.setIcon(load_tabler_icon(FILL_HOLES_ICON, color=color, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH))
+
+    def _on_fill_holes_toggled(self) -> None:
+        self._paint_fill_holes()
+        self.changed.emit()
+
     def _method(self) -> WandMethod:
-        return WandMethod(self.method.currentData())
+        return self._picked
 
     def method_label(self) -> str:
-        return self.method.currentText()
+        return dict(_METHOD_LABELS)[self._picked]
 
     def picked_method(self) -> WandMethod:
         return self._method()
 
+    def set_method(self, method: WandMethod) -> None:
+        """Pick `method` (a click on its icon, the wheel over the wand button, a restore). Picking the picked one changes nothing."""
+        if method is not self._picked:
+            self._picked = method
+            self._on_method_changed()
+        else:
+            self._show_method()  # a click on the checked button must leave it checked
+
+    def _show_method(self) -> None:
+        for method, button in self.method_buttons.items():
+            button.setChecked(method is self._picked)
+
     def cycle_method(self, steps: int) -> str:
         """Move `steps` places along the method list, wrapping round (the wheel over the wand button); returns the label of
         the method now picked."""
-        count = self.method.count()
-        self.method.setCurrentIndex((self.method.currentIndex() + int(steps)) % count)
+        order = [method for method, _label in _METHOD_LABELS]
+        self.set_method(order[(order.index(self._picked) + int(steps)) % len(order)])
         return self.method_label()
 
     def threshold_box(self) -> QDoubleSpinBox:
@@ -299,6 +359,7 @@ class WandSettingsForm(QWidget):
 
     def _on_method_changed(self) -> None:
         method = self._method()
+        self._show_method()
         self.contrast_threshold.setVisible(method is WandMethod.CONTRAST)
         self.brightness_tolerance.setVisible(method is WandMethod.BRIGHTNESS)
         self.edge_threshold.setVisible(method is WandMethod.EDGES)
@@ -321,7 +382,11 @@ class WandSettingsForm(QWidget):
         )
 
     def bind_ui_state(self, store: UiStateStore) -> None:
-        store.bind("selection/wand_method", self.method)
+        # The method is written by hand (three buttons are not one widget `bind` knows), under the key and values it had as a drop-down.
+        saved = store.get("selection/wand_method")
+        if isinstance(saved, str) and saved in {method.value for method in WandMethod}:
+            self.set_method(WandMethod(saved))
+        self.changed.connect(lambda: store.set("selection/wand_method", self._picked.value))
         store.bind("selection/wand_contrast_threshold", self.contrast_threshold)
         store.bind("selection/wand_brightness_tolerance", self.brightness_tolerance)
         store.bind("selection/wand_edge_threshold", self.edge_threshold)
@@ -332,11 +397,11 @@ class WandSettingsForm(QWidget):
 
 
 class SelectionToolbar(QFrame):
-    """Lock / Unlock, the selection tools, the mode picker, the select-by-value tools and Modify selection - one column beside the image, in five
-    sections (module docstring)."""
+    """View, the mode picker, the selection tools, the select-by-value tools, Modify selection and Lock / Unlock - one column beside the image, in
+    six sections (module docstring)."""
 
-    lock_requested = pyqtSignal()  # the Lock button: the selection becomes the fence
-    unlock_requested = pyqtSignal()  # the Unlock button
+    lock_requested = pyqtSignal()  # the Lock button shows Lock and was pressed: the selection becomes the fence
+    unlock_requested = pyqtSignal()  # the Lock button shows Unlock and was pressed
 
     def __init__(
         self,
@@ -364,28 +429,47 @@ class SelectionToolbar(QFrame):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
-        self._column = ScrollingColumn(self._content, self)
-        outer.addWidget(self._column, 1)
+        self._column = ScrollingColumn(self._content, self)  # added to `outer` below the View button
 
         self._wand_busy = False
         self._value_busy = False
         self._held_mode: str | None = None  # the combine mode a held Shift / Alt gives (`show_held_mode`); None = the picked mode shows
         self._tool_buttons: dict[AreaSelectionMode, QToolButton] = {}
-        self._separators: list[QFrame] = []  # the four dividers of the column, then the one above the pinned View button
+        self._lock_inside = False  # a lock is on and the Lock button was wheeled to its Lock face (lock the selection inside the lock)
+        self._separators: list[QFrame] = []  # the one under the pinned View button, then the four dividers of the column
         self._popups: dict[AreaSelectionMode, QMenu] = {}
 
-        # 1. Lock / Unlock
-        self._lock_button = QToolButton(self)
-        _style_button(self._lock_button)
-        self._lock_button.clicked.connect(lambda _checked=False: self.lock_requested.emit())
-        layout.addWidget(self._lock_button)
-        self._unlock_button = QToolButton(self)
-        _style_button(self._unlock_button)
-        self._unlock_button.clicked.connect(lambda _checked=False: self.unlock_requested.emit())
-        layout.addWidget(self._unlock_button)
+        # 1. View (2026-11-16, maintainer: the top of the toolbar): the pop-up that changes how the selection looks. Pinned above the scrolling
+        # column (`outer`), not inside it, so it is always at the top whether or not the column scrolls.
+        self._view_form = SelectionViewForm(self._style, self)
+        self._view_menu = QMenu(self)
+        view_action = QWidgetAction(self._view_menu)
+        view_action.setDefaultWidget(self._view_form)
+        self._view_menu.addAction(view_action)
+        self._view_button = QToolButton(self)
+        _style_button(self._view_button)
+        self._view_button.clicked.connect(lambda _checked=False: self.show_view_menu())
+        outer.addSpacing(4)
+        outer.addWidget(self._view_button, 0, Qt.AlignmentFlag.AlignHCenter)
+        self._add_separator(outer)
+        outer.addWidget(self._column, 1)
+
+        # 2. The mode picker: the Venn diagram of the picked mode; click = a menu of the four, the wheel steps through them.
+        self._mode_button = WheelToolButton(self)
+        _style_button(self._mode_button)
+        self._mode_menu = QMenu(self)
+        self._mode_actions: dict[str, QAction] = {}
+        for how in COMBINE_MODES:
+            action = self._mode_menu.addAction(_MODE_LABELS[how])
+            action.setCheckable(True)
+            action.triggered.connect(lambda _checked=False, picked=how: self._selection.set_combine_mode(picked))
+            self._mode_actions[how] = action
+        self._mode_button.clicked.connect(lambda _checked=False: self.show_mode_menu())
+        self._mode_button.wheel_steps.connect(self._on_mode_wheel)
+        layout.addWidget(self._mode_button)
         self._add_separator(layout)
 
-        # 2. Selection tools: Rectangle, Lasso, Wand, Draw
+        # 3. Selection tools: Rectangle, Lasso, Wand, Draw
         for mode in (
             AreaSelectionMode.RECTANGLE, AreaSelectionMode.LASSO, AreaSelectionMode.WAND, AreaSelectionMode.BRUSH
         ):
@@ -401,30 +485,15 @@ class SelectionToolbar(QFrame):
             self._attach_popup(AreaSelectionMode.BRUSH, brush_form)
         self._add_separator(layout)
 
-        # 3. The mode picker: the Venn diagram of the picked mode; click = a menu of the four, the wheel steps through them.
-        self._mode_button = WheelToolButton(self)
-        _style_button(self._mode_button)
-        self._mode_menu = QMenu(self)
-        self._mode_actions: dict[str, QAction] = {}
-        for how in COMBINE_MODES:
-            action = self._mode_menu.addAction(_MODE_LABELS[how])
-            action.setCheckable(True)
-            action.triggered.connect(lambda _checked=False, picked=how: self._selection.set_combine_mode(picked))
-            self._mode_actions[how] = action
-        self._mode_button.clicked.connect(lambda _checked=False: self.show_mode_menu())
-        self._mode_button.wheel_steps.connect(self._on_mode_wheel)
-        layout.addWidget(self._mode_button)
-        self._add_separator(layout)
-
         # 4. Select by value: Histogram range, Threshold, Local contrast. One pop-up form, showing the numbers of the button that opened it.
         for mode in VALUE_MODES:
             self._add_tool(layout, mode)
         self._value_menu: QMenu | None = None
         if value_tool is not None:
             self._value_menu = QMenu(self)
-            value_action = QWidgetAction(self._value_menu)
-            value_action.setDefaultWidget(value_tool.form)
-            self._value_menu.addAction(value_action)
+            self._value_action = QWidgetAction(self._value_menu)
+            self._value_action.setDefaultWidget(value_tool.form)
+            self._value_menu.addAction(self._value_action)
             for mode in VALUE_MODES:
                 button = self._tool_buttons[mode]
                 button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -444,21 +513,16 @@ class SelectionToolbar(QFrame):
             _style_button(self._modify_button)
             self._modify_button.clicked.connect(lambda _checked=False: self.show_modify_menu())
             layout.addWidget(self._modify_button)
-        layout.addStretch(1)
+            self._add_separator(layout)
 
-        # 6. View (2026-11-16): the pop-up that changes how the selection looks. Pinned under the scrolling column (`outer`), not inside it, so it
-        # is always at the bottom of the ribbon whether or not the column scrolls.
-        self._view_form = SelectionViewForm(self._style, self)
-        self._view_menu = QMenu(self)
-        view_action = QWidgetAction(self._view_menu)
-        view_action.setDefaultWidget(self._view_form)
-        self._view_menu.addAction(view_action)
-        self._add_separator(outer)
-        self._view_button = QToolButton(self)
-        _style_button(self._view_button)
-        self._view_button.clicked.connect(lambda _checked=False: self.show_view_menu())
-        outer.addWidget(self._view_button, 0, Qt.AlignmentFlag.AlignHCenter)
-        outer.addSpacing(4)
+        # 6. Lock / Unlock, one button (2026-11-16, maintainer): Lock while nothing is locked, Unlock while a lock is on. The wheel over it flips it
+        # to its Lock face while locked (lock the selection inside the lock: narrow it); the right-click menu on the image has both as well.
+        self._lock_button = WheelToolButton(self, wheel_wanted=self._selection.has_lock)  # with no lock the wheel scrolls the column
+        _style_button(self._lock_button)
+        self._lock_button.clicked.connect(lambda _checked=False: self._on_lock_clicked())
+        self._lock_button.wheel_steps.connect(self._on_lock_wheel)
+        layout.addWidget(self._lock_button)
+        layout.addStretch(1)
         self.setFixedWidth(_BAR_WIDTH)
         self._refresh_wand_tip()
 
@@ -549,11 +613,13 @@ class SelectionToolbar(QFrame):
 
     @property
     def lock_button(self) -> QToolButton:
+        """The one Lock / Unlock button (`lock_action()` says which of the two it is now)."""
         return self._lock_button
 
-    @property
-    def unlock_button(self) -> QToolButton:
-        return self._unlock_button
+    def lock_action(self) -> str:
+        """What the Lock button does now: `LOCK_ACTION` (no lock yet, or a lock is on and the button was wheeled to Lock to narrow it) or
+        `UNLOCK_ACTION` (a lock is on: the button's resting face)."""
+        return UNLOCK_ACTION if self._selection.has_lock() and not self._lock_inside else LOCK_ACTION
 
     @property
     def modify_button(self) -> QToolButton | None:
@@ -579,10 +645,8 @@ class SelectionToolbar(QFrame):
         menu.popup(button.mapToGlobal(QPoint(button.width(), 0)))
 
     def show_view_menu(self) -> None:
-        """Open the View pop-up beside its button (what a click on it does). The button is at the bottom of the ribbon, so the pop-up's bottom
-        edge is level with the button's, not its top (it would have to be pushed back up anyway)."""
-        height = self._view_menu.sizeHint().height()
-        self._view_menu.popup(self._view_button.mapToGlobal(QPoint(self._view_button.width(), self._view_button.height() - height)))
+        """Open the View pop-up beside its button (what a click on it does)."""
+        self._popup_beside(self._view_menu, self._view_button)
 
     def show_settings(self, mode: AreaSelectionMode) -> None:
         """Open the numbers of the tool `mode` beside its button (what a right-click on the button does)."""
@@ -601,6 +665,10 @@ class SelectionToolbar(QFrame):
         """Open the numbers of the select-by-value tool `mode` (Histogram range, Threshold or Local contrast) beside its button."""
         if self._value_tool is not None and self._value_menu is not None:
             self._value_tool.form.set_method(MODE_METHODS[mode])
+            # A QMenu measures its widget once and keeps the size, but the three methods differ (Histogram range is one icon, the others
+            # have number fields): taking the action out and putting it back makes the menu measure the form again (2026-11-16).
+            self._value_menu.removeAction(self._value_action)
+            self._value_menu.addAction(self._value_action)
             self._popup_beside(self._value_menu, self._tool_buttons[mode])
 
     def show_modify_menu(self) -> None:
@@ -653,6 +721,25 @@ class SelectionToolbar(QFrame):
         how = COMBINE_MODES[(COMBINE_MODES.index(self._selection.combine_mode()) + int(steps)) % len(COMBINE_MODES)]
         self._selection.set_combine_mode(how)
         QToolTip.showText(self._mode_button.mapToGlobal(QPoint(self._mode_button.width(), 0)), f"Selection mode: {_MODE_LABELS[how]}", self._mode_button)
+
+    def _on_lock_clicked(self) -> None:
+        """The Lock button asks for whichever of the two it shows; afterwards it goes back to its resting face."""
+        action = self.lock_action()
+        self._lock_inside = False
+        (self.unlock_requested if action == UNLOCK_ACTION else self.lock_requested).emit()
+        self._refresh()
+
+    def _on_lock_wheel(self, _steps: int) -> None:
+        """The wheel over the Lock button while a lock is on: flips it between Unlock and Lock (lock the selection inside the lock, which narrows
+        it). Locking needs a selection; without one the tool tip says so and the button stays Unlock."""
+        button = self._lock_button
+        where = button.mapToGlobal(QPoint(button.width(), 0))
+        if not self._selection.has_selection():
+            QToolTip.showText(where, "Lock inside the lock: make a selection first", button)
+            return
+        self._lock_inside = not self._lock_inside
+        self._refresh()
+        QToolTip.showText(where, "Lock: the selection becomes the new, smaller lock" if self._lock_inside else "Unlock", button)
 
     def show_held_mode(self, how: str | None) -> None:
         """A held Shift / Alt (or the keys a drag began with) make the next selection combine as *how*: the mode button shows that mode's
@@ -737,34 +824,53 @@ class SelectionToolbar(QFrame):
                 "Modify selection: Grow, Shrink, Open (remove specks), Close (fill gaps), Fill holes, Invert; the radius is in the menu."
                 if has_selection else "Modify selection: make a selection first."
             )
-        self._lock_button.setEnabled(has_selection)
-        self._lock_button.setToolTip(
-            "Lock to selection: the selection becomes the fence. Everything outside is dimmed; tools and new selections work only "
-            "inside it (like a crop that keeps the image). A selection made inside a lock can be locked again to narrow it."
-            if has_selection else "Lock to selection: make a selection first."
-        )
+        self._refresh_lock_button(has_selection, theme)
+
+    def _refresh_lock_button(self, has_selection: bool, theme: GuiTheme) -> None:
+        """The one Lock / Unlock button: its icon, whether it can be pressed and what its tool tip says follow `lock_action()`."""
         locked = self._selection.has_lock()
+        if not locked or not has_selection:
+            self._lock_inside = False  # the Lock face inside a lock needs a selection to lock to (and a lock to be inside)
+        action = self.lock_action()
         # Amber (the lock border's colour on the image) while a lock is on, so the button says "you are locked"
-        self._unlock_button.setIcon(
-            load_tabler_icon("lock-open", color=BORDER_COLOR if locked else theme.text_primary, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH)
+        self._lock_button.setIcon(
+            load_tabler_icon(
+                "lock-open" if action == UNLOCK_ACTION else "lock",
+                color=BORDER_COLOR if locked else theme.text_primary, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH,
+            )
         )
-        self._unlock_button.setEnabled(locked)
-        self._unlock_button.setToolTip(
-            "Unlock: leave the lock; the whole image can be selected and edited again. The selection stays."
-            if locked else "Unlock: nothing is locked."
-        )
+        self._lock_button.setEnabled(action == UNLOCK_ACTION or has_selection)
+        if action == UNLOCK_ACTION:
+            tip = "Unlock: leave the lock; the whole image can be selected and edited again. The selection stays."
+            tip += (
+                "\nWheel over this button: Lock (the selection becomes the new, smaller lock)."
+                if has_selection else "\n(To lock inside the lock, make a selection first, then wheel over this button.)"
+            )
+        elif locked:
+            tip = (
+                "Lock: the selection becomes the new, smaller lock (it replaces this one).\n"
+                "Wheel over this button: back to Unlock."
+            )
+        elif has_selection:
+            tip = (
+                "Lock: the selection becomes the fence. Everything outside is dimmed; tools and new selections work only inside it "
+                "(like a crop that keeps the image). Once locked, this button becomes Unlock."
+            )
+        else:
+            tip = "Lock: make a selection first."
+        self._lock_button.setToolTip(tip)
 
     def refresh_theme(self, theme: GuiTheme) -> None:
         self._column.refresh_theme()
-        for button in (*self._tool_buttons.values(), self._mode_button, self._lock_button, self._unlock_button, self._view_button):
+        for button in (*self._tool_buttons.values(), self._mode_button, self._lock_button, self._view_button):
             _style_button(button)
-        self._lock_button.setIcon(load_tabler_icon("lock", color=theme.text_primary, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH))
         self._view_button.setIcon(load_tabler_icon("eye", color=theme.text_primary, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH))
         self._view_button.setToolTip(
             "View: how the selection looks on the image. The colour of the selection and of the shape being dragged, also the colour of the "
             "Venn circles of the mode button, and an infill for each in five opacities (none by default)."
         )
         self._view_form.refresh_theme(theme)
+        self.wand_form.refresh_theme(theme)
         if self._modify_button is not None:
             _style_button(self._modify_button)
             self._modify_button.setIcon(morphology_icon())  # the old Morphology tool's icon (fixed colours)

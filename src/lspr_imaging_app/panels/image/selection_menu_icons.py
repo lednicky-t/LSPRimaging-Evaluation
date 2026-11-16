@@ -16,6 +16,8 @@ from ..ribbon_icon_size import ICON_SIZE
 INVERT_ICON = "contrast-2"  # a square split into its two halves: what is selected and what is not swap places
 DESELECT_ICON = "square-off"  # the square with a slash through it: nothing is selected
 FILL_HOLES_ICON = "bucket-droplet"  # a paint bucket: fill
+LOCK_ICON = "lock"  # the same two as the toolbar's Lock / Unlock buttons (`selection_toolbar.py`)
+UNLOCK_ICON = "lock-open"
 
 
 def menu_icon(name: str) -> QIcon:

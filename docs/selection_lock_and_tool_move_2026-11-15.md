@@ -380,3 +380,17 @@ Tests: `test_lspri_selection_style.py` (30; the result's colour, infill and bord
 **Look at (unseen by eye):** the tint's colour against the pink / green outlines and the mask (the old Mask-tab preview colour, `figure_mask_color`, opacity 0.55, fixed), the Darker icon at 24 px, the tool tip beside the button on a wheel turn, how it feels while right-dragging the threshold on a big image, a stale tint during a long blur (sigma 150: 4 s).
 
 Tests: `tests/unit/test_lspri_relative_deviation.py` (13), `tests/integration/test_lspri_threshold_live_preview.py` (16: the tint follows threshold / side / sigma, no second blur, the lock cut and not the selection's, a click selects exactly what was tinted, Play and frames, the wheel, the icon's pixels, remembered). A bug the tests found: jumping to another frame and back inside the 250 ms delay left the tint hidden (the preview thought it had already shown it).
+
+## 23. Twelfth round (2026-11-16): the toolbar is reordered, Lock and Unlock are one button
+
+**Asked (maintainer):** View first at the top; below it the selection mode, then the selection tools, then the threshold tools, then the modifiers; last the lock / unlock, as **one** button that turns into Unlock while a lock is on. Locking the selection *inside* a lock (narrowing it) must stay possible, but only by scrolling (the wheel changes the icon) or from the context menu.
+
+**Built** (`panels/image/selection_toolbar.py`, `wheel_tool_button.py`, `selection_menu_icons.py`, `interaction.py`):
+- Order, top to bottom: View (pinned above the scrolling column, so it still never scrolls away) | mode | Rectangle, Lasso, Wand, Draw | Histogram range, Threshold, Local contrast | Modify selection | Lock / Unlock. The Lock button is the last button of the scrolling column, so in a short panel it is reached with the column's arrows.
+- One `lock_button` (the old `unlock_button` is gone). `lock_action()` says what it does: `LOCK_ACTION` while nothing is locked (enabled only with a selection), `UNLOCK_ACTION` while a lock is on (open padlock, amber; enabled always). The signals `lock_requested` / `unlock_requested` are unchanged, so the Image panel's side is untouched.
+- Lock inside a lock: while a lock is on, the wheel over the button flips it between its Unlock and Lock faces (a tool tip beside the button names the face). The Lock face needs a selection (without one the wheel only says so); it is dropped again when the selection goes, and after any click the button rests on Unlock. With no lock the button does not take the wheel (`WheelToolButton(wheel_wanted=...)`), so the column scrolls over it as over any plain button.
+- Right-click menu on the image: the entry reads **Lock** (was "Lock to selection") and Lock and Unlock wear the toolbar's padlock icons (`LOCK_ICON`, `UNLOCK_ICON`).
+
+**Look at (unseen by eye):** the open / closed padlock in amber on both themes, whether the wheel over the button is discoverable enough with only the tool tip to tell (an alternative is a right-click menu on the button with both entries), and that the Lock button at the very bottom of a short panel is easy enough to reach.
+
+Tests: `test_lspri_selection_toolbar_sections.py` (order, View on top, Lock last, dividers), `test_lspri_selection_lock_panel.py` (one button, wheel flip, narrowing click, face dropped, wheel left to the column), `test_lspri_selection_toolbar_scroll.py`, `test_lspri_selection_style.py` (View at the top), `test_lspri_rewrite_area_selection.py` (menu entry and icons).

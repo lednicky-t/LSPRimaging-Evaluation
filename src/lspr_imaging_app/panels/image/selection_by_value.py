@@ -23,7 +23,7 @@ Error messages (status bar): no image on screen; no range on the Histogram; the 
   (`raster_tools.create_relative_contrast_mask`), computed on the **raw** plane of the frame on screen. **Two modes, Brighter and Darker**
   (2026-11-16, maintainer: until then it took both signs at once, which the icon never said): Brighter = more than that share *above* the
   background, Darker = more than that share *below* it. The wheel over the button flips them (the coloured part of the icon is over or
-  under its line), the form has the same switch (`side_combo`), the choice is remembered (`selection/threshold_side`, a UI state, not a
+  under its line), the form has the same switch (two icon buttons, `side_buttons`; was a drop-down until 2026-11-16), the choice is remembered (`selection/threshold_side`, a UI state, not a
   session field). Both signs at once is Local contrast (`both` in the maths, not offered here) or two clicks in Add mode.
 - **Local contrast**: pixels more than `z` local standard deviations from their local mean
   (`raster_tools.create_local_contrast_mask`), also on the raw plane.
@@ -48,9 +48,11 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import numpy as np
-from PyQt6.QtCore import QObject, Qt, pyqtSignal
+from PyQt6.QtCore import QObject, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QGuiApplication
-from PyQt6.QtWidgets import QComboBox, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel, QSpinBox, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel, QSpinBox, QToolButton, QVBoxLayout, QWidget
+
+from lspr_ui import transparent_icon_button_stylesheet
 
 from ...applog.events import log_event
 from ...image_tools import GeometryModule, MaskModule
@@ -61,7 +63,10 @@ from ...selection import AreaSelectionMode, AreaSelectionModule, HighlightRangeM
 from ...selection.area_selection_module import how_for_keys
 from ..mask_edit_preview import KIND_LOCAL_CONTRAST, KIND_THRESHOLD, MaskEditPreview
 from ..mask_tool_settings import push_tool_settings
+from ..ribbon_icon_size import BUTTON_SIZE
 from ..ui_state import UiStateStore
+from .general_group import ICON_SIZE
+from .mask_edit_tool_icons import threshold_icon
 from .tool_drag import DragAxis
 
 if TYPE_CHECKING:
@@ -96,6 +101,9 @@ _KIND = {ValueMethod.THRESHOLD: KIND_THRESHOLD, ValueMethod.LOCAL_CONTRAST: KIND
 # The Threshold's two modes (2026-11-16): which way from the local background it selects. Brighter first = the default (and the picture the
 # button always had: the area over the line coloured).
 THRESHOLD_SIDE_LABELS = ((raster_tools.SIDE_BRIGHTER, "Brighter than the background"), (raster_tools.SIDE_DARKER, "Darker than the background"))
+# The look of a pop-up's icon choice (the Threshold's side, the wand's method, its Fill holes): no frame, a neutral grey plate under the picked one
+# (readable on both themes), since the pictures themselves hardly change between the choices.
+ICON_CHOICE_STYLE = transparent_icon_button_stylesheet(hover="rgba(139, 149, 163, 0.16)", checked="rgba(139, 149, 163, 0.34)")
 
 
 class ByValueSettingsForm(QWidget):
@@ -117,13 +125,10 @@ class ByValueSettingsForm(QWidget):
         self.title = QLabel(self)  # which method these numbers are for
         outer.addWidget(self.title)
 
-        # Histogram range: nothing to set here, only to read.
+        # Histogram range: nothing to set here (2026-11-16, maintainer: icons only, no text); the range it reads is the box's tool tip.
         self._histogram_box = QWidget(self)
         histogram_layout = QVBoxLayout(self._histogram_box)
         histogram_layout.setContentsMargins(0, 0, 0, 0)
-        self.range_label = QLabel(self._histogram_box)
-        self.range_label.setWordWrap(True)
-        histogram_layout.addWidget(self.range_label)
         self._histogram_layout = histogram_layout
 
         # Threshold
@@ -131,13 +136,31 @@ class ByValueSettingsForm(QWidget):
         threshold_form = QFormLayout(self._threshold_box)
         threshold_form.setContentsMargins(0, 0, 0, 0)
         threshold_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        self.side_combo = QComboBox(self._threshold_box)
+        # Brighter / Darker: two icon buttons, one checked (2026-11-16, maintainer: "remove dropdown menu, replace it with icons"); the
+        # pictures are the toolbar button's own, so the pop-up and the button say the same thing.
+        self._side = raster_tools.SIDE_BRIGHTER
+        self.side_buttons: dict[str, QToolButton] = {}
+        side_row = QWidget(self._threshold_box)
+        side_layout = QHBoxLayout(side_row)
+        side_layout.setContentsMargins(0, 0, 0, 0)
+        side_layout.setSpacing(4)
         for side, label in THRESHOLD_SIDE_LABELS:
-            self.side_combo.addItem(label, side)
-        self.side_combo.setToolTip(
-            "Which way from the local background: Brighter = pixels above it by the threshold, Darker = pixels below it by the threshold. "
-            "The wheel over the Threshold button on the toolbar switches it too."
-        )
+            button = QToolButton(side_row)
+            button.setCheckable(True)
+            button.setAutoRaise(True)
+            button.setFixedSize(BUTTON_SIZE, BUTTON_SIZE)
+            button.setIconSize(QSize(ICON_SIZE, ICON_SIZE))
+            button.setStyleSheet(ICON_CHOICE_STYLE)
+            button.setIcon(threshold_icon(side == raster_tools.SIDE_DARKER))
+            button.setToolTip(
+                f"{label}: " + ("pixels above their local background by the threshold." if side == raster_tools.SIDE_BRIGHTER
+                                else "pixels below their local background by the threshold.")
+                + " The wheel over the Threshold button on the toolbar switches it too."
+            )
+            button.clicked.connect(lambda _checked=False, picked=side: self.set_threshold_side(picked))
+            side_layout.addWidget(button)
+            self.side_buttons[side] = button
+        side_layout.addStretch(1)
         self.threshold_spin = QDoubleSpinBox(self._threshold_box)
         self.threshold_spin.setRange(0.1, 500.0)
         self.threshold_spin.setDecimals(1)
@@ -152,7 +175,7 @@ class ByValueSettingsForm(QWidget):
         self.profile_sigma_spin.setSuffix(" px")
         self.profile_sigma_spin.setKeyboardTracking(False)
         self.profile_sigma_spin.setToolTip("Profile sigma: the blur radius of the local background.")
-        threshold_form.addRow("Select", self.side_combo)
+        threshold_form.addRow(side_row)
         threshold_form.addRow("Threshold", self.threshold_spin)
         threshold_form.addRow("Sigma", self.profile_sigma_spin)
 
@@ -181,19 +204,19 @@ class ByValueSettingsForm(QWidget):
         self._refresh_range(highlight_range.current_range())
         for spin in (self.threshold_spin, self.profile_sigma_spin, self.contrast_sigma_spin, self.z_spin):
             spin.valueChanged.connect(self._on_spin_changed)
-        self.side_combo.currentIndexChanged.connect(lambda _index: self.threshold_side_changed.emit())
+        self._show_threshold_side()
         mask.cosmetic_changed.connect(self._on_model_changed)
         mask.mask_changed.connect(self._on_model_changed)
         highlight_range.range_changed.connect(self._refresh_range)
         self.set_method(ValueMethod.HISTOGRAM)
 
     def add_overlay_toggle(self, toggle: QWidget) -> None:
-        """Put the show / hide button of the histogram highlight on the image (`HistogramOverlayToggle`) beside a caption, in the Histogram range's
-        part of the form (so only that method shows it). `toggle` is made with this form as its parent."""
+        """Put the show / hide button of the histogram highlight on the image (`HistogramOverlayToggle`) in the Histogram range's part of the
+        form (so only that method shows it), icon only (2026-11-16, maintainer: no text). `toggle` is made with this form as its parent."""
         row = QHBoxLayout()
         row.setSpacing(6)
         row.addWidget(toggle)
-        row.addWidget(QLabel("Show the range on the image", self._histogram_box), 1)
+        row.addStretch(1)
         self._histogram_layout.insertLayout(0, row)
 
     # -- the method ----------------------------------------------------------------------------------------
@@ -209,6 +232,7 @@ class ByValueSettingsForm(QWidget):
         """Show the numbers of `method` (a right-click on its button)."""
         self._method = method
         self.title.setText(f"<b>{VALUE_METHOD_LABELS[method]}</b>")
+        self.title.setVisible(method is not ValueMethod.HISTOGRAM)  # the Histogram range's pop-up is icons only; the button's tip names it
         self._histogram_box.setVisible(method is ValueMethod.HISTOGRAM)
         self._threshold_box.setVisible(method is ValueMethod.THRESHOLD)
         self._contrast_box.setVisible(method is ValueMethod.LOCAL_CONTRAST)
@@ -218,25 +242,38 @@ class ByValueSettingsForm(QWidget):
 
     def threshold_side(self) -> str:
         """``"brighter"`` or ``"darker"``: which way from the local background the Threshold tool selects."""
-        return str(self.side_combo.currentData())
+        return self._side
 
     def threshold_side_label(self) -> str:
-        return self.side_combo.currentText()
+        return dict(THRESHOLD_SIDE_LABELS)[self._side]
 
     def set_threshold_side(self, side: str) -> None:
-        index = self.side_combo.findData(side)
-        if index >= 0:
-            self.side_combo.setCurrentIndex(index)
+        if side not in self.side_buttons or side == self._side:
+            self._show_threshold_side()  # a click on the checked button must leave it checked
+            return
+        self._side = side
+        self._show_threshold_side()
+        self.threshold_side_changed.emit()
+
+    def _show_threshold_side(self) -> None:
+        for side, button in self.side_buttons.items():
+            button.setChecked(side == self._side)
 
     def cycle_threshold_side(self, steps: int) -> str:
         """Move `steps` places along the two sides, wrapping round (the wheel over the Threshold button); returns the label now picked."""
-        self.side_combo.setCurrentIndex((self.side_combo.currentIndex() + int(steps)) % self.side_combo.count())
+        sides = [side for side, _label in THRESHOLD_SIDE_LABELS]
+        self.set_threshold_side(sides[(sides.index(self._side) + int(steps)) % len(sides)])
         return self.threshold_side_label()
 
     def bind_ui_state(self, store: UiStateStore) -> None:
         """Remember the side across restarts (`panels/ui_state.py`). The numbers are `MaskSettings`, saved with the session; the side is not
-        one of them (nothing stored in a session changed for it), so it is remembered like any other control of the panel."""
-        store.bind("selection/threshold_side", self.side_combo)
+        one of them (nothing stored in a session changed for it), so it is remembered like any other control of the panel. Written by hand
+        (a row of two buttons is not one widget `bind` knows) under the same key and values as when it was a drop-down, so a saved choice survives."""
+        key = "selection/threshold_side"
+        saved = store.get(key)
+        if isinstance(saved, str):
+            self.set_threshold_side(saved)  # an unknown value changes nothing
+        self.threshold_side_changed.connect(lambda: store.set(key, self._side))
 
     # -- the numbers (MaskSettings) ----------------------------------------------------------------------------
 
@@ -266,10 +303,14 @@ class ByValueSettingsForm(QWidget):
 
     def _refresh_range(self, range_: object) -> None:
         if range_ is None:
-            self.range_label.setText("No range yet: drag the highlighted band on the Histogram panel.")
+            self._histogram_box.setToolTip("No range yet: drag the highlighted band on the Histogram panel.")
         else:
             low, high = range_  # type: ignore[misc]
-            self.range_label.setText(f"Uses the range highlighted on the Histogram panel:\n{low:,.0f} to {high:,.0f}.")
+            self._histogram_box.setToolTip(f"Uses the range highlighted on the Histogram panel:\n{low:,.0f} to {high:,.0f}.")
+
+    def range_text(self) -> str:
+        """What the Histogram range tool reads, as the tool tip of its part of the form says it (no label any more)."""
+        return self._histogram_box.toolTip()
 
 
 class ByValueSelector(QObject):

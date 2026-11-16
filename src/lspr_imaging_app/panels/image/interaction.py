@@ -45,7 +45,7 @@ from .roi_context_menu import (
 )
 from .roi_gestures import RoiGestures
 from .rotate_line_tool import RotateLineTool
-from .selection_menu_icons import DESELECT_ICON, INVERT_ICON, menu_icon
+from .selection_menu_icons import DESELECT_ICON, INVERT_ICON, LOCK_ICON, UNLOCK_ICON, menu_icon
 
 _CURSOR_FOR_CROP_HANDLE: dict[str | None, Qt.CursorShape] = {
     "n": Qt.CursorShape.SizeVerCursor,
@@ -64,7 +64,7 @@ shape is the only hint that an edge/corner/interior is grabbable."""
 
 
 SELECT_ROIS_IN_SELECTION = "Select ROIs in selection"
-LOCK_TO_SELECTION = "Lock to selection"  # 2026-11-15: the selection becomes the fence (`AreaSelectionModule.lock_selection`)
+LOCK_TO_SELECTION = "Lock"  # 2026-11-15: the selection becomes the fence (`AreaSelectionModule.lock_selection`); the menu entry reads just "Lock" since 2026-11-16
 UNLOCK = "Unlock"
 INVERT_SELECTION = "Invert selection"
 DESELECT_SELECTION = "Deselect"
@@ -545,7 +545,12 @@ class CanvasInteraction:
         chosen = show_tool_context_menu(
             self._menu_parent,
             entries,
-            icons={INVERT_SELECTION: menu_icon(INVERT_ICON), DESELECT_SELECTION: menu_icon(DESELECT_ICON)},
+            icons={
+                LOCK_TO_SELECTION: menu_icon(LOCK_ICON),
+                UNLOCK: menu_icon(UNLOCK_ICON),
+                INVERT_SELECTION: menu_icon(INVERT_ICON),
+                DESELECT_SELECTION: menu_icon(DESELECT_ICON),
+            },
             separate_before={INVERT_SELECTION, EXIT_TOOL},
         )
         if chosen == LOCK_TO_SELECTION and self._lock_to_selection is not None:
