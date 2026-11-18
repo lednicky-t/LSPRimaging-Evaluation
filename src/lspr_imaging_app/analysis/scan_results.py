@@ -2,8 +2,14 @@
 
 What the display panels (Spectra now, Sensorgram later) read. It owns two facts and nothing else:
 
-* ``stored()``: the :class:`~.scan_store.StoredScan` of ``analysis/scan.h5`` (or None). Loaded on a plain thread when the session opens and
-  again when a scan finishes (~0.5 s for 314 cubes x 160 ROIs); the GUI thread never reads the file. The arrays are shared, read-only.
+* ``stored()``: the scan **as the display should see it** (or None): the :class:`~.scan_store.StoredScan` of ``analysis/scan.h5`` with each
+  sample's reference side replaced by its effective reference, linked reference ROIs pooled by pixel (``reference_pairing.pair_scan``; plan
+  ``docs/roi_shapes_and_linking_plan_2026-11-18.md`` phase 1.2). A session with no reference ROI and no link gets the file's own object, so
+  nothing is copied. The file is loaded on a plain thread when the session opens and again when a scan finishes (~0.5 s for 314 cubes x 160
+  ROIs); the GUI thread never reads it. The pairing is **rebuilt from the stored numbers, never from the file and never by a scan**, when the
+  file arrives and when :meth:`request_pairing` is called (a link, an unlink, a role change, a restored session); a rebuild that has work to do
+  (a link exists: ~0.1-0.2 s for a full scan) runs on a thread of its own, and the old view stays until the new one is ready. The arrays are
+  shared, read-only. The raw file's own numbers are what the staleness check compares with (``_stored``).
 * ``stale_cubes()``: the dataset cubes whose stored cells are *not* current for the app as it is now, or None while that is not known. A
   check (``scan_fingerprint.cell_hashes`` of the current inputs against the hashes in the file) is started after a change that can alter
   a stored number (geometry, mask, chromatic, background, ROIs, frame roles; the owner calls :meth:`request_check` from those signals) and
@@ -22,12 +28,16 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections.abc import Callable
+import copy
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 from ..applog.events import log_event
+from ..domain.roi_links import is_reference
+from ..domain.roi_model import AreaRoi
+from .reference_pairing import PairedScan, pair_scan
 from .scan_fingerprint import cell_hashes
 from .scan_jobs import ScanSource, build_scan_plan, snapshot_source
 from .scan_store import ScanFileError, StoredScan, read_scan, stale_cube_indices
@@ -42,6 +52,7 @@ class ScanResultsModule(QObject):
     staleness_changed = pyqtSignal()  # stale_cubes() / is_checking() / the message changed; cosmetic for the data, panels redraw
 
     _loaded = pyqtSignal(int, object, object)  # generation, StoredScan | None, error text | None (from the loader thread)
+    _paired_ready = pyqtSignal(int, object, object)  # pairing generation, PairedScan | None, error text | None (from the pairing thread)
     _checked = pyqtSignal(int, object, object)  # generation, (stale set, reason) | None, error text | None
 
     def __init__(
@@ -49,12 +60,19 @@ class ScanResultsModule(QObject):
         source_factory: Callable[[], ScanSource],
         scan_running: Callable[[], bool] = lambda: False,
         parent: QObject | None = None,
+        rois: Callable[[], Sequence[AreaRoi]] | None = None,
     ) -> None:
+        """``rois``: the session's ROIs as they are now (roles and links), asked on the GUI thread; None = no pairing (every ROI is a sample with its own
+        reference), which is what a caller that has no ROI toolbox, such as a test, wants."""
         super().__init__(parent)
         self._source_factory = source_factory
         self._scan_running = scan_running
+        self._rois_source = rois
         self._path: Path | None = None
-        self._stored: StoredScan | None = None
+        self._stored: StoredScan | None = None  # the file as it is: the staleness check compares with this
+        self._paired: PairedScan | None = None  # what the display sees (see the module docstring); None until the first pairing of a loaded file is done
+        self._pair_generation = 0  # bumped by every pairing request and every invalidate: a pairing from an older one is dropped
+        self._publish_after_pairing = False  # a new file waits for its pairing before the panels and the check hear of it (kept across a pairing that is replaced)
         self._stale: frozenset[int] | None = None
         self._reason = ""
         self._message = ""
@@ -73,11 +91,22 @@ class ScanResultsModule(QObject):
         self._timer.timeout.connect(self._start_check)
         self._loaded.connect(self._on_loaded)
         self._checked.connect(self._on_checked)
+        self._paired_ready.connect(self._on_paired)
 
     # -- query interface -----------------------------------------------------------------------------------------------------
 
     def stored(self) -> StoredScan | None:
-        return self._stored
+        """The scan as the display sees it: one row per sample ROI, each with its effective reference (module docstring). None: no scan, or the file
+        is still being read and paired."""
+        return self._paired.stored if self._paired is not None else None
+
+    def reference_note(self, roi_id: int) -> str:
+        """Why a sample ROI has no reference numbers ("No reference: ..."; a linked reference that is not in the file yet), or ''."""
+        return self._paired.problems.get(int(roi_id), "") if self._paired is not None else ""
+
+    def reference_notes(self) -> dict[int, str]:
+        """``reference_note`` for every ROI that has one, as a plain dict (safe to hand to a worker)."""
+        return dict(self._paired.problems) if self._paired is not None else {}
 
     def path(self) -> Path | None:
         return self._path
@@ -119,8 +148,10 @@ class ScanResultsModule(QObject):
         self._generation += 1
         self._timer.stop()
         self._loading = self._checking = self._recheck = self._check_wanted = False
+        self._pair_generation += 1  # a pairing still running is dropped when it arrives
+        self._publish_after_pairing = False
         had = self._stored is not None
-        self._stored, self._stale, self._reason, self._message = None, None, "", ""
+        self._stored, self._paired, self._stale, self._reason, self._message = None, None, None, "", ""
         if had:
             self.results_changed.emit()
 
@@ -129,12 +160,15 @@ class ScanResultsModule(QObject):
         path = self._path
         if path is None or not path.exists():
             if self._stored is not None:
-                self._stored, self._stale, self._reason = None, None, ""
+                self._pair_generation += 1
+                self._publish_after_pairing = False
+                self._stored, self._paired, self._stale, self._reason = None, None, None, ""
                 self.results_changed.emit()
             return
         self._generation += 1
         generation = self._generation
         self._loading = True
+        self._pair_generation += 1  # a pairing of the old file is dropped
         self._checking = self._recheck = False  # a check of the old file is dropped when it arrives (older generation)
         self._start_thread(lambda: self._load(generation, path), "scan-results-load")
 
@@ -196,15 +230,73 @@ class ScanResultsModule(QObject):
         if generation != self._generation:
             return  # the session changed meanwhile
         self._loaded_applied_at = time.perf_counter()
-        self._loading = False
         self._message = str(error) if error else ""
         self._stored = stored if isinstance(stored, StoredScan) else None
         self._stale = None  # unknown until the check below has run against this file
         self._reason = ""
-        self.results_changed.emit()
-        self.staleness_changed.emit()
+        if self._stored is None:
+            self._loading = False
+            self._paired = None
+            self._publish_after_pairing = False
+            self.results_changed.emit()
+            self.staleness_changed.emit()
+            return
+        self._publish_after_pairing = True
+        self._pair()  # publishes (results_changed, staleness_changed, the check) when the pairing is in place
+
+    # -- pairing samples with their references -------------------------------------------------------------------------------------
+
+    def request_pairing(self) -> None:
+        """The roles or links of the ROIs changed (a link, an unlink, a role change, a session restored): make the display's view of the scan again from
+        the numbers already stored. Nothing is read from the file and nothing is scanned. Without a loaded file there is nothing to do: the pairing is
+        made when one arrives."""
         if self._stored is not None:
-            QTimer.singleShot(0, self._start_check)  # (not self._timer.start(0): that would change the debounce interval for good)
+            self._pair()
+
+    def _snapshot_rois(self) -> list[AreaRoi]:
+        """The ROIs as they are now, copied (GUI thread: the toolbox hands out live objects, and the pairing runs on another thread)."""
+        return [copy.copy(roi) for roi in self._rois_source()] if self._rois_source is not None else []
+
+    def _pair(self) -> None:
+        stored = self._stored
+        rois = self._snapshot_rois()
+        self._pair_generation += 1
+        generation = self._pair_generation
+        if not any(is_reference(roi) or roi.reference_roi_ids for roi in rois):  # nothing to pair: the file's own object comes back, no copy, no thread
+            self._on_paired(generation, pair_scan(stored, rois), None)
+            return
+        self._start_thread(lambda: self._pair_work(generation, stored, rois), "scan-results-pair")
+
+    def _pair_work(self, generation: int, stored: StoredScan, rois: list[AreaRoi]) -> None:
+        started, cpu_started = time.perf_counter(), time.thread_time()
+        try:
+            paired = pair_scan(stored, rois)
+        except BaseException as exc:  # nothing may escape a thread silently
+            logger.exception("Pairing the samples with their references failed")
+            self._paired_ready.emit(generation, None, f"Could not pair the samples with their references: {exc}")
+            return
+        log_event(logger, "analysis.scan_paired", logging.INFO, rois=len(rois), rows=len(paired.stored.roi_ids),
+                  linked=sum(1 for s in paired.sources.values() if s == "linked"), ms=round((time.perf_counter() - started) * 1000),
+                  cpu_ms=round((time.thread_time() - cpu_started) * 1000))
+        self._paired_ready.emit(generation, paired, None)
+
+    def _on_paired(self, generation: int, paired: object, error: object) -> None:
+        if generation != self._pair_generation:
+            return  # another pairing was asked for, or the file changed meanwhile
+        self._loading = False
+        if isinstance(paired, PairedScan):
+            self._paired = paired
+            if self._publish_after_pairing:  # a new file: its message starts empty (a rebuild after a link keeps what the check said)
+                self._message = ""
+        else:  # said, never hidden: the panels show the message instead of numbers made without the pairing
+            self._paired = None
+            self._message = str(error or "Could not pair the samples with their references.")
+        self.results_changed.emit()
+        if self._publish_after_pairing:
+            self._publish_after_pairing = False
+            self.staleness_changed.emit()
+            if self._stored is not None:
+                QTimer.singleShot(0, self._start_check)  # (not self._timer.start(0): that would change the debounce interval for good)
 
     # -- staleness check ----------------------------------------------------------------------------------------------------------
 

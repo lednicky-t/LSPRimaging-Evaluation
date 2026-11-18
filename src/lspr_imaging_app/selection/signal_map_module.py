@@ -163,7 +163,7 @@ class SignalMapModule(QObject):
         return self._calculating
 
     def roi_ids(self) -> tuple[int, ...]:
-        return tuple(sorted(int(r.area_roi_id) for r in self._toolbox.rois()))
+        return tuple(sorted(self._toolbox.sample_ids(r.area_roi_id for r in self._toolbox.rois())))  # samples only: a reference ROI is not coloured by a number it does not have
 
     def export_info(self) -> dict[str, object]:
         """What produced the map, for the record beside an exported table (the step module's record, plus the map's own choices)."""
@@ -204,7 +204,7 @@ class SignalMapModule(QObject):
         claimed: set[int] = set()
         rows: list[GroupMembers] = []
         for group in self._toolbox.groups():
-            members = tuple(sorted(int(r) for r in group.area_roi_ids))
+            members = tuple(sorted(self._toolbox.sample_ids(group.area_roi_ids)))
             if members:
                 rows.append(GroupMembers(group.group_id, members))
                 claimed.update(members)

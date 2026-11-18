@@ -85,21 +85,47 @@ An R region leaves out the pixels of every sample, like the ring does today (`ex
   and 3 regions, with empty and one-pixel regions; `prepare_spectra` on the paired scan uses the reference ROI's numbers.
   Mutating the pooling formula (no between-region term, mean of means, n instead of n - 1) fails the tests each time.
 
-### 1.2c Wiring and analysis units (NEXT)
-- `ScanResultsModule` keeps the raw `StoredScan` (what `scan_store`, the stale check and ROI-tuning Accept read) and hands the
-  display the paired one, built off the GUI thread on load and on `links_changed` / a role change. The readers of
-  `mean[..., SAMPLE / REFERENCE]` (`scan_view.py`, `scan_trace.py` x2, `step_diagnostics.py`, `roi_tuning_run.py`, `trace_fit`
-  inputs) need no change and cannot disagree; the trace caches key on `id(stored)`, so a new paired scan drops them.
-- Reference ROIs are not analysis units: Spectra / Sensorgram / step table / groups / Signal map / S_bulk skip them, and a sample
-  without a reference says "no reference" (`PairedScan.problems`).
+### 1.2c Wiring and analysis units (DONE 2026-11-18, unseen by eye)
+- `ScanResultsModule(rois=roi_toolbox.rois)` keeps the raw `StoredScan` (`_stored`: what the stale check compares with) and
+  hands the display the paired one: `stored()` is the **paired** scan, `reference_note(id)` / `reference_notes()` say why a
+  sample has no reference. The pairing is made when a file arrives (the file's own object when the session has no reference ROI
+  and no link: no copy, no thread) and when `request_pairing()` is called; with a reference ROI or a link it runs on a thread
+  (`analysis.scan_paired` in the log: ms, rows, linked), and the old view stays until the new one is ready. A failed pairing is
+  said (`message()`), never replaced by the raw numbers.
+- `app_rewrite._wire_analysis_scan`: `roi_toolbox.links_changed` -> `results.request_pairing()` (a link, an unlink, a role change,
+  a restored session, a deleted reference). Links ask for **no staleness check and no scan**; a role change also emits
+  `geometry_changed`, which already asks for the check, and the changed role makes that ROI's cells stale (tested).
+- A file that arrives is published (panels, staleness check) only when its pairing is in place; the flag that says so is kept
+  when a link replaces a pairing in flight (`_publish_after_pairing`; tested by calling `_on_loaded` and `request_pairing` back to
+  back).
+- The readers of `mean[..., SAMPLE / REFERENCE]` (`scan_view`, `scan_trace` x2, `step_diagnostics`, `trace_fit` inputs) are
+  **unchanged**; the trace caches key on `id(stored)` and the panels drop their caches on `results_changed`, so a new paired scan
+  refreshes them. The step table's rows are stamped with the scan object too, so after a link they read "not current" until the
+  user recalculates (the app calculates only on request).
+- Analysis units are samples only. One rule, `RoiToolbox.sample_ids(ids)` (a reference ROI is dropped; an unknown id is kept),
+  applied where a list of ROIs enters a calculation: Spectra and Sensorgram (the selection; a selection of references only says
+  "Only reference ROIs are selected ..."; the drift controls' list too), `StepTableModule` (`recalculate`, `count_not_current`
+  and every group stamp, through `_sample_members`, so a group holding a reference ROI is calculated and judged "current" from
+  its samples), `SignalMapModule` (`roi_ids`, group rows). Data checks, mask marks and the Sensorgram axis read the paired scan,
+  which has no row for a reference ROI. `prepare_spectra(reference_notes=...)` says "No reference: ..." instead of "No wavelength
+  has a value" for a sample without one.
+- Not done, deliberately: the ROI / Group table has no "R7" label and no Linked view (phase 3); there is no gesture that creates
+  a reference ROI or a link yet (the toolbox commands exist). **ROI position tuning still scores a sample against its own ring
+  and ignores links, and its selection can hold a reference ROI: it is phase 1.2d.**
+- Tests: `tests/integration/test_lspri_reference_roi_wiring.py` (10, real scan, real wiring).
 
-### 1.2d Position tuning with its linked references (after 1.2c)
-- **ROI position tuning (maintainer, 2026-11-18):** tuning is for sample ROIs only (a reference ROI is never a candidate on its
-  own), but a sample's linked reference ROIs **move with it** in a trial: the pair is shifted by the same offset. This is a rule of
-  the tuning only; decision 4 (S and R move independently) still holds for every other edit. Consequences to build with it: a trial
-  scans the sample and its references at the shifted positions, and Accept moves both and copies the numbers of both into
-  `scan.h5`, still bit-identical to a real scan. **Open until the tuning part is built: a reference linked to two samples cannot
-  move with both** (candidates: refuse to tune such a sample, or tune it with the reference left where it is and say so).
+### 1.2d Position tuning and linked references (after 1.2c)
+- **ROI position tuning (maintainer, 2026-11-18, corrected the same day):** tuning is for sample ROIs only (a reference ROI is never
+  a candidate on its own). **A linked reference ROI never moves with its sample** (decision 4 holds for tuning too: S and R move
+  independently). The only reference that moves with a sample is its **analytical** one, the built-in border (gap and thickness
+  around its shape, today the ring), because it is defined from the sample's own geometry; that is how tuning already works. An
+  earlier note of this day said linked references move with the sample: that was a misreading and is withdrawn.
+- What that leaves to build: for a sample **with linked references** a trial position is scored against its *linked* reference
+  (fixed in place), not against the moving ring, and Accept still copies only what the file stores for a sample (its own region and
+  its ring), bit-identical to a real scan; the links apply afterwards through the pairing, as for every other number. A trial
+  that moves a sample's disc into a linked reference's region changes that region (it loses the pixels of every sample disc):
+  `ring_reach_matrix` already counts a reference ROI as a neighbour of such a sample, which is the existing "interacting pair" rule
+  (no Accept copy); the score of such a position is the part to decide when it is built (1.2d).
 
 ### 2 Shapes (back end)
 - One geometry function per shape (circle, rectangle with rotation, mask), used by the scan, the overlay, the histogram,

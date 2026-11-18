@@ -414,14 +414,14 @@ class StepTableModule(QObject):
         row = self._groups.get(key)
         if row is None:
             return None
-        stamp = self._stamp(group=True, members=tuple(sorted(int(r) for r in members)))
+        stamp = self._stamp(group=True, members=self._sample_members(members))
         return row.numbers, stamp is not None and row.stamp == stamp
 
     def group_cell(self, key: str | None, members: Sequence[int], ref: object) -> CellValue | None:
         row = self._groups.get(key)
         if row is None:
             return None
-        stamp = self._stamp(group=True, members=tuple(sorted(int(r) for r in members)))
+        stamp = self._stamp(group=True, members=self._sample_members(members))
         return self._compare_cell(row, ref, stamp) if is_compare_ref(ref) else self._cell(row, ref, stamp)
 
     def _compare_cell(self, row: _Row, ref: object, stamp: tuple | None) -> CellValue | None:
@@ -504,7 +504,7 @@ class StepTableModule(QObject):
         row = self._groups.get(key)
         if row is None or ref not in row.numbers.refs:
             return None
-        stamp = self._stamp(group=True, members=tuple(sorted(int(r) for r in members)))
+        stamp = self._stamp(group=True, members=self._sample_members(members))
         return row.numbers.value_at(ref), stamp is not None and row.stamp == stamp
 
     def roi_line(self, roi_id: int) -> tuple[np.ndarray, bool] | None:
@@ -520,7 +520,7 @@ class StepTableModule(QObject):
         row = self._groups.get(key)
         if row is None or row.numbers.line is None:
             return None
-        stamp = self._stamp(group=True, members=tuple(sorted(int(r) for r in members)))
+        stamp = self._stamp(group=True, members=self._sample_members(members))
         return row.numbers.line, stamp is not None and row.stamp == stamp
 
     def scan_position(self, cube_index: int) -> int | None:
@@ -536,16 +536,22 @@ class StepTableModule(QObject):
     def has_numbers(self) -> bool:
         return bool(self._rois or self._groups)
 
+    def _sample_members(self, members: Sequence[int]) -> tuple[int, ...]:
+        """A group's members that are analysis units (samples), in id order: what a group row is calculated from and stamped with."""
+        return tuple(sorted(self._toolbox.sample_ids(members)))
+
     def count_not_current(self, roi_ids: Sequence[int], groups: Sequence[GroupMembers]) -> int:
         """How many of these rows have no numbers or numbers that are out of date: what a recalculation of them would change."""
         roi_stamp = self._stamp(group=False, members=None)
         count = 0
-        for roi_id in roi_ids:
+        for roi_id in self._toolbox.sample_ids(roi_ids):  # a reference ROI has no numbers of its own, so it is never "not current"
             row = self._rois.get(int(roi_id))
             count += row is None or roi_stamp is None or row.stamp != roi_stamp
         for g in groups:
+            if not self._sample_members(g.roi_ids):
+                continue  # a group of reference ROIs only has nothing to calculate
             row = self._groups.get(g.key)
-            stamp = self._stamp(group=True, members=tuple(sorted(int(r) for r in g.roi_ids)))
+            stamp = self._stamp(group=True, members=self._sample_members(g.roi_ids))
             count += row is None or stamp is None or row.stamp != stamp
         return count
 
@@ -697,8 +703,8 @@ class StepTableModule(QObject):
         if not steps:
             self.notice.emit("This dataset has no experiment steps, so there are no step columns to fill.")
             return False
-        rois = tuple(dict.fromkeys(int(r) for r in roi_ids))
-        group_rows = tuple(GroupMembers(g.key, tuple(sorted(int(r) for r in g.roi_ids))) for g in groups if g.roi_ids)  # members in id order: the same set always gives the same numbers
+        rois = tuple(dict.fromkeys(self._toolbox.sample_ids(roi_ids)))  # only samples are analysis units: a reference ROI has no row
+        group_rows = tuple(GroupMembers(g.key, self._sample_members(g.roi_ids)) for g in groups if self._sample_members(g.roi_ids))  # members in id order: the same set always gives the same numbers
         if not rois and not group_rows:
             self.notice.emit("No ROI or group is shown.")
             return False

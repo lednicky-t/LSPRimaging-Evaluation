@@ -694,7 +694,8 @@ class SpectraPanel(QWidget):
         if self._held_by_pause():  # paused after the timer was started
             return
         stored = self._scan.stored()
-        roi_ids = tuple(sorted(self._selection.selected_roi_ids()))
+        selected = tuple(sorted(self._selection.selected_roi_ids()))
+        roi_ids = self._roi_toolbox.sample_ids(selected)  # a reference ROI is not an analysis unit: only the samples among the selected
         if stored is None:
             self._generation += 1
             self._last = None
@@ -717,7 +718,10 @@ class SpectraPanel(QWidget):
             self._plot.set_fit_window(None)
             self._plot.set_current_wavelength(None)
             self.task.end("cancelled", "nothing to compute")
-            self._status.setText("Select one or more ROIs (ROI table or image) to see their spectra.")
+            self._status.setText(
+                "Select one or more ROIs (ROI table or image) to see their spectra." if not selected
+                else "Only reference ROIs are selected. A reference ROI has no spectrum of its own: select a sample ROI."
+            )
             self._clear_quality()
             return
         request = SpectraRequest(roi_ids, int(self._selection.current_cube()), self._roi_toolbox.detection_settings().formula_key,
@@ -820,7 +824,7 @@ class SpectraPanel(QWidget):
             with timed(logger, "spectra.compute", rois=len(missing), cached=len(job.known), cube=job.request.cube, pool=pool is not None):
                 results: object = compute_spectra(
                     job.stored, replace(job.request, roi_ids=missing), templates=self._templates,
-                    fit_runner=None if pool is None else pool.run_spectra,
+                    fit_runner=None if pool is None else pool.run_spectra, reference_notes=self._scan.reference_notes(),
                 )
         except BaseException as exc:  # nothing may escape a thread silently
             logger.exception("Computing the spectra failed")

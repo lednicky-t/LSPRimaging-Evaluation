@@ -307,7 +307,9 @@ class SensorgramPanel(QWidget):
         )
         self._band_edit.setChecked(self._band_visible)
         # The drift baseline (2026-11-09): method, shape and the anchor points clicked on the plot.
-        self._drift = DriftBaselineControls(self, analysis_settings, lambda: tuple(sorted(self._selection.selected_roi_ids())), self._cube_axis_now)
+        self._drift = DriftBaselineControls(
+            self, analysis_settings, lambda: self._roi_toolbox.sample_ids(sorted(self._selection.selected_roi_ids())), self._cube_axis_now
+        )
         self._status = QLabel("", self)
         self._status.setWordWrap(True)
         self._status.setStyleSheet(f"color: {get_active_theme().text_dim};")
@@ -750,7 +752,8 @@ class SensorgramPanel(QWidget):
         if self._held_by_pause():  # paused after the timer was started
             return
         stored = self._scan.stored()
-        roi_ids = tuple(sorted(self._selection.selected_roi_ids()))
+        selected = tuple(sorted(self._selection.selected_roi_ids()))
+        roi_ids = self._roi_toolbox.sample_ids(selected)  # a reference ROI is not an analysis unit: only the samples among the selected
         if stored is None:
             if self._scan.message():
                 self._clear_with(self._scan.message())
@@ -761,7 +764,10 @@ class SensorgramPanel(QWidget):
             return
         self._warm_up_pool()
         if not roi_ids:
-            self._clear_with("Select one or more ROIs (ROI table or image) to see their sensorgram.")
+            self._clear_with(
+                "Select one or more ROIs (ROI table or image) to see their sensorgram." if not selected
+                else "Only reference ROIs are selected. A reference ROI has no sensorgram of its own: select a sample ROI."
+            )
             return
         _label, x = self._x_axis()
         detection = self._roi_toolbox.detection_settings()

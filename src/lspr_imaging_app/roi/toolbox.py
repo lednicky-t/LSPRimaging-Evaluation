@@ -108,7 +108,7 @@ import itertools
 import logging
 import math
 import time
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields, replace
 
 import numpy as np
@@ -139,6 +139,7 @@ from ..domain.roi_links import (
     ROI_ROLES,
     ROLE_REFERENCE,
     cleaned_links,
+    is_reference,
     link_refusal,
     normalized_ids,
     reference_source,
@@ -430,6 +431,12 @@ class RoiToolbox(QObject):
     def reference_source(self, roi_id: int) -> str:
         """``"linked"`` / ``"builtin"`` / ``"none"`` / ``"is_reference"`` (see `domain.roi_links.reference_source`)."""
         return reference_source(self._rois[int(roi_id)])
+
+    def sample_ids(self, roi_ids: Iterable[int]) -> tuple[int, ...]:
+        """``roi_ids`` without the reference ROIs, in the order given. Only a sample is an analysis unit (Spectra, Sensorgram, step table, groups, Signal
+        map, S_bulk); a reference ROI only serves the samples linked to it. An id this toolbox does not know is kept, so the callers' own "not in the scan" paths
+        behave as they always did."""
+        return tuple(i for i in (int(r) for r in roi_ids) if i not in self._rois or not is_reference(self._rois[i]))
 
     def _apply_link_state(self, states: list[tuple[AreaRoi, str, tuple[int, ...]]]) -> None:
         for roi, role, links in states:

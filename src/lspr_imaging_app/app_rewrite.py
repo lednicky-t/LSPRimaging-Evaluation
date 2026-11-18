@@ -852,6 +852,7 @@ def _build_modules() -> _Modules:
     scan_results = ScanResultsModule(
         lambda: analysis_scan_source(modules_holder[0]),
         scan_running=lambda: analysis_scan.is_running() or (bool(modules_holder) and modules_holder[0].roi_tuning.task.is_running()),
+        rois=roi_toolbox.rois,  # the roles and links the display pairs the stored numbers by (never the stored numbers themselves)
     )
     analysis_live = AnalysisLiveModule()  # Live / Paused: the Spectra and Sensorgram plots and the out-of-date check stop recomputing while paused
     analysis_live.live_changed.connect(lambda live: scan_results.set_paused(not live))
@@ -1153,6 +1154,9 @@ def _wire_analysis_scan(m: _Modules, row: AnalysisTab, ui_state: UiStateStore, s
         m.roi_toolbox.geometry_changed, m.roi_toolbox.roi_ids_renumbered, m.frame_roles.roles_changed,
     ):
         changed.connect(lambda *_args: results.request_check())
+    # A link, an unlink, a role change or a restored session changes which stored numbers a sample is measured against, never a stored number
+    # (plan 2026-11-18): the display's view is made again from what is stored, so no check and no scan.
+    m.roi_toolbox.links_changed.connect(lambda *_args: results.request_pairing())
     row.run_requested.connect(run)
     row.stop_requested.connect(m.analysis_scan.cancel)
     m.analysis_scan.running_changed.connect(row.set_running)

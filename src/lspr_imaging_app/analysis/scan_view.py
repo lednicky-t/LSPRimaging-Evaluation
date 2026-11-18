@@ -11,7 +11,7 @@ A wavelength without a value (no valid pixel on either side) is left out of the 
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -80,14 +80,16 @@ def compute_spectra(
     *,
     templates: TemplateCache | None = None,
     fit_runner: Callable[[list[SpectrumFitJob], MetricSettings], list[RoiSpectrum]] | None = None,
+    reference_notes: Mapping[int, str] | None = None,
 ) -> list[RoiSpectrum]:
     """One :class:`RoiSpectrum` per requested ROI, in the order requested. A ROI that is not in the file (added after the scan), or a cube
     that was never scanned, gives an empty spectrum with a ``note``.
 
     ``templates``: a cache of the ROIs' reference spectra (template shift) kept by the caller for this stored scan; the reference of a ROI is the
     mean of its reference cubes, the same for every cube shown, so it is built once instead of at every cube change. ``fit_runner``: run the fits
-    elsewhere (the helper process); None = here. The numbers are the same either way (`fit_spectra` is what runs)."""
-    prepared = prepare_spectra(stored, request, templates)
+    elsewhere (the helper process); None = here. The numbers are the same either way (`fit_spectra` is what runs). ``reference_notes``: why a sample has no
+    reference (`ScanResultsModule.reference_notes`), said instead of the general "no value" when that is the reason."""
+    prepared = prepare_spectra(stored, request, templates, reference_notes)
     jobs = [p for p in prepared if isinstance(p, SpectrumFitJob)]
     if not jobs:
         return [p for p in prepared if isinstance(p, RoiSpectrum)]
@@ -95,9 +97,12 @@ def compute_spectra(
     return [next(fitted) if isinstance(p, SpectrumFitJob) else p for p in prepared]
 
 
-def prepare_spectra(stored: StoredScan, request: SpectraRequest, templates: TemplateCache | None = None) -> list[RoiSpectrum | SpectrumFitJob]:
+def prepare_spectra(
+    stored: StoredScan, request: SpectraRequest, templates: TemplateCache | None = None, reference_notes: Mapping[int, str] | None = None,
+) -> list[RoiSpectrum | SpectrumFitJob]:
     """Per requested ROI, in order: a finished :class:`RoiSpectrum` (nothing to fit: a note says why) or a :class:`SpectrumFitJob`."""
     empty = np.empty(0)
+    why_no_reference = reference_notes or {}
     try:
         cube_row = stored.cube_indices.index(int(request.cube))
     except ValueError:
@@ -116,14 +121,14 @@ def prepare_spectra(stored: StoredScan, request: SpectraRequest, templates: Temp
             out.append(RoiSpectrum(roi_id, empty, empty, empty, note="This ROI is not in the scan file: run the scan again."))
             continue
         if not stored.cell_hash[cube_row, row]:
-            out.append(RoiSpectrum(roi_id, empty, empty, empty, note="This cube has not been scanned yet."))
+            out.append(RoiSpectrum(roi_id, empty, empty, empty, note=why_no_reference.get(roi_id) or "This cube has not been scanned yet."))
             continue
         sample, reference = mean[cube_row, row, :, SAMPLE], mean[cube_row, row, :, REFERENCE]
         n_sample, n_reference = stored.n_valid[cube_row, row, :, SAMPLE], stored.n_valid[cube_row, row, :, REFERENCE]
         usable = np.isfinite(sample) & np.isfinite(reference) & (n_sample > 0) & (n_reference > 0)
         n_missing = int((~usable).sum())
         if not usable.any():
-            out.append(RoiSpectrum(roi_id, empty, empty, empty, n_missing=n_missing, note="No wavelength has a value for this ROI."))
+            out.append(RoiSpectrum(roi_id, empty, empty, empty, n_missing=n_missing, note=why_no_reference.get(roi_id) or "No wavelength has a value for this ROI."))
             continue
         spectrum = formula_spectrum(wavelengths[usable], sample[usable], reference[usable], request.formula_key)
         errors = formula_errors(
