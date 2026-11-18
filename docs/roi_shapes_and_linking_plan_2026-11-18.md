@@ -64,21 +64,36 @@ An R region leaves out the pixels of every sample, like the ring does today (`ex
 - `scan_store.layout_json` writes `"role": "reference"` for a reference ROI only.
 - Tests: `tests/unit/test_lspri_scan_reference_rois.py` (15; a mutation of the exclusion fails 2 of them).
 
-### 1.2b-d Pairing and display (NEXT; design proposed, awaiting the maintainer's answers)
-- **b. One pairing function** `analysis/reference_pairing.py` (pure, no Qt): from a `StoredScan` and the ROIs' roles / links it
-  gives, per *sample* ROI, the sample's own mean / SD / counts and its reference's mean / SD / counts: linked R pooled by pixel
-  (n = sum n_i; mean = sum n_i m_i / n; variance = (sum (n_i - 1) s_i^2 + sum n_i (m_i - M)^2) / (n - 1), exact), else the
-  stored built-in ring column, else "no reference" (NaN, n = 0). Pooling needs only mean / SD / count, which is all the scan
-  stores for `mean`, the only method the app ever scans.
-- **c. Where it is applied.** Proposed: `ScanResultsModule` hands the display a *paired* `StoredScan` (rows = sample ROIs, the
-  `REFERENCE` side = the sample's effective reference), rebuilt on `links_changed` / role change; the readers of
-  `mean[..., SAMPLE / REFERENCE]` (`scan_view.py`, `scan_trace.py` x2, `step_diagnostics.py`, `roi_tuning_run.py`,
-  `trace_fit` inputs) then need no change and cannot disagree, and the trace caches (keyed on `id(stored)`) drop themselves.
-  The raw file stays what `scan_store` and ROI-tuning Accept read. The alternative is the literal "move each reader to the
-  function". Reference ROIs are not analysis units: Spectra / Sensorgram / step table / groups / Signal map / S_bulk skip them,
-  and a sample without a reference says "no reference".
-- **d. Proof test:** a sample linked to a separate reference ROI that has exactly the pixels of its own ring gives numbers
-  identical to the built-in ring (and pooled two half-rings equal the whole ring to rounding).
+### 1.2b Pairing function (DONE 2026-11-18)
+- `analysis/reference_pairing.py` (pure, no Qt; in the `lspri-science-no-qt` contract): `pair_scan(stored, rois) -> PairedScan`
+  (`.stored`, `.sources`, `.problems`). `.stored` is a `StoredScan` with **one row per sample ROI** (the file's row order) whose
+  `REFERENCE` side is the sample's effective reference: one linked reference = its stored region copied as it is (every method,
+  exact, no arithmetic); several = **pooled by pixel** from stored mean / SD / count (n = sum n_i; M = sum n_i m_i / n;
+  (n - 1) S^2 = sum (n_i - 1) s_i^2 + sum n_i (m_i - M)^2), `mean` only (a median cannot be pooled from medians; the app scans
+  `mean` only); none linked = the stored ring column untouched; no ring either = no reference (already empty in the file).
+  Reference ROIs have no row. A cube where a linked reference was never scanned has `cell_hash` 0 for that sample; a link to a
+  ROI that is not in the file (added after the scan) gives the sample no reference and a `problems` line ("scan again").
+- **No reference ROI and no link in the session: `pair_scan` returns the stored scan itself, nothing copied (0.08 ms).**
+- Cost, measured on a scan of the real dataset's size (314 cubes x 160 ROIs x 26 wavelengths, 73 MB of arrays): 150 samples with
+  one linked reference each 81 ms, with two pooled 205 ms; the paired copy holds as much memory again as the arrays it was made
+  from (73 MB) while any link exists. Applying the same pooling inside each reader instead would cost the 205 ms again at every
+  full trace refresh and about 23 ms at every cube step of the Spectra panel: this is why the paired copy is built once (off the
+  GUI thread) when a scan loads or a link / role changes.
+- Proof tests (`tests/unit/test_lspri_reference_pairing.py`, 16): a separate reference ROI that has exactly the pixels of a
+  sample's ring, run through the real `reduce_frame`, gives the ring's mean / SD / counts **bit for bit**; the ring's two
+  halves pooled give the whole ring's to 1e-12 relative; pooling equals the numpy mean / SD of the concatenated pixels for 2
+  and 3 regions, with empty and one-pixel regions; `prepare_spectra` on the paired scan uses the reference ROI's numbers.
+  Mutating the pooling formula (no between-region term, mean of means, n instead of n - 1) fails the tests each time.
+
+### 1.2c Wiring and analysis units (NEXT)
+- `ScanResultsModule` keeps the raw `StoredScan` (what `scan_store`, the stale check and ROI-tuning Accept read) and hands the
+  display the paired one, built off the GUI thread on load and on `links_changed` / a role change. The readers of
+  `mean[..., SAMPLE / REFERENCE]` (`scan_view.py`, `scan_trace.py` x2, `step_diagnostics.py`, `roi_tuning_run.py`, `trace_fit`
+  inputs) need no change and cannot disagree; the trace caches key on `id(stored)`, so a new paired scan drops them.
+- Reference ROIs are not analysis units: Spectra / Sensorgram / step table / groups / Signal map / S_bulk skip them, and a sample
+  without a reference says "no reference" (`PairedScan.problems`).
+
+### 1.2d Position tuning with its linked references (after 1.2c)
 - **ROI position tuning (maintainer, 2026-11-18):** tuning is for sample ROIs only (a reference ROI is never a candidate on its
   own), but a sample's linked reference ROIs **move with it** in a trial: the pair is shifted by the same offset. This is a rule of
   the tuning only; decision 4 (S and R move independently) still holds for every other edit. Consequences to build with it: a trial

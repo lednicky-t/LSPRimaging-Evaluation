@@ -27,7 +27,7 @@ Rules it follows, taken from ``compute_cell`` and the invariants in ``apps/LSPRi
 * A **reference ROI** (``AreaRoi.role == "reference"``, plan ``docs/roi_shapes_and_linking_plan_2026-11-18.md``) is one region: its pixels are
   stored in the ``SAMPLE`` column, its ``REFERENCE`` column is empty (NaN / 0 pixels), it has no ring, and its region loses the pixels of every
   *sample* ROI's aperture, as a ring does. Its apertures take nothing from anyone. Which reference numbers belong to which sample is **not**
-  decided here: that pairing is applied afterwards to the stored numbers (plan phase 1.2b), so linking never needs a rescan. A set
+  decided here: that pairing is applied afterwards to the stored numbers (``reference_pairing.py``), so linking never needs a rescan. A set
   with no reference ROI gives the pixels, numbers and hashes it always gave.
 * The ignore mask (processed space) removes pixels from both apertures. It does not change the image.
 * A pixel without a value (NaN, e.g. created by rotation) is never reduced. ``n_nominal`` counts the aperture after
