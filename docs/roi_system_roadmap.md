@@ -1,5 +1,9 @@
 # ROI System Roadmap
 
+> **Superseded 2026-11-18** by [`roi_shapes_and_linking_plan_2026-11-18.md`](roi_shapes_and_linking_plan_2026-11-18.md)
+> (sample / reference roles, one reference shared by several samples, shapes). Kept for history; its file paths are from
+> the old app.
+
 This document is the single, actionable implementation plan for generalizing LSPRimaging
 Evaluation's ROI (Region of Interest) system beyond circle-sample / annulus-reference. It
 consolidates four earlier planning documents plus an audit of what is actually built today,

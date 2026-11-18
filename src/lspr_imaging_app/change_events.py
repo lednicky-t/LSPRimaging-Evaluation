@@ -45,4 +45,17 @@ class RoiComputationalChange:
     # "detection_settings" carries an empty `roi_ids`: the shared detection/
     # reduction settings changed, which invalidates every ROI's stored result
     # without any individual ROI having changed.
-    reason: str  # "moved" | "resized" | "geometry_type_changed" | "added" | "deleted" | "detected" | "detection_settings" | "session_restored" | "remapped"
+    reason: str  # "moved" | "resized" | "geometry_type_changed" | "added" | "deleted" | "detected" | "detection_settings" | "session_restored" | "remapped" | "role_changed"
+
+
+@dataclass(frozen=True)
+class RoiLinkChange:
+    """Which reference ROIs a sample ROI is linked to has changed (`domain/roi_links.py`).
+
+    Neither of the two kinds above: no pixel a scan reads changes (the scan stores every region on its own), so nothing stored
+    goes stale, but every number *derived* from a sample's pair (formula, spectra, sensorgram, step table) must be rebuilt
+    from the stored numbers, like a change of formula. ``sample_ids`` are the samples whose reference set changed (ids after
+    the change); empty with ``reason="session_restored"`` means "all of them"."""
+
+    sample_ids: tuple[int, ...]
+    reason: str  # "linked" | "unlinked" | "role_changed" | "deleted" | "session_restored" - for logging only

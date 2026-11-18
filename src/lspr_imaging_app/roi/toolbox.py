@@ -115,7 +115,7 @@ import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from ..applog.events import emit_timing
-from ..change_events import RoiComputationalChange, RoiCosmeticChange
+from ..change_events import RoiComputationalChange, RoiCosmeticChange, RoiLinkChange
 from ..diagnostics import instrumented
 from ..image_tools.chromatic.affine import apply_affine_to_points
 from ..undo import FunctionCommand, undo_manager
@@ -134,6 +134,15 @@ from ..domain.roi_model import (
     base_geometry,
     geometry_at,
     resolved_at,
+)
+from ..domain.roi_links import (
+    ROI_ROLES,
+    ROLE_REFERENCE,
+    cleaned_links,
+    link_refusal,
+    normalized_ids,
+    reference_source,
+    samples_linked_to,
 )
 from .ordering import move_block, renumbering
 from .palette import first_free_tint_index, gradient_tints, next_group_color, normalize_hex, tint_color
@@ -265,6 +274,8 @@ class RoiToolbox(QObject):
     # recomputed or needs redrawing on its own) - a separate, narrower signal
     # for "if you hold a roi_id, it may now be wrong".
     roi_ids_renumbered = pyqtSignal(dict)
+    # A sample's set of linked reference ROIs changed (`RoiLinkChange`): derived numbers must be rebuilt, nothing stored is stale.
+    links_changed = pyqtSignal(RoiLinkChange)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -390,6 +401,8 @@ class RoiToolbox(QObject):
         existing one and silently replace it. Same for group ids, whose
         `"group-<n>"` form is parsed back out for the same reason."""
         self._detection_settings = replace(detection_settings)
+        for problem in cleaned_links(rois):  # a hand-edited or inconsistent file: repaired and said, never silently
+            logger.warning("Session ROI links repaired: %s", problem)
         self._rois = {int(roi.area_roi_id): roi for roi in rois}
         self._groups = {str(group.group_id): group for group in groups}
         self._array_groups = {str(array_group.array_id): array_group for array_group in arrays}
@@ -397,6 +410,125 @@ class RoiToolbox(QObject):
         self._group_id_counter = itertools.count(_highest_group_number(self._groups) + 1)
         self.geometry_changed.emit(RoiComputationalChange(roi_ids=(), reason="session_restored"))
         self.cosmetic_changed.emit(RoiCosmeticChange(roi_ids=(), reason="session_restored"))
+        self.links_changed.emit(RoiLinkChange(sample_ids=(), reason="session_restored"))
+
+    # -- sample / reference roles and links (domain/roi_links.py) ---------
+    #
+    # Every command is one undo step, validates before changing anything, and holds the ROI *objects* in its closures (so
+    # it stays correct whatever renumbering happens around it). Roles change which pixels a scan reads for a ROI (a reference
+    # region leaves out every sample's pixels), so a role change is a `RoiComputationalChange`; a link change is only a
+    # `RoiLinkChange` (nothing stored goes stale).
+
+    def references_of(self, sample_id: int) -> tuple[int, ...]:
+        """The reference ROIs ``sample_id`` is linked to, ascending (empty: it uses its built-in reference, if any)."""
+        return tuple(self._rois[int(sample_id)].reference_roi_ids)
+
+    def samples_of(self, reference_id: int) -> tuple[int, ...]:
+        """The sample ROIs linked to ``reference_id``, ascending."""
+        return samples_linked_to(self._rois.values(), reference_id)
+
+    def reference_source(self, roi_id: int) -> str:
+        """``"linked"`` / ``"builtin"`` / ``"none"`` / ``"is_reference"`` (see `domain.roi_links.reference_source`)."""
+        return reference_source(self._rois[int(roi_id)])
+
+    def _apply_link_state(self, states: list[tuple[AreaRoi, str, tuple[int, ...]]]) -> None:
+        for roi, role, links in states:
+            roi.role = role
+            roi.reference_roi_ids = links
+
+    def _push_link_edit(
+        self,
+        label: str,
+        before: list[tuple[AreaRoi, str, tuple[int, ...]]],
+        after: list[tuple[AreaRoi, str, tuple[int, ...]]],
+        *,
+        role_changed: tuple[AreaRoi, ...],
+        reason: str,
+    ) -> None:
+        """Apply ``after`` (``(roi, role, links)`` per touched ROI) as one undo step; ``before`` is what undo puts back."""
+        changed_links = tuple(roi for (roi, _, old), (_, _, new) in zip(before, after) if old != new)
+
+        def emit() -> None:
+            if role_changed:
+                self.geometry_changed.emit(
+                    RoiComputationalChange(roi_ids=tuple(sorted(roi.area_roi_id for roi in role_changed)), reason="role_changed")
+                )
+            samples = {roi.area_roi_id for roi in changed_links} | {
+                roi.area_roi_id for roi in role_changed if roi.role != ROLE_REFERENCE
+            }
+            if samples:  # never empty here: an empty tuple means "every sample" (session restore)
+                self.links_changed.emit(RoiLinkChange(sample_ids=tuple(sorted(samples)), reason=reason))
+
+        def apply() -> None:
+            self._apply_link_state(after)
+            emit()
+
+        def revert() -> None:
+            self._apply_link_state(before)
+            emit()
+
+        apply()
+        undo_manager.push(FunctionCommand(label, undo_fn=revert, redo_fn=apply))
+
+    @instrumented("RoiToolbox.set_roi_role")
+    def set_roi_role(self, roi_ids: Collection[int], role: str) -> None:
+        """Make the ROIs ``role`` (``"sample"`` or ``"reference"``), one undo step.
+
+        Making a ROI a reference drops its own links (a reference has none). Making a reference a sample takes it out of every
+        sample's links (those samples fall back to their built-in reference, or have none: shown as missing). The ROI's ring
+        diameters are never touched, so switching back restores exactly what it was. ROIs already in ``role`` are left alone;
+        nothing to change pushes no undo step."""
+        if role not in ROI_ROLES:
+            raise ValueError(f"role must be one of {ROI_ROLES}, got {role!r}")
+        targets = [roi for roi in self._require_rois(roi_ids) if roi.role != role]
+        if not targets:
+            return
+        target_ids = {roi.area_roi_id for roi in targets}
+        touched: dict[int, tuple[AreaRoi, str, tuple[int, ...]]] = {}
+        for roi in targets:
+            touched[roi.area_roi_id] = (roi, role, () if role == ROLE_REFERENCE else roi.reference_roi_ids)
+        if role != ROLE_REFERENCE:  # former references leave every sample's links
+            for roi in self._rois.values():
+                if roi.area_roi_id in target_ids or not (target_ids & set(roi.reference_roi_ids)):
+                    continue
+                touched[roi.area_roi_id] = (roi, roi.role, tuple(i for i in roi.reference_roi_ids if i not in target_ids))
+        before = [(roi, roi.role, roi.reference_roi_ids) for roi, _, _ in touched.values()]
+        after = list(touched.values())
+        noun = "reference" if role == ROLE_REFERENCE else "sample"
+        label = f"Make ROI {noun}" if len(targets) == 1 else f"Make {len(targets)} ROIs {noun}s"
+        self._push_link_edit(label, before, after, role_changed=tuple(targets), reason="role_changed")
+
+    @instrumented("RoiToolbox.link_references")
+    def link_references(self, sample_ids: Collection[int], reference_ids: Collection[int]) -> None:
+        """Link every sample in ``sample_ids`` to every reference in ``reference_ids`` (added to the links each sample already
+        has), one undo step. Refused with `ValueError` (message for the status line, `domain.roi_links.link_refusal`) when a
+        side is empty, an id is unknown, or a ROI has the wrong role; nothing changes then."""
+        refusal = link_refusal(self._rois, sample_ids, reference_ids)
+        if refusal:
+            raise ValueError(refusal)
+        new_refs = set(normalized_ids(reference_ids))
+        samples = [self._rois[i] for i in normalized_ids(sample_ids)]
+        before = [(roi, roi.role, roi.reference_roi_ids) for roi in samples]
+        after = [(roi, roi.role, normalized_ids({*roi.reference_roi_ids, *new_refs})) for roi in samples]
+        if all(old == new for (_, _, old), (_, _, new) in zip(before, after)):
+            return
+        label = "Link ROI to reference" if len(samples) == 1 else f"Link {len(samples)} ROIs to references"
+        self._push_link_edit(label, before, after, role_changed=(), reason="linked")
+
+    @instrumented("RoiToolbox.unlink_references")
+    def unlink_references(self, sample_ids: Collection[int], reference_ids: Collection[int] | None = None) -> None:
+        """Remove the links of ``sample_ids`` to ``reference_ids`` (``None``: all their links), one undo step. A sample left
+        without links uses its built-in reference again, or has none (shown as missing). Nothing to remove pushes no step."""
+        samples = self._require_rois(sample_ids)
+        drop = None if reference_ids is None else set(normalized_ids(reference_ids))
+        before = [(roi, roi.role, roi.reference_roi_ids) for roi in samples]
+        after = [
+            (roi, roi.role, () if drop is None else tuple(i for i in roi.reference_roi_ids if i not in drop)) for roi in samples
+        ]
+        if all(old == new for (_, _, old), (_, _, new) in zip(before, after)):
+            return
+        label = "Unlink ROI" if len(samples) == 1 else f"Unlink {len(samples)} ROIs"
+        self._push_link_edit(label, before, after, role_changed=(), reason="unlinked")
 
     # -- command API (§7): single-ROI mutation ---------------------------
 
@@ -907,6 +1039,23 @@ class RoiToolbox(QObject):
         undo_manager.push(FunctionCommand(label, undo_fn=lambda: write(0), redo_fn=lambda: write(1)))
         return emit_seconds
 
+    def _survivor_links(
+        self, id_map: Mapping[int, int]
+    ) -> tuple[list[tuple[AreaRoi, tuple[int, ...]]], list[tuple[AreaRoi, tuple[int, ...]]], tuple[AreaRoi, ...]]:
+        """For a command that removes ROIs and renumbers the survivors by ``id_map`` (``{old: new}``, survivors only): the
+        links of the surviving samples before, after (renumbered; a link to a removed reference is dropped, so that sample
+        falls back to its built-in reference or has none), and the samples that lost a link. Computed once, up front, like
+        the id map, so redo and undo replay exactly."""
+        linked = [self._rois[old_id] for old_id in sorted(id_map) if self._rois[old_id].reference_roi_ids]
+        before = [(roi, roi.reference_roi_ids) for roi in linked]
+        after = [(roi, tuple(sorted(id_map[i] for i in roi.reference_roi_ids if i in id_map))) for roi in linked]
+        lost = tuple(roi for (roi, old), (_, new) in zip(before, after) if len(new) < len(old))
+        return before, after, lost
+
+    def _emit_lost_links(self, lost: tuple[AreaRoi, ...]) -> None:
+        if lost:
+            self.links_changed.emit(RoiLinkChange(tuple(sorted(roi.area_roi_id for roi in lost)), reason="deleted"))
+
     @instrumented("RoiToolbox.delete_roi")
     def delete_roi(self, roi_id: int) -> None:
         self.delete_rois((roi_id,))
@@ -953,6 +1102,7 @@ class RoiToolbox(QObject):
         id_map = {old_id: new_id for new_id, old_id in enumerate(surviving_old_ids_sorted, start=1)}
         reverse_id_map = {new_id: old_id for old_id, new_id in id_map.items()}
         next_counter_after_delete = len(surviving_old_ids_sorted) + 1
+        links_before, links_after, lost_link = self._survivor_links(id_map)
 
         def apply() -> None:
             renumbered: dict[int, AreaRoi] = {}
@@ -961,6 +1111,8 @@ class RoiToolbox(QObject):
                 roi.area_roi_id = new_id
                 renumbered[new_id] = roi
             self._rois = renumbered
+            for roi, links in links_after:
+                roi.reference_roi_ids = links
             for group in self._groups.values():
                 group.area_roi_ids = sorted({id_map[rid] for rid in group.area_roi_ids if rid in id_map})
             self._groups = {group_id: group for group_id, group in self._groups.items() if group.area_roi_ids}
@@ -974,6 +1126,7 @@ class RoiToolbox(QObject):
             # subscriber drops what it holds for every id absent from the map.
             self.roi_ids_renumbered.emit(dict(id_map))
             self.geometry_changed.emit(RoiComputationalChange(roi_ids=tuple(sorted(ids_to_delete)), reason="deleted"))
+            self._emit_lost_links(lost_link)
 
         def revert() -> None:
             restored: dict[int, AreaRoi] = {}
@@ -983,6 +1136,8 @@ class RoiToolbox(QObject):
                 restored[old_id] = roi
             restored.update(removed_rois)
             self._rois = restored
+            for roi, links in links_before:
+                roi.reference_roi_ids = links
             for snapshot in groups_before:
                 _restore(snapshot)
             for snapshot in arrays_before:
@@ -992,6 +1147,7 @@ class RoiToolbox(QObject):
             self._roi_id_counter = itertools.count(next_counter_before_delete)
             self.roi_ids_renumbered.emit(dict(reverse_id_map))
             self.geometry_changed.emit(RoiComputationalChange(roi_ids=tuple(sorted(removed_rois)), reason="added"))
+            self._emit_lost_links(lost_link)
 
         apply()
         label = "Delete ROI" if len(ids_to_delete) == 1 else f"Delete {len(ids_to_delete)} ROIs"
@@ -1109,6 +1265,7 @@ class RoiToolbox(QObject):
         id_map = {old_id: new_id for new_id, old_id in enumerate(survivors, start=1)}
         reverse_id_map = {new_id: old_id for old_id, new_id in id_map.items()}
         first_new_id = len(survivors) + 1
+        links_before, links_after, lost_link = self._survivor_links(id_map)
         array_number = 1
         for existing in self._array_groups:
             tail = existing.rsplit("_", 1)[-1]
@@ -1154,6 +1311,8 @@ class RoiToolbox(QObject):
             for roi in new_rois:
                 renumbered[roi.area_roi_id] = roi
             self._rois = renumbered
+            for roi, links in links_after:
+                roi.reference_roi_ids = links
             for group in self._groups.values():
                 group.area_roi_ids = sorted({id_map[rid] for rid in group.area_roi_ids if rid in id_map})
             self._groups = {gid: group for gid, group in self._groups.items() if group.area_roi_ids}
@@ -1164,6 +1323,7 @@ class RoiToolbox(QObject):
             self._roi_id_counter = itertools.count(first_new_id + count)
             self.roi_ids_renumbered.emit(dict(id_map))
             self.geometry_changed.emit(RoiComputationalChange(roi_ids=new_ids, reason="added"))
+            self._emit_lost_links(lost_link)
 
         def revert() -> None:
             restored: dict[int, AreaRoi] = {}
@@ -1174,6 +1334,9 @@ class RoiToolbox(QObject):
                     restored[old_id] = roi
             restored.update(removed_rois)
             self._rois = dict(sorted(restored.items()))  # rois() is in id order
+            for roi, links in links_before:
+                roi.reference_roi_ids = links
+            self._emit_lost_links(lost_link)
             for snapshot in groups_before:
                 _restore(snapshot)
             for snapshot in arrays_before:
@@ -1245,6 +1408,9 @@ class RoiToolbox(QObject):
                 roi.area_roi_id = new
                 renumbered[new] = roi
             self._rois = dict(sorted(renumbered.items()))
+            for roi in self._rois.values():  # links follow their references' new numbers
+                if roi.reference_roi_ids:
+                    roi.reference_roi_ids = tuple(sorted(mapping[i] for i in roi.reference_roi_ids))
             for group in self._groups.values():
                 group.area_roi_ids = sorted(mapping[roi_id] for roi_id in group.area_roi_ids)
             for array in self._array_groups.values():

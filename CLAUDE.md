@@ -103,7 +103,7 @@ These come from real incidents. Violating any of them will likely reproduce a bu
 
 - `dataset/`: dataset load and convert; acquisition metadata.
 - `image_tools/{geometry,mask,chromatic,background}/`: independent modules. Only Chromatic's `affine_for()` and `warp_mask()` are called from outside.
-- `roi/`: the ROI Toolbox, one backend with several front doors (Image panel, ROI/Group table) that call the same command API. Follow `docs/roi_system_roadmap.md`; don't re-derive an ROI model.
+- `roi/`: the ROI Toolbox, one backend with several front doors (Image panel, ROI/Group table) that call the same command API. Follow `docs/roi_shapes_and_linking_plan_2026-11-18.md` (sample / reference roles and links, shapes; supersedes `docs/roi_system_roadmap.md`); don't re-derive an ROI model. Role / link rules: `domain/roi_links.py`; links live on the sample (`AreaRoi.reference_roi_ids`) and every command that renumbers or removes ROIs must carry them (`RoiToolbox._survivor_links`).
 - `analysis/`: the scan (`scan*.py`, `frame_reduce.py`), the display queries (`query.py`, `scan_view.py`, `statistics.py`), background workers (`worker.py`), reduction math (`reduction.py`) and the reference `tasks.compute_cell`. Computes only on an explicit Scan / Fast scan.
 - `selection/`: the one intentionally shared state (current cube, wavelength, ROI). Not a license to add more.
 - `panels/`: display only. Read query interfaces; turn gestures into command calls; own no domain state.

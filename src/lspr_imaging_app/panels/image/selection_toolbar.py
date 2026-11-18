@@ -71,7 +71,7 @@ from ...image_tools.mask import raster_tools
 from ...image_tools.selection_wand import WandMethod, WandSettings
 from ...selection import AreaSelectionMode, AreaSelectionModule
 from ...selection.area_selection_module import ADD, COMBINE_MODES, INTERSECT, REPLACE, SUBTRACT, VALUE_MODES
-from ...storage.ui_state_keys import SELECTION_COMBINE_MODE
+from ...storage.ui_state_keys import SELECTION_COMBINE_MODE, SELECTION_WAND_METHOD
 from ..icon_button_style import style_general_icon_button
 from ..ribbon_icon_size import BUTTON_SIZE, ICON_SIZE
 from ..scrolling_column import ScrollingColumn
@@ -389,10 +389,10 @@ class WandSettingsForm(QWidget):
 
     def bind_ui_state(self, store: UiStateStore) -> None:
         # The method is written by hand (three buttons are not one widget `bind` knows), under the key and values it had as a drop-down.
-        saved = store.get("selection/wand_method")
+        saved = store.get(SELECTION_WAND_METHOD.key)
         if isinstance(saved, str) and saved in {method.value for method in WandMethod}:
             self.set_method(WandMethod(saved))
-        self.changed.connect(lambda: store.set("selection/wand_method", self._picked.value))
+        self.changed.connect(lambda: store.set(SELECTION_WAND_METHOD.key, self._picked.value))
         store.bind("selection/wand_contrast_threshold", self.contrast_threshold)
         store.bind("selection/wand_brightness_tolerance", self.brightness_tolerance)
         store.bind("selection/wand_edge_threshold", self.edge_threshold)

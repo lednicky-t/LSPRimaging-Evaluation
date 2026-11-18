@@ -128,7 +128,10 @@ from ..domain.roi_model import (
 logger = logging.getLogger(__name__)
 
 SESSION_SCHEMA_NAME = "lspri_rewrite_session"
-SESSION_SCHEMA_VERSION = "1.10"
+SESSION_SCHEMA_VERSION = "1.11"
+# 1.11 (2026-11-18): a ROI entry may also hold "role" ("reference"; absent = "sample") and "reference_roi_ids" (the reference ROIs a sample is linked to;
+# absent = none, the built-in ring is its reference), domain/roi_links.py. Written only when not the default, so a session without references is written exactly
+# as before; a 1.10 (or older) file loads as all samples with their built-in rings. An older build ignores both keys (it would analyse a reference ROI as a sample).
 # 1.10 (2026-11-16): the "selection" block may also hold "locked": true - the ROI selection lock (selection/module.py). Written only when the selection is locked, so a
 # session without a lock is written exactly as before; a 1.9 (or older) file has none and loads unlocked. (The version compare is on the major number only, so "1.10" > "1.9" needs no care.)
 # 1.9 (2026-11-13): the "refractive_index" block may also hold "rows" - the user's working table (edited, added, removed rows, rows assigned to steps by hand), plan/refractive_index.py;
@@ -333,6 +336,12 @@ def _encode_area_roi(area_roi: AreaRoi) -> dict:
     payload["reference_mask"] = _encode_roi_mask(area_roi.reference_mask)
     payload["per_wavelength"] = _encode_per_wavelength(area_roi.per_wavelength)
     payload["timeline"] = _encode_timeline(area_roi.timeline)
+    if area_roi.role == "sample":  # schema 1.11: written only when not the default
+        payload.pop("role")
+    if area_roi.reference_roi_ids:
+        payload["reference_roi_ids"] = [int(i) for i in area_roi.reference_roi_ids]
+    else:
+        payload.pop("reference_roi_ids")
     return payload
 
 
@@ -359,6 +368,8 @@ def _decode_area_rois(raw: object) -> list[AreaRoi]:
             kwargs["reference_mask"] = _decode_roi_mask(entry.get("reference_mask"))
             kwargs["per_wavelength"] = _decode_per_wavelength(entry.get("per_wavelength"))
             kwargs["timeline"] = _decode_timeline(entry.get("timeline"))
+            kwargs["role"] = str(entry.get("role", "sample"))  # an unknown role is repaired (and logged) by RoiToolbox.restore_state
+            kwargs["reference_roi_ids"] = tuple(sorted({int(i) for i in entry.get("reference_roi_ids") or ()}))
             decoded.append(AreaRoi(**kwargs))
         except (KeyError, TypeError, ValueError):
             logger.warning("Skipping an undecodable ROI in the session file", exc_info=True)

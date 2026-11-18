@@ -215,6 +215,14 @@ class AreaRoi:
     timeline: RoiTimeline | None = None
     """Geometry edits by cube (see `RoiTimeline`). ``None`` / empty: the ROI has one geometry for every cube, the fields
     above (its **base** geometry). Identity (id, label, colours, group, array) is never on the timeline."""
+    role: str = "sample"
+    """``"sample"`` (an analysis unit: its own region is the sample) or ``"reference"`` (its own region is a reference that
+    samples link to; it has no reference of its own and is not an analysis unit). Identity, never on the timeline. Rules:
+    `domain/roi_links.py`; plan: ``docs/roi_shapes_and_linking_plan_2026-11-18.md``."""
+    reference_roi_ids: tuple[int, ...] = ()
+    """On a sample: the ids of the reference ROIs it is linked to, ascending. Empty: the sample uses its built-in reference
+    (the ring). Non-empty: the linked references *are* its reference and the ring is not used (its diameters are kept, so
+    unlinking brings it back). Always empty on a reference ROI. Ids follow renumbering (`RoiToolbox`)."""
 
 
 @dataclass(slots=True)

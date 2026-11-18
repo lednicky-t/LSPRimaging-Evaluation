@@ -103,6 +103,7 @@ IMAGE_CURSOR_READOUT = UiKey("image/cursor_readout", False, bool)
 IMAGE_MASK_EDIT_PREVIEW = UiKey("image/mask_edit_preview", True, bool)  # the eye toggle of the Mask tab's edit-preview tint
 IMAGE_SCALE_BAR_COLOR = UiKey("image/scale_bar_color", None, str)
 SELECTION_COMBINE_MODE = UiKey("selection/combine_mode", "replace", str)  # the selection toolbar's mode button: replace / add / subtract / intersect
+SELECTION_WAND_METHOD = UiKey("selection/wand_method", "contrast", str)  # the magic wand's method: contrast / brightness / edges (WandMethod values)
 IMAGE_ROI_LABELS = UiKey("image/roi_labels", False, bool)
 # The Image panel's layers (panels/image/layers.py, 2026-11-16): the Image layer's eye and the active layer ("image" / "roi" / "mask").
 IMAGE_LAYER_IMAGE_VISIBLE = UiKey("image/layer_image_visible", True, bool)
@@ -222,7 +223,7 @@ ARRAY_KEYS = {  # ROIs tab, "Array" group (panels/image/array_controls.py); leng
 }
 HAND_WIRED_KEYS: tuple[UiKey, ...] = (
     HISTOGRAM_CURSOR_READOUT, HISTOGRAM_CURVE_STYLES, IMAGE_CURSOR_READOUT, IMAGE_MASK_EDIT_PREVIEW,
-    IMAGE_SCALE_BAR_COLOR, IMAGE_ROI_LABELS, SELECTION_COMBINE_MODE, IMAGE_LAYER_IMAGE_VISIBLE, IMAGE_ACTIVE_LAYER,
+    IMAGE_SCALE_BAR_COLOR, IMAGE_ROI_LABELS, SELECTION_COMBINE_MODE, SELECTION_WAND_METHOD, IMAGE_LAYER_IMAGE_VISIBLE, IMAGE_ACTIVE_LAYER,
     IMAGE_OVERLAY_CACHE_MB, IMAGE_GPU_DRAWING, RI_WAVELENGTH_NM, RI_AGE_WARNING_DAYS, DISPLAY_RESOLUTION, PERF_MODE, PERF_MANUAL_WORKERS, PERF_RESERVED_CORES, PERF_LOW_PRIORITY, ANALYSIS_MODE,
     *(key for keys_for_kind in ROI_OVERLAY_KEYS.values() for key in keys_for_kind.values()),
     *(key for keys_for_role in SELECTION_STYLE_KEYS.values() for key in keys_for_role.values()),
