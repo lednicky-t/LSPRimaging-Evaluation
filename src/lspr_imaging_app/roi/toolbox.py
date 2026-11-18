@@ -438,6 +438,12 @@ class RoiToolbox(QObject):
         behave as they always did."""
         return tuple(i for i in (int(r) for r in roi_ids) if i not in self._rois or not is_reference(self._rois[i]))
 
+    def linked_sample_ids(self, roi_ids: Iterable[int]) -> tuple[int, ...]:
+        """The ids among ``roi_ids`` of sample ROIs that have linked reference ROIs, in the order given (position tuning asks: it does not follow links yet)."""
+        return tuple(
+            i for i in (int(r) for r in roi_ids) if i in self._rois and not is_reference(self._rois[i]) and self._rois[i].reference_roi_ids
+        )
+
     def _apply_link_state(self, states: list[tuple[AreaRoi, str, tuple[int, ...]]]) -> None:
         for roi, role, links in states:
             roi.role = role

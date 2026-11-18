@@ -120,12 +120,28 @@ An R region leaves out the pixels of every sample, like the ring does today (`ex
   independently). The only reference that moves with a sample is its **analytical** one, the built-in border (gap and thickness
   around its shape, today the ring), because it is defined from the sample's own geometry; that is how tuning already works. An
   earlier note of this day said linked references move with the sample: that was a misreading and is withdrawn.
-- What that leaves to build: for a sample **with linked references** a trial position is scored against its *linked* reference
-  (fixed in place), not against the moving ring, and Accept still copies only what the file stores for a sample (its own region and
-  its ring), bit-identical to a real scan; the links apply afterwards through the pairing, as for every other number. A trial
+- **Built (minimal, 2026-11-18; this is where phase 1.2 ends):** `RoiTuningModule._prepare` drops reference ROIs from the selection
+  (`RoiToolbox.sample_ids`; a selection of references only says "Only reference ROIs are selected ...") and **refuses a sample that has
+  linked references** with the reason ("ROI 5 is linked to reference ROIs, and position tuning does not follow links yet ...";
+  `RoiToolbox.linked_sample_ids`), so a linked sample is never silently scored against its moving ring. An unlinked sample, a
+  reference-free session and Accept are untouched (Accept copies only a sample's own region and ring, which the file stores). Tests:
+  `test_lspri_roi_tuning_module.py` (2 new, mutation-checked), `test_lspri_roi_links.py`.
+- **Potential work, not needed now (maintainer, 2026-11-18: "no need now, mark it down"): link-aware tuning.** For a sample **with
+  linked references** a trial position would be scored against its *linked* reference (fixed in place), not against the moving ring,
+  and Accept would still copy only what the file stores for a sample (its own region and its ring), bit-identical to a real scan;
+  the links apply afterwards through the pairing, as for every other number. Sketch: the trial matrix keeps its scan-level numbers
+  and `TuningMatrix.trace_inputs()` is the one place that turns them into traces, so a linked sample's `REFERENCE` arrays there
+  would be replaced by the paired reference of the stored scan (`reference_pairing`, constant over the lattice positions; the same
+  cubes and wavelength axis as the plan, refused with a message if they differ or the linked cells were never scanned). A trial
   that moves a sample's disc into a linked reference's region changes that region (it loses the pixels of every sample disc):
   `ring_reach_matrix` already counts a reference ROI as a neighbour of such a sample, which is the existing "interacting pair" rule
-  (no Accept copy); the score of such a position is the part to decide when it is built (1.2d).
+  (flagged "approximate", no Accept copy); the exact alternative is to scan the linked references as unmoved extra rows of every
+  trial, at the cost of widening the matrix and every consumer of its ROI axis. Until then a linked sample is refused (above).
+- **Also noted, for phase 3:** with only reference ROIs selected, Spectra and Sensorgram draw nothing and the reason ("Only reference
+  ROIs are selected ...") goes to their status text, which is not visible (Spectra's status row is hidden by the maintainer's
+  2026-10-23 decision; the Sensorgram's reaches the status bar only for a run that became visible). Nothing differs from before for
+  a session without reference ROIs, and no gesture creates one before phase 3, so this edge case cannot be reached yet; decide
+  the visible form together with the "R7" label and the Linked view.
 
 ### 2 Shapes (back end)
 - One geometry function per shape (circle, rectangle with rotation, mask), used by the scan, the overlay, the histogram,

@@ -98,7 +98,7 @@ class RoiTuningModule(QObject):
         x_is_time: Callable[[], bool] | None = None,
     ) -> None:
         """``plan``: the ``ExperimentPlanModule``; ``selection``: ``selected_roi_ids()``; ``settings``: the ``AnalysisSettingsModule``; ``dataset``:
-        ``cube_spans_unix_ms(cubes)``; ``roi_toolbox``: ``detection_settings()``. All are read on the GUI thread, through their public queries only.
+        ``cube_spans_unix_ms(cubes)``; ``roi_toolbox``: ``detection_settings()``, ``sample_ids(ids)`` and ``linked_sample_ids(ids)``. All are read on the GUI thread, through their public queries only.
         ``x_is_time``: whether the Sensorgram's x axis is time (``SensorgramAxis.uses_time``; None = the cube number). Only the drift baseline reads it:
         its curve is fitted against the Sensorgram's x, and the trial must fit it the same way."""
         super().__init__(parent)
@@ -532,9 +532,21 @@ class RoiTuningModule(QObject):
                 self._settings.metric_settings(), statistics, for_refit.first_unix_ms, for_refit.last_unix_ms,
                 for_refit.extra_cubes, self._drift_anchors(for_refit.roi_ids, statistics), x_is_time,
             )
-        roi_ids = tuple(sorted(int(r) for r in self._selection.selected_roi_ids()))
+        selected = tuple(sorted(int(r) for r in self._selection.selected_roi_ids()))
+        roi_ids = self._roi_toolbox.sample_ids(selected)  # tuning moves sample ROIs; a reference ROI is never a candidate (plan 2026-11-18)
         if not roi_ids:
-            return _Problem("Select at least one ROI first.")
+            return _Problem(
+                "Select at least one ROI first." if not selected
+                else "Only reference ROIs are selected. Position tuning moves sample ROIs: select a sample ROI."
+            )
+        linked = self._roi_toolbox.linked_sample_ids(roi_ids)
+        if linked:  # said, never scored against the wrong reference: a trial would compare each position with the moving ring, not with the linked reference ROIs
+            shown = ", ".join(str(r) for r in linked[:3]) + (" ..." if len(linked) > 3 else "")
+            return _Problem(
+                f"ROI {shown} {'is' if len(linked) == 1 else 'are'} linked to reference ROIs, and position tuning does not follow links yet: it would score "
+                f"{'it' if len(linked) == 1 else 'them'} against the moving border. Unlink {'it' if len(linked) == 1 else 'them'} or leave "
+                f"{'it' if len(linked) == 1 else 'them'} out of the selection."
+            )
         baseline, signal = self._plan.baseline_step(), self._plan.signal_step()
         if baseline is None or signal is None:
             return _Problem("Choose a baseline step (B1) and a signal step (S1) on the Experimental plan tab of the Sensorgram first.")
