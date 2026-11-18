@@ -111,8 +111,9 @@ def layout_json(rs: RoiSet) -> str:
             "sample_diameter_px": float(r.sample_diameter_px), "sample_geometry_type": r.sample_geometry_type,
             "reference_geometry_type": r.reference_geometry_type, "reference_inner_diameter_px": r.reference_inner_diameter_px,
             "reference_outer_diameter_px": r.reference_outer_diameter_px,
+            **({"role": "reference"} if rs.is_ref[i] else {}),  # written only for a reference ROI: an all-sample layout reads as before
         }
-        for r in rs.rois
+        for i, r in enumerate(rs.rois)
     ]
     return json.dumps(
         {"default_reference_inner_diameter_px": rs.inner_default_px, "default_reference_outer_diameter_px": rs.outer_default_px, "rois": rows},

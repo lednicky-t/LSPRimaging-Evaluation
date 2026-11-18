@@ -48,19 +48,43 @@ An R region leaves out the pixels of every sample, like the ring does today (`ex
 - Tests: `tests/unit/test_lspri_roi_links.py`.
 - Nothing reads the roles yet: until 1.2, an R ROI is still scanned and shown as if it were a sample.
 
-### 1.2 Scan + pairing (next)
-- Scan: an R ROI reads only its own region, minus every sample's pixels; its ring is off. The role goes into the per-ROI
-  digest (`frame_reduce.roi_row_digests`) and `RoiSet`. Bump `SCAN_ALGORITHM_VERSION` only if a stored number of an existing
-  (all-sample) session can change: it must not.
-- One pairing function (in `analysis/`) returning, per sample: S mean/SD/n and R mean/SD/n (built-in, or linked pooled by
-  pixel). The ~6 readers of `mean[..., SAMPLE]` / `mean[..., REFERENCE]` move to it: `scan_view.py`, `scan_trace.py` (2),
-  `step_diagnostics.py`, `roi_tuning_run.py`, `trace_fit.formula_arrays` inputs.
-- Analysis units = samples only: Spectra, Sensorgram, step table, groups, Signal map, S_bulk skip R ROIs; a sample without
-  a reference shows "no reference" instead of numbers.
-- Wire `links_changed` to whatever caches derived numbers (`analysis/trace_store.py`, step table).
-- Proof test: S linked to a separate R ring with exactly the pixels of its own ring gives identical numbers to the built-in
-  ring.
-- Open: ROI position tuning moves samples; a shared R is not tuned (decide when 1.2 is built).
+### 1.2a Scan side (DONE 2026-11-18, uncommitted when written)
+- `frame_reduce.RoiSet.is_ref` (from `AreaRoi.role`). A reference ROI: ring off (`ring_on` False), its region goes to the
+  `SAMPLE` column, `REFERENCE` column NaN / 0 pixels; its region loses the pixels of every *sample* ROI (`_exclude_sample_discs`,
+  shared by `build_layout` and `build_subset_layout`); its disc cuts no ring and no other region. `reduce_frame` stores a
+  reference ROI's value from its own pixels (mean, and median / trimmed mean / plane-fit's mean side), so it is not dropped for
+  lacking ring pixels. `ring_reach_matrix` treats a reference ROI as a "ring" of its own disc radius and never as a disc that
+  reaches, so `local_roi_keys` (stale cells) and the subset scan follow the same rule.
+- The role is in `roi_row_digests` and `RoiSet.key` **only for a reference ROI**. Proof that an all-sample set is untouched:
+  a before / after fingerprint of key, row digests, local keys, full and subset pixel lists (both exclusion modes, identity and
+  chromatic affine, one free-form mask ROI) and the numbers of all four reduction methods: byte-identical; the three digests of
+  a small set are pinned in the test. So `SCAN_ALGORITHM_VERSION` stays 1 and no existing session rescans.
+- Changing a ROI's role changes that ROI's cell hash (and the hash of a sample whose ring it used to cut): those cells go stale
+  and need a scan, like any geometry change. Linking / unlinking changes no hash.
+- `scan_store.layout_json` writes `"role": "reference"` for a reference ROI only.
+- Tests: `tests/unit/test_lspri_scan_reference_rois.py` (15; a mutation of the exclusion fails 2 of them).
+
+### 1.2b-d Pairing and display (NEXT; design proposed, awaiting the maintainer's answers)
+- **b. One pairing function** `analysis/reference_pairing.py` (pure, no Qt): from a `StoredScan` and the ROIs' roles / links it
+  gives, per *sample* ROI, the sample's own mean / SD / counts and its reference's mean / SD / counts: linked R pooled by pixel
+  (n = sum n_i; mean = sum n_i m_i / n; variance = (sum (n_i - 1) s_i^2 + sum n_i (m_i - M)^2) / (n - 1), exact), else the
+  stored built-in ring column, else "no reference" (NaN, n = 0). Pooling needs only mean / SD / count, which is all the scan
+  stores for `mean`, the only method the app ever scans.
+- **c. Where it is applied.** Proposed: `ScanResultsModule` hands the display a *paired* `StoredScan` (rows = sample ROIs, the
+  `REFERENCE` side = the sample's effective reference), rebuilt on `links_changed` / role change; the readers of
+  `mean[..., SAMPLE / REFERENCE]` (`scan_view.py`, `scan_trace.py` x2, `step_diagnostics.py`, `roi_tuning_run.py`,
+  `trace_fit` inputs) then need no change and cannot disagree, and the trace caches (keyed on `id(stored)`) drop themselves.
+  The raw file stays what `scan_store` and ROI-tuning Accept read. The alternative is the literal "move each reader to the
+  function". Reference ROIs are not analysis units: Spectra / Sensorgram / step table / groups / Signal map / S_bulk skip them,
+  and a sample without a reference says "no reference".
+- **d. Proof test:** a sample linked to a separate reference ROI that has exactly the pixels of its own ring gives numbers
+  identical to the built-in ring (and pooled two half-rings equal the whole ring to rounding).
+- **ROI position tuning (maintainer, 2026-11-18):** tuning is for sample ROIs only (a reference ROI is never a candidate on its
+  own), but a sample's linked reference ROIs **move with it** in a trial: the pair is shifted by the same offset. This is a rule of
+  the tuning only; decision 4 (S and R move independently) still holds for every other edit. Consequences to build with it: a trial
+  scans the sample and its references at the shifted positions, and Accept moves both and copies the numbers of both into
+  `scan.h5`, still bit-identical to a real scan. **Open until the tuning part is built: a reference linked to two samples cannot
+  move with both** (candidates: refuse to tune such a sample, or tune it with the reference left where it is and say so).
 
 ### 2 Shapes (back end)
 - One geometry function per shape (circle, rectangle with rotation, mask), used by the scan, the overlay, the histogram,

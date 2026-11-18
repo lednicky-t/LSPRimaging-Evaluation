@@ -24,6 +24,11 @@ Rules it follows, taken from ``compute_cell`` and the invariants in ``apps/LSPRi
   (identity when there is none).
 * ``exclude_all_sample_rois`` (default): a reference ring never counts a pixel inside **any** ROI's sample aperture,
   built from every ROI passed in, never a selected subset. ``none``: rings overlap sample apertures freely.
+* A **reference ROI** (``AreaRoi.role == "reference"``, plan ``docs/roi_shapes_and_linking_plan_2026-11-18.md``) is one region: its pixels are
+  stored in the ``SAMPLE`` column, its ``REFERENCE`` column is empty (NaN / 0 pixels), it has no ring, and its region loses the pixels of every
+  *sample* ROI's aperture, as a ring does. Its apertures take nothing from anyone. Which reference numbers belong to which sample is **not**
+  decided here: that pairing is applied afterwards to the stored numbers (plan phase 1.2b), so linking never needs a rescan. A set
+  with no reference ROI gives the pixels, numbers and hashes it always gave.
 * The ignore mask (processed space) removes pixels from both apertures. It does not change the image.
 * A pixel without a value (NaN, e.g. created by rotation) is never reduced. ``n_nominal`` counts the aperture after
   exclusions and the ignore mask but before this test; ``n_valid`` counts after it. ``n_masked`` is the part of the aperture the
@@ -49,9 +54,17 @@ import numpy as np
 
 from ..image_tools.chromatic.affine import apply_affine_to_points, invert_affine_matrix
 from ..roi import rasterize as rz
+from ..domain.roi_links import is_reference
 from ..domain.roi_model import AreaRoi
 from .provenance import DEFAULT_REFERENCE_EXCLUSION_MODE, REFERENCE_EXCLUSION_MODES
-from .reduction import DEFAULT_TRIMMED_MEAN_FRACTION, REDUCTION_METHODS, reduce_sample_and_reference
+from .reduction import (
+    DEFAULT_TRIMMED_MEAN_FRACTION,
+    REDUCTION_METHODS,
+    reduce_mean,
+    reduce_median,
+    reduce_sample_and_reference,
+    reduce_trimmed_mean,
+)
 
 EXCLUDE_ALL_SAMPLE_ROIS = "exclude_all_sample_rois"
 
@@ -84,6 +97,13 @@ class RoiSet:
     key: str = field(default="", compare=False)
     """A digest of everything above that decides which pixels a ROI covers (also free-form masks). Two RoiSets with the
     same key cover the same pixels; used only to find a cached `PixelLayout`, never stored."""
+    is_ref: np.ndarray | None = field(default=None, compare=False, repr=False)
+    """True for a *reference* ROI (`AreaRoi.role`, plan 2026-11-18): it reads only its own region (stored in the ``SAMPLE`` column), minus every
+    sample ROI's pixels, and has no ring (``ring_on`` is False). ``None`` at construction means "no reference ROI"; always an array afterwards."""
+
+    def __post_init__(self) -> None:
+        if self.is_ref is None:
+            object.__setattr__(self, "is_ref", np.zeros(len(self.rois), dtype=bool))
 
     @property
     def n(self) -> int:
@@ -96,7 +116,7 @@ class RoiSet:
         key = hashlib.sha256(self.key.encode("ascii") + b"|subset|" + idx.astype(np.int64).tobytes()).hexdigest()
         return RoiSet(
             tuple(self.rois[i] for i in idx), self.cx[idx], self.cy[idx], self.sample_r[idx], self.ring_in_r[idx], self.ring_out_r[idx],
-            self.sample_on[idx], self.ring_on[idx], self.vectorised[idx], self.inner_default_px, self.outer_default_px, key,
+            self.sample_on[idx], self.ring_on[idx], self.vectorised[idx], self.inner_default_px, self.outer_default_px, key, self.is_ref[idx],
         )
 
 
@@ -118,6 +138,8 @@ def roi_row_digests(rs: RoiSet) -> list[bytes]:
         digest.update(np.array([rs.cx[i], rs.cy[i], rs.sample_r[i], rs.ring_in_r[i], rs.ring_out_r[i]], dtype=np.float64).tobytes())
         digest.update(bytes((int(rs.ring_on[i]), int(rs.vectorised[i]))))
         digest.update(defaults)
+        if rs.is_ref[i]:  # only a reference ROI adds a byte, so the digest (and the stored cell hash) of an all-sample ROI set is unchanged
+            digest.update(b"|reference")
         if not rs.vectorised[i]:
             roi = rs.rois[i]
             digest.update(repr((roi.sample_geometry_type, roi.reference_geometry_type, roi.sample_diameter_px,
@@ -138,12 +160,17 @@ def ring_reach_matrix(rs: RoiSet, rows, margin_px: float = NEIGHBOUR_REACH_MARGI
     by nobody; a ROI without a sample aperture reaches nobody. The diagonal (a ROI against itself) is not cleared here.
 
     Shared by `local_roi_keys` (which cells a moved ROI makes stale) and `build_subset_layout` (which other ROIs a subset's rings need), so
-    the two can never disagree about who is a neighbour."""
+    the two can never disagree about who is a neighbour.
+
+    A **reference** ROI (``rs.is_ref``) is read like a ring that is its own disc: its region loses the pixels of every sample disc, so the
+    region's reach is the disc radius and it counts as a "ring" here; and its disc removes nothing from anyone, so it never counts as a
+    sample disc that reaches. With no reference ROI every line below is the same as before."""
     idx = np.asarray(rows, dtype=np.intp)
-    ring_reach = np.where(rs.vectorised, rs.ring_out_r, _UNBOUNDED_REACH_PX)[idx]
+    ring_reach = np.where(rs.vectorised, np.where(rs.is_ref, rs.sample_r, rs.ring_out_r), _UNBOUNDED_REACH_PX)[idx]
     sample_reach = np.where(rs.vectorised, rs.sample_r, _UNBOUNDED_REACH_PX)
-    has_ring = (rs.ring_on | ~rs.vectorised)[idx]
-    has_sample = rs.sample_on | ~rs.vectorised
+    has_ring = np.where(rs.is_ref, rs.sample_on, rs.ring_on)
+    has_ring = (has_ring | ~rs.vectorised)[idx]
+    has_sample = (rs.sample_on | ~rs.vectorised) & ~rs.is_ref
     distance = np.hypot(rs.cx[idx][:, None] - rs.cx[None, :], rs.cy[idx][:, None] - rs.cy[None, :])
     return (distance <= ring_reach[:, None] + sample_reach[None, :] + float(margin_px)) & has_ring[:, None] & has_sample[None, :]
 
@@ -185,6 +212,7 @@ def build_roi_set(rois, default_inner_diameter_px: float, default_outer_diameter
     ring_out = np.zeros(n)
     ring_on = np.zeros(n, dtype=bool)
     vectorised = np.ones(n, dtype=bool)
+    is_ref = np.array([is_reference(r) for r in rois], dtype=bool)
     for i, roi in enumerate(rois):
         if (roi.sample_geometry_type == "mask" and roi.sample_mask is not None) or (
             roi.reference_geometry_type == "mask" and roi.reference_mask is not None
@@ -192,7 +220,7 @@ def build_roi_set(rois, default_inner_diameter_px: float, default_outer_diameter
             vectorised[i] = False
             continue
         sample_r[i] = max(float(roi.sample_diameter_px) / 2.0, 0.0)
-        if roi.reference_geometry_type != "none":
+        if roi.reference_geometry_type != "none" and not is_ref[i]:  # a reference ROI is one region: no ring of its own
             inner_d, outer_d = rz.effective_reference_diameters(roi, default_inner_diameter_px, default_outer_diameter_px)
             if outer_d > 0.0:
                 inner_r = max(inner_d, 0.0) / 2.0
@@ -203,6 +231,8 @@ def build_roi_set(rois, default_inner_diameter_px: float, default_outer_diameter
     for array in (cx, cy, sample_r, ring_in, ring_out, ring_on, vectorised):
         digest.update(np.ascontiguousarray(array).tobytes())
     digest.update(np.array([default_inner_diameter_px, default_outer_diameter_px], dtype=np.float64).tobytes())
+    if is_ref.any():  # only then, so the key of an all-sample set is what it was
+        digest.update(b"|reference|" + np.ascontiguousarray(is_ref).tobytes())
     for i in np.flatnonzero(~vectorised):  # a free-form mask ROI: its masks and geometry types decide its pixels
         roi = rois[i]
         digest.update(repr((i, roi.center_x, roi.center_y, roi.sample_diameter_px, roi.sample_geometry_type, roi.reference_geometry_type,
@@ -213,7 +243,7 @@ def build_roi_set(rois, default_inner_diameter_px: float, default_outer_diameter
                 digest.update(np.ascontiguousarray(mask.mask, dtype=bool).tobytes())
     return RoiSet(
         rois, cx, cy, sample_r, ring_in, ring_out, sample_r > 0.0, ring_on, vectorised,
-        float(default_inner_diameter_px), float(default_outer_diameter_px), digest.hexdigest(),
+        float(default_inner_diameter_px), float(default_outer_diameter_px), digest.hexdigest(), is_ref,
     )
 
 
@@ -284,7 +314,7 @@ def locate_pixels(
         roi = rs.rois[i]
         masks = (
             rz.rasterize_sample(roi, shape, affine),
-            rz.rasterize_reference(
+            np.zeros(shape, dtype=bool) if rs.is_ref[i] else rz.rasterize_reference(  # a reference ROI has no ring
                 roi, shape, affine, default_inner_diameter_px=rs.inner_default_px, default_outer_diameter_px=rs.outer_default_px
             ),
         )
@@ -438,6 +468,25 @@ def _assemble_layout(
     )
 
 
+def _exclude_sample_discs(
+    rs: RoiSet, shape: tuple[int, int], s_roi: np.ndarray, s_flat: np.ndarray, r_roi: np.ndarray, r_flat: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """``exclude_all_sample_rois``: no reference ring and no reference ROI counts a pixel inside **a sample ROI's** aperture (before the ignore
+    mask, as ``tasks._sample_exclusion_union``). The union is made of the sample ROIs' apertures only: a reference ROI's region is not an
+    aperture that takes pixels from anyone (plan 2026-11-18). Returns the four pixel lists with those pixels removed; a sample ROI's own
+    aperture is never cut. With no reference ROI this is exactly the earlier exclusion of the rings."""
+    union = np.zeros(shape[0] * shape[1], dtype=bool)
+    if rs.is_ref.any():
+        of_reference = rs.is_ref[s_roi]
+        union[s_flat[~of_reference]] = True
+        keep_region = ~(of_reference & union[s_flat])  # a sample ROI's pixels are never cut
+        s_roi, s_flat = s_roi[keep_region], s_flat[keep_region]
+    else:
+        union[s_flat] = True
+    keep = ~union[r_flat]
+    return s_roi, s_flat, r_roi[keep], r_flat[keep]
+
+
 def build_layout(
     rs: RoiSet, affine: np.ndarray, shape: tuple[int, int],
     exclusion_mode: str = DEFAULT_REFERENCE_EXCLUSION_MODE, block: int = DEFAULT_BLOCK_ROIS,
@@ -447,10 +496,7 @@ def build_layout(
     shape = (int(shape[0]), int(shape[1]))
     s_roi, s_flat, r_roi, r_flat = locate_pixels(rs, affine, shape, block)
     if exclusion_mode == EXCLUDE_ALL_SAMPLE_ROIS:
-        union = np.zeros(shape[0] * shape[1], dtype=bool)
-        union[s_flat] = True  # every ROI's sample aperture, before the ignore mask (as tasks._sample_exclusion_union)
-        keep = ~union[r_flat]
-        r_roi, r_flat = r_roi[keep], r_flat[keep]
+        s_roi, s_flat, r_roi, r_flat = _exclude_sample_discs(rs, shape, s_roi, s_flat, r_roi, r_flat)
     return _assemble_layout(shape, rs.n, exclusion_mode, s_roi, s_flat, r_roi, r_flat)
 
 
@@ -476,12 +522,10 @@ def build_subset_layout(
     members = np.sort(idx)  # ascending, so the located rows come out in ROI order
     if exclusion_mode == EXCLUDE_ALL_SAMPLE_ROIS and idx.size and rs.n > 1:
         members = np.union1d(members, np.flatnonzero(ring_reach_matrix(rs, idx).any(axis=0)))
-    s_roi, s_flat, r_roi, r_flat = locate_pixels(rs.subset(members), affine, shape, block)
-    if exclusion_mode == EXCLUDE_ALL_SAMPLE_ROIS:
-        union = np.zeros(shape[0] * shape[1], dtype=bool)
-        union[s_flat] = True  # the sample apertures of the subset and of its neighbours, before the ignore mask (as `build_layout`)
-        keep = ~union[r_flat]
-        r_roi, r_flat = r_roi[keep], r_flat[keep]
+    located = rs.subset(members)
+    s_roi, s_flat, r_roi, r_flat = locate_pixels(located, affine, shape, block)
+    if exclusion_mode == EXCLUDE_ALL_SAMPLE_ROIS:  # the sample apertures of the subset and of its neighbours, before the ignore mask (as `build_layout`)
+        s_roi, s_flat, r_roi, r_flat = _exclude_sample_discs(located, shape, s_roi, s_flat, r_roi, r_flat)
     where = np.searchsorted(members, idx)  # the row of each wanted ROI among the located ones
     s_flat, s_count = _blocks(s_flat, np.bincount(s_roi, minlength=members.size), where)
     r_flat, r_count = _blocks(r_flat, np.bincount(r_roi, minlength=members.size), where)
@@ -643,14 +687,24 @@ def reduce_frame(
     for method in methods:
         out = values[method]
         if method == "mean":  # float64, all ROIs at once (see the module docstring); no per-ROI loop
-            both = (n_valid[:, SAMPLE] > 0) & (n_valid[:, REFERENCE] > 0)
+            # a reference ROI is one region: its value needs only its own pixels (its REFERENCE column stays NaN, it has no ring)
+            both = (n_valid[:, SAMPLE] > 0) & ((n_valid[:, REFERENCE] > 0) | rs.is_ref)
             out[both, SAMPLE] = s_mean[both]
             out[both, REFERENCE] = r_mean[both]
             continue
         for i in range(n):
-            if n_valid[i, SAMPLE] == 0 or n_valid[i, REFERENCE] == 0:
+            if n_valid[i, SAMPLE] == 0:
                 continue
             a0, a1, b0, b1 = s_off[i], s_off[i + 1], r_off[i], r_off[i + 1]
+            if rs.is_ref[i]:  # the region alone, reduced as the sample side of that method is (plane_fit's sample side is a plain mean)
+                region = s_val[a0:a1]
+                out[i, SAMPLE] = (
+                    reduce_median(region) if method == "median" else reduce_trimmed_mean(region, trimmed_fraction) if method == "trimmed_mean"
+                    else reduce_mean(region)
+                )
+                continue
+            if n_valid[i, REFERENCE] == 0:
+                continue
             sample_value, reference_value = reduce_sample_and_reference(
                 s_val[a0:a1], r_val[b0:b1], method, trimmed_mean_fraction=trimmed_fraction,
                 reference_xx=None if r_xx is None else r_xx[b0:b1], reference_yy=None if r_yy is None else r_yy[b0:b1],
