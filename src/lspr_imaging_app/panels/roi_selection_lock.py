@@ -5,7 +5,7 @@ The lock itself is `SelectionModule.set_roi_selection_locked` (`selection/module
 computes anything.
 """
 
-MENU_TEXT = "Lock selection"
+MENU_TEXT = "Lock ROI selection"
 
 TIP = (
     "Lock the ROI selection: clicks on the image and in the table no longer change which ROIs are selected "
@@ -13,5 +13,5 @@ TIP = (
 )
 
 REFUSED_TEXT = (
-    "The ROI selection is locked, so it was not changed. Unlock it (the lock button on the ROIs tab, or right-click > Lock selection) to change it."
+    "The ROI selection is locked, so it was not changed. Unlock it (the lock button on the ROIs tab, or right-click > Lock ROI selection) to change it."
 )
