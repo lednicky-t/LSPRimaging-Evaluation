@@ -33,17 +33,26 @@ from .context_menu import show_tool_context_menu
 from .crop_tool import CropTool
 from .measure_line_tool import MeasureLineTool
 from .roi_context_menu import (
+    ADD_RECTANGLE,
     ADD_ROI,
+    ADD_SELECTION_BLOBS,
+    ADD_SELECTION_ONE,
     ADD_TO_GROUP,
     DELETE,
     DESELECT,
     GROUP,
+    LINK,
+    MAKE_REFERENCE,
+    MAKE_SAMPLE,
     REMOVE_CUBE_EDIT,
+    RESIZE_RECTANGLE,
     SELECT_GROUP,
     TOGGLE_LOCK,
     UNGROUP,
+    UNLINK,
     show_roi_context_menu,
 )
+from .roi_creation import RoiCreation
 from .roi_gestures import RoiGestures
 from .rotate_line_tool import RotateLineTool
 from .selection_menu_icons import DESELECT_ICON, INVERT_ICON, LOCK_ICON, UNLOCK_ICON, menu_icon
@@ -110,6 +119,7 @@ class CanvasInteraction:
         lock_to_selection: Callable[[], None] | None = None,
         unlock: Callable[[], None] | None = None,
         combine_badge: CombineBadge | None = None,
+        roi_creation: RoiCreation,
     ) -> None:
         self._plot = plot
         self._view = view
@@ -128,6 +138,7 @@ class CanvasInteraction:
         self._roi_gestures = roi_gestures
         self._roi_tab_active = roi_tab_active
         self._to_reference = to_reference
+        self._roi_creation = roi_creation  # Add ROI > ..., Make this ROI > ..., Link / Unlink: `roi_creation.py`
         self._notify = notify
         self._wand_click = wand_click  # the wand's click: (x, y, "replace" | "add" | "subtract")
         self._rois_touching = rois_touching  # display-space bool mask -> ids of the ROIs overlapping it
@@ -328,7 +339,7 @@ class CanvasInteraction:
         if button == Qt.MouseButton.LeftButton:
             p = self._plot.vb.mapSceneToView(scene_pos)
             if self.in_selection(float(p.x()), float(p.y())):
-                self._roi_toolbox.add_roi(float(p.x()), float(p.y()))
+                self._roi_creation.add_picked(float(p.x()), float(p.y()))
             elif self._area_selection.has_lock() and not self._area_selection.has_selection():
                 self._notify("ROI not added: it is outside the lock (Unlock in the selection toolbar to place it there).")
             else:
@@ -385,6 +396,11 @@ class CanvasInteraction:
             groups=[(group.group_id, group.name) for group in toolbox.groups()],
             any_selected_grouped=any(toolbox.group_for_roi(selected) is not None for selected in ids),
             can_add=self.in_selection(x, y),
+            can_add_from_selection=self._roi_creation.has_pixel_selection(),
+            selected_roles=self._roi_creation.role_counts(ids),
+            can_link=self._roi_creation.can_link(ids),
+            can_unlink=self._roi_creation.can_unlink(ids),
+            selected_rectangles=len(self._roi_creation.rectangles_among(ids)),
             can_remove_cube_edit=any(
                 toolbox.roi_by_id(i).timeline and int(self._selection.current_cube()) in toolbox.roi_by_id(i).timeline.cubes() for i in ids
             ),
@@ -397,8 +413,22 @@ class CanvasInteraction:
             return
         if choice.action == SELECT_GROUP and clicked_group is not None:
             self._selection.set_roi_selection(set(clicked_group.area_roi_ids))
-        elif choice.action == ADD_ROI:
-            self._guarded("Add ROI", lambda: self._selection.set_roi_selection({toolbox.add_roi(*self._to_reference(x, y))}))
+        elif choice.action == ADD_ROI:  # Add ROI > Circle
+            self._roi_creation.add_circle(x, y)
+        elif choice.action == ADD_RECTANGLE:
+            self._roi_creation.add_rectangle(x, y)
+        elif choice.action in (ADD_SELECTION_ONE, ADD_SELECTION_BLOBS):
+            self._roi_creation.add_from_selection(together=choice.action == ADD_SELECTION_ONE)
+        elif choice.action == MAKE_SAMPLE:
+            self._roi_creation.set_role(ids, "sample")
+        elif choice.action == MAKE_REFERENCE:
+            self._roi_creation.set_role(ids, "reference")
+        elif choice.action == RESIZE_RECTANGLE:
+            self._roi_creation.resize_rectangles(ids)
+        elif choice.action == LINK:
+            self._roi_creation.link()
+        elif choice.action == UNLINK:
+            self._roi_creation.unlink()
         elif choice.action == GROUP:
             default = f"Group {len(toolbox.groups()) + 1}"
             name, accepted = QInputDialog.getText(self._menu_parent, "Group ROIs", "Group name", text=default)
@@ -621,6 +651,8 @@ class CanvasInteraction:
             hit = self._roi_gestures.hit(x, y)
             if hit is not None and hit.zone == "body":
                 shape = Qt.CursorShape.SizeAllCursor
+            elif hit is not None and hit.zone == "rect_rotate":
+                shape = Qt.CursorShape.OpenHandCursor  # the round knob above a selected rectangle: turn it
             elif hit is not None:
                 shape = self._resize_cursor(hit.center, x, y)
         if shape != self._roi_cursor:

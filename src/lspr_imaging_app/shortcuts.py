@@ -76,6 +76,8 @@ BINDINGS: tuple[Binding, ...] = (
     Binding("edit.undo", "Edit", "Undo the last edit", keys=("Ctrl+Z", "Alt+Backspace")),
     Binding("edit.redo", "Edit", "Redo the last undone edit", keys=("Ctrl+Y", "Alt+Shift+Backspace", "Ctrl+Shift+Z")),
     Binding("edit.preferences", "Edit", "Open Preferences", keys=("Ctrl+,",)),
+    Binding("links.link", "ROIs", "Link the selected sample ROIs to the selected reference ROIs", keys=("Ctrl+L",)),
+    Binding("links.unlink", "ROIs", "Take apart the links of the selected ROIs (samples and references)", keys=("Ctrl+K",)),
     Binding("help.log_console", "Help", "Show or hide the Log Console", keys=("Ctrl+Shift+L",)),
     Binding("help.shortcuts", "Help", "Show the keyboard shortcuts", keys=("F1",)),
     *(
@@ -133,6 +135,11 @@ BINDINGS: tuple[Binding, ...] = (
     Binding(
         "mouse.view.menu", "Mouse: image view", "Open the menu of the ROIs tab, or of the tool that is active",
         gesture="Right-click", scope=_VIEW,
+    ),
+    Binding(
+        "mouse.view.rectangle_handles", "Mouse: image view",
+        "Selected rectangle ROI: drag an edge or a corner to change its width / height, drag the round knob above it to turn it (every selected rectangle gets the value)",
+        gesture="Drag", scope=_VIEW,
     ),
     Binding("mouse.view.wand", "Mouse: image view", "Magic wand (armed in the selection toolbar): select the feature under the pointer", gesture="Click", scope=_VIEW),
     Binding(

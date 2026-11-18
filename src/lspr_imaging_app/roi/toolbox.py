@@ -146,6 +146,7 @@ from ..domain.roi_links import (
     reference_source,
     samples_linked_to,
 )
+from .mask_regions import mask_regions
 from .ordering import move_block, renumbering
 from .palette import first_free_tint_index, gradient_tints, next_group_color, normalize_hex, tint_color
 
@@ -595,6 +596,38 @@ class RoiToolbox(QObject):
         undo_manager.push(FunctionCommand("Add ROI", undo_fn=revert, redo_fn=apply))
         return roi_id
 
+    @instrumented("RoiToolbox.add_mask_rois")
+    def add_mask_rois(self, plane: np.ndarray, *, together: bool, role: str = "reference") -> tuple[int, ...]:
+        """Make pixel-mask ROIs from the ``True`` pixels of ``plane`` (a bool image in the processed-image space ROIs live in), one undo step and one
+        signal however many there are: ``together=True`` one ROI holding every selected pixel, ``together=False`` one per separate blob
+        (`mask_regions`). ``role`` defaults to ``"reference"``: a region picked out of the image is usually a patch to measure against, and it is linked
+        to nothing until the user links it. A mask ROI follows the shared default border if it is made a sample later. Returns the new ids in order; an
+        empty selection raises `ValueError` (the message is for the status line) and changes nothing."""
+        if role not in ROI_ROLES:
+            raise ValueError(f"unknown ROI role {role!r}; known: {ROI_ROLES}")
+        regions = mask_regions(plane, together=together)
+        if not regions:
+            raise ValueError("There is nothing selected to make a ROI from.")
+        new_rois = []
+        for mask, cx, cy in regions:
+            roi_id = next(self._roi_id_counter)
+            new_rois.append(AreaRoi(area_roi_id=roi_id, center_x=self._rounded(cx), center_y=self._rounded(cy), shape=MaskShape(mask), border=None, role=role))
+        ids = tuple(roi.area_roi_id for roi in new_rois)
+
+        def apply() -> None:
+            for roi in new_rois:
+                self._rois[roi.area_roi_id] = roi
+            self.geometry_changed.emit(RoiComputationalChange(roi_ids=ids, reason="added"))
+
+        def revert() -> None:
+            for roi in new_rois:
+                self._rois.pop(roi.area_roi_id, None)
+            self.geometry_changed.emit(RoiComputationalChange(roi_ids=ids, reason="deleted"))
+
+        apply()
+        undo_manager.push(FunctionCommand("Add ROI from selection" if len(new_rois) == 1 else f"Add {len(new_rois)} ROIs from selection", undo_fn=revert, redo_fn=apply))
+        return ids
+
     # -- multi-ROI helpers ----------------------------------------------
 
     def _require_rois(self, roi_ids: Collection[int]) -> list[AreaRoi]:
@@ -833,12 +866,28 @@ class RoiToolbox(QObject):
         one common vector; this is for different positions, e.g. the answer of ROI position tuning.)"""
         self._set_positions({int(roi_id): (float(x), float(y)) for roi_id, (x, y) in positions.items()}, label)
 
+    def move_refusal(self, roi_ids: Collection[int]) -> str | None:
+        """Why these ROIs cannot be moved by a position edit, or ``None``. A **pixel-mask** ROI is the pixels it was made from (`MaskShape`): a position edit
+        would move only its centre, the point it is labelled by, while the pixels that are measured and drawn stayed where they are, so it is refused
+        (a half-moved ROI would look moved and measure the old place). Delete it and make a new one where it should be."""
+        masks = [roi.area_roi_id for roi in self._require_rois(roi_ids) if isinstance(roi.shape, MaskShape)]
+        if not masks:
+            return None
+        names = ", ".join(str(i) for i in masks)
+        return (
+            f"ROI {names} {'is a pixel mask' if len(masks) == 1 else 'are pixel masks'}: its pixels cannot be moved "
+            "(only its label point would move), so nothing was moved. Delete it and make a new one where you want it."
+        )
+
     @instrumented("RoiToolbox.translate_rois")
     def translate_rois(
         self, roi_ids: Collection[int], dx: float, dy: float, *, cube: int | None = None, scope: str = SCOPE_PERSISTENT
     ) -> None:
         """Shift every ROI in ``roi_ids`` by (dx, dy) pixels: the multi-select
-        position edit that keeps the ROIs' arrangement."""
+        position edit that keeps the ROIs' arrangement. Refused (`ValueError`, nothing moved) while a pixel mask is among them (`move_refusal`)."""
+        refusal = self.move_refusal(roi_ids)
+        if refusal:
+            raise ValueError(refusal)
         rois = self._require_rois(roi_ids)
         positions = {}
         for roi in rois:
@@ -861,6 +910,9 @@ class RoiToolbox(QObject):
         line up a row or a column; giving both stacks the ROIs on one point."""
         if x is None and y is None:
             return
+        refusal = self.move_refusal(roi_ids)
+        if refusal:
+            raise ValueError(refusal)
         rois = self._require_rois(roi_ids)
         positions = {}
         for roi in rois:
@@ -933,6 +985,45 @@ class RoiToolbox(QObject):
                 border = Border.from_ring_diameters(diameter, inner, outer)
             targets.append((roi, Circle(diameter), border))
         self._set_shapes(targets, "Resize ROI" if len(targets) == 1 else "Resize ROIs", cube=cube, scope=scope)
+
+    @instrumented("RoiToolbox.resize_rectangles")
+    def resize_rectangles(
+        self,
+        roi_ids: Collection[int],
+        *,
+        width_px: float | None = None,
+        height_px: float | None = None,
+        angle_deg: float | None = None,
+        cube: int | None = None,
+        scope: str = SCOPE_PERSISTENT,
+    ) -> None:
+        """Set the width, height and / or angle of every rectangular ROI in ``roi_ids``; a field left ``None`` is unchanged, a no-op (no undo entry) if
+        nothing differs. The width and height are along the rectangle's own axes and the angle turns it clockwise on the screen about its centre
+        (`roi_shapes.Rectangle`). The border follows the shape, as everywhere (a resize carries the band with it).
+
+        Raises ``ValueError``, before changing anything, for a ROI that is not a rectangle, a value that is not finite, or a width or height below
+        `MIN_SAMPLE_DIAMETER_PX`."""
+        rois = self._require_rois(roi_ids)
+        for value, name in ((width_px, "width"), (height_px, "height"), (angle_deg, "angle")):
+            if value is not None and not math.isfinite(float(value)):
+                raise ValueError(f"{name} must be a finite number, got {value!r}")
+        for value, name in ((width_px, "width"), (height_px, "height")):
+            if value is not None and float(value) < MIN_SAMPLE_DIAMETER_PX:
+                raise ValueError(f"{name} must be at least {MIN_SAMPLE_DIAMETER_PX:g} px, got {float(value):g}")
+        targets: list[tuple[AreaRoi, Shape, Border | None]] = []
+        for roi in rois:
+            g = geometry_at(roi, cube)
+            if not isinstance(g.shape, Rectangle):
+                raise ValueError(f"ROI {roi.area_roi_id} is not a rectangle: it has no width, height or angle")
+            shape = Rectangle(
+                g.shape.width_px if width_px is None else float(width_px),
+                g.shape.height_px if height_px is None else float(height_px),
+                g.shape.angle_deg if angle_deg is None else float(angle_deg),
+            )
+            if shape != g.shape:
+                targets.append((roi, shape, g.border))
+        if targets:
+            self._set_shapes(targets, "Resize rectangle" if len(targets) == 1 else "Resize rectangles", cube=cube, scope=scope)
 
     @instrumented("RoiToolbox.resize_roi")
     def resize_roi(

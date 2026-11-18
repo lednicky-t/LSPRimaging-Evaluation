@@ -13,7 +13,7 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 
 from ...domain.roi_model import AreaRoi, AreaRoiDetectionSettings, AreaRoiGroup
-from ...domain.roi_shapes import Border, Circle, MaskShape, Shape, effective_border, ring_diameters
+from ...domain.roi_shapes import Border, Circle, MaskShape, Rectangle, Shape, effective_border, ring_diameters
 from ...roi.palette import DEFAULT_ROI_COLOR_HEX
 
 COLUMN_ID, COLUMN_NAME, COLUMN_X, COLUMN_Y, COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT = range(7)
@@ -38,17 +38,19 @@ FIELD_NAMES = {COLUMN_X: "x", COLUMN_Y: "y", COLUMN_SAMPLE: "D_s", COLUMN_RING_I
 
 # -- shapes ---------------------------------------------------------------------
 
-SHAPE_RING, SHAPE_DISK, SHAPE_MASK, SHAPE_OTHER = "ring", "disk", "mask", "other"
+SHAPE_RING, SHAPE_DISK, SHAPE_MASK, SHAPE_RECTANGLE, SHAPE_OTHER = "ring", "disk", "mask", "rectangle", "other"
 SHAPE_LABELS = {
     SHAPE_RING: "Circle with reference ring",
     SHAPE_DISK: "Circle, no reference",
     SHAPE_MASK: "Pixel mask",
+    SHAPE_RECTANGLE: "Rectangle",
     SHAPE_OTHER: "Other shape",
 }
 SHAPE_FIELDS = {
     SHAPE_RING: (COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT),
     SHAPE_DISK: (COLUMN_SAMPLE,),
     SHAPE_MASK: (),
+    SHAPE_RECTANGLE: (),  # a rectangle has a width, a height and an angle, not diameters: its size is in the Shape cell's tooltip, edited in the ROI menu
     SHAPE_OTHER: (),
 }
 """The diameter columns each shape has, in order (a ring: D_s, d_r, D_r); the others stay blank.
@@ -66,6 +68,8 @@ def shape_of(shape: Shape, border: Border | None) -> str:
         return SHAPE_MASK
     if isinstance(shape, Circle):
         return SHAPE_RING if border is None or border.enabled else SHAPE_DISK
+    if isinstance(shape, Rectangle):
+        return SHAPE_RECTANGLE
     return SHAPE_OTHER
 
 
@@ -167,6 +171,9 @@ class RoiRow:
     is_mask: bool
     nudge_count: int
     shape: str = SHAPE_RING
+    role: str = "sample"  # "reference" shows as "R7" in the first column
+    link_note: str = ""  # what the ROI is linked to (or used by), for the first column's tooltip
+    shape_note: str = ""  # the size of a rectangle or mask, for the Shape cell's tooltip
 
 
 @dataclass(frozen=True)
@@ -178,6 +185,9 @@ class GroupInfo:
     group_id: str | None
     name: str
     color_hex: str
+    synthetic: bool = False  # a header of the Linked view: read-only, no step numbers of its own (the "Ungrouped" numbers must not be shown on it)
+    note: str = ""  # its tooltip, when it has one
+    collapse_key: str | None = None  # what the remembered "collapsed" set holds for it (a Linked header has no group id of its own)
 
 
 @dataclass(frozen=True)
@@ -196,6 +206,11 @@ def build_roi_rows(
     group_of = {roi_id: group.group_id for group in groups for roi_id in group.area_roi_ids}
     rows = []
     default_border = defaults.default_border()
+    users: dict[int, list[int]] = {}  # reference id -> the samples linked to it
+    for roi in rois:
+        for reference_id in roi.reference_roi_ids:
+            users.setdefault(reference_id, []).append(roi.area_roi_id)
+    reference_ids = {roi.area_roi_id for roi in rois if roi.role == "reference"}
     for roi in rois:
         # the diameter columns describe a circle (its ring as diameters); any other shape has none to show yet
         inner, outer = ring_diameters(roi.shape, effective_border(roi.border, default_border)) if isinstance(roi.shape, Circle) else (0.0, 0.0)
@@ -216,9 +231,80 @@ def build_roi_rows(
                 is_mask=isinstance(roi.shape, MaskShape),
                 nudge_count=len(roi.per_wavelength or {}),
                 shape=shape_of(roi.shape, roi.border),
+                role=roi.role,
+                link_note=link_note(roi, effective_border(roi.border, default_border).enabled, users.get(roi.area_roi_id, ()), reference_ids),
+                shape_note=shape_note(roi.shape),
             )
         )
     return rows
+
+
+def link_note(roi: AreaRoi, has_border: bool, used_by: Sequence[int], reference_ids: Collection[int]) -> str:
+    """One sentence for the first column's tooltip: a reference ROI says which samples use it, a sample says what it is measured against
+    (its linked references, else its own border, else nothing)."""
+    if roi.role == "reference":
+        if not used_by:
+            return "Reference ROI: not linked to any sample yet."
+        return "Reference ROI, used by sample" + ("" if len(used_by) == 1 else "s") + " " + ", ".join(str(i) for i in sorted(used_by)) + "."
+    linked = [i for i in roi.reference_roi_ids if i in reference_ids]
+    if linked:
+        return "Measured against reference" + ("" if len(linked) == 1 else "s (pooled by pixel)") + " " + ", ".join(f"R{i}" for i in linked) + "."
+    return "Measured against its own border." if has_border else "No reference: its results are missing."
+
+
+def shape_note(shape: Shape) -> str:
+    """The size of a rectangle or a pixel mask, for the Shape cell's tooltip (a circle's diameters are columns of their own)."""
+    if isinstance(shape, Rectangle):
+        return f"{shape.width_px:g} x {shape.height_px:g} px, turned {shape.angle_deg:g} degrees clockwise."
+    if isinstance(shape, MaskShape):
+        return f"{int(shape.mask.mask.sum()):,} pixels."
+    return ""
+
+
+# -- the Linked view ----------------------------------------------------------
+
+LINKED_NOT_LINKED_KEY = "linked:none"
+
+
+def build_linked_sections(rows: Sequence[RoiRow], rois: Sequence[AreaRoi], not_linked_color_hex: str = DEFAULT_ROI_COLOR_HEX) -> list[Section]:
+    """The Linked arrangement (plan phase 3): one section for **each sample that has linked references**, headed by what it is measured against, holding the
+    sample's own row first and then the rows of its references (a reference shared by several samples appears in each of their sections); then one
+    section, "Not linked", with the samples that have no linked reference and the references no sample uses. Read-only: a view of the links, not of
+    the groups (which are not shown while it is on). Every ROI is in at least one section; a link to a ROI that is not a reference is not shown."""
+    row_of = {row.roi_id: row for row in rows}
+    references = {roi.area_roi_id for roi in rois if roi.role == "reference"}
+    used: set[int] = set()
+    sections: list[Section] = []
+    unlinked: list[RoiRow] = []
+    for roi in sorted(rois, key=lambda r: r.area_roi_id):
+        if roi.role == "reference":
+            continue
+        linked = [i for i in roi.reference_roi_ids if i in references and i in row_of]
+        sample_row = row_of.get(roi.area_roi_id)
+        if sample_row is None:
+            continue
+        if not linked:
+            unlinked.append(sample_row)
+            continue
+        used.update(linked)
+        names = ", ".join(f"R{i}" for i in linked)
+        header = GroupInfo(
+            None, f"{roi.area_roi_id} measured against {names}", sample_row.color_hex,
+            synthetic=True, note=f"Sample {roi.area_roi_id} and the reference ROIs it is linked to ({names}).", collapse_key=f"linked:{roi.area_roi_id}",
+        )
+        sections.append(Section(header, (sample_row, *(row_of[i] for i in linked))))
+    unlinked += [row_of[i] for i in sorted(references) if i in row_of and i not in used]
+    if unlinked:
+        sections.append(
+            Section(
+                GroupInfo(
+                    None, "Not linked", not_linked_color_hex, synthetic=True, collapse_key=LINKED_NOT_LINKED_KEY,
+                    note="Samples measured against their own border (or against nothing) and reference ROIs no sample uses.",
+                ),
+                tuple(sorted(unlinked, key=lambda r: r.roi_id)),
+            )
+        )
+    return sections
 
 
 # -- sorting and sections ----------------------------------------------------

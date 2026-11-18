@@ -64,6 +64,11 @@ than a circle's radius) bounds how far the warped result can reach in
 target space, and `_warp_roi_mask_into_box`/`expand_mask_to_patch_warped`
 warp only within that bound, reading directly from `roi_mask.mask`'s own
 small array - the full source/target canvases are never materialized.
+
+**2026-11-18 (phase 2.2 of ``docs/roi_shapes_and_linking_plan_2026-11-18.md``):** the full-plane ``rasterize_sample`` of a mask no longer
+warps a full canvas either; every non-circular region (a rectangle, a mask, a border) is found inside its own box by ``_region_hits``, and the
+scan asks for flat pixel indices straight from it (``sample_flat_indices`` / ``reference_flat_indices``), so the scan and the drawing use one
+set of pixels. ``expand_mask_to_patch_warped`` (the box warp's old wrapper) is gone: ``_region_hits`` does its job.
 """
 
 from __future__ import annotations
@@ -75,12 +80,12 @@ import numpy as np
 from scipy import ndimage
 
 from ..image_tools.chromatic.affine import apply_affine_to_points, invert_affine_matrix
-from ..image_tools.chromatic.warp import warp_boolean_mask_affine
 from ..image_tools.geometry.model import GeometrySettings
 from ..image_tools.geometry.transform import combined_geometry_affine_xy
 from ..progress import Cancelled
 from ..domain.roi_model import AreaRoi, RoiMask
 from ..domain.roi_shapes import (
+    MASK_BORDER_SLACK_PX,
     NO_BORDER,
     Border,
     Circle,
@@ -228,36 +233,6 @@ def _warp_roi_mask_into_box(
         prefilter=False,
     )
     return warped >= 0.5
-
-
-def expand_mask_to_patch_warped(
-    roi_mask: RoiMask,
-    patch_origin_xy: tuple[int, int],
-    patch_shape: tuple[int, int],
-    affine_matrix: np.ndarray,
-) -> np.ndarray:
-    """Like `expand_mask_to_patch`, but forward-transformed through
-    `affine_matrix` first (see `rasterize_sample`'s mask-geometry warp) -
-    the patch-scoped counterpart, bounded by `_mask_reach_box` so only the
-    region the warped mask can actually reach is ever touched, never the
-    full patch/image regardless of patch size (CLAUDE.md's non-negotiable
-    invariant - see this module's own docstring for why "warp then crop"
-    was rejected instead)."""
-    patch_h, patch_w = patch_shape[:2]
-    px0, py0 = int(patch_origin_xy[0]), int(patch_origin_xy[1])
-    reach_x0, reach_y0, reach_x1, reach_y1 = _mask_reach_box(roi_mask, affine_matrix)
-    local_x0 = max(reach_x0 - px0, 0)
-    local_x1 = min(reach_x1 - px0, patch_w)
-    local_y0 = max(reach_y0 - py0, 0)
-    local_y1 = min(reach_y1 - py0, patch_h)
-    out = np.zeros((patch_h, patch_w), dtype=bool)
-    if local_x0 >= local_x1 or local_y0 >= local_y1:
-        return out
-    warped_local = _warp_roi_mask_into_box(
-        roi_mask, affine_matrix, (px0 + local_x0, py0 + local_y0, px0 + local_x1, py0 + local_y1)
-    )
-    out[local_y0:local_y1, local_x0:local_x1] = warped_local
-    return out
 
 
 # -- mask geometry: re-anchor to a new rotation/flip/crop (2026-09-28) ------
@@ -557,7 +532,7 @@ def _signed_distance_rectangle(sx: np.ndarray, sy: np.ndarray, cx: float, cy: fl
     return np.hypot(np.maximum(qx, 0.0), np.maximum(qy, 0.0)) + np.minimum(np.maximum(qx, qy), 0.0)
 
 
-@functools.lru_cache(maxsize=64)
+@functools.lru_cache(maxsize=512)  # one entry per mask ROI (~20 KB for a ROI-sized one). 64 thrashed at 160 masks: an EDT per call, 169 vs 99 ms per layout
 def _mask_sdf(x0: int, y0: int, mask_bytes: bytes, height: int, width: int, pad: int) -> tuple[np.ndarray, int, int]:
     """Signed distance from a mask's edge at every pixel of its bounding box padded by ``pad`` pixels, and the source position of that
     array's pixel (0, 0). The edge lies half a pixel from the pixel centres: outside a pixel at centre distance ``d`` from the nearest mask
@@ -621,6 +596,8 @@ def region_source_bounds(roi: AreaRoi, region: str, border: Border) -> tuple[flo
     if isinstance(shape, MaskShape):
         height, width = shape.mask.mask.shape[:2]
         x0, y0 = float(shape.mask.x0) - 0.5, float(shape.mask.y0) - 0.5
+        if region == "border":  # its distance map is read at whole pixels: a border pixel can lie up to MASK_BORDER_SLACK_PX beyond (found 2026-11-18)
+            extra += MASK_BORDER_SLACK_PX
         return x0 - extra, y0 - extra, x0 + width + extra, y0 + height + extra
     radius = max(float(shape.diameter_px), 0.0) / 2.0 + extra
     return cx - radius, cy - radius, cx + radius, cy + radius
@@ -629,6 +606,8 @@ def region_source_bounds(roi: AreaRoi, region: str, border: Border) -> tuple[flo
 def _region_reach_box(roi: AreaRoi, region: str, affine_matrix: np.ndarray, border: Border) -> tuple[int, int, int, int]:
     """Target-space box ``(x0, y0, x1, y1)`` (end exclusive, not clipped to anything) that holds the ROI's ``region`` after the affine: the
     box of the transformed corners of its source-space bounds, plus a few pixels of safety margin."""
+    if region == "sample" and isinstance(roi.shape, MaskShape):
+        return _mask_reach_box(roi.shape.mask, affine_matrix)  # a mask's own region is warped, not measured (see `_region_in_box`)
     sx0, sy0, sx1, sy1 = region_source_bounds(roi, region, border)
     corners = np.array([[sx0, sy0], [sx1, sy0], [sx0, sy1], [sx1, sy1]], dtype=np.float64)
     moved = apply_affine_to_points(corners, affine_matrix)
@@ -644,25 +623,112 @@ def _region_in_box(roi: AreaRoi, region: str, box: tuple[int, int, int, int], af
     height, width = y1 - y0, x1 - x0
     if height <= 0 or width <= 0:
         return np.zeros((max(height, 0), max(width, 0)), dtype=bool)
+    if region == "sample" and isinstance(roi.shape, MaskShape):
+        # A mask's own region: its stored pixels warped through the affine, nearest neighbour (the scipy call every mask ROI has used). The patch
+        # variants always did this inside a box; the full-plane `rasterize_sample` now does too (2026-11-18, phase 2.2), so one place decides.
+        return _warp_roi_mask_into_box(roi.shape.mask, affine_matrix, box)
     yy, xx = np.indices((height, width), dtype=np.float64)
     source = apply_affine_to_points(np.column_stack((xx.ravel() + x0, yy.ravel() + y0)), invert_affine_matrix(affine_matrix))
     return _region_test(roi, region, border, source[:, 0], source[:, 1]).reshape((height, width))
 
 
+def _region_hits(
+    roi: AreaRoi, region: str, window: tuple[int, int, int, int], affine_matrix: np.ndarray, border: Border
+) -> tuple[int, int, np.ndarray]:
+    """``(x0, y0, hits)``: the ROI's ``region`` inside ``window`` (``(x0, y0, x1, y1)``, end exclusive: the image, or a patch of it), as a bool
+    box whose top-left pixel is ``(x0, y0)``. Only the part of the window the region can reach is computed, never the whole window (the
+    invariant at the top of this module). ``hits`` is empty (zero-sized) when the region misses the window."""
+    wx0, wy0, wx1, wy1 = window
+    bx0, by0, bx1, by1 = _region_reach_box(roi, region, affine_matrix, border)
+    x0, y0, x1, y1 = max(bx0, wx0), max(by0, wy0), min(bx1, wx1), min(by1, wy1)
+    if x0 >= x1 or y0 >= y1:
+        return wx0, wy0, np.zeros((0, 0), dtype=bool)
+    return x0, y0, _region_in_box(roi, region, (x0, y0, x1, y1), affine_matrix, border)
+
+
 def _place_region(
     roi: AreaRoi, region: str, origin_xy: tuple[int, int], shape: tuple[int, int], affine_matrix: np.ndarray, border: Border
 ) -> np.ndarray:
-    """The ROI's ``region`` as a bool array of ``shape`` that starts at ``origin_xy`` in the image (a whole plane: origin 0, 0; or a patch).
-    Only the region's own reach box is ever computed, never the plane (the invariant at the top of this module)."""
+    """The ROI's ``region`` as a bool array of ``shape`` that starts at ``origin_xy`` in the image (a whole plane: origin 0, 0; or a patch)."""
     out = np.zeros((int(shape[0]), int(shape[1])), dtype=bool)
     ox, oy = int(origin_xy[0]), int(origin_xy[1])
-    bx0, by0, bx1, by1 = _region_reach_box(roi, region, affine_matrix, border)
-    x0, y0 = max(bx0, ox), max(by0, oy)
-    x1, y1 = min(bx1, ox + out.shape[1]), min(by1, oy + out.shape[0])
-    if x0 >= x1 or y0 >= y1:
-        return out
-    out[y0 - oy:y1 - oy, x0 - ox:x1 - ox] = _region_in_box(roi, region, (x0, y0, x1, y1), affine_matrix, border)
+    x0, y0, hits = _region_hits(roi, region, (ox, oy, ox + out.shape[1], oy + out.shape[0]), affine_matrix, border)
+    if hits.size:
+        out[y0 - oy:y0 - oy + hits.shape[0], x0 - ox:x0 - ox + hits.shape[1]] = hits
     return out
+
+
+def _flat_indices(roi: AreaRoi, region: str, image_shape: tuple[int, int], affine_matrix: np.ndarray, border: Border) -> np.ndarray:
+    """Row-major flat indices (into an ``image_shape`` image, ascending, int64) of the pixels of the ROI's ``region``: exactly
+    ``np.flatnonzero(<the full-plane mask of that region>)``, made without ever creating the plane."""
+    height, width = int(image_shape[0]), int(image_shape[1])
+    x0, y0, hits = _region_hits(roi, region, (0, 0, width, height), affine_matrix, border)
+    if not hits.size:
+        return np.zeros(0, dtype=np.int64)
+    rows, cols = np.nonzero(hits)  # row-major, so ascending in the image too
+    return (rows.astype(np.int64) + y0) * width + (cols.astype(np.int64) + x0)
+
+
+def sample_flat_indices(roi: AreaRoi, image_shape: tuple[int, int], affine_matrix: np.ndarray) -> np.ndarray:
+    """The pixels of ``rasterize_sample(roi, image_shape, affine_matrix)`` as ascending row-major flat indices (int64), found inside the ROI's
+    own box: what the scan wants for a rectangle or a mask, without a full plane per ROI (a plane is 1.2 MB at 1.2 MP, ~1 ms to scan for its
+    ``True`` pixels). A circle goes through its plane, as it always did (the scan finds circles all at once, `frame_reduce.locate_pixels`)."""
+    if isinstance(roi.shape, Circle):
+        return np.flatnonzero(rasterize_sample(roi, image_shape, affine_matrix)).astype(np.int64, copy=False)
+    return _flat_indices(roi, "sample", image_shape, affine_matrix, NO_BORDER)
+
+
+def reference_flat_indices(
+    roi: AreaRoi, image_shape: tuple[int, int], affine_matrix: np.ndarray, *, default_border: Border = NO_BORDER
+) -> np.ndarray:
+    """The pixels of ``rasterize_reference(roi, image_shape, affine_matrix, default_border=...)`` as ascending flat indices (see
+    :func:`sample_flat_indices`). Empty when the ROI's border is switched off."""
+    border = effective_border(roi.border, default_border)
+    if not border.enabled:
+        return np.zeros(0, dtype=np.int64)
+    if isinstance(roi.shape, Circle):
+        return np.flatnonzero(rasterize_reference(roi, image_shape, affine_matrix, default_border=default_border)).astype(np.int64, copy=False)
+    return _flat_indices(roi, "border", image_shape, affine_matrix, border)
+
+
+def _or_region(plane: np.ndarray, roi: AreaRoi, region: str, affine_matrix: np.ndarray, border: Border) -> None:
+    """OR the ROI's ``region`` into the full-image bool ``plane``, touching only the region's own box (a rectangle or a mask)."""
+    height, width = plane.shape[:2]
+    x0, y0, hits = _region_hits(roi, region, (0, 0, width, height), affine_matrix, border)
+    if hits.size:
+        plane[y0:y0 + hits.shape[0], x0:x0 + hits.shape[1]] |= hits
+
+
+def region_contains(roi: AreaRoi, region: str, border: Border, sx: np.ndarray, sy: np.ndarray) -> np.ndarray:
+    """Which points ``(sx, sy)`` (arrays, **source space**, pixel-index coordinates, the space ROI centres and masks are stored in) lie in the
+    ROI's ``region`` (``"sample"`` or ``"border"``) of any shape. For hit-testing a point the user pointed at (the display point is first pulled
+    back through the frame's affine); a mask is looked up at the nearest stored pixel. A border needs ``border.enabled``: a ROI without one
+    contains nothing of it."""
+    sx, sy = np.asarray(sx, dtype=np.float64), np.asarray(sy, dtype=np.float64)
+    shape = roi.shape
+    if region == "border" and not border.enabled:
+        return np.zeros(sx.shape, dtype=bool)
+    if isinstance(shape, Circle):
+        distance = np.hypot(sx - float(roi.center_x), sy - float(roi.center_y))
+        radius = max(float(shape.diameter_px), 0.0) / 2.0
+        if region == "sample":
+            return distance <= radius
+        inner, outer = ring_radii(shape, border)
+        return (distance >= inner) & (distance <= outer)
+    return _region_test(roi, region, border, sx.ravel(), sy.ravel()).reshape(sx.shape)
+
+
+def mask_border_pixels(mask: RoiMask, border: Border) -> tuple[int, int, np.ndarray]:
+    """``(x0, y0, band)``: the pixels of a mask's border in the mask's own (source) pixel grid, a bool array whose top-left pixel is ``(x0, y0)``.
+    Exactly the pixels `rasterize_reference` finds under the identity affine; what the overlay draws for a mask's border. Empty (zero-sized)
+    for a border that is off."""
+    if not border.enabled:
+        return int(mask.x0), int(mask.y0), np.zeros((0, 0), dtype=bool)
+    height, width = mask.mask.shape[:2]
+    pad = int(np.ceil(_border_extent(border))) + 2
+    sdf, origin_x, origin_y = _mask_sdf(int(mask.x0), int(mask.y0), np.ascontiguousarray(mask.mask, dtype=bool).tobytes(), int(height), int(width), pad)
+    gap = float(border.gap_px)
+    return origin_x, origin_y, (sdf >= gap) & (sdf <= gap + float(border.thickness_px))
 
 
 def _ring_diameters_of(circle: Circle, border: Border) -> tuple[float, float]:
@@ -678,12 +744,14 @@ def rasterize_sample(
     """One ROI's sample-region mask, full-image-sized.
 
     A mask is re-warped by `affine_matrix` like every other shape (2026-09-21): ``shape.mask`` is authored in the reference frame's
-    processed-image space, expanded to full-image size, then forward-transformed, so it follows the current wavelength's geometry
-    instead of sitting at a fixed pixel location regardless of wavelength."""
+    processed-image space and forward-transformed, so it follows the current wavelength's geometry instead of sitting at a fixed pixel
+    location regardless of wavelength. Since 2026-11-18 (phase 2.2) the warp is made inside the mask's own box (the patch variant always was),
+    not on a full-image canvas: the same pixels for any ordinary affine (pinned by ``tests/unit/test_lspri_scan_circle_golden.py``), except
+    that a mask touching the image edge keeps the pixels scipy's full-canvas call used to drop at the border, and that an affine whose
+    shift is an exact half pixel breaks the resulting rounding ties the other way (neither is a measured case)."""
     shape = roi.shape
     if isinstance(shape, MaskShape):
-        expanded = expand_mask(shape.mask, image_shape)
-        return warp_boolean_mask_affine(expanded, affine_matrix, output_shape=image_shape)
+        return _place_region(roi, "sample", (0, 0), image_shape[:2], affine_matrix, NO_BORDER)
     if isinstance(shape, Circle):
         return transformed_disk_mask(image_shape, (float(roi.center_x), float(roi.center_y)), float(shape.diameter_px), affine_matrix)
     return _place_region(roi, "sample", (0, 0), image_shape[:2], affine_matrix, NO_BORDER)
@@ -695,11 +763,9 @@ def rasterize_sample_for_patch(
     patch_shape: tuple[int, int],
     affine_matrix: np.ndarray,
 ) -> np.ndarray:
-    """Same as `rasterize_sample`, scoped to a patch (see `transformed_disk_mask_for_patch`); a mask is affine-warped here too, through
-    `expand_mask_to_patch_warped`'s own reach-box bound, so the full-canvas cost this function exists to avoid is never paid."""
+    """Same as `rasterize_sample`, scoped to a patch (see `transformed_disk_mask_for_patch`); a rectangle or a mask is found inside its own
+    reach box, so the full-canvas cost this function exists to avoid is never paid."""
     shape = roi.shape
-    if isinstance(shape, MaskShape):
-        return expand_mask_to_patch_warped(shape.mask, patch_origin_xy, patch_shape, affine_matrix)
     if isinstance(shape, Circle):
         return transformed_disk_mask_for_patch(
             patch_origin_xy, patch_shape, (float(roi.center_x), float(roi.center_y)), float(shape.diameter_px), affine_matrix
@@ -770,8 +836,8 @@ def union_roi_masks(
 
     Gives exactly what OR-ing `rasterize_sample` / `rasterize_reference` over `rois` gives, but a circle or ring is rasterized only inside
     its own reach box and ORed into the shared plane. The one-at-a-time form allocates and ORs two full planes per ROI (4 MB each at
-    2048 x 2048), which measured 4.2 s for 1000 ROIs on the GUI thread (Histogram panel, 2026-10-07). Masks and rectangles keep the
-    one-at-a-time path: they are rare.
+    2048 x 2048), which measured 4.2 s for 1000 ROIs on the GUI thread (Histogram panel, 2026-10-07). Rectangles and masks are ORed inside their own
+    box too since 2026-11-18 (the same pixels as their planes: `_region_hits` is what `rasterize_*` use).
 
     `cancelled` is checked once per ROI; when it returns true this raises `progress.Cancelled` (CLAUDE.md: heavy work can be cancelled)."""
     image_height, image_width = image_shape[:2]
@@ -789,7 +855,7 @@ def union_roi_masks(
                 x0, y0, x1, y1, local = placed
                 sample[y0:y1, x0:x1] |= local
         else:
-            sample |= rasterize_sample(roi, image_shape, affine_matrix)
+            _or_region(sample, roi, "sample", affine_matrix, NO_BORDER)
 
         border = effective_border(roi.border, default_border)
         if not border.enabled:
@@ -802,7 +868,7 @@ def union_roi_masks(
                     x0, y0, x1, y1, local = placed
                     reference[y0:y1, x0:x1] |= local
         else:
-            reference |= rasterize_reference(roi, image_shape, affine_matrix, default_border=default_border)
+            _or_region(reference, roi, "border", affine_matrix, border)
     return sample, reference
 
 

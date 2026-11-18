@@ -228,12 +228,47 @@ in 2.5 (the cell hashes, not that record, decide what is stale).
     to the pinned radii, pixels and numbers. A free-form *reference* region (never created by the UI) is dropped with a warning.
   - Display until phase 3: the overlay draws a rectangle or a mask as the circle that holds it (`nominal_diameter`) and hit-testing uses that
     circle; the ROI table shows 0 for the diameters of such a ROI (shape key "other" for a rectangle). Phase 3 draws and edits each shape.
-- **2.2 Scan speed for non-circles (OPEN).** Vectorised path for rectangles and masks in `locate_pixels`; bounding boxes in `ring_reach_matrix` /
-  `roi_window_boxes` (and so in `local_roi_keys`) so a rectangle or a mask no longer "reaches everything" and a partial rescan works. A mask's pixel
-  membership through a fast lookup may differ from the scipy warp at half-pixel ties: count them against the `MASK_SAMPLE` pin and report.
-- **2.4 Remaining consumers (OPEN).** Overlay and hit-testing per shape, the histogram's region for a rectangle border, `region_at`'s ring search for
-  non-circles (a circle's ring is found by distance; a rectangle's border is only reachable through `rasterize_reference`), the scan's stored
-  `layout_json` (readable record, already shape-aware).
+- **2.2 Scan path and reach of rectangles and masks (DONE 2026-11-18, unseen by eye: no GUI involved).**
+  - *Measured before (160 ROIs, 1200 x 1000 frame, one layout = one pixel list of every ROI for one affine; a scan builds 26 of them per worker):*
+    160 circles 20 ms; 140 circles + 10 rectangles + 10 masks 117 ms; 160 rectangles 324 ms; 160 masks 1,054 ms. With any rectangle or mask in the
+    set, **every other ROI counted as its neighbour** (5,980 pairs for the mixed set, 25,440 for 160 rectangles): moving one made every cell stale.
+    *After:* mixed 28 ms, 160 rectangles ~100 ms, 160 masks 99 ms; **0 false neighbour pairs**. Circle-only sets are unchanged (20 -> 15 ms is noise;
+    the golden pins KEYS / PIXELS / NUMBERS / RADII / MASK_SAMPLE all hold untouched).
+  - *How:* one function finds a non-circular region **inside its own box** (`rasterize._region_hits`, never a full plane): `rasterize_sample`,
+    `rasterize_reference`, their patch variants, `union_roi_masks` (histogram) and the scan (`sample_flat_indices` / `reference_flat_indices` in
+    `locate_pixels`) all use it, so the scan's pixels equal the reference rasterizer's **by construction** (also tested for 240 random ROIs x 5 affines).
+    No separate "fast lookup" for masks (the plan allowed one and asked to count the differences): the box-bounded scipy warp is pixel-identical to
+    the old full-canvas warp for every ordinary affine (0 differences in 250 interior cases each for a chromatic and a rotated affine), so nothing could
+    disagree. **Two measured differences, both in the old full-canvas call:** a mask touching the image edge keeps pixels scipy's border handling used to
+    drop (about 5 % of random edge-touching cases, 1-70 px), and an affine whose shift is an exact half pixel breaks the rounding tie the other way
+    (an arbitrary tie, not a measured case). The patch variant was always box-based, so the full-plane one was the odd one out.
+  - *Reach:* `RoiSet.sample_r` / `ring_out_r` are the **reach** (radius of a disc about the centre that holds the shape / its border) for a rectangle
+    or a mask (`roi_shapes.reach_radius`, `border_reach_radius`); `ring_reach_matrix` and `roi_window_boxes` need no special case any more (`bounded`
+    is kept in the return value, always True). The cell hash of a rectangle or mask ROI changes once (rescan once; none exist in a real session).
+    A mask's border needs `MASK_BORDER_SLACK_PX = 1.5` beyond `reach + gap + thickness` (proved <= 1.21, measured worst case 0.49 px over 4,000 random
+    masks and five affines); with no slack 1 pair in ~1,250 that meet is missed (test with a fixed seed). The property tests
+    (`tests/unit/test_lspri_roi_shape_reach.py`) compare every window box, read box and neighbour answer with the reference rasterizer, with no margin.
+  - *Found on the way:* `chunk_plan.roi_read_boxes` under-covered a **mask's border by up to ~1 px** (a partial read of an export could have missed a
+    row of border pixels; fixed in `region_source_bounds`); `_mask_sdf`'s cache held 64 maps (an EDT per call at 160 masks; now 512).
+  - Mutations that the tests catch: no mask slack, border reach = shape reach, mask reach from the box middle, pixels shifted by 1.
+- **2.4 Display and pointing for every shape (DONE 2026-11-18, UNSEEN BY EYE).**
+  - Drawing: circles and rectangles are rows of the same arrays (`overlay_geometry.rectangle_points`: rotated, rounded corners for a border, bent by the
+    affine like a circle); a mask is drawn as its **traced pixel outline** in a small painted item (`panels/image/shape_paths_item.py`, one path per ROI,
+    even-odd so a hole stays empty), the border of a mask as the traced band. A circle-only session takes exactly the old code path.
+  - **Half-pixel convention (observation, not changed):** ROI centres are view coordinates (pixel `(row, col)` covers `[col, col+1)`) while the
+    rasterizer treats a pixel *index* as its coordinate, so a circle is drawn about 0.5 px (both axes) off the pixel set it measures. Nothing in the app
+    corrects for it. A mask is therefore drawn along the cells of its pixels (`overlay_geometry.CELL_OFFSET`), so a lasso-made mask outlines exactly where it
+    was drawn; circles and rectangles keep the existing convention. Whether to shift the circles is the maintainer's decision.
+  - Pointing (`roi/shape_hits.py`, same region test as the scan): `roi_at` is exact for rectangles and masks (a hole is not a hit), the wand's ROI layer
+    finds a rectangle's or mask's border, `rois_touching` uses the ROI's pixels, and a selected **rectangle** can be grabbed by its inside
+    (`SelectedApertures.body`) and moved; no edge handles (they resize a diameter).
+  - **A pixel mask is drawn and pointed at from its pixels through the frame's affine, never from the ROI's centre** (the scan does exactly that; the centre is
+    only the label point). Found in review before it shipped: with a centre-based drawing, dragging a mask would have moved its drawn outline while the
+    measured pixels stayed (a ROI that looks moved and measures the old place). Now `RoiToolbox.move_refusal` refuses `translate_rois` / `place_rois` while a
+    pixel mask is among the ROIs (nothing is half-moved; the message says to delete it and make a new one), a drag that starts with a mask selected is refused
+    once with that message (`RoiGestures._begin_edit`), and a mask has no inside to grab. To make a mask movable later, `translate_rois` would have to shift
+    `RoiMask.x0 / y0` by whole pixels (a drag is fractional): a decision, not built.
+  - The histogram's region uses the box-bounded union (above). `scan_store.layout_json` was already shape-aware.
 - Original outline of this phase (kept): one geometry function per shape (circle, rectangle with rotation, mask), used by the scan, the overlay,
   the histogram, the wand's ROI layer, chunk planning and the session carry.
 - Fast vectorised path for rectangles and masks (inverse-map the window's pixels, test / look up); masks get a bounding box
@@ -241,8 +276,49 @@ in 2.5 (the cell hashes, not that record, decide what is stale).
 - The general border (distance g .. g + t), cached in source space.
 - Before / after: `tools/scan_golden_check.py` must show circle numbers bit-identical.
 
-### 3 UI
-- ROI from selection (rectangle selection -> rectangle ROI; lasso / wand / brush -> mask ROI), labelled S or R.
-- Link / unlink gestures on the image with link lines drawn; a "Linked" view in the ROI table (R rows under their S).
-- The Shape picker's greyed entries (`panels/image/roi_shape_picker.py`) become live.
-- Each new screen gets the GUI rules' description first (`.claude/rules/gui.md`).
+### 3 UI (BUILT 2026-11-18, UNSEEN BY EYE; maintainer's answers of the same day)
+
+Decisions (maintainer): **right-click menu** Add ROI > Circle / Rectangle / Current selection > All together as one ROI | Separate blobs;
+**Make this ROI > Sample / Reference**; ROIs made from a selection are **pixel-mask references, linked to nothing**; **no ROIs-tab icon** for
+creating from a selection; **Link / Unlink = select, then press**: icon buttons in the ROIs tab (Selection group), context-menu entries, **Ctrl+L / Ctrl+K**;
+the Shape picker keeps **Circle + Rectangle** (Polygon / Freeform removed: a lasso becomes a pixel mask); everything in one go.
+
+What exists:
+- `roi/mask_regions.py` (selection -> regions: all together or one per 8-connected blob, reading order, centroid), `RoiToolbox.add_mask_rois` (one undo
+  step, one signal), `RoiToolbox.resize_rectangles` (width / height / angle, timeline-aware like `resize_rois`), `roi/link_actions.py` (which ROIs a
+  selection means for Link / Unlink, and the status line each says: Link = every selected sample to every selected reference; Unlink = those two sets, or
+  all links of the selected samples, or the selected references from every sample that uses them).
+- `panels/image/roi_creation.py` (`RoiCreation`: the one object between menu / buttons / keys and the toolbox; a refusal goes to the status bar; the
+  display selection is carried back into the reference frame by the inverse chromatic affine), `roi_context_menu.py` (new entries; `ADD_ROI` stays the
+  "Circle" choice), `rectangle_size_dialog.py`, ROIs tab Link / Unlink / Links buttons, Shape picker (Circle, Rectangle; remembered; sets what the Add ROI
+  tool places).
+- Display: dashed **link lines** from each sample to its references (the Links eye, on by default, remembered), the label **"R7"** for a reference ROI
+  (samples keep their plain number), a reference ROI wears the reference colour and has no border drawn; the table's first column shows "R7" with a tooltip
+  (what a sample is measured against, or which samples use a reference), the Shape column says "Rectangle" with a pictogram and the size in its tooltip.
+- Shortcuts: `links.link` (Ctrl+L), `links.unlink` (Ctrl+K) in `shortcuts.py` (application-wide). Ids use the prefix `links.`: the prefix `roi.` collides with
+  log event names in the shortcut test's source scan.
+
+**Screen descriptions (GUI rules).** *Rectangle size dialog:* purpose: set width, height, angle of the selected rectangles; actions: type values, OK / Cancel;
+layout: a three-row form (Width px, Height px, Angle deg clockwise) and OK / Cancel, filled from the first selected rectangle; states: with several
+rectangles only the fields changed are applied; validation: width and height >= the minimum ROI size (the toolbox refuses with a message); errors: on the status bar.
+*ROI menu additions:* an "Add ROI" submenu (entries greyed when they cannot apply: no room under the lock / selection, no area selection), "Make this ROI"
+submenu (the role the whole selection has is checked), "Rectangle size...", "Link references" and "Unlink" with their keys (greyed unless the selection holds
+something to link / take apart).
+
+**Built after the first Phase 3 round (same day, "you can do all"):**
+- **Linked view** of the ROI / Groups table (view menu: "Linked view (each sample with its references)", remembered, key `roi_table/linked_view`):
+  `rows.build_linked_sections` makes one section for each sample with linked references, headed "7 measured against R3, R4", holding the sample's row and then
+  its references' rows (a shared reference appears in each of its samples' sections), then "Not linked" (samples on their own border or with nothing, references
+  nobody uses). The headers are read-only synthetic labels with no step numbers of their own (`GroupInfo.synthetic`: the "Ungrouped" numbers must not appear on
+  them), each remembers its own collapsed state (`collapse_key`), nothing is dragged or dropped there, and groups come back when it is switched off.
+  **The table now also refreshes on `links_changed`** (it did not: a Link / Unlink left "R7" and the link tooltips stale; found while building this).
+- **Rectangle handles on the image** (`panels/image/rectangle_handles_item.py`, `roi/shape_hits.py` `rectangle_handle_points` / `rectangle_handle_zone` /
+  `rectangle_size_at`, `RoiGestures` mode "rectangle"): a selected rectangle shows white squares on its corners and edge middles and a round knob on a stem beyond
+  its top edge. Dragging an edge sets the width or height, a corner both, the knob turns it; all about the centre, in the rectangle's own axes under the chromatic
+  affine, **every selected rectangle gets the value under the cursor** (as a circle's diameter does), a circle among them is untouched, the whole drag is one undo
+  step, sizes clamp at the minimum ROI size. The knob sits `KNOB_PX` = 22 screen px out; the hover cursor is the resize arrow, or an open hand on the knob. The drawn
+  handle positions and the hit test come from one function and a round-trip test (drag to another rectangle's handle = that rectangle's size / angle) pins them.
+  A corner zone never reaches a tiny rectangle's middle (found by a test: a 6 x 6 rectangle had nothing to grab by). Shortcut table row `mouse.view.rectangle_handles`.
+
+**Still not built:** a drag-to-draw rectangle (a click places a 20 x 20 px square), W / H / angle as editable table columns (the dialog and the handles edit them),
+link-aware ROI position tuning (plan 1.2d), and moving a pixel mask (refused, see 2.4).

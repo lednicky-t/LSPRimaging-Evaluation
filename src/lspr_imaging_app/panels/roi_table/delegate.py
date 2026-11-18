@@ -42,6 +42,7 @@ from .rows import (
     DIAMETER_COLUMNS,
     SHAPE_DISK,
     SHAPE_MASK,
+    SHAPE_RECTANGLE,
     SHAPE_RING,
     step_text,
 )
@@ -232,6 +233,9 @@ class RoiTableDelegate(QStyledItemDelegate):
         elif shape == SHAPE_DISK:
             painter.setBrush(fill)
             painter.drawEllipse(center, 5.0, 5.0)
+        elif shape == SHAPE_RECTANGLE:
+            painter.setBrush(fill)
+            painter.drawRect(QRectF(center.x() - 7.0, center.y() - 4.5, 14.0, 9.0))
         elif shape == SHAPE_MASK:
             outline.setStyle(Qt.PenStyle.DashLine)
             painter.setPen(outline)

@@ -1,16 +1,16 @@
-"""Image panel ribbon, "ROIs" tab: the "Shape" pick-up menu (circle, rectangle, polygon, freeform).
+"""Image panel ribbon, "ROIs" tab: the "Shape" pick-up menu (circle or rectangle).
 
-Only the circle exists so far; the other entries are listed but disabled (greyed) so the
-menu shows what is planned. Display only: picking a shape changes no ROI yet. When a second
-shape is built, this picker gets a `shape_changed` signal and the ROI Toolbox the matching
-command; nothing here stores state.
+It sets the shape the **Add ROI tool** places when the image is clicked (`shape_changed`, which `RoiCreation.set_picked_shape` follows). Polygon and freeform
+entries were listed here, greyed, until 2026-11-18 and were removed (maintainer's choice): a free-form region is made with the selection toolbar's Lasso, Wand or
+brush and the right-click menu's Add ROI > Current selection, which gives a pixel-mask ROI. The right-click menu's Add ROI > Circle / Rectangle place that shape
+whatever the picker says (a control does what it says). The pick is remembered (`bind_ui_state`).
 
 The icons are filled shapes drawn with `QPainter` (the Tabler set has outlines only).
 """
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QPointF, QRectF, Qt
+from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QActionGroup, QColor, QIcon, QPainter, QPainterPath, QPixmap, QPolygonF
 from PyQt6.QtWidgets import QMenu, QToolButton, QWidget
 
@@ -24,9 +24,7 @@ _MARGIN = _RENDER_SIZE * 0.14
 # key, menu text, available now
 SHAPES = (
     ("circle", "Circle", True),
-    ("rectangle", "Rectangle", False),
-    ("polygon", "Polygon (straight segments)", False),
-    ("freeform", "Freeform (drawn by hand)", False),
+    ("rectangle", "Rectangle", True),
 )
 
 
@@ -69,6 +67,8 @@ def shape_icon(shape: str, color: str) -> QIcon:
 
 
 class RoiShapePicker(QToolButton):
+    shape_changed = pyqtSignal(str)  # "circle" or "rectangle"
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._shape = "circle"
@@ -93,9 +93,20 @@ class RoiShapePicker(QToolButton):
     def set_shape(self, shape: str) -> None:
         """Pick a shape; ignored if unknown or not available yet."""
         action = self._actions.get(shape)
+        changed = False
         if action is not None and action.isEnabled():
+            changed = shape != self._shape
             self._shape = shape
         self._refresh()
+        if changed:
+            self.shape_changed.emit(shape)
+
+    def bind_ui_state(self, store, key: str) -> None:
+        """Put the pick back as last left (a saved value that is not a shape of this menu is ignored), then save each change."""
+        saved = store.get(key)
+        if isinstance(saved, str) and saved in self._actions:
+            self.set_shape(saved)
+        self.shape_changed.connect(lambda shape: store.set(key, shape))
 
     def refresh_theme(self) -> None:
         style_general_icon_button(self)
@@ -108,4 +119,4 @@ class RoiShapePicker(QToolButton):
         self._actions[self._shape].setChecked(True)
         self.setIcon(shape_icon(self._shape, get_active_theme().accent_blue))
         label = next(text for key, text, _available in SHAPES if key == self._shape)
-        self.setToolTip(f"ROI shape: {label}. Only circles are available so far.")
+        self.setToolTip(f"ROI shape the Add ROI tool places: {label}. (The right-click menu's Add ROI offers every shape.)")

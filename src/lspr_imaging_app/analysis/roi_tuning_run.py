@@ -25,6 +25,7 @@ from dataclasses import dataclass, field, replace
 import numpy as np
 
 from ..applog.events import log_event
+from ..domain.roi_shapes import MaskShape
 from ..progress import Cancelled
 from .baseline_drift import AnchorCubes, regions_from_cubes
 from .roi_tuning import (
@@ -71,10 +72,15 @@ def check_tunable(plan: ScanPlan, selected: Sequence[int]) -> None:
         raise TuningError("The ROIs change over the experiment (a ROI geometry timeline); position tuning does not support that yet.")
     if len(set(selected)) != len(selected) or any(not 0 <= i < rs.n for i in selected):
         raise TuningError("The selected ROIs are not part of the scan.")
-    free_form = [int(plan.roi_ids[i]) for i in selected if not rs.vectorised[i]]
+    free_form = [int(plan.roi_ids[i]) for i in selected if not rs.vectorised[i]]  # not a circle: tuning is built for circles only
     if free_form:
         shown = ", ".join(str(r) for r in free_form[:3]) + (" ..." if len(free_form) > 3 else "")
-        raise TuningError(f"ROI {shown} {'is a free-form ROI' if len(free_form) == 1 else 'are free-form ROIs'} and cannot be tuned by moving its centre.")
+        only_masks = all(isinstance(rs.rois[i].shape, MaskShape) for i in selected if not rs.vectorised[i])
+        if only_masks:
+            what = "is a free-form ROI" if len(free_form) == 1 else "are free-form ROIs"
+        else:
+            what = "is not a circle" if len(free_form) == 1 else "are not circles"
+        raise TuningError(f"ROI {shown} {what} and cannot be tuned by moving its centre.")
     if "mean" not in plan.settings.methods:
         raise TuningError("Position tuning needs the 'mean' reduction in the scan settings.")
 

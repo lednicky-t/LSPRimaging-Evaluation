@@ -98,6 +98,8 @@ def build_roi_tab(panel: ImagePanel) -> QWidget:
     )
     panel._roi_tab.overlay_changed.connect(panel._on_roi_overlay_changed)
     panel._roi_tab.labels_toggled.connect(panel._on_roi_labels_toggled)
+    panel._roi_tab.links_visible_toggled.connect(lambda shown: _on_links_toggled(panel, shown))
+    panel._roi_overlay.links_visible = panel._roi_tab.links_button.isChecked()
     panel._roi_tab.label_placement_changed.connect(panel._on_roi_label_placement_changed)
     panel._roi_tab.label_size_changed.connect(panel._roi_overlay.set_label_point_size)
     panel._roi_tab.group_labels_changed.connect(panel._on_group_labels_changed)
@@ -262,3 +264,10 @@ def build_top_bar(panel: ImagePanel, view_content: QWidget, image_tools_content:
     panel._refresh_tool_info(None)
     top_bar_layout.addWidget(panel._tool_info)
     panel._top_drawer.expanded_changed.connect(panel._tool_info.setVisible)  # rolled up: only the handle is left
+
+
+def _on_links_toggled(panel, shown: bool) -> None:
+    """The ROIs tab's Links switch: the overlay draws (or stops drawing) its link lines, so the ROIs are drawn again."""
+    panel._roi_overlay.set_links_visible(bool(shown))
+    if panel._last_image_shape is not None:
+        panel._draw_roi_overlay()

@@ -40,9 +40,11 @@ _BITMAP_PAD = 2.0  # logical px around the text in its bitmap (room for the halo
 _BITMAP_CACHE_LIMIT = 2000
 
 
-def label_text(roi_id: int, name: str | None) -> str:
-    """``"12"``, or ``"12 spot A"`` when the ROI has a name."""
-    return f"{roi_id} {name}" if name else str(roi_id)
+def label_text(roi_id: int, name: str | None, *, reference: bool = False) -> str:
+    """``"12"``, or ``"12 spot A"`` when the ROI has a name; a reference ROI (phase 3, 2026-11-18) carries an ``R`` in front: ``"R12"``, ``"R12 dark patch"``.
+    A sample keeps its plain number, so a session without reference ROIs is labelled as it always was."""
+    text = f"{roi_id} {name}" if name else str(roi_id)
+    return f"R{text}" if reference else text
 
 
 class RoiLabelItem(pg.GraphicsObject):

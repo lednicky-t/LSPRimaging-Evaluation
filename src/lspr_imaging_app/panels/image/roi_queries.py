@@ -14,10 +14,17 @@ import numpy as np
 
 from ...image_tools import ChromaticModule
 from ...roi import RoiToolbox
-from ...domain.roi_shapes import Circle, effective_border, reach_radius, ring_diameters
-from ...roi.rasterize import rasterize_reference, rasterize_sample
+from ...domain.roi_links import is_reference
+from ...domain.roi_shapes import NO_BORDER, Circle, Rectangle, effective_border, reach_radius, ring_diameters
+from ...roi.rasterize import rasterize_reference, rasterize_sample, rasterize_sample_for_patch
+from ...roi.shape_hits import FrameMap, display_point_in_region, rectangle_handle_zone
 from ...selection import SelectionModule
 from .roi_gestures import SelectedApertures
+
+
+def _stretch(linear: np.ndarray) -> float:
+    """The largest stretch of a linear map (at least 1): a region of reach ``r`` around a centre stays within ``r * stretch`` of its display centre."""
+    return max(float(np.max(np.linalg.svd(linear, compute_uv=False))), 1.0)
 
 
 class RoiQueries:
@@ -58,7 +65,16 @@ class RoiQueries:
         distances = np.hypot(x - centers[:, 0], y - centers[:, 1])
         # a rectangle or a mask is hit within the circle that holds it until the shape UI (plan phase 3) gives each its own test
         radii = np.fromiter((reach_radius(roi.shape, roi.center_x, roi.center_y) for roi in rois), dtype=np.float64, count=len(rois))
-        distances = np.where(distances <= radii, distances, np.inf)
+        within = distances <= radii
+        if not all(isinstance(roi.shape, Circle) for roi in rois):
+            # A rectangle or a mask is hit only inside its own region (phase 2.4): the reach circle (stretched by the affine, plus a cell) only
+            # says where to look, and the exact test is the one the scan's pixels are made with.
+            frame_map = FrameMap.of(affine)
+            for index, roi in enumerate(rois):
+                if isinstance(roi.shape, Circle):
+                    continue
+                within[index] = display_point_in_region(roi, "sample", NO_BORDER, centers[index], frame_map, x, y)
+        distances = np.where(within, distances, np.inf)
         nearest = int(np.argmin(distances))  # first of equal distances wins, as before
         return rois[nearest].area_roi_id if np.isfinite(distances[nearest]) else None
 
@@ -85,19 +101,24 @@ class RoiQueries:
         default_border = detection.default_border()
         centers = self._roi_toolbox.display_positions(frame, affine)
         distances = np.hypot(x - centers[:, 0], y - centers[:, 1])
+        frame_map = FrameMap.of(affine)
         best: tuple[float, int] | None = None
         for index, roi in enumerate(rois):
             border = effective_border(roi.border, default_border)
-            if not border.enabled or not isinstance(roi.shape, Circle):  # only a circle's border is a ring that is found by distance
+            if not border.enabled or is_reference(roi):  # a reference ROI is one region: it has no border to point at
                 continue
-            inner, outer = ring_diameters(roi.shape, border)
-            if outer > inner and inner / 2.0 <= distances[index] <= outer / 2.0 and (best is None or distances[index] < best[0]):
+            if isinstance(roi.shape, Circle):  # a circle's border is a ring, found by distance
+                inner, outer = ring_diameters(roi.shape, border)
+                found = outer > inner and inner / 2.0 <= distances[index] <= outer / 2.0
+            else:  # any other shape: the band at gap .. gap + thickness from its edge, by the scan's own region test
+                found = display_point_in_region(roi, "border", border, centers[index], frame_map, x, y)
+            if found and (best is None or distances[index] < best[0]):
                 best = (float(distances[index]), index)
         if best is None:
             return None
         roi = rois[best[1]]
         ring = rasterize_reference(roi, shape, affine, default_border=default_border)
-        return ring, f"ROI {roi.area_roi_id} reference ring"
+        return ring, f"ROI {roi.area_roi_id} reference {'ring' if isinstance(roi.shape, Circle) else 'border'}"
 
     def rois_in_rect(self, x0: float, y0: float, x1: float, y1: float) -> set[int]:
         """Ids of the ROIs whose display-space *centre* lies in the rectangle
@@ -119,12 +140,24 @@ class RoiQueries:
         rois = self._roi_toolbox.rois_at(frame[0])
         if not rois or not mask.any():
             return set()
-        centers = self._roi_toolbox.display_positions(frame, self._chromatic.affine_for(frame))
+        affine = self._chromatic.affine_for(frame)
+        centers = self._roi_toolbox.display_positions(frame, affine)
+        stretch = _stretch(np.asarray(affine, dtype=np.float64)[:2, :2])
         rows, cols = mask.shape[:2]
         hits: set[int] = set()
         for roi, (cx, cy) in zip(rois, centers, strict=True):
             radius = reach_radius(roi.shape, roi.center_x, roi.center_y)
             if not (np.isfinite(cx) and np.isfinite(cy)):
+                continue
+            if not isinstance(roi.shape, Circle):
+                # A rectangle or a mask: the pixels it measures against the selected ones (its reach box only says where to look).
+                reach = radius * stretch + 2.0
+                c0, c1 = max(int(np.floor(cx - reach)), 0), min(int(np.floor(cx + reach)) + 1, cols)
+                r0, r1 = max(int(np.floor(cy - reach)), 0), min(int(np.floor(cy + reach)) + 1, rows)
+                if c0 < c1 and r0 < r1 and mask[r0:r1, c0:c1].any():
+                    own = rasterize_sample_for_patch(roi, (c0, r0), (r1 - r0, c1 - c0), affine)
+                    if bool(np.any(own & mask[r0:r1, c0:c1])):
+                        hits.add(roi.area_roi_id)
                 continue
             c0, c1 = max(int(np.floor(cx - radius)), 0), min(int(np.floor(cx + radius)) + 1, cols)
             r0, r1 = max(int(np.floor(cy - radius)), 0), min(int(np.floor(cy + radius)) + 1, rows)
@@ -163,6 +196,28 @@ class RoiQueries:
             dtype=np.float64,
         ).reshape(-1, 2)
         resizable = np.array([isinstance(roi.shape, Circle) for roi in chosen], dtype=bool)  # the aperture handles resize a diameter
+        body = None
+        handles = None
+        if any(isinstance(roi.shape, Rectangle) for roi in chosen):
+            frame_for_handles = FrameMap.of(self.current_affine())
+            handles = tuple(
+                None if not isinstance(roi.shape, Rectangle)
+                else (
+                    lambda x, y, tolerance, knob, roi=roi, centre=centre: rectangle_handle_zone(
+                        roi.shape, centre, frame_for_handles, x, y, tolerance, knob
+                    )
+                )
+                for roi, centre in zip(chosen, centers, strict=True)
+            )
+        if not resizable.all():
+            # Inside a rectangle means inside its region, so the selection can be moved by it. A pixel mask cannot be moved (its pixels stay: `RoiToolbox.move_refusal`),
+            # so it gets no inside test and a drag that starts on it is a rubber band, as before. No edge handles for either.
+            frame_map = FrameMap.of(self.current_affine())
+            body = tuple(
+                None if not isinstance(roi.shape, Rectangle)
+                else (lambda x, y, roi=roi, centre=centre: display_point_in_region(roi, "sample", NO_BORDER, centre, frame_map, x, y))
+                for roi, centre in zip(chosen, centers, strict=True)
+            )
         return SelectedApertures(
             ids=np.array([roi.area_roi_id for roi in chosen], dtype=np.int64),
             centers=centers,
@@ -171,6 +226,8 @@ class RoiQueries:
             ring_inner=rings[:, 0],
             ring_outer=rings[:, 1],
             ring_resizable=resizable & bool(self._reference_visible()) & (rings[:, 1] > rings[:, 0]),
+            body=body,
+            handles=handles,
         )
 
     def current_affine(self) -> np.ndarray:

@@ -45,7 +45,9 @@ from ...applog.events import emit_timing
 from ...roi import RoiToolbox
 from ...domain.roi_model import SCOPE_PERSISTENT
 from ...roi.scope import RoiEditTarget
+from ...domain.roi_shapes import Rectangle
 from ...roi.rasterize import effective_reference_diameters
+from ...roi.shape_hits import RECTANGLE_ZONES, ZONE_ROTATE, FrameMap, rectangle_size_at
 from ...roi.toolbox import MIN_SAMPLE_DIAMETER_PX
 from ...selection import SelectionModule
 from ...undo import undo_manager
@@ -61,12 +63,16 @@ MIN_RING_GAP_PX = 1.0
 HIT_TOLERANCE_PX = 6.0
 """How far (screen pixels) from a selected ROI's border still counts as on it."""
 
+KNOB_PX = 22.0
+"""How far (screen pixels) a selected rectangle's rotation knob sits beyond its top edge."""
+
 
 @dataclass(frozen=True)
 class SelectedApertures:
     """The selected ROIs as the hit test needs them. Display space throughout.
 
-    ``resizable`` is False for a mask ROI: it has no diameter to drag."""
+    ``resizable`` is False for a ROI that is not a circle: it has no diameter to drag. ``body[i]`` (``None`` for a circle) tells whether a display
+    point is inside that ROI's own region, so a rectangle or a mask can still be grabbed by its inside and moved."""
 
     ids: np.ndarray  # (N,) int
     centers: np.ndarray  # (N, 2)
@@ -78,6 +84,9 @@ class SelectedApertures:
     ring_inner: np.ndarray | None = None  # (N,)
     ring_outer: np.ndarray | None = None  # (N,)
     ring_resizable: np.ndarray | None = None  # (N,) bool
+    body: tuple[Callable[[float, float], bool] | None, ...] | None = None
+    # per selected ROI, ``None`` unless it is a rectangle: ``handle(x, y, tolerance, knob)`` -> the handle zone under the display point (`shape_hits`), or ``None``
+    handles: tuple[Callable[[float, float, float, float], str | None] | None, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -88,14 +97,14 @@ class RoiHit:
 
 
 def hit_test(
-    x: float, y: float, selected: SelectedApertures, linear: np.ndarray, tolerance: float
+    x: float, y: float, selected: SelectedApertures, linear: np.ndarray, tolerance: float, knob: float = 0.0
 ) -> RoiHit | None:
     """What the display point (x, y) is over among the *selected* ROIs.
 
     The border of any resizable ROI wins over the inside of another (the
     nearest border if several). Otherwise the ROI whose centre is nearest wins,
     so a small ROI inside a big one stays reachable. ``tolerance`` is in display
-    units. The border zone reaches ``tolerance`` outward but at most half a
+    units; ``knob`` is how far (display units) a selected rectangle's rotation knob sits beyond its edge. The border zone reaches ``tolerance`` outward but at most half a
     radius inward, so a small ROI always keeps a middle to grab it by. Pure."""
     if len(selected.ids) == 0:
         return None
@@ -127,7 +136,16 @@ def hit_test(
         return RoiHit(
             int(selected.ids[index]), zones[int(zone_index)], (float(selected.centers[index, 0]), float(selected.centers[index, 1]))
         )
+    if selected.handles is not None:  # a selected rectangle's edges, corners and knob (after the circles' borders)
+        for index, handle in enumerate(selected.handles):
+            zone = None if handle is None else handle(x, y, tolerance, knob)
+            if zone is not None:
+                return RoiHit(int(selected.ids[index]), zone, (float(selected.centers[index, 0]), float(selected.centers[index, 1])))
     inside = distance <= radius
+    if selected.body is not None:
+        for index, test in enumerate(selected.body):
+            if test is not None:
+                inside[index] = bool(test(x, y))
     if inside.any():
         index = int(np.argmin(np.where(inside, distance, np.inf)))
         return RoiHit(int(selected.ids[index]), "body", (float(selected.centers[index, 0]), float(selected.centers[index, 1])))
@@ -169,7 +187,8 @@ class RoiGestures(QObject):
         self._edit_target = edit_target
         self._edit_kwargs: dict = {}  # fixed at the start of a drag: the scope or cube must not change under it
         self._edit_cube: int | None = None
-        self._mode: str | None = None  # "marquee" | "move" | "resize" while a gesture runs
+        self._mode: str | None = None  # "marquee" | "move" | "resize" | "rectangle" while a gesture runs
+        self._rect_angle = 0.0  # the rectangle's angle when a handle drag began (an edge drag measures along these axes)
         self._band_start: tuple[float, float] | None = None
         self._edit_ids: tuple[int, ...] = ()
         self._move_start: tuple[float, float] | None = None
@@ -203,7 +222,8 @@ class RoiGestures(QObject):
         selected = self._selected_apertures()
         if selected is None:
             return None
-        return hit_test(x, y, selected, self._display_linear(), HIT_TOLERANCE_PX * float(self._view_pixel_size()))
+        pixel = float(self._view_pixel_size())
+        return hit_test(x, y, selected, self._display_linear(), HIT_TOLERANCE_PX * pixel, KNOB_PX * pixel)
 
     # -- one gesture: begin / update / end -------------------------------------------
 
@@ -240,7 +260,19 @@ class RoiGestures(QObject):
         selected = self._selection.selected_roi_ids()
         self._edit_kwargs = edit_kwargs
         self._edit_cube = None if self._edit_target is None else self._edit_target.cube()
-        if hit.zone in ("edge", "ring_inner", "ring_outer"):
+        if hit.zone in RECTANGLE_ZONES:
+            apertures = self._selected_apertures()
+            rectangles = set() if apertures is None or apertures.handles is None else {
+                int(i) for i, handle in zip(apertures.ids, apertures.handles, strict=True) if handle is not None
+            }
+            self._edit_ids = tuple(sorted(selected & rectangles))
+            self._resize_center = hit.center
+            self._resize_zone = hit.zone
+            anchor = next((r for r in self._toolbox.rois_at(self._edit_cube) if r.area_roi_id == hit.roi_id), None)
+            self._rect_angle = float(anchor.shape.angle_deg) if anchor is not None and isinstance(anchor.shape, Rectangle) else 0.0
+            self._mode = "rectangle"
+            undo_manager.begin_batch("Resize rectangles" if hit.zone != ZONE_ROTATE else "Turn rectangles")
+        elif hit.zone in ("edge", "ring_inner", "ring_outer"):
             apertures = self._selected_apertures()
             resizable = set() if apertures is None else {int(i) for i, ok in zip(apertures.ids, apertures.resizable, strict=True) if ok}
             self._edit_ids = tuple(sorted(selected & resizable))
@@ -258,6 +290,11 @@ class RoiGestures(QObject):
             self._mode = "resize"
             undo_manager.begin_batch("Resize ROIs")
         else:
+            refusal = self._toolbox.move_refusal(selected)  # a pixel mask cannot be moved; said once here, not from inside the mouse-move handler
+            if refusal is not None:
+                self.refused.emit(refusal)
+                self._mode = "refused"
+                return True
             self._edit_ids = tuple(sorted(selected))
             self._move_start = (x, y)
             self._move_applied = np.zeros(2)
@@ -274,12 +311,14 @@ class RoiGestures(QObject):
             self._update_move(x, y)
         elif self._mode == "resize":
             self._update_resize(x, y)
+        elif self._mode == "rectangle":
+            self._update_rectangle(x, y)
 
     def end(self, x: float, y: float, *, additive: bool) -> None:
         mode, self._mode = self._mode, None
         if mode == "marquee":
             self._end_marquee(x, y, additive=additive)
-        elif mode in ("move", "resize"):
+        elif mode in ("move", "resize", "rectangle"):
             self._inverse = None
             self._move_start = None
             undo_manager.end_batch()
@@ -317,6 +356,17 @@ class RoiGestures(QObject):
             overlay_ms=round((done - written) * 1000.0, 2),
             n=len(self._edit_ids),
         )
+
+    def _update_rectangle(self, x: float, y: float) -> None:
+        """Dragging a rectangle's handle: every selected rectangle gets the width / height / angle under the cursor (the same value for all, as a circle's
+        diameter is), about its own centre, one undo step for the whole drag."""
+        if self._inverse is None or not self._edit_ids:
+            return
+        sizes = rectangle_size_at(self._resize_zone, self._rect_angle, self._resize_center, FrameMap(np.linalg.inv(self._inverse), self._inverse, np.zeros(2)), x, y)
+        sizes = {name: (max(MIN_SAMPLE_DIAMETER_PX, value) if name != "angle_deg" else value) for name, value in sizes.items()}
+        if sizes:
+            self._toolbox.resize_rectangles(self._edit_ids, **sizes, **self._edit_kwargs)
+            self._redraw_now()
 
     def _update_resize(self, x: float, y: float) -> None:
         if self._inverse is None or not self._edit_ids:

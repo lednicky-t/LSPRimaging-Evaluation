@@ -38,6 +38,7 @@ from ...roi.array_task import ArrayAction
 from ...roi.scope import RoiEditTarget, RoiScopeModule
 from ...selection import SelectionModule
 from .. import roi_selection_lock
+from ...shortcuts import display
 from ..ribbon_group import group_label_style, labeled_icon_group, ribbon_separator
 from ..ui_state import UiStateStore
 from .array_actions import ArrayActions
@@ -60,11 +61,15 @@ class RoiTab(QWidget):
     # A Sample / Reference display control changed: (kind "sample"|"reference", field "visible"|"color"|"alpha", value).
     overlay_changed = pyqtSignal(str, str, object)
     labels_toggled = pyqtSignal(bool)
+    link_requested = pyqtSignal()  # the Link button (the same as Ctrl+L)
+    unlink_requested = pyqtSignal()  # the Unlink button (Ctrl+K)
+    links_visible_toggled = pyqtSignal(bool)  # the Links switch: draw a dashed line from each sample to its linked references
     label_placement_changed = pyqtSignal(str)  # one of `label_placement.PLACEMENTS`
     label_size_changed = pyqtSignal(int)  # the ROI labels' text size, pt
     # The labels button's icon was redrawn (toggle, theme change, restore); the View tab's copy follows it.
     labels_icon_refreshed = pyqtSignal()
     group_labels_changed = pyqtSignal()
+    shape_changed = pyqtSignal(str)  # the Shape picker's choice: "circle" or "rectangle" (what the Add ROI tool places)
     status = pyqtSignal(str)  # a one-line result from the Array / Groups actions
     auto_crop_readiness_changed = pyqtSignal(object)  # re-emitted from `ArrayActions` for the Image tools tab
 
@@ -119,6 +124,7 @@ class RoiTab(QWidget):
         self._scope_toggle = RoiScopeToggle(roi_scope, self)
         scope_group, self._scope_caption = labeled_icon_group(self, self._scope_toggle, "Scope")
         self._shape_picker = RoiShapePicker(self)
+        self._shape_picker.shape_changed.connect(self.shape_changed)
         shape_group, self._shape_caption = labeled_icon_group(self, self._shape_picker, "Shape")
         self._array_controls = ArrayControls(geometry, self)
         array_group, self._array_caption = labeled_icon_group(self, self._array_controls, "Array")
@@ -163,7 +169,31 @@ class RoiTab(QWidget):
         selection.roi_selection_lock_changed.connect(self._lock_button.setChecked)
         selection.roi_selection_refused.connect(lambda: self.status.emit(roi_selection_lock.REFUSED_TEXT))
         self._refresh_lock_icon()
-        selection_group, self._selection_caption = labeled_icon_group(self, self._lock_button, "Selection")
+        # Link / Unlink act on the selected ROIs (samples and references) and say why in the status bar when they cannot, so they are always enabled.
+        self._link_button = QToolButton(self)
+        self._unlink_button = QToolButton(self)
+        self._links_button = QToolButton(self)
+        self._links_button.setCheckable(True)
+        self._links_button.setChecked(True)
+        self._link_button.setToolTip(f"Link the selected sample ROIs to the selected reference ROIs ({display('links.link')}).")
+        self._unlink_button.setToolTip(
+            f"Take apart links ({display('links.unlink')}): between the selected samples and references; with only samples selected all their links; "
+            "with only references selected, those references from every sample that uses them."
+        )
+        self._links_button.setToolTip("Show or hide the dashed lines that join each sample ROI to the reference ROIs it is linked to.")
+        for button in (self._link_button, self._unlink_button, self._links_button):
+            style_general_icon_button(button)
+        self._link_button.clicked.connect(lambda _checked=False: self.link_requested.emit())
+        self._unlink_button.clicked.connect(lambda _checked=False: self.unlink_requested.emit())
+        self._links_button.toggled.connect(self._on_links_toggled)
+        self._refresh_link_icons()
+        selection_box = QWidget(self)
+        selection_row = QHBoxLayout(selection_box)
+        selection_row.setContentsMargins(0, 0, 0, 0)
+        selection_row.setSpacing(2)
+        for button in (self._lock_button, self._link_button, self._unlink_button, self._links_button):
+            selection_row.addWidget(button)
+        selection_group, self._selection_caption = labeled_icon_group(self, selection_box, "Selection")
 
         # Sections left to right, a thin separator between neighbours (restyled on a theme switch).
         sections = (display_group, scope_group, shape_group, array_group, groups_group, selection_group)
@@ -212,6 +242,23 @@ class RoiTab(QWidget):
     @property
     def labels_button(self) -> QToolButton:
         return self._labels_button
+
+    @property
+    def shape_picker(self) -> RoiShapePicker:
+        return self._shape_picker
+
+    @property
+    def link_button(self) -> QToolButton:
+        return self._link_button
+
+    @property
+    def unlink_button(self) -> QToolButton:
+        return self._unlink_button
+
+    @property
+    def links_button(self) -> QToolButton:
+        """The Links switch (checked = the link lines are drawn)."""
+        return self._links_button
 
     @property
     def lock_button(self) -> QToolButton:
@@ -264,6 +311,8 @@ class RoiTab(QWidget):
         self._label_placement_picker.bind_ui_state(store, "image/roi_label_placement")
         store.bind("image/roi_label_point_size", self._label_size_box)
         self._group_controls.label_menu.bind_ui_state(store)
+        self._shape_picker.bind_ui_state(store, "image/roi_shape")
+        store.bind("image/roi_show_links", self._links_button)
         # (The lock is not bound here: it belongs to the session, next to the selection it holds - `SessionState.selection_locked`.)
 
     def _on_lock_toggled(self, locked: bool) -> None:
@@ -283,6 +332,20 @@ class RoiTab(QWidget):
                 stroke_width=2.1,
             )
         )
+
+    def _on_links_toggled(self, shown: bool) -> None:
+        self._refresh_link_icons()
+        self.links_visible_toggled.emit(bool(shown))
+
+    def _refresh_link_icons(self) -> None:
+        theme = get_active_theme()
+        on = self._links_button.isChecked()
+        for button, name, color in (
+            (self._link_button, "link", theme.text_secondary),
+            (self._unlink_button, "link-off", theme.text_secondary),
+            (self._links_button, "eye" if on else "eye-off", theme.accent_blue if on else theme.text_dim),
+        ):
+            button.setIcon(load_tabler_icon(name, color=color, size=_RIBBON_ICON_SIZE * 2, stroke_width=2.1))
 
     def _on_labels_toggled(self, shown: bool) -> None:
         self._refresh_labels_icon()
@@ -309,6 +372,9 @@ class RoiTab(QWidget):
         self._refresh_labels_icon()
         style_general_icon_button(self._lock_button)
         self._refresh_lock_icon()
+        for button in (self._link_button, self._unlink_button, self._links_button):
+            style_general_icon_button(button)
+        self._refresh_link_icons()
         self._label_placement_picker.refresh_theme(theme)
         self._label_size_box.refresh_theme()
         self._display_menu.refresh_theme(theme)

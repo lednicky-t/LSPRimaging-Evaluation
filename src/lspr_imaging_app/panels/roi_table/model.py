@@ -42,6 +42,7 @@ from .rows import (
     RoiRow,
     Section,
     StepSort,
+    build_linked_sections,
     build_roi_rows,
     build_sections,
     edit_text,
@@ -147,6 +148,7 @@ class RoiTreeModel(QAbstractItemModel):
         self._default_color_hex = DEFAULT_ROI_COLOR_HEX
         self._selected: frozenset[int] = frozenset()
         self._grouped = False
+        self._linked = False  # the Linked view (`rows.build_linked_sections`): the tree has headers but they are not groups
         self._step_columns: tuple[StepColumn, ...] = ()
         self._cells: StepCells | None = None
         self._display = DISPLAY_BOTH
@@ -209,7 +211,7 @@ class RoiTreeModel(QAbstractItemModel):
         mode = self._mode_of(column)
         decimals = self._decimals if column.decimals is None else column.decimals
         texts = [format_cell(self._cells.roi_cell(row.roi_id, column.ref), mode, decimals) for row in self._rows]
-        if self._grouped:
+        if self._grouped and not self._linked:
             texts += [format_cell(self._cells.group_cell(key, sorted(members), column.ref), mode, decimals) for key, members in self._members_by_group().items()]
         return [text for text in texts if text]
 
@@ -278,7 +280,7 @@ class RoiTreeModel(QAbstractItemModel):
     def _all_cells(self):
         if self._cells is None:
             return
-        members_of = self._members_by_group() if self._grouped else {}
+        members_of = self._members_by_group() if self._grouped and not self._linked else {}
         for column in self._step_columns:
             for row in self._rows:
                 yield self._cells.roi_cell(row.roi_id, column.ref)
@@ -307,9 +309,24 @@ class RoiTreeModel(QAbstractItemModel):
 
     def is_grouped_view(self) -> bool:
         """False whenever there are no groups (a lone "Ungrouped" header over
-        every ROI would say nothing)."""
-        return self._grouped
+        every ROI would say nothing), and in the Linked view (its headers are not groups)."""
+        return self._grouped and not self._linked
 
+    def is_linked_view(self) -> bool:
+        return self._linked
+
+    def set_linked_view(self, linked: bool) -> None:
+        """Arrange the table by links (each sample with its references, `rows.build_linked_sections`) or as before (groups or a flat list)."""
+        if bool(linked) != self._linked:
+            self._linked = bool(linked)
+            self._rebuild()
+
+    def collapse_key(self, index: QModelIndex) -> str | None:
+        """What the remembered collapsed set holds for a group header: its group id (``"Ungrouped"``'s key for the synthetic one), or the key of a Linked header."""
+        node = index.internalPointer() if index.isValid() else None
+        if node is None or node.kind != "group":
+            return None
+        return node.section.group.collapse_key
     def unit(self) -> LengthUnit:
         return self._unit
 
@@ -325,16 +342,21 @@ class RoiTreeModel(QAbstractItemModel):
 
     def _rebuild(self) -> None:
         self._rows = build_roi_rows(self._rois, self._groups, self._defaults, self._default_color_hex)
-        self._grouped = bool(self._groups)
+        self._grouped = bool(self._groups) or self._linked
         if self._step_columns:
             self._refresh_decimals()  # one number of decimals for the rows as they are now
         root = _Node("root", None)
         if self._grouped:
             colors = {group.group_id: group.sample_color_hex for group in self._groups}
-            for section in build_sections(
-                self._rows, self._groups, colors, sort_column=self._sort_column, descending=self._descending,
-                ungrouped_color_hex=self._default_color_hex, step_sort=self._step_sort(),
-            ):
+            sections = (
+                build_linked_sections(self._rows, self._rois, self._default_color_hex)
+                if self._linked
+                else build_sections(
+                    self._rows, self._groups, colors, sort_column=self._sort_column, descending=self._descending,
+                    ungrouped_color_hex=self._default_color_hex, step_sort=self._step_sort(),
+                )
+            )
+            for section in sections:
                 header = _Node("group", root, section=section)
                 header.position = len(root.children)
                 root.children.append(header)
@@ -483,11 +505,13 @@ class RoiTreeModel(QAbstractItemModel):
         node = index.internalPointer()
         flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
         if node.kind == "group":
-            flags |= Qt.ItemFlag.ItemIsDropEnabled  # drop ROIs on a header to put them in that group
+            if not self._linked:
+                flags |= Qt.ItemFlag.ItemIsDropEnabled  # drop ROIs on a header to put them in that group
             if index.column() == 0 and node.section.group.group_id is not None:
                 flags |= Qt.ItemFlag.ItemIsEditable
             return flags
-        flags |= Qt.ItemFlag.ItemIsDragEnabled  # ROI rows are not drop targets: a drop lands between rows
+        if not self._linked:
+            flags |= Qt.ItemFlag.ItemIsDragEnabled  # ROI rows are not drop targets: a drop lands between rows (nothing is dragged in the Linked view)
         column = index.column()
         if column in EDITABLE_COLUMNS and not (column in DIAMETER_COLUMNS and column not in SHAPE_FIELDS[node.row.shape]):
             flags |= Qt.ItemFlag.ItemIsEditable  # a mask has no diameter, a disk no ring
@@ -524,6 +548,8 @@ class RoiTreeModel(QAbstractItemModel):
         if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):
             return group.name
         if role == Qt.ItemDataRole.ToolTipRole:
+            if group.note:
+                return group.note
             count = len(node.section.rows)
             noun = "ROI" if count == 1 else "ROIs"
             return f"{group.name}: {count} {noun}. Double-click to rename." if group.group_id else f"{count} {noun} in no group"
@@ -567,6 +593,8 @@ class RoiTreeModel(QAbstractItemModel):
         step = self._step_columns[column - COLUMN_COUNT]
         if node is not None:
             group = node.section.group
+            if group.synthetic:
+                return None  # a Linked header is only a label: the numbers are the rows'
             value = self._cells.group_cell(group.group_id, node.members, step.ref)
             row_text, is_group = group.name, True
         else:
@@ -584,7 +612,7 @@ class RoiTreeModel(QAbstractItemModel):
         """``(shown, text the editor starts with)``."""
         unit = self._unit
         if column == COLUMN_ID:
-            return str(row.roi_id), str(row.roi_id)
+            return (f"R{row.roi_id}" if row.role == "reference" else str(row.roi_id)), str(row.roi_id)  # a reference ROI is "R7"; editing starts from its number
         if column == COLUMN_NAME:
             return "", ""  # labels belong to groups; a ROI has its id
         if column in (COLUMN_X, COLUMN_Y):
@@ -601,8 +629,10 @@ class RoiTreeModel(QAbstractItemModel):
 
     def _tooltip(self, row: RoiRow, column: int) -> str | None:
         unit = self._unit.label
+        if column == COLUMN_ID:
+            return row.link_note or None
         if column == COLUMN_SHAPE:
-            return SHAPE_LABELS[row.shape]
+            return f"{SHAPE_LABELS[row.shape]}: {row.shape_note}" if row.shape_note else SHAPE_LABELS[row.shape]
         if column in (COLUMN_X, COLUMN_Y) and row.nudge_count:
             plural = "" if row.nudge_count == 1 else "s"
             return f"Position on the reference image ({unit}). {row.nudge_count} manual per-wavelength nudge{plural}."
@@ -635,6 +665,8 @@ class RoiTreeModel(QAbstractItemModel):
         can be dropped there. Qt reports a drop *on* an item as ``row == -1``
         with the item as ``parent``, and a drop *between* rows as the row index
         under the parent those rows share."""
+        if self._linked:
+            return None  # the Linked view is read-only: dropping would put ROIs in a group or reorder them behind the arrangement's back
         if parent.isValid():
             node = parent.internalPointer()
             if node.kind != "group":

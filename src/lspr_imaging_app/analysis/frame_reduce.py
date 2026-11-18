@@ -56,7 +56,17 @@ from ..image_tools.chromatic.affine import apply_affine_to_points, invert_affine
 from ..roi import rasterize as rz
 from ..domain.roi_links import is_reference
 from ..domain.roi_model import AreaRoi
-from ..domain.roi_shapes import Border, Circle, MaskShape, Rectangle, effective_border, ring_radii, shape_kind
+from ..domain.roi_shapes import (
+    Border,
+    Circle,
+    MaskShape,
+    Rectangle,
+    border_reach_radius,
+    effective_border,
+    reach_radius,
+    ring_radii,
+    shape_kind,
+)
 from .provenance import DEFAULT_REFERENCE_EXCLUSION_MODE, REFERENCE_EXCLUSION_MODES
 from .reduction import (
     DEFAULT_TRIMMED_MEAN_FRACTION,
@@ -81,15 +91,22 @@ SAMPLE, REFERENCE = 0, 1
 class RoiSet:
     """The geometry of an ordered list of ROIs as plain arrays, in the radii ``roi.rasterize`` uses.
 
-    ``vectorised[i]`` is True for a circular ROI, whose pixels are found for all ROIs at once; any other shape (rectangle, mask) is
-    rasterised by the per-ROI code of ``roi.rasterize`` (slower, same result). Row ``i`` of every result array belongs to ``rois[i]``."""
+    ``vectorised[i]`` is True for a circular ROI, whose pixels are found for all circles at once in one block pass; a rectangle or a mask is
+    found ROI by ROI inside its own box (``roi.rasterize.sample_flat_indices`` / ``reference_flat_indices``: the pixels of the reference
+    rasterizer, without a full plane per ROI). Row ``i`` of every result array belongs to ``rois[i]``.
+
+    **Radii.** For a circle, ``sample_r`` is its radius and ``ring_in_r`` / ``ring_out_r`` its ring, and they are what finds its pixels. For a
+    rectangle or a mask they are only a *reach*: ``sample_r`` and ``ring_out_r`` are the radii of a disc about the centre (in the ROI's own
+    source space) that holds the shape and its border (``roi_shapes.reach_radius`` / ``border_reach_radius``), ``ring_in_r`` is 0, and
+    ``sample_on`` / ``ring_on`` say whether the region can have pixels at all. That is all the neighbour test (`ring_reach_matrix`) and the
+    window boxes (`roi_window_boxes`) need; the pixels come from the shape itself."""
 
     rois: tuple[AreaRoi, ...]
     cx: np.ndarray
     cy: np.ndarray
-    sample_r: np.ndarray  # outer radius of the sample disk, px
-    ring_in_r: np.ndarray
-    ring_out_r: np.ndarray
+    sample_r: np.ndarray  # outer radius of the sample disk (a circle) or of the disc that holds the shape (any other), px
+    ring_in_r: np.ndarray  # circles only
+    ring_out_r: np.ndarray  # outer radius of the ring (a circle) or of the disc that holds the border (any other), px
     sample_on: np.ndarray  # False: empty sample aperture (radius 0)
     ring_on: np.ndarray  # False: no reference ring ("none", or outer diameter 0)
     vectorised: np.ndarray
@@ -125,9 +142,6 @@ NEIGHBOUR_REACH_MARGIN_PX = 2.0
 (two discs that do not overlap share no pixel), so this only covers floating-point edge cases; a larger margin costs a few needless re-reads,
 never a wrong number."""
 
-_UNBOUNDED_REACH_PX = 1.0e18  # a free-form (mask) ROI has no radius: it is treated as reaching everything
-
-
 def roi_row_digests(rs: RoiSet) -> list[bytes]:
     """One digest per ROI of everything that decides which pixels that ROI covers: the per-ROI part of ``RoiSet.key`` (centre, radii, which
     parts exist, and for a rectangle or a free-form ROI its shape, its resolved border and its mask). A circle's border is in its radii, so
@@ -162,8 +176,10 @@ def ring_reach_matrix(rs: RoiSet, rows, margin_px: float = NEIGHBOUR_REACH_MARGI
     """``near[a, k]``: True when the sample disc of ROI ``k`` can touch the reference ring of ROI ``rows[a]`` (``exclude_all_sample_rois`` leaves
     those pixels out of that ring). The test is on the distance of the centres, in the ROIs' own (source) space where the discs are defined,
     so it holds whatever the chromatic affine of the frame is (it maps both discs alike): a pixel in both ring j and disc k needs
-    ``distance <= ring_out_j + sample_r_k``. A free-form ROI has no radius and counts as reaching everything; a ROI without a ring is reached
-    by nobody; a ROI without a sample aperture reaches nobody. The diagonal (a ROI against itself) is not cleared here.
+    ``distance <= ring_out_j + sample_r_k``. For a rectangle or a mask those two radii are the *reach* of its border and of its shape (the disc
+    about the centre that holds it, `RoiSet`), so they take part like any other ROI: since 2026-11-18 (phase 2.2) a rectangle or a mask no longer
+    counts as reaching everything, and moving one makes stale only the ROIs it can touch. A ROI without a ring is reached by nobody; a ROI
+    without a sample aperture reaches nobody. The diagonal (a ROI against itself) is not cleared here.
 
     Shared by `local_roi_keys` (which cells a moved ROI makes stale) and `build_subset_layout` (which other ROIs a subset's rings need), so
     the two can never disagree about who is a neighbour.
@@ -172,13 +188,11 @@ def ring_reach_matrix(rs: RoiSet, rows, margin_px: float = NEIGHBOUR_REACH_MARGI
     region's reach is the disc radius and it counts as a "ring" here; and its disc removes nothing from anyone, so it never counts as a
     sample disc that reaches. With no reference ROI every line below is the same as before."""
     idx = np.asarray(rows, dtype=np.intp)
-    ring_reach = np.where(rs.vectorised, np.where(rs.is_ref, rs.sample_r, rs.ring_out_r), _UNBOUNDED_REACH_PX)[idx]
-    sample_reach = np.where(rs.vectorised, rs.sample_r, _UNBOUNDED_REACH_PX)
-    has_ring = np.where(rs.is_ref, rs.sample_on, rs.ring_on)
-    has_ring = (has_ring | ~rs.vectorised)[idx]
-    has_sample = (rs.sample_on | ~rs.vectorised) & ~rs.is_ref
+    ring_reach = np.where(rs.is_ref, rs.sample_r, rs.ring_out_r)[idx]
+    has_ring = np.where(rs.is_ref, rs.sample_on, rs.ring_on)[idx]
+    has_sample = rs.sample_on & ~rs.is_ref
     distance = np.hypot(rs.cx[idx][:, None] - rs.cx[None, :], rs.cy[idx][:, None] - rs.cy[None, :])
-    return (distance <= ring_reach[:, None] + sample_reach[None, :] + float(margin_px)) & has_ring[:, None] & has_sample[None, :]
+    return (distance <= ring_reach[:, None] + rs.sample_r[None, :] + float(margin_px)) & has_ring[:, None] & has_sample[None, :]
 
 
 def local_roi_keys(rs: RoiSet, exclusion_mode: str = DEFAULT_REFERENCE_EXCLUSION_MODE, margin_px: float = NEIGHBOUR_REACH_MARGIN_PX) -> list[bytes]:
@@ -188,9 +202,9 @@ def local_roi_keys(rs: RoiSet, exclusion_mode: str = DEFAULT_REFERENCE_EXCLUSION
 
     The test is made in the ROIs' own (source) space, where the discs are defined: a pixel is in both ring j and disc k only if its source
     position is within ``ring_out_j`` of ROI j's centre and within ``sample_r_k`` of ROI k's, so ``distance <= ring_out_j + sample_r_k`` is
-    necessary, whatever the chromatic affine of the frame (it maps both discs alike). A free-form ROI has no radius and counts as reaching
-    everything; a ROI without a border (``NO_BORDER``) is affected by no neighbour; ``exclusion_mode == "none"`` has
-    no neighbours at all.
+    necessary, whatever the chromatic affine of the frame (it maps both discs alike). A rectangle or a mask takes part with the reach of its
+    shape and border (`ring_reach_matrix`); a ROI without a border (``NO_BORDER``) is affected by no neighbour; ``exclusion_mode == "none"``
+    has no neighbours at all.
 
     Pure; O(n squared) arithmetic for n ROIs (160 ROIs: a few milliseconds)."""
     rows = roi_row_digests(rs)
@@ -219,12 +233,22 @@ def build_roi_set(rois, default_border: Border) -> RoiSet:
     ring_on = np.zeros(n, dtype=bool)
     vectorised = np.ones(n, dtype=bool)
     is_ref = np.array([is_reference(r) for r in rois], dtype=bool)
+    sample_on = np.zeros(n, dtype=bool)
     for i, roi in enumerate(rois):
-        if not isinstance(roi.shape, Circle):  # a rectangle or a mask: rasterised ROI by ROI (see `locate_pixels`)
+        border = effective_border(roi.border, default_border)
+        if not isinstance(roi.shape, Circle):
+            # A rectangle or a mask: found ROI by ROI inside its own box (see `locate_pixels`). Only its reach goes into the radius arrays:
+            # the neighbour test and the window boxes need "how far from the centre can this ROI's pixels be", nothing more. An empty
+            # mask has no pixels; a rectangle always may (even a zero-sized one can sit exactly on a pixel).
             vectorised[i] = False
+            sample_r[i] = reach_radius(roi.shape, cx[i], cy[i])
+            sample_on[i] = bool(roi.shape.mask.mask.any()) if isinstance(roi.shape, MaskShape) else True
+            if border.enabled and not is_ref[i]:
+                ring_out[i] = border_reach_radius(roi.shape, cx[i], cy[i], border)
+                ring_on[i] = True
             continue
         sample_r[i] = max(float(roi.shape.diameter_px) / 2.0, 0.0)
-        border = effective_border(roi.border, default_border)
+        sample_on[i] = sample_r[i] > 0.0
         if border.enabled and not is_ref[i]:  # a reference ROI is one region: no ring of its own
             inner_r, outer_r = ring_radii(roi.shape, border)
             if outer_r > 0.0:
@@ -239,7 +263,7 @@ def build_roi_set(rois, default_border: Border) -> RoiSet:
     for i in np.flatnonzero(~vectorised):  # a rectangle or a mask ROI: its shape and resolved border decide its pixels
         digest.update(repr((i, rois[i].center_x, rois[i].center_y)).encode())
         _update_with_free_shape(digest, rois[i], default_border)
-    return RoiSet(rois, cx, cy, sample_r, ring_in, ring_out, sample_r > 0.0, ring_on, vectorised, default_border, digest.hexdigest(), is_ref)
+    return RoiSet(rois, cx, cy, sample_r, ring_in, ring_out, sample_on, ring_on, vectorised, default_border, digest.hexdigest(), is_ref)
 
 
 def locate_pixels(
@@ -305,18 +329,17 @@ def locate_pixels(
                 local += start
                 parts[roi_key].append(local if every else index[local])
                 parts[flat_key].append((y0[local] + row) * width + (x0[local] + col))
-    for i in np.flatnonzero(~rs.vectorised):
+    for i in np.flatnonzero(~rs.vectorised):  # a rectangle or a mask: found inside its own box, the pixels of the reference rasterizer
         roi = rs.rois[i]
-        masks = (
-            rz.rasterize_sample(roi, shape, affine),
-            np.zeros(shape, dtype=bool) if rs.is_ref[i] else rz.rasterize_reference(  # a reference ROI has no ring
+        flats = (
+            rz.sample_flat_indices(roi, shape, affine),
+            np.zeros(0, dtype=np.int64) if rs.is_ref[i] else rz.reference_flat_indices(  # a reference ROI has no ring
                 roi, shape, affine, default_border=rs.default_border
             ),
         )
-        for mask, roi_key, flat_key in zip(masks, ("s_roi", "r_roi"), ("s_flat", "r_flat")):
-            flat = np.flatnonzero(mask)
+        for flat, roi_key, flat_key in zip(flats, ("s_roi", "r_roi"), ("s_flat", "r_flat")):
             parts[roi_key].append(np.full(flat.size, i, dtype=np.int64))
-            parts[flat_key].append(flat.astype(np.int64, copy=False))
+            parts[flat_key].append(flat)
     out = {key: (np.concatenate(arrays) if arrays else np.zeros(0, dtype=np.int64)) for key, arrays in parts.items()}
     if not rs.vectorised.all():
         for roi_key, flat_key in (("s_roi", "s_flat"), ("r_roi", "r_flat")):
@@ -333,7 +356,8 @@ costs a few needless re-reads when a mask changes there, never a wrong number)."
 def roi_window_boxes(rs: RoiSet, affine: np.ndarray, shape: tuple[int, int], margin_px: float = WINDOW_MARGIN_PX) -> tuple[np.ndarray, ...]:
     """For every ROI of ``rs``, the pixel box ``(y0, y1, x0, x1)`` (half-open, clipped to the ``shape`` image) that holds **every pixel the ROI can
     read** in a frame with chromatic ``affine`` - its sample disc and its reference ring - plus ``margin_px``. Four int64 arrays, one entry per ROI,
-    and a bool array ``bounded`` that is False for a free-form (mask) ROI, whose box is then the whole image.
+    and a bool array ``bounded``: True for every ROI since 2026-11-18 (phase 2.2: a rectangle or a mask has a reach too, `RoiSet`), kept so the
+    result keeps its shape; a ROI that were not bounded would get the whole image as its box.
 
     Why the box is big enough: a pixel ``p`` belongs to a ROI if its source position ``q = affine^-1 p`` lies within the outer radius ``r`` of the
     ROI's centre ``c``; then ``p - affine(c) = A (q - c)`` with ``A`` the linear part of the affine, so ``|p - affine(c)| <= sigma_max(A) * r`` (the
@@ -341,7 +365,6 @@ def roi_window_boxes(rs: RoiSet, affine: np.ndarray, shape: tuple[int, int], mar
     more. Used by `scan_fingerprint` to hash only the part of an ignore mask a ROI can see, so the box must never be too small: pinned by a test."""
     height, width = int(shape[0]), int(shape[1])
     n = rs.n
-    full = np.array([0, height, 0, width], dtype=np.int64)
     if n == 0:
         empty = np.zeros(0, dtype=np.int64)
         return empty, empty.copy(), empty.copy(), empty.copy(), np.zeros(0, dtype=bool)
@@ -354,10 +377,7 @@ def roi_window_boxes(rs: RoiSet, affine: np.ndarray, shape: tuple[int, int], mar
     x1 = np.clip(np.ceil(centres[:, 0] + reach) + 1, 0, width).astype(np.int64)
     y0 = np.clip(np.floor(centres[:, 1] - reach), 0, height).astype(np.int64)
     y1 = np.clip(np.ceil(centres[:, 1] + reach) + 1, 0, height).astype(np.int64)
-    bounded = rs.vectorised.copy()
-    for i in np.flatnonzero(~bounded):  # a free-form ROI: no radius to bound it by
-        y0[i], y1[i], x0[i], x1[i] = full
-    return y0, y1, x0, x1, bounded
+    return y0, y1, x0, x1, np.ones(n, dtype=bool)
 
 
 def group_mean_std(values: np.ndarray, roi: np.ndarray, n: int) -> tuple[np.ndarray, np.ndarray]:

@@ -148,6 +148,28 @@ def reach_radius(shape: Shape, center_x: float, center_y: float) -> float:
     return math.hypot(max(abs(left - center_x), abs(left + width - center_x)), max(abs(top - center_y), abs(top + height - center_y)))
 
 
+MASK_BORDER_SLACK_PX = 1.5
+"""Extra radius a mask's border needs beyond ``reach + gap + thickness`` (:func:`border_reach_radius`). The border of a mask is read off a distance
+map at whole pixels: the (source-space) point a target pixel maps to is snapped to its nearest pixel (at most 0.71 px away, along a diagonal) and
+that pixel is in the border when its centre is within ``gap + thickness + 0.5`` of a mask pixel's centre (the edge lies half a pixel out), and every
+mask pixel centre is within the reach of the centre. So a border pixel lies at most 0.71 + 0.5 = 1.21 px beyond ``reach + gap + thickness``; 1.5
+rounds that up. Measured worst case: 0.49 px (4,000 random masks, five affines, 2026-11-18; 0 under the identity). Pinned against the rasterizer by
+``tests/unit/test_lspri_roi_shape_reach.py`` (with no slack at all, 1 pair in 1,500 that meet is missed)."""
+
+
+def border_reach_radius(shape: Shape, center_x: float, center_y: float, border: Border) -> float:
+    """Radius of the circle about ``(center_x, center_y)`` that holds every pixel of the shape's **border**, in the ROI's own (source) space. For a
+    circle that is the outer radius of its ring (:func:`ring_radii`). For a rectangle it is its :func:`reach_radius` plus how far the border
+    reaches beyond the edge, ``max(gap + thickness, 0)`` (every border point is within that of the rectangle, and the rectangle is within its
+    reach of the centre). A mask adds :data:`MASK_BORDER_SLACK_PX` for the way its distance map is read. Only for code that asks "how far can this
+    ROI's border reach" (which ROIs can touch which, which pixels to read); never for deciding which pixels are in the border. Call it only for a
+    border that is enabled."""
+    if isinstance(shape, Circle):
+        return ring_radii(shape, border)[1]
+    reach = reach_radius(shape, center_x, center_y) + max(float(border.gap_px) + float(border.thickness_px), 0.0)
+    return reach + MASK_BORDER_SLACK_PX if isinstance(shape, MaskShape) else reach
+
+
 def scaled_shape(shape: Shape, scale: float) -> Shape:
     """The shape with its sizes multiplied by ``scale`` (a circle keeps at least 2 px across): what a ROI looks like after a chromatic
     affine of that largest stretch, for the overlay's drawing copy. A mask is not resampled (its drawing copy is only ever read for

@@ -76,6 +76,7 @@ from ...storage.ui_state_keys import (
     ROI_TABLE_COLLAPSED,
     ROI_TABLE_COLUMN_WIDTHS,
     ROI_TABLE_GROUP_ONLY,
+    ROI_TABLE_LINKED,
     ROI_TABLE_SORT,
     ROI_TABLE_VIEW_MODE,
 )
@@ -211,6 +212,8 @@ class RoiTablePanel(QWidget):
             self._rebuild(lambda: self._model.set_sort(saved_sort[0], saved_sort[1]))
         if store.get(ROI_TABLE_GROUP_ONLY) is True:
             self.set_group_only(True)
+        if store.get(ROI_TABLE_LINKED) is True:
+            self._linked_action.setChecked(True)  # (its handler rebuilds the table)
         collapsed = store.get(ROI_TABLE_COLLAPSED)
         if isinstance(collapsed, list) and all(isinstance(item, str) for item in collapsed):
             self._collapsed = set(collapsed)
@@ -268,6 +271,14 @@ class RoiTablePanel(QWidget):
             action.triggered.connect(lambda _checked=False, m=mode: self._on_view_mode_chosen(m))
             action_group.addAction(action)
             self._view_actions[mode] = action
+        self._view_menu.addSeparator()
+        self._linked_action = self._view_menu.addAction("Linked view (each sample with its references)")
+        self._linked_action.setCheckable(True)
+        self._linked_action.setToolTip(
+            "Arrange the table by links instead of groups: each sample that has linked references heads a section holding its own row and its references' rows; "
+            "samples without links and unused references are under \"Not linked\". Read-only (nothing is dragged or reordered here); groups come back when it is off."
+        )
+        self._linked_action.toggled.connect(self._on_linked_toggled)
         self._view_menu.setToolTipsVisible(True)
         self._view_actions[VIEW_GEOMETRY].setToolTip("x, y, shape and the diameters. D = outer, d = inner diameter; s = sample, r = reference.")
         self._view_actions[VIEW_SIMPLE].setToolTip("Only the ID and the group labels.")
@@ -320,6 +331,7 @@ class RoiTablePanel(QWidget):
 
     def _connect(self) -> None:
         self._toolbox.geometry_changed.connect(self._schedule_refresh)
+        self._toolbox.links_changed.connect(self._schedule_refresh)  # "R7", the link tooltips and the Linked view follow a link or an unlink
         self._toolbox.cosmetic_changed.connect(self._schedule_refresh)
         self._geometry.cosmetic_changed.connect(self._schedule_refresh)  # display unit, calibration
         if self._display_style is not None:
@@ -483,7 +495,7 @@ class RoiTablePanel(QWidget):
             self._tree.expandAll()
             for header in self._model.group_headers():
                 self._tree.setFirstColumnSpanned(header.row(), QModelIndex(), True)
-                if self._group_only or _group_key(self._model.group_id(header)) in self._collapsed:
+                if self._group_only or self._group_key_of(header) in self._collapsed:
                     self._tree.collapse(header)
         finally:
             self._restoring_view = False
@@ -614,7 +626,7 @@ class RoiTablePanel(QWidget):
                 header = QPersistentModelIndex(index)
                 QTimer.singleShot(0, lambda: self._tree.collapse(QModelIndex(header)) if header.isValid() else None)
             return
-        key = _group_key(self._model.group_id(index))
+        key = self._group_key_of(index)
         (self._collapsed.discard if expanded else self._collapsed.add)(key)
         if self._store is not None:
             self._store.set(ROI_TABLE_COLLAPSED, sorted(self._collapsed))
@@ -669,6 +681,15 @@ class RoiTablePanel(QWidget):
             self._rebuild(lambda: self._model.set_sort(COLUMN_ID, False), reveal=False)
             if self._store is not None:
                 self._store.set(ROI_TABLE_SORT, [COLUMN_ID, False])
+
+    def _group_key_of(self, header: QModelIndex) -> str:
+        """What the remembered collapsed set holds for a header: a group's id, "Ungrouped"'s key, or a Linked header's own key."""
+        return self._model.collapse_key(header) or _group_key(self._model.group_id(header))
+
+    def _on_linked_toggled(self, on: bool) -> None:
+        self._rebuild(lambda: self._model.set_linked_view(bool(on)), reveal=False)
+        if self._store is not None:
+            self._store.set(ROI_TABLE_LINKED, bool(on))
 
     def _on_view_mode_chosen(self, mode: str) -> None:
         self._apply_view_mode(mode)

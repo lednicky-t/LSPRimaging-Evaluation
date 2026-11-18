@@ -177,8 +177,8 @@ def cell_hashes(plan: ScanPlan, *, local_masks: bool = True) -> np.ndarray:
     pixels *in its window* and not with the whole mask. A mask edit then makes stale only the ROIs it touches, instead of every ROI of every cube it
     applies to. A frame whose mask does not meet a ROI's window contributes nothing to that ROI's hash: it hashes as if the frame had no mask, which
     is also what the numbers are. Whole-mask hashing remains for the cases that cannot be local: background removal that cuts the masked pixels out
-    of its estimate (`masks_are_global`), a plan that cannot make its masks (no ``mask_resolver``), a frame whose mask cannot be made, and a free-form
-    ROI (no bound). ``local_masks=False`` gives the hashes as they were before (cubes without masks never changed): used to recognise cells stamped
+    of its estimate (`masks_are_global`), a plan that cannot make its masks (no ``mask_resolver``) and a frame whose mask cannot be made. (A free-form
+    or rectangular ROI has a window like any other since phase 2.2, 2026-11-18.) ``local_masks=False`` gives the hashes as they were before (cubes without masks never changed): used to recognise cells stamped
     with the previous formula, whose inputs are then known to be unchanged (`stamped_by_previous_formula`)."""
     base = recipe_digest(recipe_of(plan.settings))
     local = bool(local_masks) and not masks_are_global(plan.settings)

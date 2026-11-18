@@ -29,14 +29,17 @@ from PyQt6.QtGui import QBrush, QColor, QPainterPath
 from PyQt6.QtWidgets import QGraphicsPathItem
 
 from ...roi.display_style import DEFAULT_REFERENCE_COLOR, RoiCircleStyle, RoiDisplayStyle
+from ...domain.roi_links import is_reference
 from ...domain.roi_model import AreaRoi, AreaRoiGroup
-from ...domain.roi_shapes import Border, Circle, effective_border, nominal_diameter, reach_radius, ring_diameters
-from ...roi.overlay_geometry import circle_outlines, circle_points
+from ...domain.roi_shapes import Border, Circle, MaskShape, Rectangle, effective_border, reach_radius, ring_diameters
+from ...roi.overlay_geometry import circle_outlines, circle_points, rectangle_points
 from .group_label_overlay import GroupLabelItem, GroupLabelSettings, group_label_entries
 from .label_placement import DEFAULT_ROI_PLACEMENT
 from .overlay_cache import OverlayLayers
 from .roi_label_overlay import DEFAULT_POINT_SIZE, RoiLabelItem, label_text
 from .sample_circles_item import SampleCirclesItem
+from .rectangle_handles_item import RectangleHandlesItem
+from .shape_paths_item import MaskOutlines, ShapePathsItem, placed
 
 CIRCLE_POINTS = 48
 """Vertices per drawn circle. 48 is smooth at any zoom a screen can show
@@ -48,6 +51,7 @@ SAMPLE_WIDTH = 1.5
 SAMPLE_WIDTH_FAST = 1.0
 """The sample circles' outline width while the slideshow plays with "thin ROI outlines" on."""
 REFERENCE_WIDTH = 1.0
+LINK_WIDTH = 1.0
 SELECTED_COLOR = "#f8fafc"
 SELECTED_WIDTH = 3.5
 
@@ -126,11 +130,78 @@ def roi_overlay_color(color_hex: str | None, default: str) -> str:
 
 
 def _ring_to_draw(roi: AreaRoi, default_border: Border) -> tuple[float, float]:
-    """The (inner, outer) diameters of the ring drawn for a ROI: its border's ring when it is a circle with a border, else (0, 0) (nothing)."""
+    """The (inner, outer) diameters of the ring drawn for a ROI: its border's ring when it is a circle with a border, else (0, 0) (nothing).
+    A reference ROI is one region with no border of its own (the scan gives it none), so none is drawn."""
     border = effective_border(roi.border, default_border)
-    if isinstance(roi.shape, Circle) and border.enabled:
+    if isinstance(roi.shape, Circle) and border.enabled and not is_reference(roi):
         return ring_diameters(roi.shape, border)
     return 0.0, 0.0
+
+
+def _flat_outlines(xs: np.ndarray, ys: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """``(N, P)`` closed rows as the two flat NaN-separated arrays `circle_outlines` returns (no NaN after the last)."""
+    if xs.shape[0] == 0:
+        return np.empty(0), np.empty(0)
+    gap = np.full((xs.shape[0], 1), np.nan)
+    return np.hstack((xs, gap)).ravel()[:-1], np.hstack((ys, gap)).ravel()[:-1]
+
+
+def _degenerate_rows(centers: np.ndarray, points: int) -> tuple[np.ndarray, np.ndarray]:
+    """Rows that sit on the centre: what a ROI with nothing to draw in a given part leaves in the arrays (as a circle of diameter 0 does)."""
+    return np.repeat(centers[:, 0:1], points, axis=1), np.repeat(centers[:, 1:2], points, axis=1)
+
+
+def sample_rows(rois: Sequence[AreaRoi], centers: np.ndarray, affine_matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """``(N, CIRCLE_POINTS)`` closed outline rows of every ROI's own region: circles and rectangles as their outline, a mask as a row on its centre
+    (a mask is drawn from its traced pixels, `ShapePathsItem`). Pure."""
+    xs, ys = _degenerate_rows(centers, CIRCLE_POINTS)
+    circles = [i for i, roi in enumerate(rois) if isinstance(roi.shape, Circle)]
+    rectangles = [i for i, roi in enumerate(rois) if isinstance(roi.shape, Rectangle)]
+    if circles:
+        diameters = np.array([rois[i].shape.diameter_px for i in circles], dtype=np.float64)
+        xs[circles], ys[circles] = circle_points(centers[circles], diameters, affine_matrix, n_points=CIRCLE_POINTS)
+    if rectangles:
+        shapes = [rois[i].shape for i in rectangles]
+        xs[rectangles], ys[rectangles] = rectangle_points(
+            centers[rectangles], np.array([r.width_px for r in shapes]), np.array([r.height_px for r in shapes]),
+            np.array([r.angle_deg for r in shapes]), affine_matrix, n_points=CIRCLE_POINTS,
+        )
+    return xs, ys
+
+
+def border_rows(
+    rois: Sequence[AreaRoi], centers: np.ndarray, affine_matrix: np.ndarray, default_border: Border
+) -> tuple[tuple[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]]:
+    """``((inner_x, inner_y), (outer_x, outer_y))``, each ``(N, CIRCLE_POINTS)``: the two edges of every ROI's border band. A circle's are its ring; a
+    rectangle's are the outlines at distance gap and gap + thickness from its edge (the outer one with rounded corners); a mask, a ROI without a
+    border and a reference ROI leave rows on their centre (a mask's band is drawn from its traced pixels). Pure."""
+    inner_x, inner_y = _degenerate_rows(centers, CIRCLE_POINTS)
+    outer_x, outer_y = inner_x.copy(), inner_y.copy()
+    circles, rectangles = [], []
+    for i, roi in enumerate(rois):
+        if is_reference(roi) or not effective_border(roi.border, default_border).enabled:
+            continue
+        if isinstance(roi.shape, Circle):
+            circles.append(i)
+        elif isinstance(roi.shape, Rectangle):
+            rectangles.append(i)
+    if circles:
+        sizes = np.array([ring_diameters(rois[i].shape, effective_border(rois[i].border, default_border)) for i in circles], dtype=np.float64)
+        inner_x[circles], inner_y[circles] = circle_points(centers[circles], sizes[:, 0], affine_matrix, n_points=CIRCLE_POINTS)
+        outer_x[circles], outer_y[circles] = circle_points(centers[circles], sizes[:, 1], affine_matrix, n_points=CIRCLE_POINTS)
+    if rectangles:
+        shapes = [rois[i].shape for i in rectangles]
+        borders = [effective_border(rois[i].border, default_border) for i in rectangles]
+        width, height, angle = (np.array([getattr(r, name) for r in shapes], dtype=np.float64) for name in ("width_px", "height_px", "angle_deg"))
+        gaps = np.array([bd.gap_px for bd in borders], dtype=np.float64)
+        reaches = gaps + np.array([bd.thickness_px for bd in borders], dtype=np.float64)
+        inner_x[rectangles], inner_y[rectangles] = rectangle_points(
+            centers[rectangles], width, height, angle, affine_matrix, offset_px=gaps, n_points=CIRCLE_POINTS
+        )
+        outer_x[rectangles], outer_y[rectangles] = rectangle_points(
+            centers[rectangles], width, height, angle, affine_matrix, offset_px=reaches, n_points=CIRCLE_POINTS
+        )
+    return (inner_x, inner_y), (outer_x, outer_y)
 
 
 class RoiOverlay:
@@ -152,15 +223,39 @@ class RoiOverlay:
         plot.addItem(self.sample_circles)
         self.sample_circles.set_style(self.sample.alpha, self.sample.alpha)
         self.sample_circles.setVisible(self.sample.visible)
+        # Mask ROIs (variable-length outlines) and the border of a mask: painted paths, see `shape_paths_item.py`. Empty for circles and rectangles.
+        self._mask_outlines = MaskOutlines()
+        self.mask_samples = ShapePathsItem(SAMPLE_WIDTH)
+        plot.addItem(self.mask_samples)
+        self.mask_samples.set_style(self.sample.alpha, self.sample.alpha)
+        self.mask_samples.setVisible(self.sample.visible)
         self.reference_curve = add_curve(plot, DEFAULT_REFERENCE_COLOR, width=REFERENCE_WIDTH)
         self.reference_fill = add_fill(plot, self.reference_curve)
         self.reference_fill.setPath(QPainterPath())
         self._style_fill(self.reference_fill, DEFAULT_REFERENCE_COLOR, self.reference.alpha)
+        self.mask_borders = ShapePathsItem(REFERENCE_WIDTH)
+        plot.addItem(self.mask_borders)
+        self.mask_borders.set_style(self.reference.alpha, self.reference.alpha)
+        self.mask_borders.setVisible(self.reference.visible)
+        # A dashed line from every sample ROI to each reference ROI it is linked to (the ROIs tab's Links switch), in the reference colour.
+        self.links_visible = True
+        self.link_curve = add_curve(plot, DEFAULT_REFERENCE_COLOR, width=LINK_WIDTH, dashed=True)
+        self._style_curve(self.link_curve, self.reference.color, self.reference.alpha, LINK_WIDTH, dashed=True)
         self.selection_curve = add_curve(plot, SELECTED_COLOR, width=SELECTED_WIDTH)
+        self.mask_selection = ShapePathsItem(SELECTED_WIDTH, filled=False)
+        plot.addItem(self.mask_selection)
+        self.mask_selection.setVisible(self.sample.visible)
+        # The handles of the selected rectangles (drag an edge or corner to resize, the knob to turn): `rectangle_handles_item.py`.
+        self.rect_handles = RectangleHandlesItem()
+        plot.addItem(self.rect_handles)
+        self.rect_handles.setVisible(self.sample.visible)
         self.label_item: RoiLabelItem | None = None
         self.group_label_item: GroupLabelItem | None = None
         self.group_labels = GroupLabelSettings()
-        for item in (self.sample_circles, self.reference_fill, self.reference_curve, self.selection_curve):
+        for item in (
+            self.sample_circles, self.mask_samples, self.reference_fill, self.reference_curve, self.mask_borders, self.link_curve,
+            self.selection_curve, self.mask_selection, self.rect_handles,
+        ):
             self.layers.adopt_data(item)  # in the stacking order they were created in (the fill sits under its curve)
         self._sample_drawn = False  # does the sample / reference part currently hold geometry? (a hidden part is not computed)
         self._reference_drawn = False
@@ -224,17 +319,27 @@ class RoiOverlay:
         self.layers.invalidate()
         self.sample_circles.set_style(self.sample.alpha, self.sample.alpha)
         self.sample_circles.setVisible(self.sample.visible)
+        self.mask_samples.set_style(self.sample.alpha, self.sample.alpha)
+        self.mask_samples.setVisible(self.sample.visible)
         self.selection_curve.setVisible(self.sample.visible)
+        self.mask_selection.setVisible(self.sample.visible)
+        self.rect_handles.setVisible(self.sample.visible)
         self._style_curve(self.reference_curve, self.reference.color, self.reference.alpha, REFERENCE_WIDTH)
         self.reference_curve.setVisible(self.reference.visible)
         self._style_fill(self.reference_fill, self.reference.color, self.reference.alpha)
         self.reference_fill.setVisible(self.reference.visible)
+        self.mask_borders.set_style(self.reference.alpha, self.reference.alpha)
+        self.mask_borders.setVisible(self.reference.visible)
+        self._style_curve(self.link_curve, self.reference.color, self.reference.alpha, LINK_WIDTH, dashed=True)
 
     @staticmethod
-    def _style_curve(curve: pg.PlotDataItem, color_hex: str, alpha: float, width: float) -> None:
+    def _style_curve(curve: pg.PlotDataItem, color_hex: str, alpha: float, width: float, *, dashed: bool = False) -> None:
         color = QColor(color_hex)
         color.setAlphaF(max(0.0, min(1.0, float(alpha))))
-        curve.setPen(pg.mkPen(color, width=width))
+        pen = pg.mkPen(color, width=width)
+        if dashed:
+            pen.setStyle(Qt.PenStyle.DashLine)
+        curve.setPen(pen)
 
     def _style_fill(self, item: QGraphicsPathItem, color_hex: str, alpha: float) -> None:
         color = QColor(color_hex)
@@ -243,13 +348,85 @@ class RoiOverlay:
 
     # -- drawing -------------------------------------------------------------------
 
+    def _draw_links(self, rois: Sequence[AreaRoi], centers: np.ndarray) -> None:
+        """The link lines: from each sample ROI's display centre to the display centre of each reference ROI it is linked to, NaN between lines. Only while
+        the Links switch is on and some ROI has links (a session without links draws nothing and costs one pass over the ROIs)."""
+        if not self.links_visible or not any(roi.reference_roi_ids for roi in rois):
+            self.link_curve.clear()
+            return
+        index_of = {roi.area_roi_id: i for i, roi in enumerate(rois)}
+        xs: list[float] = []
+        ys: list[float] = []
+        for i, roi in enumerate(rois):
+            for reference_id in roi.reference_roi_ids:
+                j = index_of.get(reference_id)
+                if j is not None:
+                    xs += [float(centers[i, 0]), float(centers[j, 0]), np.nan]
+                    ys += [float(centers[i, 1]), float(centers[j, 1]), np.nan]
+        if xs:
+            self.link_curve.setData(np.array(xs[:-1]), np.array(ys[:-1]))
+        else:
+            self.link_curve.clear()
+
+    def set_links_visible(self, shown: bool) -> None:
+        """The Links switch. The caller redraws (it needs the ROIs and their display centres)."""
+        self.layers.invalidate()
+        self.links_visible = bool(shown)
+
+    def _draw_shapes_sample(
+        self, rois: Sequence[AreaRoi], centers: np.ndarray, is_selected: np.ndarray, colors: Sequence[str], affine_matrix: np.ndarray
+    ) -> None:
+        """The sample part for a ROI list with a rectangle or a mask in it: circles and rectangles as rows in the circles item (a mask has none), each
+        mask as its traced pixel outline (`MaskOutlines`, `placed`), the selected ones again, thicker and white."""
+        rows_x, rows_y = sample_rows(rois, centers, affine_matrix)
+        is_mask = np.array([isinstance(roi.shape, MaskShape) for roi in rois], dtype=bool)
+        own = np.flatnonzero(~is_mask)
+        self.sample_circles.set_circles(rows_x[own], rows_y[own], [colors[i] for i in own])
+        selected_x, selected_y = _flat_outlines(rows_x[own][is_selected[own]], rows_y[own][is_selected[own]])
+        self.selection_curve.setData(selected_x, selected_y)
+        paths, path_colors, selected_paths = [], [], []
+        for i in np.flatnonzero(is_mask):
+            roi = rois[i]
+            path = placed(self._mask_outlines.sample(roi.shape.mask), affine_matrix)
+            paths.append(path)
+            path_colors.append(colors[i])
+            if is_selected[i]:
+                selected_paths.append(path)
+        self.mask_samples.set_paths(paths, path_colors)
+        self.mask_selection.set_paths(selected_paths, [SELECTED_COLOR] * len(selected_paths))
+        self.rect_handles.set_rectangles(
+            [(roi.shape, tuple(centers[i])) for i, roi in enumerate(rois) if is_selected[i] and isinstance(roi.shape, Rectangle)],
+            np.asarray(affine_matrix, dtype=np.float64)[:2, :2],
+        )
+
+    def _draw_shapes_border(
+        self, rois: Sequence[AreaRoi], centers: np.ndarray, affine_matrix: np.ndarray, default_border: Border
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """The border part for a ROI list with a rectangle or a mask in it: the two edge outlines of every circle and rectangle border (the flat arrays
+        the reference curve and ring fill take: ``N`` inner rows then ``N`` outer rows), and the traced band of every mask's border."""
+        (inner_x, inner_y), (outer_x, outer_y) = border_rows(rois, centers, affine_matrix, default_border)
+        paths = []
+        for roi in rois:
+            border = effective_border(roi.border, default_border)
+            if isinstance(roi.shape, MaskShape) and border.enabled and not is_reference(roi):
+                path = self._mask_outlines.border(roi.shape.mask, border)
+                if not path.isEmpty():
+                    paths.append(placed(path, affine_matrix))
+        self.mask_borders.set_paths(paths, [self.reference.color] * len(paths))
+        return _flat_outlines(np.vstack((inner_x, outer_x)), np.vstack((inner_y, outer_y)))
+
     def clear(self) -> None:
         self.layers.invalidate()
         self._sample_drawn = self._reference_drawn = False
         self.sample_circles.clear()
+        self.mask_samples.clear()
         self.reference_curve.clear()
         set_fill_outlines(self.reference_fill, np.empty(0), np.empty(0), 0)
+        self.mask_borders.clear()
+        self.link_curve.clear()
         self.selection_curve.clear()
+        self.mask_selection.clear()
+        self.rect_handles.clear()
         if self.label_item is not None:
             self.label_item.set_labels([])
         if self.group_label_item is not None:
@@ -276,8 +453,12 @@ class RoiOverlay:
         bent by the affine's linear part only - the translation is already in
         the centre."""
         centers = display_centers
-        # a rectangle or a mask is drawn as the circle that holds it until the shape UI (plan phase 3) draws each shape itself
-        sample_diameters = np.fromiter((nominal_diameter(roi.shape, roi.center_x, roi.center_y) for roi in rois), dtype=np.float64, count=len(rois))
+        # Circles only (every session before shapes, and still the usual one): the arrays below, unchanged. A rectangle or a mask in the list sends
+        # the sample and reference parts through `_draw_shapes` (phase 2.4, 2026-11-18).
+        circles_only = all(isinstance(roi.shape, Circle) for roi in rois)
+        sample_diameters = (
+            np.fromiter((roi.shape.diameter_px for roi in rois), dtype=np.float64, count=len(rois)) if circles_only else np.empty(0)
+        )
 
         # A part that is hidden is not computed (testing10, 2026-10-14: with every overlay switched off the overlay still
         # re-computed all its geometry on every wavelength step, ~7 ms). Showing it again goes through `apply_style` + a
@@ -292,44 +473,64 @@ class RoiOverlay:
                 key = roi.sample_color_hex
                 if color_override is not None:
                     key = color_override.get(roi.area_roi_id, key)
+                if key is None and is_reference(roi):  # one meaning for one colour: a reference ROI wears the reference colour
+                    key = self.reference.color
                 if key not in resolved:
                     resolved[key] = roi_overlay_color(key, self.sample.color)
                 sample_colors.append(resolved[key])
-            sample_x, sample_y = circle_points(centers, sample_diameters, affine_matrix, n_points=CIRCLE_POINTS)
-            self.sample_circles.set_circles(sample_x, sample_y, sample_colors)
-            # A selected ROI keeps its own colour and fill; the white border drawn on top of it marks the selection.
-            selection_x, selection_y = circle_outlines(
-                centers[is_selected], sample_diameters[is_selected], affine_matrix, n_points=CIRCLE_POINTS
-            )
-            self.selection_curve.setData(selection_x, selection_y)
+            if circles_only:
+                sample_x, sample_y = circle_points(centers, sample_diameters, affine_matrix, n_points=CIRCLE_POINTS)
+                self.sample_circles.set_circles(sample_x, sample_y, sample_colors)
+                # A selected ROI keeps its own colour and fill; the white border drawn on top of it marks the selection.
+                selection_x, selection_y = circle_outlines(
+                    centers[is_selected], sample_diameters[is_selected], affine_matrix, n_points=CIRCLE_POINTS
+                )
+                self.selection_curve.setData(selection_x, selection_y)
+                self.mask_samples.clear()
+                self.mask_selection.clear()
+                self.rect_handles.clear()
+            else:
+                self._draw_shapes_sample(rois, centers, is_selected, sample_colors, affine_matrix)
             self._sample_drawn = True
         elif self._sample_drawn:
             self.sample_circles.clear()
+            self.mask_samples.clear()
             self.selection_curve.clear()
+            self.mask_selection.clear()
+            self.rect_handles.clear()
             self._sample_drawn = False
 
         if self.reference.visible:
-            ring_sizes = np.asarray(
-                [_ring_to_draw(roi, default_border) for roi in rois], dtype=np.float64
-            ).reshape(-1, 2)  # (N, 2): inner, outer diameters; (0, 0) for a ROI with no ring to draw
-            reference_x, reference_y = circle_outlines(
-                np.vstack((centers, centers)),
-                np.concatenate((ring_sizes[:, 0], ring_sizes[:, 1])),
-                affine_matrix,
-                n_points=CIRCLE_POINTS,
-            )
+            if circles_only:
+                ring_sizes = np.asarray(
+                    [_ring_to_draw(roi, default_border) for roi in rois], dtype=np.float64
+                ).reshape(-1, 2)  # (N, 2): inner, outer diameters; (0, 0) for a ROI with no ring to draw
+                reference_x, reference_y = circle_outlines(
+                    np.vstack((centers, centers)),
+                    np.concatenate((ring_sizes[:, 0], ring_sizes[:, 1])),
+                    affine_matrix,
+                    n_points=CIRCLE_POINTS,
+                )
+                self.mask_borders.clear()
+            else:
+                reference_x, reference_y = self._draw_shapes_border(rois, centers, affine_matrix, default_border)
             self.reference_curve.setData(reference_x, reference_y)
             ring_x, ring_y = annulus_outlines(reference_x, reference_y, len(rois), CIRCLE_POINTS)
             set_fill_outlines(self.reference_fill, ring_x, ring_y, 2 * CIRCLE_POINTS)
             self._reference_drawn = True
         elif self._reference_drawn:
             self.reference_curve.clear()
+            self.mask_borders.clear()
             set_fill_outlines(self.reference_fill, np.empty(0), np.empty(0), 0)
             self._reference_drawn = False
+        self._draw_links(rois, centers)
         labels: list[tuple[float, float, float, str]] = []
         if self.labels_visible:
             labels = [
-                (float(cx), float(cy), reach_radius(roi.shape, roi.center_x, roi.center_y), label_text(roi.area_roi_id, roi.label))
+                (
+                    float(cx), float(cy), reach_radius(roi.shape, roi.center_x, roi.center_y),
+                    label_text(roi.area_roi_id, roi.label, reference=is_reference(roi)),
+                )
                 for roi, (cx, cy) in zip(rois, centers, strict=True)
             ]
 

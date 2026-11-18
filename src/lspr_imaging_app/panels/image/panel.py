@@ -160,6 +160,7 @@ from .overlay_style import OverlayStyle
 from .overlay_tint import OverlayTint
 from .tint_overlays import TintOverlays
 from .frame_status_text import FrameStatusText
+from .roi_creation import RoiCreation
 from .roi_queries import RoiQueries
 from .slideshow_state import restore_slideshow_settings
 from .prefetch import prefetch_order
@@ -694,6 +695,15 @@ class ImagePanel(QWidget):
             edit_target=self._edit_target, parent=self,
         )
         roi_gestures.refused.connect(self._on_tool_status)  # e.g. an individual change on a persistent point
+        self._roi_creation = RoiCreation(
+            self._roi_toolbox, self._selection, self._area_selection, image_shape=lambda: self._last_image_shape,
+            current_affine=self._roi_queries.current_affine, to_reference=self._roi_queries.display_to_reference, action_parent=self,
+        )
+        self._roi_creation.status.connect(self._on_tool_status)
+        self._roi_tab.link_requested.connect(self._roi_creation.link)
+        self._roi_tab.unlink_requested.connect(self._roi_creation.unlink)
+        self._roi_tab.shape_changed.connect(self._roi_creation.set_picked_shape)
+        self._roi_creation.set_picked_shape(self._roi_tab.shape_picker.shape())
         self._interaction = CanvasInteraction(
             plot=self._plot, view=self._view, menu_parent=self,
             active_tool=self._active_tool, roi_toolbox=self._roi_toolbox, selection=self._selection,
@@ -709,6 +719,7 @@ class ImagePanel(QWidget):
             drag_adjusters=self._selection_tools.drag_adjusters, value_click=self._selection_tools.run_value_tool,
             combine_badge=self._selection_tools.combine_badge,
             lock_to_selection=self.selection_regions.lock_to_selection, unlock=self.selection_regions.unlock_selection,
+            roi_creation=self._roi_creation,
         )
         scene.sigMouseClicked.connect(self._on_scene_clicked)
         scene.sigMouseMoved.connect(self._on_scene_moved)
