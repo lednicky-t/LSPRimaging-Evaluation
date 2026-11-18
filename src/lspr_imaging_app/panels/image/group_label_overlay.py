@@ -25,6 +25,7 @@ from PyQt6.QtCore import QPointF, QRectF
 from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QPainter
 
 from ...domain.roi_model import AreaRoi, AreaRoiGroup
+from ...domain.roi_shapes import nominal_diameter, reach_radius
 from .label_placement import DEFAULT_GROUP_PLACEMENT, placement_origin
 
 POSITIONS = ("first", "last")
@@ -94,7 +95,7 @@ def group_label_entries(
             middle = len(steps) // 2
             spacing = steps[middle] if len(steps) % 2 else 0.5 * (steps[middle - 1] + steps[middle])
         else:
-            spacing = 2.0 * float(anchor_roi.sample_diameter_px)
+            spacing = 2.0 * nominal_diameter(anchor_roi.shape, anchor_roi.center_x, anchor_roi.center_y)
         middle_roi = rois[index_of[members[len(members) // 2]]]
         color = middle_roi.sample_color_hex or group.sample_color_hex or default_color
         entries.append(
@@ -102,7 +103,7 @@ def group_label_entries(
                 text=group.name,
                 x=float(centers[index_of[anchor]][0]),
                 y=float(centers[index_of[anchor]][1]),
-                radius=float(anchor_roi.sample_diameter_px) / 2.0,
+                radius=reach_radius(anchor_roi.shape, anchor_roi.center_x, anchor_roi.center_y),
                 spacing=max(spacing, 1e-6),
                 color=color,
             )

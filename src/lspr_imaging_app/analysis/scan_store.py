@@ -52,6 +52,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
+from ..domain.roi_shapes import Circle, Rectangle
 from ..version import APP_NAME, APP_VERSION
 from .frame_reduce import RoiSet
 from .scan_arrays import ScanArrays
@@ -103,20 +104,29 @@ class StoredScan:
         return self.cell_hash != 0
 
 
+def _shape_json(shape) -> dict:
+    """A ROI's shape for the readable layout record (a mask is described by its box, not its pixels)."""
+    if isinstance(shape, Circle):
+        return {"kind": "circle", "diameter_px": float(shape.diameter_px)}
+    if isinstance(shape, Rectangle):
+        return {"kind": "rectangle", "width_px": float(shape.width_px), "height_px": float(shape.height_px), "angle_deg": float(shape.angle_deg)}
+    return {"kind": "mask", "x0": int(shape.mask.x0), "y0": int(shape.mask.y0), "shape": list(shape.mask.mask.shape[:2])}
+
+
 def layout_json(rs: RoiSet) -> str:
     """The ROI table of one layout, readable (ids and geometry as the scan used them)."""
     rows = [
         {
             "roi_id": int(r.area_roi_id), "center_x": float(r.center_x), "center_y": float(r.center_y),
-            "sample_diameter_px": float(r.sample_diameter_px), "sample_geometry_type": r.sample_geometry_type,
-            "reference_geometry_type": r.reference_geometry_type, "reference_inner_diameter_px": r.reference_inner_diameter_px,
-            "reference_outer_diameter_px": r.reference_outer_diameter_px,
+            "shape": _shape_json(r.shape),
+            "border": None if r.border is None else {"gap_px": r.border.gap_px, "thickness_px": r.border.thickness_px, "enabled": r.border.enabled},
             **({"role": "reference"} if rs.is_ref[i] else {}),  # written only for a reference ROI: an all-sample layout reads as before
         }
         for i, r in enumerate(rs.rois)
     ]
     return json.dumps(
-        {"default_reference_inner_diameter_px": rs.inner_default_px, "default_reference_outer_diameter_px": rs.outer_default_px, "rois": rows},
+        {"default_border": {"gap_px": rs.default_border.gap_px, "thickness_px": rs.default_border.thickness_px, "enabled": rs.default_border.enabled},
+         "rois": rows},
         indent=1, default=str,
     )
 

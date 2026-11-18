@@ -1591,8 +1591,7 @@ class ImagePanel(QWidget):
             self._with_tuning_best(rois, self._roi_toolbox.display_positions(frame, affine), affine),
             self._selection.selected_roi_ids(),
             affine,
-            detection.reference_inner_diameter_px,
-            detection.reference_outer_diameter_px,
+            detection.default_border(),
             self._roi_toolbox.groups(),
             color_override=self.signal_map.colors(),
         )

@@ -53,6 +53,7 @@ from ..image_tools.mask.model import MaskChange
 from ..image_tools.mask.transient_detection import ContourMask
 from ..progress import StageProgress
 from ..domain.roi_model import AreaRoi, RoiArrayGroup, RoiMask
+from ..domain.roi_shapes import MaskShape, Rectangle, Shape, remap_rectangle
 from .session import SessionState, write_json_file
 
 logger = logging.getLogger(__name__)
@@ -285,14 +286,20 @@ def _carry_roi(roi: AreaRoi, transform: ExportTransform) -> AreaRoi:
         center_y=center_y,
         per_wavelength=per_wavelength,
         timeline=None if roi.timeline is None else roi.timeline.mapped(shift),
-        sample_mask=_carry_roi_mask(roi.sample_mask, transform),
-        reference_mask=_carry_roi_mask(roi.reference_mask, transform),
+        shape=_carry_shape(roi.shape, roi.center_x, roi.center_y, transform),
     )
 
 
-def _carry_roi_mask(mask: RoiMask | None, transform: ExportTransform) -> RoiMask | None:
-    if mask is None:
-        return None
+def _carry_shape(shape: Shape, center_x: float, center_y: float, transform: ExportTransform) -> Shape:
+    """A ROI's shape in the exported coordinates: a circle is unchanged, a rectangle gets the angle its own x axis now points in, a mask is shifted."""
+    if isinstance(shape, Rectangle):
+        return remap_rectangle(shape, center_x, center_y, transform.point_from_processed)
+    if isinstance(shape, MaskShape):
+        return MaskShape(_carry_roi_mask(shape.mask, transform))
+    return shape
+
+
+def _carry_roi_mask(mask: RoiMask, transform: ExportTransform) -> RoiMask:
     ox, oy = transform.origin
     return RoiMask(x0=int(mask.x0) - ox, y0=int(mask.y0) - oy, mask=mask.mask)
 

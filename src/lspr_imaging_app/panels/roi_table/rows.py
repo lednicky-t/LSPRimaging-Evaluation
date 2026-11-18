@@ -13,6 +13,7 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 
 from ...domain.roi_model import AreaRoi, AreaRoiDetectionSettings, AreaRoiGroup
+from ...domain.roi_shapes import Border, Circle, MaskShape, Shape, effective_border, ring_diameters
 from ...roi.palette import DEFAULT_ROI_COLOR_HEX
 
 COLUMN_ID, COLUMN_NAME, COLUMN_X, COLUMN_Y, COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT = range(7)
@@ -59,14 +60,12 @@ app. `shape_of` calls any other sample/reference pairing "other"; give each new 
 own key, label, columns and pictogram (`delegate._paint_shape`) here when it arrives."""
 
 
-def shape_of(sample_geometry_type: str, reference_geometry_type: str) -> str:
-    """The shape a ROI's two stored geometry types make together."""
-    if sample_geometry_type == "mask":
+def shape_of(shape: Shape, border: Border | None) -> str:
+    """The table's shape key of a ROI's shape and border (``border`` ``None`` = the shared default border, which is one)."""
+    if isinstance(shape, MaskShape):
         return SHAPE_MASK
-    if sample_geometry_type == "circle" and reference_geometry_type == "annulus":
-        return SHAPE_RING
-    if sample_geometry_type == "circle" and reference_geometry_type == "none":
-        return SHAPE_DISK
+    if isinstance(shape, Circle):
+        return SHAPE_RING if border is None or border.enabled else SHAPE_DISK
     return SHAPE_OTHER
 
 
@@ -196,7 +195,10 @@ def build_roi_rows(
     """``default_color_hex``: the colour of a ROI with none of its own, as the Image panel draws it (the Sample swatch)."""
     group_of = {roi_id: group.group_id for group in groups for roi_id in group.area_roi_ids}
     rows = []
+    default_border = defaults.default_border()
     for roi in rois:
+        # the diameter columns describe a circle (its ring as diameters); any other shape has none to show yet
+        inner, outer = ring_diameters(roi.shape, effective_border(roi.border, default_border)) if isinstance(roi.shape, Circle) else (0.0, 0.0)
         rows.append(
             RoiRow(
                 roi_id=roi.area_roi_id,
@@ -206,14 +208,14 @@ def build_roi_rows(
                 has_own_color=roi.sample_color_hex is not None,
                 x=roi.center_x,
                 y=roi.center_y,
-                sample=roi.sample_diameter_px,
-                inner=defaults.reference_inner_diameter_px if roi.reference_inner_diameter_px is None else roi.reference_inner_diameter_px,
-                outer=defaults.reference_outer_diameter_px if roi.reference_outer_diameter_px is None else roi.reference_outer_diameter_px,
-                inner_inherited=roi.reference_inner_diameter_px is None,
-                outer_inherited=roi.reference_outer_diameter_px is None,
-                is_mask=roi.sample_geometry_type == "mask",
+                sample=roi.shape.diameter_px if isinstance(roi.shape, Circle) else 0.0,
+                inner=inner,
+                outer=outer,
+                inner_inherited=roi.border is None,
+                outer_inherited=roi.border is None,
+                is_mask=isinstance(roi.shape, MaskShape),
                 nudge_count=len(roi.per_wavelength or {}),
-                shape=shape_of(roi.sample_geometry_type, roi.reference_geometry_type),
+                shape=shape_of(roi.shape, roi.border),
             )
         )
     return rows

@@ -30,8 +30,8 @@ from PyQt6.QtWidgets import QGraphicsPathItem
 
 from ...roi.display_style import DEFAULT_REFERENCE_COLOR, RoiCircleStyle, RoiDisplayStyle
 from ...domain.roi_model import AreaRoi, AreaRoiGroup
+from ...domain.roi_shapes import Border, Circle, effective_border, nominal_diameter, reach_radius, ring_diameters
 from ...roi.overlay_geometry import circle_outlines, circle_points
-from ...roi.rasterize import effective_reference_diameters
 from .group_label_overlay import GroupLabelItem, GroupLabelSettings, group_label_entries
 from .label_placement import DEFAULT_ROI_PLACEMENT
 from .overlay_cache import OverlayLayers
@@ -123,6 +123,14 @@ def roi_overlay_color(color_hex: str | None, default: str) -> str:
     if color_hex and QColor(color_hex).isValid():
         return color_hex.lower()
     return default
+
+
+def _ring_to_draw(roi: AreaRoi, default_border: Border) -> tuple[float, float]:
+    """The (inner, outer) diameters of the ring drawn for a ROI: its border's ring when it is a circle with a border, else (0, 0) (nothing)."""
+    border = effective_border(roi.border, default_border)
+    if isinstance(roi.shape, Circle) and border.enabled:
+        return ring_diameters(roi.shape, border)
+    return 0.0, 0.0
 
 
 class RoiOverlay:
@@ -253,8 +261,7 @@ class RoiOverlay:
         display_centers: np.ndarray,
         selected_ids: Collection[int],
         affine_matrix: np.ndarray,
-        default_inner_diameter_px: float,
-        default_outer_diameter_px: float,
+        default_border: Border,
         groups: Sequence[AreaRoiGroup] = (),
         color_override: Mapping[int, str] | None = None,
     ) -> None:
@@ -269,7 +276,8 @@ class RoiOverlay:
         bent by the affine's linear part only - the translation is already in
         the centre."""
         centers = display_centers
-        sample_diameters = np.fromiter((roi.sample_diameter_px for roi in rois), dtype=np.float64, count=len(rois))
+        # a rectangle or a mask is drawn as the circle that holds it until the shape UI (plan phase 3) draws each shape itself
+        sample_diameters = np.fromiter((nominal_diameter(roi.shape, roi.center_x, roi.center_y) for roi in rois), dtype=np.float64, count=len(rois))
 
         # A part that is hidden is not computed (testing10, 2026-10-14: with every overlay switched off the overlay still
         # re-computed all its geometry on every wavelength step, ~7 ms). Showing it again goes through `apply_style` + a
@@ -301,16 +309,12 @@ class RoiOverlay:
             self._sample_drawn = False
 
         if self.reference.visible:
-            ring_diameters = np.asarray(
-                [
-                    effective_reference_diameters(roi, default_inner_diameter_px, default_outer_diameter_px)
-                    for roi in rois
-                ],
-                dtype=np.float64,
-            )  # (N, 2): inner, outer
+            ring_sizes = np.asarray(
+                [_ring_to_draw(roi, default_border) for roi in rois], dtype=np.float64
+            ).reshape(-1, 2)  # (N, 2): inner, outer diameters; (0, 0) for a ROI with no ring to draw
             reference_x, reference_y = circle_outlines(
                 np.vstack((centers, centers)),
-                np.concatenate((ring_diameters[:, 0], ring_diameters[:, 1])),
+                np.concatenate((ring_sizes[:, 0], ring_sizes[:, 1])),
                 affine_matrix,
                 n_points=CIRCLE_POINTS,
             )
@@ -325,7 +329,7 @@ class RoiOverlay:
         labels: list[tuple[float, float, float, str]] = []
         if self.labels_visible:
             labels = [
-                (float(cx), float(cy), float(roi.sample_diameter_px) / 2.0, label_text(roi.area_roi_id, roi.label))
+                (float(cx), float(cy), reach_radius(roi.shape, roi.center_x, roi.center_y), label_text(roi.area_roi_id, roi.label))
                 for roi, (cx, cy) in zip(rois, centers, strict=True)
             ]
 

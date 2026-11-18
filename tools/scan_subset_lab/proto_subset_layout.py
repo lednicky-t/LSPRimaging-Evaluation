@@ -62,7 +62,7 @@ if __name__ == "__main__":
     for squeeze, shift in ((0.25, (0, 0)), (0.4, (500, 300)), (1.0, (-600, -350))):
         cx0, cy0 = rs.cx.mean(), rs.cy.mean()
         moved = [replace(r, center_x=float(cx0 + (r.center_x - cx0) * squeeze + shift[0] * (squeeze == 1.0 and 1 or 0)), center_y=float(cy0 + (r.center_y - cy0) * squeeze + shift[1] * (squeeze == 1.0 and 1 or 0))) for r in rs.rois]
-        dense = fr.build_roi_set(moved, rs.inner_default_px, rs.outer_default_px)
+        dense = fr.build_roi_set(moved, rs.default_border)
         subs = [(int(i),) for i in rng.choice(dense.n, 6, replace=False)] + [tuple(sorted(rng.choice(dense.n, 8, replace=False)))]
         bad += check(f"synthetic squeeze {squeeze}, shift {shift}", dense, fr.EXCLUDE_ALL_SAMPLE_ROIS, subs, affines[:3])
     print("ALL IDENTICAL" if bad == 0 else f"MISMATCHES: {bad}")

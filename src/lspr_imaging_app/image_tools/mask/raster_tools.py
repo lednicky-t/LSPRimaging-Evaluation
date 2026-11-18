@@ -14,7 +14,7 @@ paint), not owned by any one consumer.
 
 **The intended shared consumers**: `MaskModule`'s whole-image raw-pixel-
 space ignore mask, and (not built yet) `RoiToolbox`'s per-ROI arbitrary
-mask geometry (`AreaRoi.sample_mask`/`reference_mask`, a `RoiMask` -
+mask geometry (`MaskShape.mask` of `AreaRoi.shape`, a `RoiMask` -
 `domain/roi_model.py`). Both are "a raster canvas authored once, edited with these
 same tools" - they differ only in size (full image vs. a small cropped
 bounding box) and in what happens *around* an edit (MaskModule's own

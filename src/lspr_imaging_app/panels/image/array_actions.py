@@ -43,6 +43,7 @@ from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QMessageBox, QWidget
 
 from ...dataset import chunk_plan as cp
+from ...domain.roi_shapes import nominal_diameter
 from ...dataset.model import is_dark_frame_wavelength
 from ...image_tools.background.module import BackgroundModule
 from ...image_tools.chromatic.affine import apply_affine_to_points
@@ -211,7 +212,7 @@ class ArrayActions(QObject):
         if len(rois) < 2:
             self.status.emit("Array: nothing to reorder (fewer than two ROIs).")
             return
-        band = grid_band_px([roi.sample_diameter_px for roi in rois])
+        band = grid_band_px([nominal_diameter(roi.shape, roi.center_x, roi.center_y) for roi in rois])
         order = order_by_grid(
             [roi.area_roi_id for roi in rois],
             [(float(roi.center_x), float(roi.center_y)) for roi in rois],
@@ -257,7 +258,7 @@ class ArrayActions(QObject):
             positions = self._toolbox.display_positions((cube, wavelength), affine)
             ids_all = [roi.area_roi_id for roi in self._toolbox.rois()]  # same order as `rois_at`
             centers = np.array([positions[ids_all.index(roi.area_roi_id)] for roi in keep], dtype=np.float64)
-            diameters = np.array([roi.sample_diameter_px for roi in keep], dtype=np.float64)
+            diameters = np.array([nominal_diameter(roi.shape, roi.center_x, roi.center_y) for roi in keep], dtype=np.float64)
             request["roi_ids"] = tuple(roi.area_roi_id for roi in keep)
         self._last_request = dict(kind=kind, **request)
         self.status.emit("Array: working...")
@@ -337,8 +338,7 @@ class ArrayActions(QObject):
         huge = (1 << 30, 1 << 30)
         boxes = cp.roi_read_boxes(
             rois, huge,
-            default_inner_diameter_px=settings.reference_inner_diameter_px,
-            default_outer_diameter_px=settings.reference_outer_diameter_px,
+            default_border=settings.default_border(),
         )
         centers = self._centers_of(rois)
         reach = cp.affine_reach(centers, self._chromatic.fitted_affines() if self._chromatic is not None else None)

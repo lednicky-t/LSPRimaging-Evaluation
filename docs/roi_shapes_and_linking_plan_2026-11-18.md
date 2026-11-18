@@ -143,9 +143,99 @@ An R region leaves out the pixels of every sample, like the ring does today (`ex
   a session without reference ROIs, and no gesture creates one before phase 3, so this edge case cannot be reached yet; decide
   the visible form together with the "R7" label and the Linked view.
 
-### 2 Shapes (back end)
-- One geometry function per shape (circle, rectangle with rotation, mask), used by the scan, the overlay, the histogram,
-  the wand's ROI layer, chunk planning and the session carry.
+### 2 Shapes (back end): design decisions of 2026-11-18 and build order
+
+**Maintainer's choices (2026-11-18), both the larger option; each has a consequence to keep in view:**
+
+1. **Circles convert to the same border description as every shape: gap g and thickness t from the shape's edge** (not "circles keep
+   their inner / outer diameters"). Border pixels are those at signed distance g .. g + t from the edge (positive = outside; a circle's
+   signed distance is |p - c| - R, so a *negative* gap, a ring that starts inside the sample, stays expressible: the golden set has one).
+   For a circle the pixel test stays the squared-distance test of today; only where its radii come from changes: `ring_in_r = R + g`,
+   `ring_out_r = ring_in_r + t`, evaluated in that fixed order.
+   *Consequence A, exactness:* the cell hash contains the ring radii as float64 bytes. A one-ulp difference (1e-10 in a diameter was
+   enough in the 2.0 mutation check) changes the key of that ROI without changing a single pixel, so the session would rescan for nothing.
+   The migration therefore stores `g = inner_r - R`, `t = outer_r - inner_r` and **verifies bit for bit** that `R + g` and `(R + g) + t`
+   give the old radii (true whenever the subtractions are exact, Sterbenz: R/2 <= inner_r <= 2R and inner_r <= outer_r <= 2 inner_r,
+   which covers every ring seen so far); a ROI that fails the check is reported by name and its cells rescan, never silently.
+   *Consequence B, behaviour:* today a ring is **absolute** (inner / outer diameter): resizing a circle's sample leaves its ring where it
+   was. With g / t the ring is defined from the sample's edge, so **resizing the sample carries the ring with it**. This is what decision 5
+   asks for, but it is a visible change for circles; the migration keeps every existing ROI's numbers (it writes each ROI's own g / t
+   from its effective legacy ring), the change only shows when a sample is resized afterwards. The shared default ring becomes a default
+   (gap, thickness), derived from the default diameters (28 / 36 with a 20 px sample = 4 / 4); a ROI whose legacy ring is not exactly
+   that gets its own border at migration.
+2. **One small parameter object per shape** instead of loose fields: `Circle(diameter_px)`, `Rectangle(width_px, height_px, angle_deg)`,
+   `MaskShape(mask)`, plus `Border` (own gap and thickness, or "shared default", or "none"), in a new pure module `domain/roi_shapes.py`
+   (added to the `lspr-science-no-qt` contract). `RoiGeometry` (the per-cube timeline entry) carries shape and border instead of
+   `sample_diameter_px` and the two ring diameters, so a rectangle can change size per cube like a circle. `AreaRoi` loses
+   `sample_diameter_px`, `sample_geometry_type`, `sample_mask`, `reference_geometry_type`, `reference_mask`, `reference_inner/outer_diameter_px`.
+   *Consequence C, reach:* about 21 files read `sample_diameter_px` (overlay, `roi_queries`, `roi_gestures`, `render` cache key, ROI table,
+   `chunk_plan`, `ring_size`, `detection`, `array_actions`, `group_*`, `provenance`, `scan_store.layout_json`, `session`, `session_carry`,
+   `background/estimate`, `chromatic/affine`, `frame_reduce`, `rasterize`). Each one is looked at and given an explicit shape rule; there
+   are **no compatibility properties** that pretend a rectangle has a diameter. The ring columns of the ROI table and the "Edit reference
+   ROI region" dialog show diameters today; in phase 2 they show the circle's diameters *derived* from g / t (no new screen), and phase 3
+   decides how to present gap / thickness.
+   A free-form **reference** region (`reference_geometry_type == "mask"`) goes away: it is a reference ROI (role) linked to the sample
+   (decisions 1-3). Nothing in the UI ever created one; the migration reports any it finds by ROI id instead of dropping it.
+
+**Data safety for saved sessions (needs the maintainer's yes before 2.5; nothing below is built):** session schema 1.12 (additive, a
+minor bump). A 1.11 file is read as before and converted in memory by the checked migration above; it is written in the new form by the
+next autosave. Before the first overwrite of a 1.11 `session.json` a copy `session.json.pre-1.12` is written once next to it. A build older than
+1.12 cannot read a 1.12 session correctly (it would fall back to its 20 px default diameter), so the file's schema version is what stops it.
+The old-format fixture `tests/data/lspri_golden_rois_session_1_11.json` is the migration's proof: it must decode to the pinned digests below.
+`scan.h5` (`lspri_scan` 1.1) records each ROI's geometry in `layout_json`; whether that record changes shape or stays informational is decided
+in 2.5 (the cell hashes, not that record, decide what is stale).
+
+**Build order (each step is committed locally only after asking):**
+- **2.0 Baseline (DONE 2026-11-18, before any source change).** `tests/unit/test_lspri_scan_circle_golden.py`: 12 deliberately awkward circles
+  (shared / own / no / zero-thickness / inside-the-sample / inner-0 rings, non-integer diameters, windows leaving the image, overlapping
+  discs, empty sample, one reference ROI) pinned as four SHA-256 digests: **keys** (set key, row digests, local keys, reach matrix; exact bytes),
+  **pixels** (full and subset layouts for identity / chromatic / rotated affines, both exclusion modes, window boxes; exact), **numbers**
+  (`reduce_frame`, four methods, with and without ignore mask and NaN pixels; counts exact, values to 10 significant digits because the plane
+  fit is not bit-reproducible across platforms) and **mask** (today's scipy-warped free-form ROI, to be replaced in 2.2 by a measured
+  decision). Mutation check: a 1e-10 diameter change moves the keys only; 0.4 px moves keys, pixels and numbers. Rule for every later step:
+  *only `golden_rois()` may be edited (to build the same circles in the new model); the pins must not move.*
+- **2.1 + 2.3 + 2.5 Model, per-ROI geometry, border, session (BUILT 2026-11-18; maintainer: "the app is in development, no proper migrations or
+  compatibility needed, just upgrade it"; so no backup copy and no per-ROI reporting, only a short reader of the old form).**
+  - `domain/roi_shapes.py` (pure, in the `lspr-science-no-qt` contract): `Circle`, `Rectangle(width, height, angle_deg)` (angle clockwise on the
+    screen, about the centre), `MaskShape`, `Border(gap, thickness, enabled)`, `NO_BORDER`; `ring_radii` (the one place a circle's ring radii are
+    computed: `R + g`, never below 0, then `+ t`), `ring_diameters`, `effective_border`, `reach_radius`, `nominal_diameter`, `remap_rectangle`,
+    `scaled_shape`. `RoiMask` moved there (re-exported by `roi_model`).
+  - `AreaRoi.shape` / `AreaRoi.border` (`None` = the shared default) replace `sample_diameter_px`, `sample_geometry_type`, `sample_mask`,
+    `reference_geometry_type`, `reference_mask`, `reference_inner/outer_diameter_px`; `RoiGeometry` is `(center_x, center_y, shape, border)`;
+    `AreaRoiDetectionSettings` has `border_gap_px` / `border_thickness_px` (4 + 4 = the old 28 / 36 ring around the 20 px default sample) and
+    `default_border()`. `default_border: Border` replaces every `(default_inner_diameter_px, default_outer_diameter_px)` pair in the scan,
+    the rasterizers, the overlay, the histogram, `chunk_plan.roi_read_boxes` and `tasks.compute_cell`.
+  - Circles: the pixel test and the squared-distance code are untouched. **Measured (2026-11-18, old sources of commit 24f0179 against the new ones,
+    `tests/unit/test_lspri_scan_circle_golden.py`):** the float64 radii of the 12 awkward circles are bit-identical (`RADII` pin), the pixel lists of
+    every layout / subset / window box and the reduced numbers are identical (`PIXELS`, `NUMBERS`), and the sample pixels of a free-form ROI are
+    identical (`MASK_SAMPLE`). The cell keys (`KEYS`) were **re-pinned**: a circle's digest no longer contains the shared default diameters (its
+    border is already in its radii), so every stored `scan.h5` hashes differently and rescans once; no number changes.
+  - `roi/rasterize.py` routes by shape. A rectangle is found by an exact signed distance in source space; the border of a rectangle or a mask is
+    the band `g <= signed distance <= g + t` (a rectangle's has rounded outer corners; a mask's distance is measured from pixel centres with the edge
+    half a pixel out, an exact-along-the-axes approximation of the staircase edge, `_mask_sdf`, cached). A mask's own region keeps the scipy warp.
+    All tested against brute-force implementations written in the test (`tests/unit/test_lspri_roi_shapes.py`).
+  - Non-circular ROIs go through the per-ROI rasterizer in the scan (`RoiSet.vectorised` is True only for circles) and count as "reaching
+    everything" for stale cells: correct, but slow (this is 2.2 below).
+  - Toolbox: `add_shaped_roi(x, y, shape, border=, role=)` (one undo step; `add_roi` is a circle wrapper); the diameter commands (`resize_rois`,
+    `resize_roi`, `reset_roi_diameters`, `refine_rois`, `place_array`) keep their **diameter-based API for circles** and store the border that gives
+    those diameters (so gestures, the ROI table and `ring_size` did not change); they refuse a ROI that is not a circle. **A change of the sample
+    diameter alone now carries the ring with it** (maintainer, 2026-11-18); a ring edit stores an own border at the (new) sample size; a ROI
+    without an own border keeps following the default. `remap_all` (rotate / flip / crop) turns a rectangle's angle (`remap_rectangle`; also in the
+    timeline and in the export's session carry), re-warps a mask as before.
+  - Session schema 1.12: ROI and timeline entries hold `shape` and (only when own) `border`; settings hold `border_gap_px` / `border_thickness_px`.
+    A 1.11 file is read as circles whose ring is converted per ROI (`_legacy_shape_and_border`: a ROI keeps exactly the ring it was measured
+    with, using the old file's own default ring diameters); the old-format fixture `tests/data/lspri_golden_rois_session_1_11.json` reads back
+    to the pinned radii, pixels and numbers. A free-form *reference* region (never created by the UI) is dropped with a warning.
+  - Display until phase 3: the overlay draws a rectangle or a mask as the circle that holds it (`nominal_diameter`) and hit-testing uses that
+    circle; the ROI table shows 0 for the diameters of such a ROI (shape key "other" for a rectangle). Phase 3 draws and edits each shape.
+- **2.2 Scan speed for non-circles (OPEN).** Vectorised path for rectangles and masks in `locate_pixels`; bounding boxes in `ring_reach_matrix` /
+  `roi_window_boxes` (and so in `local_roi_keys`) so a rectangle or a mask no longer "reaches everything" and a partial rescan works. A mask's pixel
+  membership through a fast lookup may differ from the scipy warp at half-pixel ties: count them against the `MASK_SAMPLE` pin and report.
+- **2.4 Remaining consumers (OPEN).** Overlay and hit-testing per shape, the histogram's region for a rectangle border, `region_at`'s ring search for
+  non-circles (a circle's ring is found by distance; a rectangle's border is only reachable through `rasterize_reference`), the scan's stored
+  `layout_json` (readable record, already shape-aware).
+- Original outline of this phase (kept): one geometry function per shape (circle, rectangle with rotation, mask), used by the scan, the overlay,
+  the histogram, the wand's ROI layer, chunk planning and the session carry.
 - Fast vectorised path for rectangles and masks (inverse-map the window's pixels, test / look up); masks get a bounding box
   for the reach test (`ring_reach_matrix`) so partial rescans keep working.
 - The general border (distance g .. g + t), cached in source space.

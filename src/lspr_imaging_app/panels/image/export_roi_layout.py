@@ -69,8 +69,7 @@ def gather_export_roi_layout(
     )
     # Processed-space boxes are not clipped to any image here (a huge shape): clipping happens once, in raw space.
     huge = (1 << 30, 1 << 30)
-    boxes = cp.roi_read_boxes(rois, huge, default_inner_diameter_px=settings.reference_inner_diameter_px,
-                              default_outer_diameter_px=settings.reference_outer_diameter_px)
+    boxes = cp.roi_read_boxes(rois, huge, default_border=settings.default_border())
     centres = np.array([(float(r.center_x), float(r.center_y)) for r in rois], dtype=np.float64)
     if reach is None:  # walks every fitted model, so the caller is expected to keep the answer
         reach = cp.affine_reach(centres, None if chromatic is None else chromatic.fitted_affines())

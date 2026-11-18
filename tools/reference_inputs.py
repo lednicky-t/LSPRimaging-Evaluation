@@ -31,9 +31,9 @@ class ReferenceInputs:
     def coverage_thresholds(self) -> CoverageThresholds:
         return DEFAULT_COVERAGE_THRESHOLDS
 
-    def default_reference_diameters(self) -> tuple[float, float]:
-        detection = self._m.roi_toolbox.detection_settings()
-        return detection.reference_inner_diameter_px, detection.reference_outer_diameter_px
+    def default_border(self):
+        """The shared default border (gap, thickness) of the session's ROIs."""
+        return self._m.roi_toolbox.detection_settings().default_border()
 
     def naming(self) -> FrameNamingScheme:
         """The file-name scheme of the stored snapshots. The dark frame is left out and the 0 nm rule is fixed (not the frame roles): changing a

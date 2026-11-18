@@ -44,15 +44,11 @@ def is_sample(roi: AreaRoi) -> bool:
 
 
 def has_builtin_reference(roi: AreaRoi) -> bool:
-    """True when the ROI's own geometry includes a reference region (the ring, or a reference mask).
+    """True when the ROI's own geometry includes a reference region (its border).
 
-    A ring whose diameters are not set on the ROI uses the shared default diameters (`rasterize.effective_reference_diameters`),
-    so ``reference_geometry_type != "none"`` is the test, not the diameter fields."""
-    if roi.reference_geometry_type == "none":
-        return False
-    if roi.reference_geometry_type == "mask":
-        return roi.reference_mask is not None
-    return True
+    A ROI without a border of its own follows the shared default border (``AreaRoi.border is None``), which is a border, so only an
+    explicitly switched-off border (``NO_BORDER``) means "none"."""
+    return roi.border is None or roi.border.enabled
 
 
 def reference_source(roi: AreaRoi) -> str:

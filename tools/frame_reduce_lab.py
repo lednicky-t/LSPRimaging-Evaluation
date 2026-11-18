@@ -59,7 +59,7 @@ class Context:
         self.background = modules.background.settings()
         self.det = modules.roi_toolbox.detection_settings()
         self.engine = modules.reference_inputs
-        self.inner, self.outer = self.engine.default_reference_diameters()
+        self.border = self.engine.default_border()
         self.trimmed = self.engine.trimmed_mean_fraction
         self.mode = self.engine.reference_exclusion_mode()
         self.timeline = bool(modules.roi_toolbox.has_timeline())
@@ -81,7 +81,7 @@ class Context:
         key = cube if self.timeline else -1
         if key not in self._cube_cache:
             rois = self.rois_for(cube)
-            rs = build_roi_set(rois, self.inner, self.outer)
+            rs = build_roi_set(rois, self.border)
             if rs.key not in self._exclusion_by_key:  # the timeline has few distinct layouts (4 in 314 cubes here)
                 self._exclusion_by_key[rs.key] = roi_exclusion_mask(self.processed_shape(), rois)
             self._cube_cache[key] = (rois, rs, self._exclusion_by_key[rs.key])
@@ -112,11 +112,11 @@ def section_profile(ctx: Context, frames) -> None:
     rois, rs, _ = ctx.cube_context(cube)
     valid = np.isfinite(processed)
     centers = np.array([[r.center_x, r.center_y] for r in rois])
-    radii = np.array([r.sample_diameter_px / 2.0 for r in rois])
+    radii = np.array([r.shape.diameter_px / 2.0 for r in rois])  # circular ROIs only
     profile = cProfile.Profile()
     profile.enable()
     for roi in rois:
-        st.roi_values_patch(roi, rois, centers, radii, processed, valid, affine, ignore, ctx.inner, ctx.outer, "mean", ctx.trimmed)
+        st.roi_values_patch(roi, rois, centers, radii, processed, valid, affine, ignore, ctx.border, "mean", ctx.trimmed)
     profile.disable()
     print(f"  today's patch-scoped path, {len(rois)} ROIs on one frame, by self time (the function's own work):")
     stats_ = pstats.Stats(profile)
@@ -148,7 +148,7 @@ def section_verify(ctx: Context, frames) -> bool:
         for i, roi in enumerate(rois):
             shape = processed.shape[:2]
             sm = rz.rasterize_sample(roi, shape, affine)
-            rm = rz.rasterize_reference(roi, shape, affine, default_inner_diameter_px=ctx.inner, default_outer_diameter_px=ctx.outer)
+            rm = rz.rasterize_reference(roi, shape, affine, default_border=ctx.border)
             if union is not None:
                 rm = rm & ~union
             if ignore is not None and ignore.shape == shape:
@@ -307,7 +307,7 @@ def section_scan(ctx: Context, cubes: list[int], threads: int, processes: int, m
         for i, roi in enumerate(rois):
             if union is None:
                 continue
-            old = st.roi_values_full(roi, processed, valid, affine, ignore, union, ctx.inner, ctx.outer, methods[0], ctx.trimmed)
+            old = st.roi_values_full(roi, processed, valid, affine, ignore, union, ctx.border, methods[0], ctx.trimmed)
             new = out[methods[0]][i, cube_pos, wl_pos]
             checked += 1
             if methods[0] == "mean":  # float64 mean on purpose: it may differ from the old float32 mean by ~1e-7 relative

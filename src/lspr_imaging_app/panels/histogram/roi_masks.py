@@ -41,6 +41,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from ...analysis.worker import AnalysisWorker
 from ...progress import Cancelled
 from ...domain.roi_model import AreaRoi
+from ...domain.roi_shapes import Border
 from ...roi.rasterize import union_roi_masks
 
 logger = logging.getLogger(__name__)
@@ -98,8 +99,7 @@ class RoiMaskProvider(QObject):
         rois: Sequence[AreaRoi],
         image_shape: tuple[int, ...],
         affine_matrix: np.ndarray,
-        default_inner_diameter_px: float,
-        default_outer_diameter_px: float,
+        default_border: Border,
         variant: Hashable = None,
     ) -> tuple[Hashable, RoiMasks | None]:
         """``(key, masks)``. `masks` is `None` when they are still being
@@ -108,21 +108,18 @@ class RoiMaskProvider(QObject):
         selected ROIs' ids), since the cache key would otherwise be identical."""
         shape = (int(image_shape[0]), int(image_shape[1]))
         affine = np.array(affine_matrix, dtype=np.float64)
-        inner, outer = float(default_inner_diameter_px), float(default_outer_diameter_px)
-        key = (self._generation, shape, affine.tobytes(), inner, outer, variant)
+        key = (self._generation, shape, affine.tobytes(), default_border, variant)
         self._wanted_key = key
         hit = self.cached(key)
         if hit is not None:
             return key, hit
         if len(rois) <= SYNC_ROI_LIMIT:
-            masks = union_roi_masks(
-                rois, shape, affine, default_inner_diameter_px=inner, default_outer_diameter_px=outer
-            )
+            masks = union_roi_masks(rois, shape, affine, default_border=default_border)
             self._cache = (key, masks)
             return key, masks
         if key == self._running_key or (self._queued is not None and self._queued[0] == key):
             return key, None  # already on its way
-        job = (key, tuple(copy.copy(roi) for roi in rois), shape, affine, inner, outer)
+        job = (key, tuple(copy.copy(roi) for roi in rois), shape, affine, default_border)
         if self._worker.is_running():
             self._queued = job  # replaces any older queued request: latest wins
             self._worker.cancel()
@@ -133,7 +130,7 @@ class RoiMaskProvider(QObject):
     # -- background job -----------------------------------------------------------
 
     def _start(self, job: tuple) -> None:
-        key, snapshot, shape, affine, inner, outer = job
+        key, snapshot, shape, affine, default_border = job
         self._worker.join(_JOIN_SECONDS)  # the previous task has emitted and is just exiting
         self._running_key = key
         cancel_event = self._worker.cancel_event
@@ -143,7 +140,7 @@ class RoiMaskProvider(QObject):
             try:
                 masks = union_roi_masks(
                     snapshot, shape, affine,
-                    default_inner_diameter_px=inner, default_outer_diameter_px=outer,
+                    default_border=default_border,
                     cancelled=cancel_event.is_set,
                 )
             except Cancelled:

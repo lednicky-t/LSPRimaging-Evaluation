@@ -108,7 +108,7 @@ def main() -> int:
     results = {r.cube_pos: r for r in scan_cubes(plan.jobs, plan.settings, processes=1)}
 
     det = modules.roi_toolbox.detection_settings()
-    inner, outer = engine.default_reference_diameters()
+    border = engine.default_border()
     naming = engine.naming()
     timeline = bool(modules.roi_toolbox.has_timeline())
     compared = identical_counts = flagged = 0
@@ -126,7 +126,7 @@ def main() -> int:
             for row in rows:
                 cell = compute_cell(
                     rois_here[row], cube, inputs, reduction_method="mean", trimmed_mean_fraction=trimmed,
-                    default_reference_inner_diameter_px=inner, default_reference_outer_diameter_px=outer,
+                    default_border=border,
                     masks_dir=scratch / "masks", chromatic_dir=scratch / "chromatic", settings_dir=scratch / "settings",
                     naming=naming, all_rois=rois_here, detection_settings=det, reference_exclusion_mode=mode,
                     sample_exclusion_cache=exclusion_cache, coverage_thresholds=engine.coverage_thresholds(),

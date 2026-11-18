@@ -30,7 +30,7 @@ calls into Chromatic itself, keeping the boundary one-directional.
 
 ``rasterize_sample``/``rasterize_reference`` (and their ``_for_patch``
 variants) are the real per-ROI, per-side dispatchers, ported from the inline
-``if roi.sample_geometry_type == "mask" ... else transformed_disk_mask(...)``
+``if the sample is a mask ... else transformed_disk_mask(...)`` (since 2026-11-18 routed by ``AreaRoi.shape``)
 logic in ``gui/analysis_tasks.py``'s ``_selected_roi_masks_for_spectrum`` -
 consolidated into one reusable place instead of re-implemented at each call
 site. That function's own multi-ROI OR-accumulation loop (iterate every
@@ -68,6 +68,7 @@ small array - the full source/target canvases are never materialized.
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Callable, Sequence
 
 import numpy as np
@@ -79,6 +80,16 @@ from ..image_tools.geometry.model import GeometrySettings
 from ..image_tools.geometry.transform import combined_geometry_affine_xy
 from ..progress import Cancelled
 from ..domain.roi_model import AreaRoi, RoiMask
+from ..domain.roi_shapes import (
+    NO_BORDER,
+    Border,
+    Circle,
+    MaskShape,
+    Rectangle,
+    effective_border,
+    ring_diameters,
+    ring_radii,
+)
 
 # -- arbitrary-mask geometry: crop/expand between stored and working form ---
 
@@ -516,43 +527,147 @@ def transformed_disk_mask_for_patch(
     return transformed_annulus_mask_for_patch(patch_origin_xy, patch_shape, center_xy, 0.0, diameter_px, affine_matrix)
 
 
-# -- per-ROI, per-side dispatcher: routes "circle"/"annulus"/"mask" ---------
-# Ported from the inline dispatch in gui/analysis_tasks.py's
-# _selected_roi_masks_for_spectrum (the per-ROI body of its loop, not its
-# multi-ROI OR-accumulation - that stays analysis/tasks.py's job).
+# -- per-ROI, per-side dispatcher: routes by the ROI's shape (circle / rectangle / mask) and its border ---------------------------------
+# A circle goes through the exact code above (its ring radii come from `roi_shapes.ring_radii`, the one place they are computed). A
+# rectangle, and the border of a rectangle or of a mask, are found by the signed-distance code below (phase 2 of
+# docs/roi_shapes_and_linking_plan_2026-11-18.md): the same pattern as the annulus (map the pixels of a target-space box back through the
+# inverse affine to source space, test them there), with the test "signed distance from the shape's edge" instead of "distance from the
+# centre". A mask's own region (the sample side) keeps the scipy warp above.
 
 
-def effective_reference_diameters(
-    roi: AreaRoi,
-    default_inner_diameter_px: float,
-    default_outer_diameter_px: float,
-) -> tuple[float, float]:
-    """Reference-ring (inner, outer) diameters to use for one ROI.
+def effective_reference_diameters(roi: AreaRoi, default_border: Border) -> tuple[float, float]:
+    """Border-ring (inner, outer) diameters of a *circular* ROI: its own border, else the shared default. Public because the Image panel
+    and the ROI table show the ring as diameters, from the very numbers this module rasterizes with (so the drawn ring and the measured
+    ring cannot disagree). Raises ``ValueError`` for a ROI that is not a circle: only a circle's border is a ring."""
+    if not isinstance(roi.shape, Circle):
+        raise ValueError("ring diameters exist only for circular ROIs")
+    return ring_diameters(roi.shape, effective_border(roi.border, default_border))
 
-    Each ROI may carry its own reference_inner_diameter_px/outer_diameter_px
-    (set via the ROI table or the "Edit reference ROI region" dialog) to
-    override the shared area_roi_settings default for that ROI only. Falls
-    back to the shared default when the ROI has no override.
 
-    Public as of 2026-09-23 (was ``_effective_reference_diameters``): the Image
-    panel draws the reference ring it is about to measure, so it needs the
-    same radii this module rasterizes with. Re-deriving the override rule in
-    the panel would mean the drawn ring and the measured ring could disagree
-    - which is exactly the class of silent error overlays exist to rule out.
-    """
-    inner = (
-        float(roi.reference_inner_diameter_px)
-        if roi.reference_inner_diameter_px is not None
-        else float(default_inner_diameter_px)
+def _signed_distance_rectangle(sx: np.ndarray, sy: np.ndarray, cx: float, cy: float, rect: Rectangle) -> np.ndarray:
+    """Distance of the points from the rectangle's edge, outwards positive (0 on the edge, negative inside). Exact: the outside part is the
+    Euclidean distance to the rectangle, so its outer corners are rounded."""
+    angle = np.deg2rad(float(rect.angle_deg))
+    cos, sin = np.cos(angle), np.sin(angle)
+    dx, dy = sx - cx, sy - cy
+    u = dx * cos + dy * sin  # along the rectangle's own x axis
+    v = dy * cos - dx * sin
+    qx = np.abs(u) - float(rect.width_px) / 2.0
+    qy = np.abs(v) - float(rect.height_px) / 2.0
+    return np.hypot(np.maximum(qx, 0.0), np.maximum(qy, 0.0)) + np.minimum(np.maximum(qx, qy), 0.0)
+
+
+@functools.lru_cache(maxsize=64)
+def _mask_sdf(x0: int, y0: int, mask_bytes: bytes, height: int, width: int, pad: int) -> tuple[np.ndarray, int, int]:
+    """Signed distance from a mask's edge at every pixel of its bounding box padded by ``pad`` pixels, and the source position of that
+    array's pixel (0, 0). The edge lies half a pixel from the pixel centres: outside a pixel at centre distance ``d`` from the nearest mask
+    pixel is ``d - 0.5`` from the edge, inside it is ``0.5 - d`` (``d`` = distance to the nearest pixel that is not in the mask). Exact along
+    the axes, a slight over-estimate of the true distance to the pixel staircase along diagonals. Cached: the mask does not change between
+    the frames of a scan."""
+    padded = np.pad(np.frombuffer(mask_bytes, dtype=bool).reshape(height, width), pad, constant_values=False)
+    sdf = np.where(padded, 0.5 - ndimage.distance_transform_edt(padded), ndimage.distance_transform_edt(~padded) - 0.5)
+    sdf.flags.writeable = False
+    return sdf, x0 - pad, y0 - pad
+
+
+def _signed_distance_mask(mask: RoiMask, extra: float, sx: np.ndarray, sy: np.ndarray) -> np.ndarray:
+    """Signed distance of the (source-space) points from a mask's edge, nearest stored pixel; ``+inf`` farther than ``extra`` outside the mask."""
+    height, width = mask.mask.shape[:2]
+    sdf, origin_x, origin_y = _mask_sdf(
+        int(mask.x0), int(mask.y0), np.ascontiguousarray(mask.mask, dtype=bool).tobytes(), int(height), int(width), int(np.ceil(extra)) + 2
     )
-    outer = (
-        float(roi.reference_outer_diameter_px)
-        if roi.reference_outer_diameter_px is not None
-        else float(default_outer_diameter_px)
-    )
-    inner = max(inner, 0.0)
-    outer = max(outer, inner)
-    return inner, outer
+    col = np.round(sx - origin_x).astype(np.int64)
+    row = np.round(sy - origin_y).astype(np.int64)
+    inside = (row >= 0) & (row < sdf.shape[0]) & (col >= 0) & (col < sdf.shape[1])
+    out = np.full(sx.shape, np.inf)
+    out[inside] = sdf[row[inside], col[inside]]
+    return out
+
+
+def _border_extent(border: Border) -> float:
+    """How far outside the shape's edge a border reaches (pixels)."""
+    return max(float(border.gap_px) + float(border.thickness_px), 0.0) if border.enabled else 0.0
+
+
+def _region_test(roi: AreaRoi, region: str, border: Border, sx: np.ndarray, sy: np.ndarray) -> np.ndarray:
+    """Which source-space points (flat arrays) belong to the ROI's ``region`` (``"sample"`` or ``"border"``): the shape's own region, or the
+    points whose signed distance from its edge is between the border's gap and gap + thickness (both inclusive). Rectangles and masks
+    only: a circle's region is found by its own, exact, squared-distance code."""
+    shape = roi.shape
+    cx, cy = float(roi.center_x), float(roi.center_y)
+    if isinstance(shape, Rectangle):
+        distance = _signed_distance_rectangle(sx, sy, cx, cy, shape)
+    elif isinstance(shape, MaskShape):
+        distance = _signed_distance_mask(shape.mask, _border_extent(border) if region == "border" else 0.0, sx, sy)
+    else:
+        raise TypeError(f"_region_test serves rectangles and masks, not {type(shape).__name__}")
+    if region == "sample":
+        return distance <= 0.0
+    gap = float(border.gap_px)
+    return (distance >= gap) & (distance <= gap + float(border.thickness_px))
+
+
+def region_source_bounds(roi: AreaRoi, region: str, border: Border) -> tuple[float, float, float, float]:
+    """``(x0, y0, x1, y1)`` in source space that holds the ROI's ``region``."""
+    shape = roi.shape
+    extra = _border_extent(border) if region == "border" else 0.0
+    cx, cy = float(roi.center_x), float(roi.center_y)
+    if isinstance(shape, Rectangle):
+        angle = np.deg2rad(float(shape.angle_deg))
+        half_w, half_h = float(shape.width_px) / 2.0, float(shape.height_px) / 2.0
+        half_x = abs(half_w * np.cos(angle)) + abs(half_h * np.sin(angle))
+        half_y = abs(half_w * np.sin(angle)) + abs(half_h * np.cos(angle))
+        return cx - half_x - extra, cy - half_y - extra, cx + half_x + extra, cy + half_y + extra
+    if isinstance(shape, MaskShape):
+        height, width = shape.mask.mask.shape[:2]
+        x0, y0 = float(shape.mask.x0) - 0.5, float(shape.mask.y0) - 0.5
+        return x0 - extra, y0 - extra, x0 + width + extra, y0 + height + extra
+    radius = max(float(shape.diameter_px), 0.0) / 2.0 + extra
+    return cx - radius, cy - radius, cx + radius, cy + radius
+
+
+def _region_reach_box(roi: AreaRoi, region: str, affine_matrix: np.ndarray, border: Border) -> tuple[int, int, int, int]:
+    """Target-space box ``(x0, y0, x1, y1)`` (end exclusive, not clipped to anything) that holds the ROI's ``region`` after the affine: the
+    box of the transformed corners of its source-space bounds, plus a few pixels of safety margin."""
+    sx0, sy0, sx1, sy1 = region_source_bounds(roi, region, border)
+    corners = np.array([[sx0, sy0], [sx1, sy0], [sx0, sy1], [sx1, sy1]], dtype=np.float64)
+    moved = apply_affine_to_points(corners, affine_matrix)
+    x_min, y_min = moved.min(axis=0)
+    x_max, y_max = moved.max(axis=0)
+    return int(np.floor(x_min)) - 2, int(np.floor(y_min)) - 2, int(np.ceil(x_max)) + 3, int(np.ceil(y_max)) + 3
+
+
+def _region_in_box(roi: AreaRoi, region: str, box: tuple[int, int, int, int], affine_matrix: np.ndarray, border: Border) -> np.ndarray:
+    """The ROI's ``region`` over the pixels of the target-space ``box`` (``(x0, y0, x1, y1)``): each pixel centre is mapped back through the
+    inverse affine and tested in source space. Shaped ``(y1 - y0, x1 - x0)``."""
+    x0, y0, x1, y1 = box
+    height, width = y1 - y0, x1 - x0
+    if height <= 0 or width <= 0:
+        return np.zeros((max(height, 0), max(width, 0)), dtype=bool)
+    yy, xx = np.indices((height, width), dtype=np.float64)
+    source = apply_affine_to_points(np.column_stack((xx.ravel() + x0, yy.ravel() + y0)), invert_affine_matrix(affine_matrix))
+    return _region_test(roi, region, border, source[:, 0], source[:, 1]).reshape((height, width))
+
+
+def _place_region(
+    roi: AreaRoi, region: str, origin_xy: tuple[int, int], shape: tuple[int, int], affine_matrix: np.ndarray, border: Border
+) -> np.ndarray:
+    """The ROI's ``region`` as a bool array of ``shape`` that starts at ``origin_xy`` in the image (a whole plane: origin 0, 0; or a patch).
+    Only the region's own reach box is ever computed, never the plane (the invariant at the top of this module)."""
+    out = np.zeros((int(shape[0]), int(shape[1])), dtype=bool)
+    ox, oy = int(origin_xy[0]), int(origin_xy[1])
+    bx0, by0, bx1, by1 = _region_reach_box(roi, region, affine_matrix, border)
+    x0, y0 = max(bx0, ox), max(by0, oy)
+    x1, y1 = min(bx1, ox + out.shape[1]), min(by1, oy + out.shape[0])
+    if x0 >= x1 or y0 >= y1:
+        return out
+    out[y0 - oy:y1 - oy, x0 - ox:x1 - ox] = _region_in_box(roi, region, (x0, y0, x1, y1), affine_matrix, border)
+    return out
+
+
+def _ring_diameters_of(circle: Circle, border: Border) -> tuple[float, float]:
+    inner, outer = ring_radii(circle, border)
+    return inner * 2.0, outer * 2.0  # a power of two: the annulus code halves them again exactly
 
 
 def rasterize_sample(
@@ -562,19 +677,16 @@ def rasterize_sample(
 ) -> np.ndarray:
     """One ROI's sample-region mask, full-image-sized.
 
-    Mask geometry is re-warped by `affine_matrix` like every other geometry
-    type (2026-09-21) - `roi.sample_mask` is authored in the reference
-    frame's processed-image space, expanded to full-image size, then
-    forward-transformed the same way `transformed_disk_mask` transforms a
-    circle's points, so it follows the current wavelength's geometry
-    instead of sitting at a fixed pixel location regardless of wavelength.
-    """
-    if roi.sample_geometry_type == "mask" and roi.sample_mask is not None:
-        expanded = expand_mask(roi.sample_mask, image_shape)
+    A mask is re-warped by `affine_matrix` like every other shape (2026-09-21): ``shape.mask`` is authored in the reference frame's
+    processed-image space, expanded to full-image size, then forward-transformed, so it follows the current wavelength's geometry
+    instead of sitting at a fixed pixel location regardless of wavelength."""
+    shape = roi.shape
+    if isinstance(shape, MaskShape):
+        expanded = expand_mask(shape.mask, image_shape)
         return warp_boolean_mask_affine(expanded, affine_matrix, output_shape=image_shape)
-    return transformed_disk_mask(
-        image_shape, (float(roi.center_x), float(roi.center_y)), float(roi.sample_diameter_px), affine_matrix
-    )
+    if isinstance(shape, Circle):
+        return transformed_disk_mask(image_shape, (float(roi.center_x), float(roi.center_y)), float(shape.diameter_px), affine_matrix)
+    return _place_region(roi, "sample", (0, 0), image_shape[:2], affine_matrix, NO_BORDER)
 
 
 def rasterize_sample_for_patch(
@@ -583,16 +695,16 @@ def rasterize_sample_for_patch(
     patch_shape: tuple[int, int],
     affine_matrix: np.ndarray,
 ) -> np.ndarray:
-    """Same as `rasterize_sample`, scoped to a patch (see
-    `transformed_disk_mask_for_patch`). Mask geometry is now affine-warped
-    here too (2026-09-21), via `expand_mask_to_patch_warped`'s own
-    reach-box bound - the full-canvas-cost trap this function exists to
-    avoid, see this module's own docstring."""
-    if roi.sample_geometry_type == "mask" and roi.sample_mask is not None:
-        return expand_mask_to_patch_warped(roi.sample_mask, patch_origin_xy, patch_shape, affine_matrix)
-    return transformed_disk_mask_for_patch(
-        patch_origin_xy, patch_shape, (float(roi.center_x), float(roi.center_y)), float(roi.sample_diameter_px), affine_matrix
-    )
+    """Same as `rasterize_sample`, scoped to a patch (see `transformed_disk_mask_for_patch`); a mask is affine-warped here too, through
+    `expand_mask_to_patch_warped`'s own reach-box bound, so the full-canvas cost this function exists to avoid is never paid."""
+    shape = roi.shape
+    if isinstance(shape, MaskShape):
+        return expand_mask_to_patch_warped(shape.mask, patch_origin_xy, patch_shape, affine_matrix)
+    if isinstance(shape, Circle):
+        return transformed_disk_mask_for_patch(
+            patch_origin_xy, patch_shape, (float(roi.center_x), float(roi.center_y)), float(shape.diameter_px), affine_matrix
+        )
+    return _place_region(roi, "sample", patch_origin_xy, patch_shape[:2], affine_matrix, NO_BORDER)
 
 
 def rasterize_reference(
@@ -600,25 +712,26 @@ def rasterize_reference(
     image_shape: tuple[int, int],
     affine_matrix: np.ndarray,
     *,
-    default_inner_diameter_px: float = 0.0,
-    default_outer_diameter_px: float = 0.0,
+    default_border: Border = NO_BORDER,
 ) -> np.ndarray:
-    """One ROI's reference-region mask, full-image-sized. Empty when
-    `reference_geometry_type == "none"` (some ROIs have no reference
-    region). See `rasterize_sample` on mask geometry's affine-warp.
-    """
-    image_height, image_width = image_shape[:2]
-    if roi.reference_geometry_type == "mask" and roi.reference_mask is not None:
-        expanded = expand_mask(roi.reference_mask, image_shape)
-        return warp_boolean_mask_affine(expanded, affine_matrix, output_shape=image_shape)
-    if roi.reference_geometry_type == "none":
-        return np.zeros((image_height, image_width), dtype=bool)
-    inner_diameter, outer_diameter = effective_reference_diameters(roi, default_inner_diameter_px, default_outer_diameter_px)
-    if outer_diameter <= 0.0:
-        return np.zeros((image_height, image_width), dtype=bool)
-    return transformed_annulus_mask(
-        image_shape, (float(roi.center_x), float(roi.center_y)), inner_diameter, outer_diameter, affine_matrix
-    )
+    """One ROI's built-in reference region (its border), full-image-sized. Empty when the ROI's border is switched off (``NO_BORDER``; a ROI
+    without its own border uses `default_border`, which is itself ``NO_BORDER`` unless the caller says otherwise).
+
+    A circle's border is the ring ``R + g .. R + g + t`` around the centre; a rectangle's or a mask's is the band of points whose distance
+    from the shape's edge is between ``g`` and ``g + t`` (see `roi_shapes`)."""
+    border = effective_border(roi.border, default_border)
+    height, width = image_shape[:2]
+    if not border.enabled:
+        return np.zeros((height, width), dtype=bool)
+    shape = roi.shape
+    if isinstance(shape, Circle):
+        inner_diameter, outer_diameter = _ring_diameters_of(shape, border)
+        if outer_diameter <= 0.0:
+            return np.zeros((height, width), dtype=bool)
+        return transformed_annulus_mask(
+            image_shape, (float(roi.center_x), float(roi.center_y)), inner_diameter, outer_diameter, affine_matrix
+        )
+    return _place_region(roi, "border", (0, 0), (height, width), affine_matrix, border)
 
 
 def rasterize_reference_for_patch(
@@ -627,22 +740,22 @@ def rasterize_reference_for_patch(
     patch_shape: tuple[int, int],
     affine_matrix: np.ndarray,
     *,
-    default_inner_diameter_px: float = 0.0,
-    default_outer_diameter_px: float = 0.0,
+    default_border: Border = NO_BORDER,
 ) -> np.ndarray:
-    """Same as `rasterize_reference`, scoped to a patch. Mask geometry is
-    affine-warped here too - see `rasterize_sample_for_patch`."""
+    """Same as `rasterize_reference`, scoped to a patch."""
+    border = effective_border(roi.border, default_border)
     patch_h, patch_w = patch_shape[:2]
-    if roi.reference_geometry_type == "mask" and roi.reference_mask is not None:
-        return expand_mask_to_patch_warped(roi.reference_mask, patch_origin_xy, patch_shape, affine_matrix)
-    if roi.reference_geometry_type == "none":
+    if not border.enabled:
         return np.zeros((patch_h, patch_w), dtype=bool)
-    inner_diameter, outer_diameter = effective_reference_diameters(roi, default_inner_diameter_px, default_outer_diameter_px)
-    if outer_diameter <= 0.0:
-        return np.zeros((patch_h, patch_w), dtype=bool)
-    return transformed_annulus_mask_for_patch(
-        patch_origin_xy, patch_shape, (float(roi.center_x), float(roi.center_y)), inner_diameter, outer_diameter, affine_matrix
-    )
+    shape = roi.shape
+    if isinstance(shape, Circle):
+        inner_diameter, outer_diameter = _ring_diameters_of(shape, border)
+        if outer_diameter <= 0.0:
+            return np.zeros((patch_h, patch_w), dtype=bool)
+        return transformed_annulus_mask_for_patch(
+            patch_origin_xy, patch_shape, (float(roi.center_x), float(roi.center_y)), inner_diameter, outer_diameter, affine_matrix
+        )
+    return _place_region(roi, "border", patch_origin_xy, (patch_h, patch_w), affine_matrix, border)
 
 
 def union_roi_masks(
@@ -650,50 +763,46 @@ def union_roi_masks(
     image_shape: tuple[int, int],
     affine_matrix: np.ndarray,
     *,
-    default_inner_diameter_px: float = 0.0,
-    default_outer_diameter_px: float = 0.0,
+    default_border: Border = NO_BORDER,
     cancelled: Callable[[], bool] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """``(sample, reference)``: the union of every ROI's sample region and of
-    every ROI's reference region, each a full-image bool plane.
+    """``(sample, reference)``: the union of every ROI's sample region and of every ROI's border, each a full-image bool plane.
 
-    Gives exactly what OR-ing `rasterize_sample` / `rasterize_reference` over
-    `rois` gives, but a circle or ring is rasterized only inside its own reach
-    box and ORed into the shared plane. The one-at-a-time form allocates and
-    ORs two full planes per ROI (4 MB each at 2048 x 2048), which measured
-    4.2 s for 1000 ROIs on the GUI thread (Histogram panel, 2026-10-07).
-    Mask-geometry ROIs keep the full-plane path: they are rare and their
-    reach box is the stored mask's, not a circle's.
+    Gives exactly what OR-ing `rasterize_sample` / `rasterize_reference` over `rois` gives, but a circle or ring is rasterized only inside
+    its own reach box and ORed into the shared plane. The one-at-a-time form allocates and ORs two full planes per ROI (4 MB each at
+    2048 x 2048), which measured 4.2 s for 1000 ROIs on the GUI thread (Histogram panel, 2026-10-07). Masks and rectangles keep the
+    one-at-a-time path: they are rare.
 
-    `cancelled` is checked once per ROI; when it returns true this raises
-    `progress.Cancelled` (CLAUDE.md: heavy work can be cancelled)."""
+    `cancelled` is checked once per ROI; when it returns true this raises `progress.Cancelled` (CLAUDE.md: heavy work can be cancelled)."""
     image_height, image_width = image_shape[:2]
     sample = np.zeros((image_height, image_width), dtype=bool)
     reference = np.zeros((image_height, image_width), dtype=bool)
     for roi in rois:
         if cancelled is not None and cancelled():
             raise Cancelled()
-        if roi.sample_geometry_type == "mask" and roi.sample_mask is not None:
-            sample |= rasterize_sample(roi, image_shape, affine_matrix)
-        else:
+        shape = roi.shape
+        if isinstance(shape, Circle):
             placed = _annulus_in_plane_box(
-                image_shape, (float(roi.center_x), float(roi.center_y)), 0.0, float(roi.sample_diameter_px), affine_matrix
+                image_shape, (float(roi.center_x), float(roi.center_y)), 0.0, float(shape.diameter_px), affine_matrix
             )
             if placed is not None:
                 x0, y0, x1, y1, local = placed
                 sample[y0:y1, x0:x1] |= local
+        else:
+            sample |= rasterize_sample(roi, image_shape, affine_matrix)
 
-        if roi.reference_geometry_type == "mask" and roi.reference_mask is not None:
-            reference |= rasterize_reference(roi, image_shape, affine_matrix)
-        elif roi.reference_geometry_type != "none":
-            inner, outer = effective_reference_diameters(roi, default_inner_diameter_px, default_outer_diameter_px)
+        border = effective_border(roi.border, default_border)
+        if not border.enabled:
+            continue
+        if isinstance(shape, Circle):
+            inner, outer = _ring_diameters_of(shape, border)
             if outer > 0.0:
-                placed = _annulus_in_plane_box(
-                    image_shape, (float(roi.center_x), float(roi.center_y)), inner, outer, affine_matrix
-                )
+                placed = _annulus_in_plane_box(image_shape, (float(roi.center_x), float(roi.center_y)), inner, outer, affine_matrix)
                 if placed is not None:
                     x0, y0, x1, y1, local = placed
                     reference[y0:y1, x0:x1] |= local
+        else:
+            reference |= rasterize_reference(roi, image_shape, affine_matrix, default_border=default_border)
     return sample, reference
 
 
@@ -817,19 +926,17 @@ def rasterize_fractional(
     affine_matrix: np.ndarray,
     supersample_factor: int = 8,
     *,
-    default_inner_diameter_px: float = 0.0,
-    default_outer_diameter_px: float = 0.0,
+    default_border: Border = NO_BORDER,
 ) -> np.ndarray:
     """§6a fractional pixel weighting: one ROI's sample- or reference-region
     coverage, full-image-sized, with values in `[0, 1]` instead of
     `rasterize_sample`/`rasterize_reference`'s plain boolean - 1.0 where a
     pixel is fully inside the ROI, 0.0 fully outside, and a fraction at
     whichever edge the affine-warped boundary cuts through. Works for
-    whichever geometry `roi`'s `side` ("sample"/"reference") actually has -
-    circle, annulus, or mask - by building the matching `point_test` and
-    handing it to the shared `_reach_box_coverage` engine; see that
-    function's docstring for why one engine suffices for every geometry
-    type instead of a per-shape rewrite.
+    whichever shape `roi` has (circle, rectangle, mask) and for its border,
+    by building the matching `point_test` and handing it to the shared
+    `_reach_box_coverage` engine; see that function's docstring for why one
+    engine suffices for every geometry type instead of a per-shape rewrite.
 
     Reach-box-bounded internally (never supersamples beyond where the shape
     can possibly reach, CLAUDE.md's non-negotiable invariant) even though
@@ -842,27 +949,25 @@ def rasterize_fractional(
     caller needs it.
     """
     image_height, image_width = image_shape[:2]
-    geometry_type = roi.sample_geometry_type if side == "sample" else roi.reference_geometry_type
-    if side == "reference" and geometry_type == "none":
+    shape = roi.shape
+    border = effective_border(roi.border, default_border)
+    region = "sample" if side == "sample" else "border"
+    if region == "border" and not border.enabled:
         return np.zeros((image_height, image_width), dtype=np.float32)
 
-    if geometry_type == "mask":
-        roi_mask = roi.sample_mask if side == "sample" else roi.reference_mask
-        if roi_mask is None:
-            return np.zeros((image_height, image_width), dtype=np.float32)
-        reach_x0, reach_y0, reach_x1, reach_y1 = _mask_reach_box(roi_mask, affine_matrix)
+    if isinstance(shape, MaskShape) and region == "sample":
+        reach_x0, reach_y0, reach_x1, reach_y1 = _mask_reach_box(shape.mask, affine_matrix)
         box = (
             max(reach_x0, 0), max(reach_y0, 0),
             min(reach_x1, image_width), min(reach_y1, image_height),
         )
-        point_test = _mask_point_test(roi_mask)
-    else:
+        point_test = _mask_point_test(shape.mask)
+    elif isinstance(shape, Circle):
         center_xy = (float(roi.center_x), float(roi.center_y))
-        if side == "sample":
-            inner_radius, outer_radius = 0.0, float(roi.sample_diameter_px) / 2.0
+        if region == "sample":
+            inner_radius, outer_radius = 0.0, float(shape.diameter_px) / 2.0
         else:
-            inner_diameter, outer_diameter = effective_reference_diameters(roi, default_inner_diameter_px, default_outer_diameter_px)
-            inner_radius, outer_radius = inner_diameter / 2.0, outer_diameter / 2.0
+            inner_radius, outer_radius = ring_radii(shape, border)
         if outer_radius <= 0.0:
             return np.zeros((image_height, image_width), dtype=np.float32)
         transformed_center, reach = annulus_reach_box(center_xy, outer_radius, affine_matrix)
@@ -873,6 +978,12 @@ def rasterize_fractional(
             min(int(np.ceil(transformed_center[1] + reach)) + 1, image_height),
         )
         point_test = _circle_annulus_point_test(center_xy, inner_radius, outer_radius)
+    else:  # a rectangle, or a mask's border: the signed-distance test
+        reach_x0, reach_y0, reach_x1, reach_y1 = _region_reach_box(roi, region, affine_matrix, border)
+        box = (max(reach_x0, 0), max(reach_y0, 0), min(reach_x1, image_width), min(reach_y1, image_height))
+
+        def point_test(source_x: np.ndarray, source_y: np.ndarray) -> np.ndarray:
+            return _region_test(roi, region, border, source_x, source_y)
 
     box_x0, box_y0, box_x1, box_y1 = box
     if box_x0 >= box_x1 or box_y0 >= box_y1:

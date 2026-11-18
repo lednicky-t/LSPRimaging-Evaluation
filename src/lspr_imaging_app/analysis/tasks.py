@@ -109,6 +109,7 @@ from ..image_tools.background.model import BackgroundSettings
 from ..image_tools.geometry.model import GeometrySettings
 from ..image_tools.preprocess import apply_preprocessing, resolve_external_mask
 from ..domain.roi_model import AreaRoi, AreaRoiDetectionSettings
+from ..domain.roi_shapes import Border
 from ..roi.rasterize import rasterize_reference, rasterize_sample
 from .provenance import (
     DEFAULT_REFERENCE_EXCLUSION_MODE,
@@ -339,8 +340,7 @@ def compute_cell(
     *,
     reduction_method: str,
     trimmed_mean_fraction: float,
-    default_reference_inner_diameter_px: float,
-    default_reference_outer_diameter_px: float,
+    default_border: Border,
     masks_dir: Path,
     chromatic_dir: Path,
     settings_dir: Path,
@@ -450,8 +450,7 @@ def compute_cell(
         sample_mask = rasterize_sample(roi, image_shape, wl_input.chromatic_affine)
         reference_mask = rasterize_reference(
             roi, image_shape, wl_input.chromatic_affine,
-            default_inner_diameter_px=default_reference_inner_diameter_px,
-            default_outer_diameter_px=default_reference_outer_diameter_px,
+            default_border=default_border,
         )
         if reference_exclusion_mode == "exclude_all_sample_rois" and all_rois:
             cache_key = (int(cube_index), float(wavelength_nm))

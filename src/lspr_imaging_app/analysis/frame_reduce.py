@@ -56,6 +56,7 @@ from ..image_tools.chromatic.affine import apply_affine_to_points, invert_affine
 from ..roi import rasterize as rz
 from ..domain.roi_links import is_reference
 from ..domain.roi_model import AreaRoi
+from ..domain.roi_shapes import Border, Circle, MaskShape, Rectangle, effective_border, ring_radii, shape_kind
 from .provenance import DEFAULT_REFERENCE_EXCLUSION_MODE, REFERENCE_EXCLUSION_MODES
 from .reduction import (
     DEFAULT_TRIMMED_MEAN_FRACTION,
@@ -80,8 +81,8 @@ SAMPLE, REFERENCE = 0, 1
 class RoiSet:
     """The geometry of an ordered list of ROIs as plain arrays, in the radii ``roi.rasterize`` uses.
 
-    ``vectorised[i]`` is False for a ROI with a free-form mask on either side: that ROI is rasterised by the existing
-    per-ROI code (slower, same result). Row ``i`` of every result array belongs to ``rois[i]``."""
+    ``vectorised[i]`` is True for a circular ROI, whose pixels are found for all ROIs at once; any other shape (rectangle, mask) is
+    rasterised by the per-ROI code of ``roi.rasterize`` (slower, same result). Row ``i`` of every result array belongs to ``rois[i]``."""
 
     rois: tuple[AreaRoi, ...]
     cx: np.ndarray
@@ -92,8 +93,7 @@ class RoiSet:
     sample_on: np.ndarray  # False: empty sample aperture (radius 0)
     ring_on: np.ndarray  # False: no reference ring ("none", or outer diameter 0)
     vectorised: np.ndarray
-    inner_default_px: float  # reference-ring diameters used for a ROI without its own, see rasterize.effective_reference_diameters
-    outer_default_px: float
+    default_border: Border  # the border used by a ROI without its own (``AreaRoi.border is None``)
     key: str = field(default="", compare=False)
     """A digest of everything above that decides which pixels a ROI covers (also free-form masks). Two RoiSets with the
     same key cover the same pixels; used only to find a cached `PixelLayout`, never stored."""
@@ -116,7 +116,7 @@ class RoiSet:
         key = hashlib.sha256(self.key.encode("ascii") + b"|subset|" + idx.astype(np.int64).tobytes()).hexdigest()
         return RoiSet(
             tuple(self.rois[i] for i in idx), self.cx[idx], self.cy[idx], self.sample_r[idx], self.ring_in_r[idx], self.ring_out_r[idx],
-            self.sample_on[idx], self.ring_on[idx], self.vectorised[idx], self.inner_default_px, self.outer_default_px, key, self.is_ref[idx],
+            self.sample_on[idx], self.ring_on[idx], self.vectorised[idx], self.default_border, key, self.is_ref[idx],
         )
 
 
@@ -130,26 +130,32 @@ _UNBOUNDED_REACH_PX = 1.0e18  # a free-form (mask) ROI has no radius: it is trea
 
 def roi_row_digests(rs: RoiSet) -> list[bytes]:
     """One digest per ROI of everything that decides which pixels that ROI covers: the per-ROI part of ``RoiSet.key`` (centre, radii, which
-    parts exist, and for a free-form ROI its masks), plus the shared default ring diameters (a free-form ROI is rasterised with them)."""
-    defaults = np.array([rs.inner_default_px, rs.outer_default_px], dtype=np.float64).tobytes()
+    parts exist, and for a rectangle or a free-form ROI its shape, its resolved border and its mask). A circle's border is in its radii, so
+    the shared default border is not in any digest: changing it changes the radii of exactly the ROIs that follow it."""
     rows: list[bytes] = []
     for i in range(rs.n):
         digest = hashlib.blake2b(digest_size=16)
         digest.update(np.array([rs.cx[i], rs.cy[i], rs.sample_r[i], rs.ring_in_r[i], rs.ring_out_r[i]], dtype=np.float64).tobytes())
         digest.update(bytes((int(rs.ring_on[i]), int(rs.vectorised[i]))))
-        digest.update(defaults)
         if rs.is_ref[i]:  # only a reference ROI adds a byte, so the digest (and the stored cell hash) of an all-sample ROI set is unchanged
             digest.update(b"|reference")
         if not rs.vectorised[i]:
-            roi = rs.rois[i]
-            digest.update(repr((roi.sample_geometry_type, roi.reference_geometry_type, roi.sample_diameter_px,
-                                roi.reference_inner_diameter_px, roi.reference_outer_diameter_px)).encode())
-            for mask in (roi.sample_mask, roi.reference_mask):
-                if mask is not None:
-                    digest.update(repr((mask.x0, mask.y0, mask.mask.shape)).encode())
-                    digest.update(np.ascontiguousarray(mask.mask, dtype=bool).tobytes())
+            _update_with_free_shape(digest, rs.rois[i], rs.default_border)
         rows.append(digest.digest())
     return rows
+
+
+def _update_with_free_shape(digest, roi: AreaRoi, default_border: Border) -> None:
+    """Add what decides the pixels of a ROI that is not a circle: its shape (kind, sizes, a mask's pixels) and its *resolved* border."""
+    shape = roi.shape
+    border = effective_border(roi.border, default_border)
+    digest.update(repr((shape_kind(shape), border.gap_px, border.thickness_px, border.enabled)).encode())
+    if isinstance(shape, Rectangle):
+        digest.update(repr((shape.width_px, shape.height_px, shape.angle_deg)).encode())
+    elif isinstance(shape, MaskShape):
+        mask = shape.mask
+        digest.update(repr((mask.x0, mask.y0, mask.mask.shape)).encode())
+        digest.update(np.ascontiguousarray(mask.mask, dtype=bool).tobytes())
 
 
 def ring_reach_matrix(rs: RoiSet, rows, margin_px: float = NEIGHBOUR_REACH_MARGIN_PX) -> np.ndarray:
@@ -183,7 +189,7 @@ def local_roi_keys(rs: RoiSet, exclusion_mode: str = DEFAULT_REFERENCE_EXCLUSION
     The test is made in the ROIs' own (source) space, where the discs are defined: a pixel is in both ring j and disc k only if its source
     position is within ``ring_out_j`` of ROI j's centre and within ``sample_r_k`` of ROI k's, so ``distance <= ring_out_j + sample_r_k`` is
     necessary, whatever the chromatic affine of the frame (it maps both discs alike). A free-form ROI has no radius and counts as reaching
-    everything; a ROI without a ring (``reference_geometry_type == "none"``) is affected by no neighbour; ``exclusion_mode == "none"`` has
+    everything; a ROI without a border (``NO_BORDER``) is affected by no neighbour; ``exclusion_mode == "none"`` has
     no neighbours at all.
 
     Pure; O(n squared) arithmetic for n ROIs (160 ROIs: a few milliseconds)."""
@@ -202,7 +208,7 @@ def local_roi_keys(rs: RoiSet, exclusion_mode: str = DEFAULT_REFERENCE_EXCLUSION
     return keys
 
 
-def build_roi_set(rois, default_inner_diameter_px: float, default_outer_diameter_px: float) -> RoiSet:
+def build_roi_set(rois, default_border: Border) -> RoiSet:
     rois = tuple(rois)
     n = len(rois)
     cx = np.array([float(r.center_x) for r in rois], dtype=np.float64)
@@ -214,37 +220,26 @@ def build_roi_set(rois, default_inner_diameter_px: float, default_outer_diameter
     vectorised = np.ones(n, dtype=bool)
     is_ref = np.array([is_reference(r) for r in rois], dtype=bool)
     for i, roi in enumerate(rois):
-        if (roi.sample_geometry_type == "mask" and roi.sample_mask is not None) or (
-            roi.reference_geometry_type == "mask" and roi.reference_mask is not None
-        ):
+        if not isinstance(roi.shape, Circle):  # a rectangle or a mask: rasterised ROI by ROI (see `locate_pixels`)
             vectorised[i] = False
             continue
-        sample_r[i] = max(float(roi.sample_diameter_px) / 2.0, 0.0)
-        if roi.reference_geometry_type != "none" and not is_ref[i]:  # a reference ROI is one region: no ring of its own
-            inner_d, outer_d = rz.effective_reference_diameters(roi, default_inner_diameter_px, default_outer_diameter_px)
-            if outer_d > 0.0:
-                inner_r = max(inner_d, 0.0) / 2.0
+        sample_r[i] = max(float(roi.shape.diameter_px) / 2.0, 0.0)
+        border = effective_border(roi.border, default_border)
+        if border.enabled and not is_ref[i]:  # a reference ROI is one region: no ring of its own
+            inner_r, outer_r = ring_radii(roi.shape, border)
+            if outer_r > 0.0:
                 ring_in[i] = inner_r
-                ring_out[i] = max(outer_d / 2.0, inner_r)
+                ring_out[i] = outer_r
                 ring_on[i] = True
     digest = hashlib.sha256()
     for array in (cx, cy, sample_r, ring_in, ring_out, ring_on, vectorised):
         digest.update(np.ascontiguousarray(array).tobytes())
-    digest.update(np.array([default_inner_diameter_px, default_outer_diameter_px], dtype=np.float64).tobytes())
     if is_ref.any():  # only then, so the key of an all-sample set is what it was
         digest.update(b"|reference|" + np.ascontiguousarray(is_ref).tobytes())
-    for i in np.flatnonzero(~vectorised):  # a free-form mask ROI: its masks and geometry types decide its pixels
-        roi = rois[i]
-        digest.update(repr((i, roi.center_x, roi.center_y, roi.sample_diameter_px, roi.sample_geometry_type, roi.reference_geometry_type,
-                            roi.reference_inner_diameter_px, roi.reference_outer_diameter_px)).encode())
-        for mask in (roi.sample_mask, roi.reference_mask):
-            if mask is not None:
-                digest.update(repr((mask.x0, mask.y0, mask.mask.shape)).encode())
-                digest.update(np.ascontiguousarray(mask.mask, dtype=bool).tobytes())
-    return RoiSet(
-        rois, cx, cy, sample_r, ring_in, ring_out, sample_r > 0.0, ring_on, vectorised,
-        float(default_inner_diameter_px), float(default_outer_diameter_px), digest.hexdigest(), is_ref,
-    )
+    for i in np.flatnonzero(~vectorised):  # a rectangle or a mask ROI: its shape and resolved border decide its pixels
+        digest.update(repr((i, rois[i].center_x, rois[i].center_y)).encode())
+        _update_with_free_shape(digest, rois[i], default_border)
+    return RoiSet(rois, cx, cy, sample_r, ring_in, ring_out, sample_r > 0.0, ring_on, vectorised, default_border, digest.hexdigest(), is_ref)
 
 
 def locate_pixels(
@@ -315,7 +310,7 @@ def locate_pixels(
         masks = (
             rz.rasterize_sample(roi, shape, affine),
             np.zeros(shape, dtype=bool) if rs.is_ref[i] else rz.rasterize_reference(  # a reference ROI has no ring
-                roi, shape, affine, default_inner_diameter_px=rs.inner_default_px, default_outer_diameter_px=rs.outer_default_px
+                roi, shape, affine, default_border=rs.default_border
             ),
         )
         for mask, roi_key, flat_key in zip(masks, ("s_roi", "r_roi"), ("s_flat", "r_flat")):

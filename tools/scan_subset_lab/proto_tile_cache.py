@@ -24,6 +24,7 @@ import analysis_stage_timing as st
 import numpy as np
 
 from lspr_imaging_app.analysis import frame_reduce as fr
+from lspr_imaging_app.domain.roi_shapes import Circle
 from lspr_imaging_app.analysis.scan import scan_cubes
 from lspr_imaging_app.analysis.scan_jobs import build_scan_plan, source_from_modules
 from lspr_imaging_app.dataset import io
@@ -150,8 +151,8 @@ def main() -> int:
     for label, dx, dy, d in (("moved (+3, -2) px", 3.0, -2.0, None), ("sample diameter +4 px", 0.0, 0.0, 4.0), ("moved (-5, +4) px", -5.0, 4.0, None)):
         roi = base[r]
         changed = replace(roi, center_x=roi.center_x + dx, center_y=roi.center_y + dy,
-                          sample_diameter_px=roi.sample_diameter_px + (d or 0.0))
-        trial_set = fr.build_roi_set([changed if i == r else x for i, x in enumerate(base)], rs.inner_default_px, rs.outer_default_px)
+                          shape=Circle(roi.shape.diameter_px + (d or 0.0)))
+        trial_set = fr.build_roi_set([changed if i == r else x for i, x in enumerate(base)], rs.default_border)
         times = []
         for _ in range(4):
             t = time.perf_counter()

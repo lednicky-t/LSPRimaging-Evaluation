@@ -23,6 +23,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from ...domain.roi_shapes import scaled_shape
+
 if TYPE_CHECKING:
     # Type-only: AreaRoi is never used as a runtime value in this file (`from __future__ import annotations` means the hint
     # on transform_rois_affine's `rois` parameter is never evaluated). (Until 2026-11-02 this also avoided a circular import
@@ -186,7 +188,7 @@ def transform_rois_affine(
     for index, roi in enumerate(rois):
         target_x = float(target_points[index, 0])
         target_y = float(target_points[index, 1])
-        # Shallow copy, not deepcopy: only center_x/center_y/sample_diameter_px
+        # Shallow copy, not deepcopy: only center_x/center_y/shape
         # get reassigned below (rebinding a scalar attribute on the copy
         # never touches the original), and every caller of this function's
         # result (ROI overlay rendering, rois_for_preprocessing's exclusion
@@ -200,7 +202,7 @@ def transform_rois_affine(
         transformed_roi = copy(roi)
         transformed_roi.center_x = target_x
         transformed_roi.center_y = target_y
-        transformed_roi.sample_diameter_px = max(float(roi.sample_diameter_px) * scale, 2.0)
+        transformed_roi.shape = scaled_shape(roi.shape, scale)
         if max_x is not None and max_y is not None:
             transformed_roi.center_x = float(np.clip(transformed_roi.center_x, 0.0, max_x))
             transformed_roi.center_y = float(np.clip(transformed_roi.center_y, 0.0, max_y))

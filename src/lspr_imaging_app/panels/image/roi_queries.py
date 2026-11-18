@@ -14,7 +14,8 @@ import numpy as np
 
 from ...image_tools import ChromaticModule
 from ...roi import RoiToolbox
-from ...roi.rasterize import effective_reference_diameters, rasterize_reference, rasterize_sample
+from ...domain.roi_shapes import Circle, effective_border, reach_radius, ring_diameters
+from ...roi.rasterize import rasterize_reference, rasterize_sample
 from ...selection import SelectionModule
 from .roi_gestures import SelectedApertures
 
@@ -55,7 +56,8 @@ class RoiQueries:
             return None
         centers = self._roi_toolbox.display_positions(frame, affine)
         distances = np.hypot(x - centers[:, 0], y - centers[:, 1])
-        radii = np.fromiter((roi.sample_diameter_px for roi in rois), dtype=np.float64, count=len(rois)) / 2.0
+        # a rectangle or a mask is hit within the circle that holds it until the shape UI (plan phase 3) gives each its own test
+        radii = np.fromiter((reach_radius(roi.shape, roi.center_x, roi.center_y) for roi in rois), dtype=np.float64, count=len(rois))
         distances = np.where(distances <= radii, distances, np.inf)
         nearest = int(np.argmin(distances))  # first of equal distances wins, as before
         return rois[nearest].area_roi_id if np.isfinite(distances[nearest]) else None
@@ -80,22 +82,21 @@ class RoiQueries:
         if not reference:
             return None
         detection = self._roi_toolbox.detection_settings()
-        inner_default, outer_default = detection.reference_inner_diameter_px, detection.reference_outer_diameter_px
+        default_border = detection.default_border()
         centers = self._roi_toolbox.display_positions(frame, affine)
         distances = np.hypot(x - centers[:, 0], y - centers[:, 1])
         best: tuple[float, int] | None = None
         for index, roi in enumerate(rois):
-            if roi.reference_geometry_type == "none":
+            border = effective_border(roi.border, default_border)
+            if not border.enabled or not isinstance(roi.shape, Circle):  # only a circle's border is a ring that is found by distance
                 continue
-            inner, outer = effective_reference_diameters(roi, inner_default, outer_default)
+            inner, outer = ring_diameters(roi.shape, border)
             if outer > inner and inner / 2.0 <= distances[index] <= outer / 2.0 and (best is None or distances[index] < best[0]):
                 best = (float(distances[index]), index)
         if best is None:
             return None
         roi = rois[best[1]]
-        ring = rasterize_reference(
-            roi, shape, affine, default_inner_diameter_px=inner_default, default_outer_diameter_px=outer_default
-        )
+        ring = rasterize_reference(roi, shape, affine, default_border=default_border)
         return ring, f"ROI {roi.area_roi_id} reference ring"
 
     def rois_in_rect(self, x0: float, y0: float, x1: float, y1: float) -> set[int]:
@@ -122,7 +123,7 @@ class RoiQueries:
         rows, cols = mask.shape[:2]
         hits: set[int] = set()
         for roi, (cx, cy) in zip(rois, centers, strict=True):
-            radius = float(roi.sample_diameter_px) / 2.0
+            radius = reach_radius(roi.shape, roi.center_x, roi.center_y)
             if not (np.isfinite(cx) and np.isfinite(cy)):
                 continue
             c0, c1 = max(int(np.floor(cx - radius)), 0), min(int(np.floor(cx + radius)) + 1, cols)
@@ -153,18 +154,19 @@ class RoiQueries:
         centers = self._roi_toolbox.display_positions(frame, self._chromatic.affine_for(frame))[keep]
         chosen = [roi for roi, hit in zip(rois, keep, strict=True) if hit]
         detection = self._roi_toolbox.detection_settings()
+        default_border = detection.default_border()
         rings = np.array(
             [
-                effective_reference_diameters(roi, detection.reference_inner_diameter_px, detection.reference_outer_diameter_px)
+                ring_diameters(roi.shape, effective_border(roi.border, default_border)) if isinstance(roi.shape, Circle) else (0.0, 0.0)
                 for roi in chosen
             ],
             dtype=np.float64,
         ).reshape(-1, 2)
-        resizable = np.array([roi.sample_geometry_type != "mask" for roi in chosen], dtype=bool)
+        resizable = np.array([isinstance(roi.shape, Circle) for roi in chosen], dtype=bool)  # the aperture handles resize a diameter
         return SelectedApertures(
             ids=np.array([roi.area_roi_id for roi in chosen], dtype=np.int64),
             centers=centers,
-            diameters=np.array([roi.sample_diameter_px for roi in chosen], dtype=np.float64),
+            diameters=np.array([roi.shape.diameter_px if isinstance(roi.shape, Circle) else 0.0 for roi in chosen], dtype=np.float64),
             resizable=resizable,
             ring_inner=rings[:, 0],
             ring_outer=rings[:, 1],

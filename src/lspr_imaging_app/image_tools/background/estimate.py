@@ -34,6 +34,7 @@ from scipy import ndimage
 
 from ...domain.ignored_pixels import ignored_pixel_mask
 from ...domain.roi_model import AreaRoi, AreaRoiDetectionSettings
+from ...domain.roi_shapes import reach_radius
 from .apply import apply_background, apply_background_at
 
 
@@ -274,7 +275,7 @@ def roi_exclusion_mask(
         return exclusion_mask
 
     for roi in rois:
-        sample_radius = float(roi.sample_diameter_px) / 2.0
+        sample_radius = reach_radius(roi.shape, roi.center_x, roi.center_y)
         exclusion_radius = max(sample_radius * 1.35, sample_radius + 2.0)
         radius_ceil = int(np.ceil(exclusion_radius))
         x0 = max(int(np.floor(roi.center_x)) - radius_ceil, 0)

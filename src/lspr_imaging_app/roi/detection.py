@@ -8,6 +8,7 @@ from scipy import ndimage
 
 from ..domain.ignored_pixels import ignored_pixel_mask
 from ..domain.roi_model import AreaRoi, AreaRoiDetectionSettings
+from ..domain.roi_shapes import Circle, reach_radius
 
 
 def detect_rois(
@@ -102,7 +103,7 @@ def detect_rois(
                 area_roi_id=len(accepted) + 1,
                 center_x=x,
                 center_y=y,
-                sample_diameter_px=float(radius * 2.0),
+                shape=Circle(float(radius * 2.0)),
                 score=score,
             )
         )
@@ -178,7 +179,7 @@ def refresh_roi_metrics(
                 valid_mask=valid_mask,
                 center_x=float(roi.center_x),
                 center_y=float(roi.center_y),
-                radius=float(roi.sample_diameter_px) / 2.0,
+                radius=reach_radius(roi.shape, roi.center_x, roi.center_y),
                 mode=settings.mode,
             ),
         )
@@ -240,12 +241,11 @@ def _refine_detected_roi(
         area_roi_id=roi.area_roi_id,
         center_x=refined_x,
         center_y=refined_y,
-        sample_diameter_px=roi.sample_diameter_px,
+        shape=roi.shape,
         score=max(roi.score, refined_score),
         sample_color_hex=roi.sample_color_hex,
         reference_color_hex=roi.reference_color_hex,
-        reference_inner_diameter_px=roi.reference_inner_diameter_px,
-        reference_outer_diameter_px=roi.reference_outer_diameter_px,
+        border=roi.border,
         support_mean_radius_px=roi.support_mean_radius_px,
         support_radius_std_px=roi.support_radius_std_px,
         support_value_mean=roi.support_value_mean,
@@ -405,7 +405,7 @@ def _fit_grid_array(
                     area_roi_id=0,
                     center_x=refined_x if found_signal else grid_x,
                     center_y=refined_y if found_signal else grid_y,
-                    sample_diameter_px=float(radius * 2.0),
+                    shape=Circle(float(radius * 2.0)),
                     score=refined_score,
                     inferred=not found_signal,
                 )

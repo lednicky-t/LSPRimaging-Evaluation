@@ -37,6 +37,7 @@ from ..image_tools.background.model import BackgroundSettings
 from ..image_tools.geometry.model import GeometrySettings
 from ..image_tools.preprocess import resolve_external_mask
 from ..domain.roi_model import AreaRoi, AreaRoiDetectionSettings
+from ..domain.roi_shapes import Border
 from .frame_reduce import RoiSet, build_roi_set
 from .provenance import DEFAULT_REFERENCE_EXCLUSION_MODE
 from .reduction import DEFAULT_TRIMMED_MEAN_FRACTION
@@ -79,7 +80,7 @@ class ScanSource:
     geometry: Callable[[], GeometrySettings]
     background: Callable[[], BackgroundSettings]
     detection: Callable[[], AreaRoiDetectionSettings]
-    default_reference_diameters: Callable[[], tuple[float, float]]  # (inner, outer) px for a ROI without its own ring
+    default_border: Callable[[], Border]  # the border (gap, thickness) of a ROI without its own
     # Optional. ``cube_indices`` is what a scan covers by default; a snapshot of a cube subset sets this to every spectral cube of the dataset,
     # so the result file's cube and wavelength axes are the whole dataset's and a partial run fits the same file as a full one.
     all_cube_indices: Callable[[], Sequence[int]] | None = None
@@ -166,7 +167,7 @@ def build_scan_plan(
     geometry = source.geometry()
     background = source.background()
     detection = source.detection()
-    inner, outer = source.default_reference_diameters()
+    default_border = source.default_border()
     timeline = bool(source.has_timeline())
 
     # -- wavelength axis: union over EVERY cube of the dataset (so a partial scan fits the same result file as a full one) ----
@@ -208,7 +209,7 @@ def build_scan_plan(
     reference_ids: tuple[int, ...] | None = None
     for cube in chosen:
         if timeline or shared is None:
-            current = build_roi_set(list(source.rois_at(cube) if timeline else source.rois()), inner, outer)
+            current = build_roi_set(list(source.rois_at(cube) if timeline else source.rois()), default_border)
             if not timeline:
                 shared = current
         else:
@@ -341,10 +342,7 @@ def source_from_modules(
         geometry=geometry.settings,
         background=background.settings,
         detection=roi_toolbox.detection_settings,
-        default_reference_diameters=lambda: (
-            roi_toolbox.detection_settings().reference_inner_diameter_px,
-            roi_toolbox.detection_settings().reference_outer_diameter_px,
-        ),
+        default_border=lambda: roi_toolbox.detection_settings().default_border(),
         frame_times_ms=dataset.frame_times_unix_ms,
     )
 
@@ -401,7 +399,7 @@ def snapshot_source(source: ScanSource, cubes: Sequence[int] | None = None) -> S
     shared_rois = () if timeline else copy_of(source.rois())
     rois_by_cube = {cube: copy_of(source.rois_at(cube)) for cube in chosen} if timeline else {}
     geometry, background, detection = source.geometry(), source.background(), source.detection()
-    diameters = tuple(float(d) for d in source.default_reference_diameters())
+    border = source.default_border()
     times = dict(source.frame_times_ms()) if source.frame_times_ms is not None else {}
 
     return ScanSource(
@@ -418,7 +416,7 @@ def snapshot_source(source: ScanSource, cubes: Sequence[int] | None = None) -> S
         geometry=lambda: geometry,
         background=lambda: background,
         detection=lambda: detection,
-        default_reference_diameters=lambda: diameters,
+        default_border=lambda: border,
         all_cube_indices=lambda: dataset_cubes,
         frame_times_ms=lambda: times,
     )

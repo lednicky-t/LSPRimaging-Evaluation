@@ -384,7 +384,7 @@ class ImageRenderer(QObject):
         caches: dict = {"weights_cache": self._weights_cache}
         if background.flatten_background_exclude_area_rois and request.rois:
             shape = spatial_output_shape(raw_shape, request.geometry)
-            key = (shape, tuple((roi.center_x, roi.center_y, roi.sample_diameter_px) for roi in request.rois))
+            key = (shape, tuple((roi.center_x, roi.center_y, roi.shape) for roi in request.rois))
             cached = self._roi_exclusion_cache
             if cached is None or cached[0] != key:
                 mask = roi_exclusion_mask(shape, list(request.rois))

@@ -486,8 +486,7 @@ class HistogramPanel(QWidget):
             rois,
             image_shape[:2],
             affine,
-            detection.reference_inner_diameter_px,
-            detection.reference_outer_diameter_px,
+            detection.default_border(),
         )
 
     def _request_selected_masks(
@@ -505,8 +504,7 @@ class HistogramPanel(QWidget):
             rois,
             image_shape[:2],
             self._chromatic.affine_for(frame),
-            detection.reference_inner_diameter_px,
-            detection.reference_outer_diameter_px,
+            detection.default_border(),
             variant=frozenset(roi.area_roi_id for roi in rois),
         )
 

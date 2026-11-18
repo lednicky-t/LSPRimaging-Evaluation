@@ -30,6 +30,7 @@ import numpy as np
 from ..frame_naming import FrameNamingScheme
 from ..image_tools.background.model import BackgroundSettings
 from ..domain.roi_model import AreaRoi, AreaRoiDetectionSettings
+from ..domain.roi_shapes import Circle, Rectangle, reach_radius, shape_kind
 
 # -- versioning + dedup: sequential per-group counters, no hashing -----------
 
@@ -322,10 +323,28 @@ biased reference value for any two ROIs close enough that one's sample
 circle falls inside the other's reference ring."""
 
 
+def _primary_size(shape) -> float:
+    """One number that orders ROIs of one kind by size: a circle's diameter, a rectangle's width, a mask's pixel count."""
+    if isinstance(shape, Circle):
+        return float(shape.diameter_px)
+    if isinstance(shape, Rectangle):
+        return float(shape.width_px)
+    return float(np.count_nonzero(shape.mask.mask))
+
+
+def shape_fingerprint(shape) -> dict:
+    """The part of a shape that decides which pixels it covers, as plain data (a mask by its pixels)."""
+    if isinstance(shape, Circle):
+        return {"kind": "circle", "diameter_px": float(shape.diameter_px)}
+    if isinstance(shape, Rectangle):
+        return {"kind": "rectangle", "width_px": float(shape.width_px), "height_px": float(shape.height_px), "angle_deg": float(shape.angle_deg)}
+    return {"kind": "mask", "x0": shape.mask.x0, "y0": shape.mask.y0, "mask": shape.mask.mask.tolist()}
+
+
 def _geometry_sort_key(roi: AreaRoi) -> tuple:
     """Order ROIs by where and how big they are, never by id - see
     `sample_exclusion_digest`."""
-    return (float(roi.center_x), float(roi.center_y), float(roi.sample_diameter_px), str(roi.sample_geometry_type))
+    return (float(roi.center_x), float(roi.center_y), _primary_size(roi.shape), shape_kind(roi.shape))
 
 
 def sample_exclusion_digest(rois: list[AreaRoi] | tuple[AreaRoi, ...]) -> list:
@@ -360,11 +379,7 @@ def sample_exclusion_digest(rois: list[AreaRoi] | tuple[AreaRoi, ...]) -> list:
         digest.append({
             "center_x": float(roi.center_x),
             "center_y": float(roi.center_y),
-            "sample_diameter_px": float(roi.sample_diameter_px),
-            "sample_geometry_type": roi.sample_geometry_type,
-            "sample_mask": None if roi.sample_mask is None else {
-                "x0": roi.sample_mask.x0, "y0": roi.sample_mask.y0, "mask": roi.sample_mask.mask.tolist(),
-            },
+            "shape": shape_fingerprint(roi.shape),
         })
     return digest
 
@@ -418,7 +433,7 @@ def background_exclusion_digest(
             {
                 "center_x": float(roi.center_x),
                 "center_y": float(roi.center_y),
-                "sample_diameter_px": float(roi.sample_diameter_px),
+                "reach_radius_px": reach_radius(roi.shape, roi.center_x, roi.center_y),
             }
             for roi in sorted(rois, key=_geometry_sort_key)
         ]
@@ -549,17 +564,8 @@ def roi_geometry_fingerprint_fields(roi: AreaRoi) -> dict:
     return {
         "center_x": float(roi.center_x),
         "center_y": float(roi.center_y),
-        "sample_diameter_px": float(roi.sample_diameter_px),
-        "sample_geometry_type": roi.sample_geometry_type,
-        "sample_mask": None if roi.sample_mask is None else {
-            "x0": roi.sample_mask.x0, "y0": roi.sample_mask.y0, "mask": roi.sample_mask.mask.tolist(),
-        },
-        "reference_geometry_type": roi.reference_geometry_type,
-        "reference_mask": None if roi.reference_mask is None else {
-            "x0": roi.reference_mask.x0, "y0": roi.reference_mask.y0, "mask": roi.reference_mask.mask.tolist(),
-        },
-        "reference_inner_diameter_px": roi.reference_inner_diameter_px,
-        "reference_outer_diameter_px": roi.reference_outer_diameter_px,
+        "shape": shape_fingerprint(roi.shape),
+        "border": None if roi.border is None else [float(roi.border.gap_px), float(roi.border.thickness_px), bool(roi.border.enabled)],
     }
 
 

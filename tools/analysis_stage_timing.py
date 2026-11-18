@@ -166,7 +166,7 @@ def time_zarr_scoped(dataset, cubes: list[int], modules, rois, geometry) -> dict
     det = modules.roi_toolbox.detection_settings()
 
     def window(roi, margin: int) -> tuple[int, int, int, int]:
-        outer = roi.reference_outer_diameter_px or det.reference_outer_diameter_px
+        outer = rz.effective_reference_diameters(roi, det.default_border())[1]  # circular ROIs only (this tool's data has no other shape)
         half = int(outer / 2 + margin)
         cx, cy = int(roi.center_x + offset_x), int(roi.center_y + offset_y)
         return max(cy - half, 0), min(cy + half, height), max(cx - half, 0), min(cx + half, width)
@@ -285,11 +285,11 @@ def _incremental_union(rois, shape, affine) -> np.ndarray:
     return union
 
 
-def roi_values_full(roi, processed, valid, affine, ignore, union, inner, outer, reduction, trimmed):
+def roi_values_full(roi, processed, valid, affine, ignore, union, border, reduction, trimmed):
     """One ROI's (sample, reference) at one frame, exactly as `compute_cell` does it today: full-frame masks."""
     shape = processed.shape[:2]
     sample_mask = rz.rasterize_sample(roi, shape, affine)
-    reference_mask = rz.rasterize_reference(roi, shape, affine, default_inner_diameter_px=inner, default_outer_diameter_px=outer)
+    reference_mask = rz.rasterize_reference(roi, shape, affine, default_border=border)
     reference_mask = reference_mask & ~union
     if ignore is not None and ignore.shape == shape:
         sample_mask = sample_mask & ~ignore
@@ -303,12 +303,12 @@ def roi_values_full(roi, processed, valid, affine, ignore, union, inner, outer, 
     )
 
 
-def roi_values_patch(roi, rois, centers, sample_radii, processed, valid, affine, ignore, inner, outer, reduction, trimmed):
+def roi_values_patch(roi, rois, centers, sample_radii, processed, valid, affine, ignore, border, reduction, trimmed):
     """The same numbers from a small window around the ROI (prototype of the planned ROI stage). Window = the ring's reach
     plus the chromatic shift plus 3 px; neighbours' sample apertures are rasterised only inside the window."""
     height, width = processed.shape[:2]
-    _inner_d, outer_d = rz.effective_reference_diameters(roi, inner, outer)
-    half = max(float(outer_d), float(roi.sample_diameter_px)) / 2.0 + 3.0
+    _inner_d, outer_d = rz.effective_reference_diameters(roi, border)
+    half = max(float(outer_d), float(roi.shape.diameter_px)) / 2.0 + 3.0
     a = np.asarray(affine, dtype=np.float64)
     cx, cy = float(roi.center_x), float(roi.center_y)
     tx = a[0, 0] * cx + a[0, 1] * cy + a[0, 2]
@@ -320,7 +320,7 @@ def roi_values_patch(roi, rois, centers, sample_radii, processed, valid, affine,
     patch_shape = (y1 - y0, x1 - x0)
     sample_mask = rz.rasterize_sample_for_patch(roi, (x0, y0), patch_shape, affine)
     reference_mask = rz.rasterize_reference_for_patch(
-        roi, (x0, y0), patch_shape, affine, default_inner_diameter_px=inner, default_outer_diameter_px=outer
+        roi, (x0, y0), patch_shape, affine, default_border=border
     )
     reach_x, reach_y = (x1 - x0) / 2.0 + 10.0, (y1 - y0) / 2.0 + 10.0
     mid_x, mid_y = (x0 + x1) / 2.0, (y0 + y1) / 2.0
@@ -344,12 +344,12 @@ def roi_values_patch(roi, rois, centers, sample_radii, processed, valid, affine,
 
 def time_roi_stage(modules, frames: list) -> dict:
     det = modules.roi_toolbox.detection_settings()
-    inner, outer = det.reference_inner_diameter_px, det.reference_outer_diameter_px
+    border = det.default_border()
     rois = list(modules.roi_toolbox.rois())
     trimmed = modules.reference_inputs.trimmed_mean_fraction
     reduction = det.reduction_method
     centers = np.array([[r.center_x, r.center_y] for r in rois], dtype=np.float64)
-    sample_radii = np.array([r.sample_diameter_px / 2.0 for r in rois], dtype=np.float64)
+    sample_radii = np.array([r.shape.diameter_px / 2.0 for r in rois], dtype=np.float64)
     use = frames[:: max(len(frames) // 3, 1)][:3]  # three frames, spread over the sample
     t_union, t_isfinite, t_full, t_patch = [], [], [], []
     differ = 0
@@ -362,9 +362,9 @@ def time_roi_stage(modules, frames: list) -> dict:
         valid, t = timed(np.isfinite, processed)
         t_isfinite.append(t)
         for roi in rois:
-            full, t = timed(roi_values_full, roi, processed, valid, affine, ignore, union, inner, outer, reduction, trimmed)
+            full, t = timed(roi_values_full, roi, processed, valid, affine, ignore, union, border, reduction, trimmed)
             t_full.append(t)
-            patch, t = timed(roi_values_patch, roi, rois, centers, sample_radii, processed, valid, affine, ignore, inner, outer, reduction, trimmed)
+            patch, t = timed(roi_values_patch, roi, rois, centers, sample_radii, processed, valid, affine, ignore, border, reduction, trimmed)
             t_patch.append(t)
             compared += 1
             for a, b in zip(full, patch):
@@ -403,7 +403,7 @@ def time_end_to_end(modules, cubes: list[int], scratch: Path) -> dict:
     det = modules.roi_toolbox.detection_settings()
     rois = tuple(modules.roi_toolbox.rois())
     naming = engine.naming()
-    inner, outer = engine.default_reference_diameters()
+    border = engine.default_border()
     chosen = [rois[int(i)] for i in np.linspace(0, len(rois) - 1, 6)]
     handler = _CellLog()
     task_logger = logging.getLogger("lspr_imaging_app.analysis.tasks")
@@ -423,7 +423,7 @@ def time_end_to_end(modules, cubes: list[int], scratch: Path) -> dict:
                 compute_cell(
                     roi, cube, inputs,
                     reduction_method=det.reduction_method, trimmed_mean_fraction=engine.trimmed_mean_fraction,
-                    default_reference_inner_diameter_px=inner, default_reference_outer_diameter_px=outer,
+                    default_border=border,
                     masks_dir=scratch / "masks", chromatic_dir=scratch / "chromatic", settings_dir=scratch / "settings",
                     naming=naming, all_rois=rois, detection_settings=det,
                     reference_exclusion_mode=engine.reference_exclusion_mode(),

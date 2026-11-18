@@ -111,7 +111,7 @@ def shifted_roi_set(rs: fr.RoiSet, indices: Sequence[int], dx: float, dy: float)
             raise ValueError(f"ROI at position {i} has a free-form mask; its position cannot be tuned by shifting the centre")
         x, y = moved_centre(rois[i].center_x, rois[i].center_y, dx, dy)
         rois[i] = replace(rois[i], center_x=x, center_y=y)
-    return fr.build_roi_set(rois, rs.inner_default_px, rs.outer_default_px)
+    return fr.build_roi_set(rois, rs.default_border)
 
 
 def neighbours_within_reach(rs: fr.RoiSet, indices: Sequence[int], lattice: Lattice) -> list[tuple[int, int]]:

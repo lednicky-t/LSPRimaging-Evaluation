@@ -252,7 +252,7 @@ class RoiGestures(QObject):
                 defaults = self._toolbox.detection_settings()
                 by_id = {roi.area_roi_id: roi for roi in self._toolbox.rois_at(self._edit_cube)}
                 self._ring_start = {
-                    i: effective_reference_diameters(by_id[i], defaults.reference_inner_diameter_px, defaults.reference_outer_diameter_px)
+                    i: effective_reference_diameters(by_id[i], defaults.default_border())
                     for i in self._edit_ids
                 }
             self._mode = "resize"

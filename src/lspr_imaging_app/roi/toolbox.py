@@ -135,6 +135,7 @@ from ..domain.roi_model import (
     geometry_at,
     resolved_at,
 )
+from ..domain.roi_shapes import Border, Circle, MaskShape, Rectangle, Shape, effective_border, remap_rectangle, ring_diameters
 from ..domain.roi_links import (
     ROI_ROLES,
     ROLE_REFERENCE,
@@ -171,7 +172,6 @@ def _restore(snapshot: tuple[object, object]) -> None:
         setattr(obj, field.name, copy.deepcopy(getattr(saved, field.name)))
 
 
-_CIRCLE_GEOMETRY_TYPES = ("circle", "annulus")
 """Geometry types whose only remapped field is the ROI center - radius/
 diameter fields are invariant under this app's transform pipeline (rotate,
 flip, crop - never a scale change), so there is nothing else to do for them."""
@@ -222,42 +222,24 @@ def _highest_group_number(groups: dict[str, AreaRoiGroup]) -> int:
 
 def _remap_roi_shape(
     roi: AreaRoi,
-    side: str,
+    remap_point: Callable[[float, float], tuple[float, float]],
     remap_mask: Callable[[RoiMask], RoiMask | None],
-) -> tuple[RoiMask | None, bool, bool]:
-    """One ROI's one side (`"sample"` or `"reference"`) through
-    `RoiToolbox.remap_all`'s per-geometry-type dispatch. Returns
-    `(new_mask_value, lost, unsupported)`: `new_mask_value` is what
-    `{side}_mask` should become (unchanged from its current value unless the
-    geometry type is `"mask"` and the warp succeeded); `lost`/`unsupported`
-    are never both true, and one flag is on only when `new_mask_value` is
-    the *old*, deliberately-unchanged value - see `remap_all`'s docstring
-    for what each case means.
-
-    This is the one place a new ROI shape's remap sub-pipeline gets added -
-    a new `elif geometry_type == "rectangle": return _remap_rectangle(...)`
-    branch (plus, separately, the ROI's own orientation-angle field, since a
-    rectangle/polygon's rotation needs remapping the way a circle's radius
-    never does) - not a change to `remap_all` itself."""
-    geometry_type = getattr(roi, f"{side}_geometry_type")
-    current_mask = getattr(roi, f"{side}_mask")
-    if geometry_type in _CIRCLE_GEOMETRY_TYPES:
-        return current_mask, False, False
-    if geometry_type == "mask":
-        if current_mask is None:  # inconsistent state (type says mask, field is empty) - nothing to warp
-            return None, False, False
-        remapped = remap_mask(current_mask)
+) -> tuple[Shape, bool]:
+    """One ROI's shape through `RoiToolbox.remap_all`'s per-shape dispatch. Returns `(new_shape, lost)`:
+    a circle is unchanged (only its centre moves; this pipeline never scales), a rectangle keeps its size and gets the angle its own
+    x axis now points in (`roi_shapes.remap_rectangle`), a mask is re-warped by `remap_mask`. `lost` is True only when a mask warped to
+    zero area: `new_shape` is then the *old* shape, deliberately unchanged (an empty mask would read as "nothing here", not "this needs
+    attention"), and the caller reports it."""
+    shape = roi.shape
+    if isinstance(shape, Rectangle):
+        return remap_rectangle(shape, roi.center_x, roi.center_y, remap_point), False
+    if isinstance(shape, MaskShape):
+        remapped = remap_mask(shape.mask)
         if remapped is None:
-            logger.warning(
-                "ROI %d's %s mask warped to zero area on a geometry edit - left at its old position.",
-                roi.area_roi_id, side,
-            )
-            return current_mask, True, False
-        return remapped, False, False
-    # "rectangle"/"polygon" (roi_system_roadmap.md) or any other geometry
-    # type this pipeline doesn't yet know how to remap - left untouched
-    # rather than guessed at.
-    return current_mask, False, True
+            logger.warning("ROI %d's mask warped to zero area on a geometry edit - left at its old position.", roi.area_roi_id)
+            return shape, True
+        return MaskShape(remapped), False
+    return shape, False
 
 
 class RoiToolbox(QObject):
@@ -307,8 +289,8 @@ class RoiToolbox(QObject):
         `image_tools/background/estimate.py`, `image_tools/preprocess.py`,
         `image_tools/chromatic/landmark_autotrack.py`, removed 2026-10-29), so there was no
         module to read it from when the engine needed
-        `reference_inner/outer_diameter_px` (its default reference-ring radii
-        for ROIs that don't override them) and `reduction_method`. Put here
+        the default reference ring (since 2026-11-18 `default_border()`: its gap and
+        thickness for ROIs that have no border of their own) and `reduction_method`. Put here
         because this is the ROI stage's state owner and the dataclass is
         ROI-stage settings throughout.
 
@@ -588,8 +570,18 @@ class RoiToolbox(QObject):
         `len(rois) + 1` as long as `delete_rois` keeps its own renumbering
         promise), so no special undo bookkeeping beyond add/remove is
         needed."""
+        return self.add_shaped_roi(x, y, Circle(float(sample_diameter_px)))
+
+    @instrumented("RoiToolbox.add_shaped_roi")
+    def add_shaped_roi(self, x: float, y: float, shape: Shape, *, border: Border | None = None, role: str = "sample") -> int:
+        """Place one ROI of any shape (`roi_shapes`: circle, rectangle, mask) with its centre at (x, y); one undo step. ``border`` ``None`` follows
+        the shared default border, ``NO_BORDER`` has none. ``role`` ``"reference"`` makes it a reference ROI (it has no border of its own then: its
+        own border is ignored, as everywhere). A mask's pixels are where they were authored (processed-image space), whatever ``(x, y)`` says:
+        the centre is the point the ROI is labelled and grouped by. Returns the new id."""
+        if role not in ROI_ROLES:
+            raise ValueError(f"unknown ROI role {role!r}; known: {ROI_ROLES}")
         roi_id = next(self._roi_id_counter)
-        roi = AreaRoi(area_roi_id=roi_id, center_x=self._rounded(x), center_y=self._rounded(y), sample_diameter_px=float(sample_diameter_px))
+        roi = AreaRoi(area_roi_id=roi_id, center_x=self._rounded(x), center_y=self._rounded(y), shape=shape, border=border, role=role)
 
         def apply() -> None:
             self._rois[roi_id] = roi
@@ -876,23 +868,15 @@ class RoiToolbox(QObject):
             positions[roi.area_roi_id] = (g.center_x if x is None else float(x), g.center_y if y is None else float(y))
         self._set_positions(positions, "Align ROIs", cube=cube, scope=scope)
 
-    def _set_diameters(
+    def _set_shapes(
         self,
-        targets: list[tuple[AreaRoi, tuple[float, float | None, float | None]]],
+        targets: list[tuple[AreaRoi, Shape, Border | None]],
         label: str,
         *,
         cube: int | None = None,
         scope: str = SCOPE_PERSISTENT,
     ) -> None:
-        changes = [
-            (
-                roi,
-                geometry_at(roi, cube)._replace(
-                    sample_diameter_px=sample, reference_inner_diameter_px=inner, reference_outer_diameter_px=outer
-                ),
-            )
-            for roi, (sample, inner, outer) in targets
-        ]
+        changes = [(roi, geometry_at(roi, cube)._replace(shape=shape, border=border)) for roi, shape, border in targets]
         self._write_geometry(changes, cube, scope, label, "resized")
 
     @instrumented("RoiToolbox.resize_rois")
@@ -907,17 +891,20 @@ class RoiToolbox(QObject):
         scope: str = SCOPE_PERSISTENT,
     ) -> None:
         """Set one or more of the sample / reference-ring diameters on every
-        ROI in ``roi_ids``; a field left ``None`` is unchanged. A no-op (no
+        circular ROI in ``roi_ids``; a field left ``None`` is unchanged. A no-op (no
         undo entry) if nothing differs.
 
-        Raises ``ValueError``, before changing anything, if the sample
+        The ring is the ROI's *border*, kept as a gap and thickness from the sample's edge (`roi_shapes`): a ring edit
+        (inner and / or outer diameter) stores the border that gives exactly those diameters at the (new) sample size, and a
+        change of the sample diameter alone **carries the border with it** (the ring keeps its gap and thickness).
+
+        Raises ``ValueError``, before changing anything, if a ROI is not a circle, if the sample
         diameter is below `MIN_SAMPLE_DIAMETER_PX` or not finite, or if a
         ROI's reference ring would not satisfy ``0 <= inner < outer``. The
         ring is checked against the diameters the ROI will actually use, so a
-        ROI that still inherits the default outer diameter is checked against
-        that default."""
+        ROI that still follows the default border is checked against that."""
         rois = self._require_rois(roi_ids)
-        defaults = self._detection_settings
+        default_border = self._detection_settings.default_border()
         for value, name in (
             (sample_diameter_px, "sample diameter"),
             (reference_inner_diameter_px, "reference inner diameter"),
@@ -927,24 +914,25 @@ class RoiToolbox(QObject):
                 raise ValueError(f"{name} must be a finite number, got {value!r}")
         if sample_diameter_px is not None and float(sample_diameter_px) < MIN_SAMPLE_DIAMETER_PX:
             raise ValueError(f"sample diameter must be at least {MIN_SAMPLE_DIAMETER_PX:g} px, got {float(sample_diameter_px):g}")
-        targets: list[tuple[AreaRoi, tuple[float, float | None, float | None]]] = []
+        targets: list[tuple[AreaRoi, Shape, Border | None]] = []
         for roi in rois:
             g = geometry_at(roi, cube)
-            new = (
-                g.sample_diameter_px if sample_diameter_px is None else float(sample_diameter_px),
-                g.reference_inner_diameter_px if reference_inner_diameter_px is None else float(reference_inner_diameter_px),
-                g.reference_outer_diameter_px if reference_outer_diameter_px is None else float(reference_outer_diameter_px),
-            )
+            if not isinstance(g.shape, Circle):
+                raise ValueError(f"ROI {roi.area_roi_id} is not a circle: its size is not a diameter")
+            diameter = g.shape.diameter_px if sample_diameter_px is None else float(sample_diameter_px)
+            border = g.border
             if reference_inner_diameter_px is not None or reference_outer_diameter_px is not None:
-                inner = new[1] if new[1] is not None else defaults.reference_inner_diameter_px
-                outer = new[2] if new[2] is not None else defaults.reference_outer_diameter_px
+                current_inner, current_outer = ring_diameters(g.shape, effective_border(g.border, default_border))
+                inner = current_inner if reference_inner_diameter_px is None else float(reference_inner_diameter_px)
+                outer = current_outer if reference_outer_diameter_px is None else float(reference_outer_diameter_px)
                 if not 0.0 <= inner < outer:
                     raise ValueError(
                         f"ROI {roi.area_roi_id}: the reference ring needs 0 <= inner < outer "
                         f"(inner {inner:g} px, outer {outer:g} px)"
                     )
-            targets.append((roi, new))
-        self._set_diameters(targets, "Resize ROI" if len(targets) == 1 else "Resize ROIs", cube=cube, scope=scope)
+                border = Border.from_ring_diameters(diameter, inner, outer)
+            targets.append((roi, Circle(diameter), border))
+        self._set_shapes(targets, "Resize ROI" if len(targets) == 1 else "Resize ROIs", cube=cube, scope=scope)
 
     @instrumented("RoiToolbox.resize_roi")
     def resize_roi(
@@ -977,28 +965,20 @@ class RoiToolbox(QObject):
         cube: int | None = None,
         scope: str = SCOPE_PERSISTENT,
     ) -> None:
-        """Put the chosen diameters back to the shared defaults.
+        """Put the chosen sizes back to the shared defaults.
 
-        ``sample``: the sample diameter becomes the detection settings'
-        sample diameter. ``reference``: the ROI's own inner/outer overrides
-        are removed (``None``), so it follows the shared reference diameters
-        again, including when those change later."""
+        ``sample``: a circle's diameter becomes the detection settings'
+        sample diameter (other shapes keep their size). ``reference``: the ROI's
+        own border is removed (``None``), so it follows the shared default
+        border again, including when that changes later."""
         rois = self._require_rois(roi_ids)
         defaults = self._detection_settings
         targets = []
         for roi in rois:
             g = geometry_at(roi, cube)
-            targets.append(
-                (
-                    roi,
-                    (
-                        float(defaults.sample_diameter_px) if sample else g.sample_diameter_px,
-                        None if reference else g.reference_inner_diameter_px,
-                        None if reference else g.reference_outer_diameter_px,
-                    ),
-                )
-            )
-        self._set_diameters(targets, "Reset ROI diameters", cube=cube, scope=scope)
+            shape = Circle(float(defaults.sample_diameter_px)) if sample and isinstance(g.shape, Circle) else g.shape
+            targets.append((roi, shape, None if reference else g.border))
+        self._set_shapes(targets, "Reset ROI diameters", cube=cube, scope=scope)
 
     @instrumented("RoiToolbox.apply_to_all_cubes")
     def apply_to_all_cubes(self, roi_ids: Collection[int], cube: int) -> None:
@@ -1035,9 +1015,8 @@ class RoiToolbox(QObject):
             for roi, old_state, new_state in states:
                 base, timeline = (old_state, new_state)[which]
                 roi.center_x, roi.center_y = base.center_x, base.center_y
-                roi.sample_diameter_px = base.sample_diameter_px
-                roi.reference_inner_diameter_px = base.reference_inner_diameter_px
-                roi.reference_outer_diameter_px = base.reference_outer_diameter_px
+                roi.shape = base.shape
+                roi.border = base.border
                 roi.timeline = timeline if timeline else None
             # `emit` runs every listener synchronously, so its time is part of the command the user sees in the
             # log (a 2026-10-21 drag report measured 300-660 ms on `translate_rois`, of which the write itself
@@ -1292,9 +1271,8 @@ class RoiToolbox(QObject):
                     area_roi_id=first_new_id + index,
                     center_x=self._rounded(centers[index, 0]),
                     center_y=self._rounded(centers[index, 1]),
-                    sample_diameter_px=float(sample[index]),
-                    reference_inner_diameter_px=float(inner[index]),
-                    reference_outer_diameter_px=float(outer[index]),
+                    shape=Circle(float(sample[index])),
+                    border=Border.from_ring_diameters(float(sample[index]), float(inner[index]), float(outer[index])),
                     inferred=not located_flags[index],
                     array_id=array_id,
                     created_by="array",
@@ -1378,8 +1356,10 @@ class RoiToolbox(QObject):
         changing anything, for non-finite values, a sample diameter below `MIN_SAMPLE_DIAMETER_PX` or a ring with
         ``0 <= inner < outer`` violated."""
         rois = self._require_rois(updates)
-        targets: list[tuple[AreaRoi, tuple[float, float | None, float | None]]] = []
+        targets: list[tuple[AreaRoi, Shape, Border | None]] = []
         for roi in rois:
+            if not isinstance(geometry_at(roi, cube).shape, Circle):
+                raise ValueError(f"ROI {roi.area_roi_id} is not a circle: refining sets diameters")
             x, y, sample, inner, outer = (float(v) for v in updates[roi.area_roi_id])
             if not all(math.isfinite(v) for v in (x, y, sample, inner, outer)):
                 raise ValueError(f"ROI {roi.area_roi_id}: refined values must be finite numbers")
@@ -1387,11 +1367,11 @@ class RoiToolbox(QObject):
                 raise ValueError(f"ROI {roi.area_roi_id}: sample diameter must be at least {MIN_SAMPLE_DIAMETER_PX:g} px")
             if not 0.0 <= inner < outer:
                 raise ValueError(f"ROI {roi.area_roi_id}: the reference ring needs 0 <= inner < outer")
-            targets.append((roi, (sample, inner, outer)))
+            targets.append((roi, Circle(sample), Border.from_ring_diameters(sample, inner, outer)))
         undo_manager.begin_batch(label)
         try:
             self._set_positions({roi.area_roi_id: tuple(updates[roi.area_roi_id][:2]) for roi in rois}, label, cube=cube, scope=scope)
-            self._set_diameters(targets, label, cube=cube, scope=scope)
+            self._set_shapes(targets, label, cube=cube, scope=scope)
         finally:
             undo_manager.end_batch()
 
@@ -1508,24 +1488,18 @@ class RoiToolbox(QObject):
         or a before/after `GeometrySettings` exists.
 
         **Dispatches per ROI side by geometry type**
-        (`sample_geometry_type`/`reference_geometry_type`) via
-        `_remap_roi_shape` - not a circle-only special case with everything
+        by shape (`roi_shapes`) via `_remap_roi_shape` - not a circle-only special case with everything
         else bolted on:
-        - `"circle"`/`"annulus"`: only the center moves (radius/diameter
-          fields are invariant - this pipeline never scales).
-        - `"mask"`: the stored raster is re-warped via `remap_mask`
+        - circle: only the center moves (the diameter is invariant - this pipeline never scales).
+        - rectangle: the center moves and the angle turns with the image (`roi_shapes.remap_rectangle`).
+        - mask: the stored raster is re-warped via `remap_mask`
           (`roi.rasterize.remap_roi_mask`). In the near-unreachable case that
           warping leaves no area at all (see that function's docstring for
-          why this pipeline essentially never does), that one side is left
-          at its **old** mask and position rather than silently replaced
+          why this pipeline essentially never does), the mask is left
+          at its **old** pixels rather than silently replaced
           with an empty one, and reported in `mask_shapes_lost` - an empty
-          mask would read as "nothing excluded here", not "this needs
+          mask would read as "nothing here", not "this needs
           attention".
-        - `"rectangle"`/`"polygon"`: not a shape any ROI can have yet (no
-          such ROI editor exists in the rewrite - `roi_system_roadmap.md`),
-          so there is nothing to remap; reported in
-          `unsupported_shapes_skipped` so this is visible now rather than a
-          silent gap discovered only once those shapes exist.
 
         Every ROI's center is also checked against `per_wavelength` - a
         manual per-wavelength position override is stored in the exact same
@@ -1542,15 +1516,13 @@ class RoiToolbox(QObject):
         new_positions: dict[int, tuple] = {}
         mask_shapes_remapped = 0
         mask_shapes_lost: list[int] = []
-        unsupported_shapes_skipped: list[int] = []
 
         for roi_id, roi in self._rois.items():
             old_positions[roi_id] = (
                 roi.center_x,
                 roi.center_y,
                 None if roi.per_wavelength is None else dict(roi.per_wavelength),
-                roi.sample_mask,
-                roi.reference_mask,
+                roi.shape,
                 roi.timeline,
             )
             new_center = remap_point(roi.center_x, roi.center_y)
@@ -1561,33 +1533,21 @@ class RoiToolbox(QObject):
                 if roi.per_wavelength is None
                 else {key: remap_point(*value) for key, value in roi.per_wavelength.items()}
             )
-            new_sample_mask, sample_lost, sample_unsupported = _remap_roi_shape(
-                roi, "sample", remap_mask
-            )
-            new_reference_mask, reference_lost, reference_unsupported = _remap_roi_shape(
-                roi, "reference", remap_mask
-            )
-            if sample_lost or reference_lost:
+            new_shape, lost = _remap_roi_shape(roi, remap_point, remap_mask)
+            if lost:
                 mask_shapes_lost.append(roi_id)
-            if sample_unsupported or reference_unsupported:
-                unsupported_shapes_skipped.append(roi_id)
-            mask_shapes_remapped += (
-                roi.sample_geometry_type == "mask" and not sample_lost
-            ) + (roi.reference_geometry_type == "mask" and not reference_lost)
-            new_positions[roi_id] = (
-                new_center[0], new_center[1], new_per_wavelength, new_sample_mask, new_reference_mask, new_timeline,
-            )
+            mask_shapes_remapped += isinstance(roi.shape, MaskShape) and not lost
+            new_positions[roi_id] = (new_center[0], new_center[1], new_per_wavelength, new_shape, new_timeline)
 
         if not old_positions:
             return RoiRemapReport((), 0, (), ())
 
         def _write(values: dict[int, tuple]) -> None:
-            for roi_id, (x, y, per_wavelength, sample_mask, reference_mask, timeline) in values.items():
+            for roi_id, (x, y, per_wavelength, shape, timeline) in values.items():
                 roi = self._rois[roi_id]
                 roi.center_x, roi.center_y = x, y
                 roi.per_wavelength = per_wavelength
-                roi.sample_mask = sample_mask
-                roi.reference_mask = reference_mask
+                roi.shape = shape
                 roi.timeline = timeline
 
         affected_ids = tuple(sorted(old_positions))
@@ -1607,7 +1567,7 @@ class RoiToolbox(QObject):
             remapped_roi_ids=affected_ids,
             mask_shapes_remapped=mask_shapes_remapped,
             mask_shapes_lost=tuple(mask_shapes_lost),
-            unsupported_shapes_skipped=tuple(unsupported_shapes_skipped),
+            unsupported_shapes_skipped=(),
         )
 
     # -- command API (§7): groups -----------------------------------------

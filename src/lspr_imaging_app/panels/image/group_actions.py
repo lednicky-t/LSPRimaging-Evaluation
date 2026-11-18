@@ -13,6 +13,7 @@ from collections.abc import Callable
 from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtWidgets import QInputDialog, QMessageBox, QWidget
 
+from ...domain.roi_shapes import nominal_diameter
 from ...roi import RoiToolbox
 from ...roi.ordering import grid_band_px, grid_lines
 from ...selection import SelectionModule
@@ -102,7 +103,7 @@ class GroupActions(QObject):
         lines = grid_lines(
             [roi.area_roi_id for roi in rois],
             [(float(roi.center_x), float(roi.center_y)) for roi in rois],
-            grid_band_px([roi.sample_diameter_px for roi in rois]),
+            grid_band_px([nominal_diameter(roi.shape, roi.center_x, roi.center_y) for roi in rois]),
             column_major=column_major,
         )
         noun = "Column" if column_major else "Row"

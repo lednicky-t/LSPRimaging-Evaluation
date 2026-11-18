@@ -5,11 +5,9 @@ Ported near-verbatim from ``domain/models.py`` on ``develop``/``main`` -
 ``AreaRoiDetectionSettings`` (the ROI Toolbox's own owned state and
 detection settings, per CLAUDE.md's "Module boundaries"). No logic changed.
 
-TODO: adopt ``docs/roi_system_roadmap.md``'s ``Pair`` vocabulary
-(sample/reference linkage) and geometry-type dispatcher here rather than
-keeping the ``sample_*``/``reference_*`` field-pair shape verbatim forever -
-this port is a faithful move of the current representation, not yet the
-roadmap's redesign.
+Since 2026-11-18 (``docs/roi_shapes_and_linking_plan_2026-11-18.md``) a ROI has a **shape** (``Circle`` / ``Rectangle`` / ``MaskShape``) and a
+**border** (gap + thickness from the shape's edge), both in ``roi_shapes.py``, and a ``role`` (sample / reference) with links; the loose
+``sample_diameter_px`` / ``*_geometry_type`` / mask / ring-diameter fields of the first port are gone.
 
 Lives in `domain/` since 2026-11-02 (moved from `roi/model.py`, layering): `image_tools` and `storage` use these classes, and `roi/`
 sits above `image_tools`. It imports nothing from the app.
@@ -22,21 +20,26 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import NamedTuple
 
-import numpy as np
+from .roi_shapes import Border, Circle, Rectangle, Shape, remap_rectangle
+from .roi_shapes import RoiMask  # re-exported (see __all__): it used to live in this module
 
-
-@dataclass(slots=True)
-class RoiMask:
-    """Cropped boolean mask fallback for an irregular sample/reference region.
-
-    ``mask`` is cropped to its bounding box, not full-image sized; (x0, y0) is
-    the top-left corner of that box in processed-image pixel coordinates.
-    """
-
-    x0: int
-    y0: int
-    mask: np.ndarray
-
+__all__ = [
+    "AreaRoi",
+    "AreaRoiDetectionSettings",
+    "AreaRoiGroup",
+    "GEOMETRY_SCOPES",
+    "LayoutPoint",
+    "RoiArrayGroup",
+    "RoiGeometry",
+    "RoiGeometryChange",
+    "RoiMask",
+    "RoiTimeline",
+    "SCOPE_INDIVIDUAL",
+    "SCOPE_PERSISTENT",
+    "base_geometry",
+    "geometry_at",
+    "resolved_at",
+]
 
 SCOPE_PERSISTENT = "persistent"
 SCOPE_INDIVIDUAL = "individual"
@@ -44,13 +47,13 @@ GEOMETRY_SCOPES = (SCOPE_PERSISTENT, SCOPE_INDIVIDUAL)
 
 
 class RoiGeometry(NamedTuple):
-    """The part of a ROI that can differ from cube to cube (diameters, never radii; pixels)."""
+    """The part of a ROI that can differ from cube to cube: where it is, what shape it has (sizes in pixels) and its border
+    (``None`` = the shared default border, see `roi_shapes`)."""
 
     center_x: float
     center_y: float
-    sample_diameter_px: float
-    reference_inner_diameter_px: float | None
-    reference_outer_diameter_px: float | None
+    shape: Shape
+    border: Border | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,8 +167,10 @@ class RoiTimeline:
         """The same changes with every centre passed through `remap_point` (rotate / flip / crop follow)."""
 
         def moved(change: RoiGeometryChange) -> RoiGeometryChange:
-            x, y = remap_point(change.geometry.center_x, change.geometry.center_y)
-            return RoiGeometryChange(change.cube, change.scope, change.geometry._replace(center_x=x, center_y=y))
+            g = change.geometry
+            x, y = remap_point(g.center_x, g.center_y)
+            shape = remap_rectangle(g.shape, g.center_x, g.center_y, remap_point) if isinstance(g.shape, Rectangle) else g.shape
+            return RoiGeometryChange(change.cube, change.scope, g._replace(center_x=x, center_y=y, shape=shape))
 
         return RoiTimeline(tuple(moved(c) for c in self.persistent), tuple(moved(c) for c in self.individual))
 
@@ -179,11 +184,13 @@ class AreaRoi:
     area_roi_id: int
     center_x: float
     center_y: float
-    sample_diameter_px: float
+    shape: Shape = Circle(20.0)
+    """The ROI's own region (`roi_shapes`: ``Circle``, ``Rectangle`` or ``MaskShape``). Part of the **base** geometry (see `timeline`)."""
+    border: Border | None = None
+    """The built-in reference region (`roi_shapes.Border`): ``None`` follows the shared default (``AreaRoiDetectionSettings.default_border()``),
+    ``NO_BORDER`` has none. Part of the base geometry. Defined from the shape's edge, so it follows the shape when that is resized."""
     sample_color_hex: str | None = None
     reference_color_hex: str | None = None
-    reference_inner_diameter_px: float | None = None
-    reference_outer_diameter_px: float | None = None
     score: float = 0.0
     support_mean_radius_px: float = 0.0
     support_radius_std_px: float = 0.0
@@ -191,12 +198,6 @@ class AreaRoi:
     support_value_std: float = 0.0
     quality_score: float = 0.0
     inferred: bool = False
-    # Geometry escape hatch: "circle"/"annulus" (default) reproduce the existing
-    # radius-based behavior exactly; "mask" uses sample_mask/reference_mask instead.
-    sample_geometry_type: str = "circle"
-    sample_mask: RoiMask | None = None
-    reference_geometry_type: str = "annulus"
-    reference_mask: RoiMask | None = None
     array_id: str | None = None
     label: str | None = None
     created_by: str = "user"
@@ -267,8 +268,10 @@ class AreaRoiDetectionSettings:
     mask_local_contrast_sigma_px: float = 8.0
     mask_local_contrast_z_threshold: float = 3.0
     sample_diameter_px: float = 20.0
-    reference_inner_diameter_px: float = 28.0
-    reference_outer_diameter_px: float = 36.0
+    border_gap_px: float = 4.0
+    border_thickness_px: float = 4.0
+    """The shared default border (gap and thickness from a shape's edge): what a ROI without its own border uses. With the default 20 px
+    sample, 4 + 4 px is the 28 / 36 px ring the app always started with."""
     ignore_marked_pixels: bool = False
     ignored_intensity_value: float | None = None
     ignored_intensity_min_value: float | None = None
@@ -287,11 +290,13 @@ class AreaRoiDetectionSettings:
     reduction_method: str = "mean"
     formula_key: str = "absorbance"
 
+    def default_border(self) -> Border:
+        """The shared default border as a `Border`."""
+        return Border(float(self.border_gap_px), float(self.border_thickness_px))
+
 
 def base_geometry(roi: AreaRoi) -> RoiGeometry:
-    return RoiGeometry(
-        roi.center_x, roi.center_y, roi.sample_diameter_px, roi.reference_inner_diameter_px, roi.reference_outer_diameter_px
-    )
+    return RoiGeometry(roi.center_x, roi.center_y, roi.shape, roi.border)
 
 
 def geometry_at(roi: AreaRoi, cube: int | None) -> RoiGeometry:
@@ -314,8 +319,7 @@ def resolved_at(roi: AreaRoi, cube: int | None) -> AreaRoi:
         roi,
         center_x=g.center_x,
         center_y=g.center_y,
-        sample_diameter_px=g.sample_diameter_px,
-        reference_inner_diameter_px=g.reference_inner_diameter_px,
-        reference_outer_diameter_px=g.reference_outer_diameter_px,
+        shape=g.shape,
+        border=g.border,
         timeline=None,
     )

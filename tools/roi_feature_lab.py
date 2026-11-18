@@ -79,7 +79,7 @@ def main() -> int:
     geometry, background = modules.geometry.settings(), modules.background.settings()
     det = modules.roi_toolbox.detection_settings()
     rois = {r.area_roi_id: r for r in modules.roi_toolbox.rois()}
-    inner_default, outer_default = det.reference_inner_diameter_px, det.reference_outer_diameter_px
+    default_border = det.default_border()
     records = io.dataset_record_map(dataset)
     raw = plane_reader.load_image_array_uncached(str(records[(cube, wavelength)].path))
     image = pp.apply_preprocessing(raw, geometry, background, rois=list(rois.values()), mask_settings=det, external_mask=None)
@@ -91,11 +91,11 @@ def main() -> int:
     windows: dict[int, tuple] = {}
     for rid, roi in sorted(rois.items()):
         sample_full = rz.rasterize_sample(roi, shape, affine)
-        ring_full = rz.rasterize_reference(roi, shape, affine, default_inner_diameter_px=inner_default, default_outer_diameter_px=outer_default)
+        ring_full = rz.rasterize_reference(roi, shape, affine, default_border=default_border)
         ys, xs = np.nonzero(sample_full)
         if xs.size == 0:
             continue
-        outer = float(roi.reference_outer_diameter_px or outer_default) / 2.0
+        outer = rz.effective_reference_diameters(roi, default_border)[1] / 2.0
         radius = outer + _FIT_MARGIN_PX
         half = int(np.ceil(radius)) + 6
         cx_s, cy_s = float(xs.mean()), float(ys.mean())

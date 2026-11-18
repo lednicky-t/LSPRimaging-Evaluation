@@ -124,11 +124,17 @@ from ..domain.roi_model import (
     RoiMask,
     RoiTimeline,
 )
+from ..domain.roi_shapes import NO_BORDER, Border, Circle, MaskShape, Rectangle, Shape
 
 logger = logging.getLogger(__name__)
 
 SESSION_SCHEMA_NAME = "lspri_rewrite_session"
-SESSION_SCHEMA_VERSION = "1.11"
+SESSION_SCHEMA_VERSION = "1.12"
+# 1.12 (2026-11-18): a ROI no longer has loose "sample_diameter_px" / "sample_geometry_type" / "sample_mask" / "reference_*" fields. It has "shape" ({"kind": "circle",
+# "diameter_px"} | {"kind": "rectangle", "width_px", "height_px", "angle_deg"} | {"kind": "mask", "mask": ...}) and, only when it has one of its own, "border" ({"gap_px",
+# "thickness_px", "enabled"}: the built-in reference region, measured from the shape's edge; absent = follow the shared default), domain/roi_shapes.py. The timeline's entries
+# carry the same two keys. The detection settings hold "border_gap_px" / "border_thickness_px" instead of the two reference diameters. A 1.11 (or older) ROI is read as a
+# circle with its ring converted to a border (`_legacy_shape_and_border`); a free-form reference region (never created by the UI) is dropped with a warning.
 # 1.11 (2026-11-18): a ROI entry may also hold "role" ("reference"; absent = "sample") and "reference_roi_ids" (the reference ROIs a sample is linked to;
 # absent = none, the built-in ring is its reference), domain/roi_links.py. Written only when not the default, so a session without references is written exactly
 # as before; a 1.10 (or older) file loads as all samples with their built-in rings. An older build ignores both keys (it would analyse a reference ROI as a sample).
@@ -273,6 +279,84 @@ def _decode_per_wavelength(raw: object) -> dict[tuple[int, float], tuple[float, 
     return decoded or None
 
 
+def _encode_shape(shape: Shape) -> dict:
+    if isinstance(shape, Circle):
+        return {"kind": "circle", "diameter_px": float(shape.diameter_px)}
+    if isinstance(shape, Rectangle):
+        return {"kind": "rectangle", "width_px": float(shape.width_px), "height_px": float(shape.height_px), "angle_deg": float(shape.angle_deg)}
+    return {"kind": "mask", "mask": _encode_roi_mask(shape.mask)}
+
+
+def _encode_border(border: Border) -> dict:
+    return {"gap_px": float(border.gap_px), "thickness_px": float(border.thickness_px), "enabled": bool(border.enabled)}
+
+
+def _decode_shape(raw: object) -> Shape:
+    """A shape from its entry; raises ``ValueError`` / ``KeyError`` / ``TypeError`` for an entry that is not one (the caller skips the ROI)."""
+    if not isinstance(raw, dict):
+        raise TypeError("a ROI shape entry must be an object")
+    kind = raw.get("kind")
+    if kind == "circle":
+        return Circle(float(raw["diameter_px"]))
+    if kind == "rectangle":
+        return Rectangle(float(raw["width_px"]), float(raw["height_px"]), float(raw.get("angle_deg", 0.0)))
+    if kind == "mask":
+        mask = _decode_roi_mask(raw.get("mask"))
+        if mask is None:
+            raise ValueError("a mask shape without a usable mask")
+        return MaskShape(mask)
+    raise ValueError(f"unknown ROI shape kind {kind!r}")
+
+
+def _decode_border(raw: object) -> Border | None:
+    if not isinstance(raw, dict):
+        return None
+    return Border(float(raw["gap_px"]), float(raw["thickness_px"]), bool(raw.get("enabled", True)))
+
+
+_Legacy = tuple[tuple[float, float], Border]
+"""What a session written before 1.12 needs to read its ROIs: the shared default ring as (inner, outer) *diameters* (a ROI without its own ring used it,
+whatever its sample size) and that same ring as the new default `Border`."""
+_LEGACY_DEFAULT: _Legacy = ((28.0, 36.0), Border(4.0, 4.0))
+
+
+def _legacy_of_settings(raw: object, sample_diameter_px: float) -> _Legacy:
+    """The `_Legacy` context of a session's ``detection_settings`` block: its ring defaults when it has them (1.11 and older), else the built-in ones."""
+    if not isinstance(raw, dict) or "reference_inner_diameter_px" not in raw:
+        return _LEGACY_DEFAULT
+    inner, outer = float(raw["reference_inner_diameter_px"]), float(raw.get("reference_outer_diameter_px", 36.0))
+    return (inner, outer), Border.from_ring_diameters(sample_diameter_px, inner, outer)
+
+
+def _legacy_shape_and_border(entry: Mapping, legacy: _Legacy = _LEGACY_DEFAULT) -> tuple[Shape, Border | None]:
+    """A ROI (or timeline entry) written before schema 1.12: loose fields. Always a circle unless it had a sample mask. Its ring becomes a border
+    (`Border.from_ring_diameters`) from its own inner and outer diameters, each falling back (as it always did) to the session's shared default ring;
+    the border is left to follow the default only when it *is* the default (a 20 px sample with the 28 / 36 ring), so every ROI keeps exactly the ring
+    it was measured with. A reference mask (a free-form reference region, never created by the UI) cannot be kept: it is dropped, said in the log."""
+    diameter = float(entry.get("sample_diameter_px", 20.0))
+    sample_mask = _decode_roi_mask(entry.get("sample_mask")) if entry.get("sample_geometry_type") == "mask" else None
+    shape: Shape = MaskShape(sample_mask) if sample_mask is not None else Circle(diameter)
+    if entry.get("reference_mask") is not None and entry.get("reference_geometry_type") == "mask":
+        logger.warning("A session ROI has a free-form reference region, which this version cannot keep: it uses the default border instead.")
+    if entry.get("reference_geometry_type") == "none":
+        return shape, NO_BORDER
+    if not isinstance(shape, Circle):
+        return shape, None
+    (default_inner, default_outer), default_border = legacy
+    inner, outer = entry.get("reference_inner_diameter_px"), entry.get("reference_outer_diameter_px")
+    border = Border.from_ring_diameters(
+        diameter, default_inner if inner is None else float(inner), default_outer if outer is None else float(outer)
+    )
+    return shape, (None if inner is None and outer is None and border == default_border else border)
+
+
+def _decode_shape_and_border(entry: Mapping, legacy: _Legacy = _LEGACY_DEFAULT) -> tuple[Shape, Border | None]:
+    """The shape and border of a ROI / timeline entry, in the 1.12 form or (when it has no "shape") in the older one."""
+    if "shape" in entry:
+        return _decode_shape(entry["shape"]), _decode_border(entry.get("border"))
+    return _legacy_shape_and_border(entry, legacy)
+
+
 def _encode_timeline(timeline: RoiTimeline | None) -> dict | None:
     """The ROI's geometry changes by cube (schema 1.2). ``None`` when it has none, so a session without a
     timeline looks exactly as it did before."""
@@ -281,19 +365,15 @@ def _encode_timeline(timeline: RoiTimeline | None) -> dict | None:
 
     def encode(change: RoiGeometryChange) -> dict:
         g = change.geometry
-        return {
-            "cube": int(change.cube),
-            "x": float(g.center_x),
-            "y": float(g.center_y),
-            "sample_diameter_px": float(g.sample_diameter_px),
-            "reference_inner_diameter_px": None if g.reference_inner_diameter_px is None else float(g.reference_inner_diameter_px),
-            "reference_outer_diameter_px": None if g.reference_outer_diameter_px is None else float(g.reference_outer_diameter_px),
-        }
+        entry = {"cube": int(change.cube), "x": float(g.center_x), "y": float(g.center_y), "shape": _encode_shape(g.shape)}
+        if g.border is not None:
+            entry["border"] = _encode_border(g.border)
+        return entry
 
     return {"persistent": [encode(c) for c in timeline.persistent], "individual": [encode(c) for c in timeline.individual]}
 
 
-def _decode_timeline(raw: object) -> RoiTimeline | None:
+def _decode_timeline(raw: object, legacy: _Legacy = _LEGACY_DEFAULT) -> RoiTimeline | None:
     """Lenient, like the rest of the decoder: a malformed change is skipped (and logged); no usable change -> ``None``."""
     if not isinstance(raw, dict):
         return None
@@ -302,15 +382,8 @@ def _decode_timeline(raw: object) -> RoiTimeline | None:
         out: dict[int, RoiGeometryChange] = {}
         for entry in entries if isinstance(entries, list) else []:
             try:
-                inner = entry.get("reference_inner_diameter_px")
-                outer = entry.get("reference_outer_diameter_px")
-                geometry = RoiGeometry(
-                    float(entry["x"]),
-                    float(entry["y"]),
-                    float(entry["sample_diameter_px"]),
-                    None if inner is None else float(inner),
-                    None if outer is None else float(outer),
-                )
+                shape, border = _decode_shape_and_border(entry, legacy)
+                geometry = RoiGeometry(float(entry["x"]), float(entry["y"]), shape, border)
                 out[int(entry["cube"])] = RoiGeometryChange(int(entry["cube"]), scope, geometry)
             except (AttributeError, KeyError, TypeError, ValueError):
                 logger.warning("Skipping an undecodable ROI geometry change in the session file", exc_info=True)
@@ -332,8 +405,11 @@ def _encode_area_roi(area_roi: AreaRoi) -> dict:
     autosave's unchanged-check. Every other `AreaRoi` field is a plain
     scalar, for which `getattr()` is exactly as correct."""
     payload = {f.name: getattr(area_roi, f.name) for f in fields(area_roi)}
-    payload["sample_mask"] = _encode_roi_mask(area_roi.sample_mask)
-    payload["reference_mask"] = _encode_roi_mask(area_roi.reference_mask)
+    payload["shape"] = _encode_shape(area_roi.shape)
+    if area_roi.border is None:  # schema 1.12: written only when the ROI has a border of its own
+        payload.pop("border")
+    else:
+        payload["border"] = _encode_border(area_roi.border)
     payload["per_wavelength"] = _encode_per_wavelength(area_roi.per_wavelength)
     payload["timeline"] = _encode_timeline(area_roi.timeline)
     if area_roi.role == "sample":  # schema 1.11: written only when not the default
@@ -345,7 +421,7 @@ def _encode_area_roi(area_roi: AreaRoi) -> dict:
     return payload
 
 
-def _decode_area_rois(raw: object) -> list[AreaRoi]:
+def _decode_area_rois(raw: object, legacy: _Legacy = _LEGACY_DEFAULT) -> list[AreaRoi]:
     """Decode leniently: an entry missing the two fields with no default
     (`area_roi_id` and a position) is skipped, unknown keys are ignored, and
     anything else falls back to the dataclass default. A session file
@@ -363,11 +439,9 @@ def _decode_area_rois(raw: object) -> list[AreaRoi]:
             kwargs["area_roi_id"] = int(entry["area_roi_id"])
             kwargs["center_x"] = float(entry["center_x"])
             kwargs["center_y"] = float(entry["center_y"])
-            kwargs["sample_diameter_px"] = float(entry.get("sample_diameter_px", 20.0))
-            kwargs["sample_mask"] = _decode_roi_mask(entry.get("sample_mask"))
-            kwargs["reference_mask"] = _decode_roi_mask(entry.get("reference_mask"))
+            kwargs["shape"], kwargs["border"] = _decode_shape_and_border(entry, legacy)
             kwargs["per_wavelength"] = _decode_per_wavelength(entry.get("per_wavelength"))
-            kwargs["timeline"] = _decode_timeline(entry.get("timeline"))
+            kwargs["timeline"] = _decode_timeline(entry.get("timeline"), legacy)
             kwargs["role"] = str(entry.get("role", "sample"))  # an unknown role is repaired (and logged) by RoiToolbox.restore_state
             kwargs["reference_roi_ids"] = tuple(sorted({int(i) for i in entry.get("reference_roi_ids") or ()}))
             decoded.append(AreaRoi(**kwargs))
@@ -812,6 +886,11 @@ def load_session(
     report(0.95, "Reading ROIs, chromatic correction and settings")
     chromatic_block = payload.get("chromatic") or {}
     roi_block = payload.get("roi") or {}
+    detection_settings = _decode_settings(roi_block.get("detection_settings"), AreaRoiDetectionSettings())
+    legacy_ring = _legacy_of_settings(roi_block.get("detection_settings"), detection_settings.sample_diameter_px)
+    if legacy_ring is not _LEGACY_DEFAULT and "border_gap_px" not in (roi_block.get("detection_settings") or {}):
+        # a session before 1.12 kept the shared ring as two diameters: the same ring is now the default border (gap, thickness)
+        detection_settings = replace(detection_settings, border_gap_px=legacy_ring[1].gap_px, border_thickness_px=legacy_ring[1].thickness_px)
     analysis_block = payload.get("analysis") or {}
     selection_block = payload.get("selection") or {}
 
@@ -829,15 +908,13 @@ def load_session(
         chromatic_landmarks=tuple(
             _decode_dataclass_list(chromatic_block.get("landmarks"), ChromaticLandmarkObservation)
         ),
-        detection_settings=_decode_settings(
-            roi_block.get("detection_settings"), AreaRoiDetectionSettings()
-        ),
+        detection_settings=detection_settings,
         # Absent in a 1.0 file - `_decode_settings` returns the default,
         # which is the right reading of a session written before these
         # could be configured.
         metric_settings=_decode_settings(analysis_block.get("metric"), LEGACY_METRIC_DEFAULTS),  # old defaults for missing keys (settings.py)
         statistics_settings=_decode_settings(analysis_block.get("statistics"), StatisticsSettings()),
-        rois=tuple(_decode_area_rois(roi_block.get("rois"))),
+        rois=tuple(_decode_area_rois(roi_block.get("rois"), legacy_ring)),
         groups=tuple(_decode_dataclass_list(roi_block.get("groups"), AreaRoiGroup)),
         arrays=tuple(_decode_dataclass_list(roi_block.get("arrays"), RoiArrayGroup)),
         selected_cube=int(selection_block.get("cube_index", 0)),

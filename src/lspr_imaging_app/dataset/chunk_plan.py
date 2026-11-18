@@ -39,6 +39,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from ..domain.roi_shapes import Border
+
 __all__ = [
     "PATTERNS",
     "SMALL_CHUNK_PX",
@@ -152,16 +154,17 @@ def roi_read_boxes(
     rois: Sequence,
     image_shape: tuple[int, int],
     *,
-    default_inner_diameter_px: float,
-    default_outer_diameter_px: float,
+    default_border: Border,
     affines: Sequence[np.ndarray] | None = None,
 ) -> np.ndarray:
     """(N, 4) int64 ``x0, y0, x1, y1`` (half-open, clipped to the image) of the pixels each `AreaRoi` reads:
-    sample disk and reference ring (or their free-form masks), united over ``affines`` (chromatic correction, one per
-    wavelength; ``None`` = identity). Same reach rule as `analysis.frame_reduce.locate_pixels`: a pixel belongs to a
-    circle when its distance from the (transformed) centre is at most radius x the affine's largest stretch.
+    sample region and border, united over ``affines`` (chromatic correction, one per wavelength; ``None`` =
+    identity). Same reach rule as `analysis.frame_reduce.locate_pixels` for a circle: a pixel belongs to it
+    when its distance from the (transformed) centre is at most radius x the affine's largest stretch; a rectangle
+    or a mask is bounded by the transformed corners of its source-space bounds.
     A ROI entirely outside the image gives an empty box (x1 <= x0)."""
-    from ..roi.rasterize import effective_reference_diameters
+    from ..domain.roi_shapes import NO_BORDER, Circle, effective_border, ring_radii
+    from ..roi.rasterize import region_source_bounds
 
     height, width = int(image_shape[0]), int(image_shape[1])
     n = len(rois)
@@ -174,15 +177,15 @@ def roi_read_boxes(
     radius = np.zeros(n)
     rects: list[tuple[int, float, float, float, float]] = []  # (roi, x0, y0, x1, y1) source-space mask rectangles
     for i, roi in enumerate(rois):
-        if roi.sample_geometry_type == "mask" and roi.sample_mask is not None:
-            rects.append((i, *_mask_rect(roi.sample_mask)))
+        border = effective_border(roi.border, default_border)
+        if isinstance(roi.shape, Circle):
+            radius[i] = max(radius[i], float(roi.shape.diameter_px) / 2.0)
+            if border.enabled:
+                radius[i] = max(radius[i], ring_radii(roi.shape, border)[1])
         else:
-            radius[i] = max(radius[i], float(roi.sample_diameter_px) / 2.0)
-        if roi.reference_geometry_type == "mask" and roi.reference_mask is not None:
-            rects.append((i, *_mask_rect(roi.reference_mask)))
-        else:
-            _inner, outer = effective_reference_diameters(roi, default_inner_diameter_px, default_outer_diameter_px)
-            radius[i] = max(radius[i], outer / 2.0)
+            rects.append((i, *region_source_bounds(roi, "sample", NO_BORDER)))
+            if border.enabled:
+                rects.append((i, *region_source_bounds(roi, "border", border)))
     circular = radius > 0.0
     for m in mats:
         stretch = max(float(np.max(np.linalg.svd(m[:, :2], compute_uv=False))), 1e-6)
@@ -264,11 +267,6 @@ def map_boxes(boxes: np.ndarray, affine: np.ndarray, image_shape: tuple[int, int
     out[valid, 2] = np.clip(np.ceil(tx.max(axis=1) - eps), 0, width)
     out[valid, 3] = np.clip(np.ceil(ty.max(axis=1) - eps), 0, height)
     return out
-
-
-def _mask_rect(mask) -> tuple[float, float, float, float]:
-    h, w = mask.mask.shape[:2]
-    return float(mask.x0), float(mask.y0), float(mask.x0 + w - 1), float(mask.y0 + h - 1)
 
 
 def lattice_groups(centers_xy: np.ndarray, *, axis: str, tolerance_px: float) -> list[list[int]]:
