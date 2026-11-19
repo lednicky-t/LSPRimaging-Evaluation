@@ -89,13 +89,20 @@ BINDINGS: tuple[Binding, ...] = (
         for number, (name, binding_id) in enumerate(PRESET_IDS.items(), start=1)
     ),
     # -- ROI table -------------------------------------------------------------------------------
-    Binding("roi_table.copy", "ROI table", "Copy the value of the current cell", keys=("Ctrl+C", "Ctrl+Ins"), scope=_ROI_TABLE),
     Binding(
-        "roi_table.paste", "ROI table", "Paste the copied value into the current column of the selected ROIs (x, y, diameter)",
+        "roi_table.copy", "ROI table", "Copy the picked cells (or the current cell); the copied cells get a moving dashed border", keys=("Ctrl+C", "Ctrl+Ins"),
+        scope=_ROI_TABLE,
+    ),
+    Binding(
+        "roi_table.paste", "ROI table",
+        "Paste the copied cells into the matching columns of the selected ROIs: one row fills them all, several rows repeat down the selection (one selected row: the block runs on down)",
         keys=("Ctrl+V", "Shift+Ins"), scope=_ROI_TABLE,
     ),
     Binding(
-        "roi_table.fill_down", "ROI table", "Fill the top selected row's value down the other selected rows (x, y, diameter)",
+        "roi_table.cancel_selection", "ROI table", "Let go of the picked cells and the dashed border of the copied ones", keys=("Esc",), scope=_ROI_TABLE,
+    ),
+    Binding(
+        "roi_table.fill_down", "ROI table", "Fill the top selected row's value down the other selected rows (x, y, sizes, angle)",
         keys=("Ctrl+D",), scope=_ROI_TABLE,
     ),
     Binding("roi_table.delete", "ROI table", "Delete the selected ROIs", keys=("Delete", "Backspace"), scope=_ROI_TABLE),
@@ -109,6 +116,19 @@ BINDINGS: tuple[Binding, ...] = (
     Binding(
         "roi_table.cell_step_large", "ROI table", "While editing a number: step it up / down in large steps",
         keys=("Shift+Up", "Shift+Down"), scope=_ROI_TABLE,
+    ),
+    Binding(
+        "mouse.roi_table.step", "Mouse: ROI table",
+        "Over a number of a selected ROI: step the value (Shift: large steps). A position moves the selected ROIs together; a size or angle is set on all of them",
+        gesture="Wheel", scope=_ROI_TABLE,
+    ),
+    Binding(
+        "mouse.roi_table.step_any", "Mouse: ROI table", "The same over the number of any ROI, selected or not", gesture="Ctrl+wheel", scope=_ROI_TABLE,
+    ),
+    Binding(
+        "mouse.roi_table.pick_cells", "Mouse: ROI table",
+        "Pick cells: click a number of an already selected row again and drag over the numbers (Geometry view). Then copy them; right-click for the menu",
+        gesture="Click again and drag", scope=_ROI_TABLE,
     ),
     # -- tools of the Image view -----------------------------------------------------------------
     Binding("tools.cancel", "Image tools", "Cancel what the Rotate, Crop or Measure tool is doing", keys=("Esc",), scope=_TOOLS),

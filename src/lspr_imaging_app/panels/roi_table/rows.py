@@ -18,23 +18,36 @@ from ...roi.palette import DEFAULT_ROI_COLOR_HEX
 
 COLUMN_ID, COLUMN_NAME, COLUMN_X, COLUMN_Y, COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT = range(7)
 COLUMN_SHAPE = 7
-COLUMN_COUNT = 8
+COLUMN_WIDTH, COLUMN_HEIGHT, COLUMN_ANGLE = 8, 9, 10
+"""A rectangle's width, height and angle (2026-11-19). Appended after the first eight, so the number every saved column key and frozen column holds still names the same column."""
+COLUMN_COUNT = 11
 """The fixed columns. The step columns (one per experiment step, ``step_columns.py``) follow them in the model: column ``COLUMN_COUNT + i`` is the i-th step."""
-COLUMN_TITLES = ("#/ROIs", "Label", "x", "y", "D_s", "d_r", "D_r", "Shape")
+COLUMN_TITLES = ("#/ROIs", "Label", "x", "y", "D_s", "d_r", "D_r", "Shape", "W", "H", "θ")
 """Header titles; ``X_y`` is drawn as X with a subscript y (`view.SubscriptHeader`)."""
-EDITABLE_COLUMNS = (COLUMN_X, COLUMN_Y, COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT)
+EDITABLE_COLUMNS = (COLUMN_X, COLUMN_Y, COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT, COLUMN_WIDTH, COLUMN_HEIGHT, COLUMN_ANGLE)
 DIAMETER_COLUMNS = (COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT)
+RECTANGLE_COLUMNS = (COLUMN_WIDTH, COLUMN_HEIGHT, COLUMN_ANGLE)
+"""The columns only a rectangle has. The view shows them only while the table holds a rectangle (`RoiTreeView.refresh_column_visibility`)."""
+LENGTH_COLUMNS = (COLUMN_X, COLUMN_Y, *DIAMETER_COLUMNS, COLUMN_WIDTH, COLUMN_HEIGHT)
+"""Columns in the display unit (px or µm). The angle is in degrees whatever the unit is."""
+SIZE_COLUMNS = (*DIAMETER_COLUMNS, *RECTANGLE_COLUMNS)
+"""The columns whose cell exists only for some shapes (`SHAPE_FIELDS`)."""
+NUMERIC_COLUMNS = (*LENGTH_COLUMNS, COLUMN_ANGLE)
+"""Every column that holds a number a ROI row can change: what a paste, a fill down, Up / Down and the mouse wheel work on."""
 VIEW_SIMPLE = "simple"
 VIEW_GEOMETRY = "geometry"
 VIEW_MODES = (VIEW_SIMPLE, VIEW_GEOMETRY)
 VIEW_MODE_COLUMNS = {
     VIEW_SIMPLE: (COLUMN_ID, COLUMN_NAME),
-    VIEW_GEOMETRY: (COLUMN_ID, COLUMN_X, COLUMN_Y, COLUMN_SHAPE, COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT),
+    VIEW_GEOMETRY: (COLUMN_ID, COLUMN_X, COLUMN_Y, COLUMN_SHAPE, COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT, *RECTANGLE_COLUMNS),
 }
 """Which columns each view mode shows, left to right on screen is the model order; the rest are hidden."""
 
-FIELD_NAMES = {COLUMN_X: "x", COLUMN_Y: "y", COLUMN_SAMPLE: "D_s", COLUMN_RING_IN: "d_r", COLUMN_RING_OUT: "D_r"}
-"""D = outer / d = inner diameter; s = sample, r = reference."""
+FIELD_NAMES = {
+    COLUMN_X: "x", COLUMN_Y: "y", COLUMN_SAMPLE: "D_s", COLUMN_RING_IN: "d_r", COLUMN_RING_OUT: "D_r",
+    COLUMN_WIDTH: "W", COLUMN_HEIGHT: "H", COLUMN_ANGLE: "θ",
+}
+"""D = outer / d = inner diameter; s = sample, r = reference. W / H = a rectangle's width / height along its own axes, θ = its angle (degrees, clockwise on the screen)."""
 
 # -- shapes ---------------------------------------------------------------------
 
@@ -50,16 +63,31 @@ SHAPE_FIELDS = {
     SHAPE_RING: (COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT),
     SHAPE_DISK: (COLUMN_SAMPLE,),
     SHAPE_MASK: (),
-    SHAPE_RECTANGLE: (),  # a rectangle has a width, a height and an angle, not diameters: its size is in the Shape cell's tooltip, edited in the ROI menu
+    SHAPE_RECTANGLE: RECTANGLE_COLUMNS,  # a rectangle has a width, a height and an angle, not diameters (the Shape cell's tooltip says the size too)
     SHAPE_OTHER: (),
 }
-"""The diameter columns each shape has, in order (a ring: D_s, d_r, D_r); the others stay blank.
+"""The size columns each shape has, in order (a ring: D_s, d_r, D_r; a rectangle: W, H, θ); the others stay blank.
 Offsets of the ring centre from the sample centre (``Δx, Δy``) are not stored yet (always 0);
 when they are, they get columns of their own, shown only when some ROI has a non-zero one.
 
 TODO(shapes): rectangle with frame, polygon and freehand are not implemented in the
 app. `shape_of` calls any other sample/reference pairing "other"; give each new shape its
 own key, label, columns and pictogram (`delegate._paint_shape`) here when it arrives."""
+
+
+def has_cell(row: RoiRow, column: int) -> bool:
+    """Does this ROI have a cell in this number column? A position every ROI has; a size or angle only the shapes `SHAPE_FIELDS` names."""
+    return column in (COLUMN_X, COLUMN_Y) or column in SHAPE_FIELDS.get(row.shape, ())
+
+
+def cell_number(row: RoiRow, column: int) -> float | None:
+    """The number in a row's cell, as the table stores it (pixels, degrees); ``None`` where the ROI has no such cell (a circle has no width) or the column holds no number."""
+    if not has_cell(row, column):
+        return None
+    return {
+        COLUMN_X: row.x, COLUMN_Y: row.y, COLUMN_SAMPLE: row.sample, COLUMN_RING_IN: row.inner, COLUMN_RING_OUT: row.outer,
+        COLUMN_WIDTH: row.width, COLUMN_HEIGHT: row.height, COLUMN_ANGLE: row.angle,
+    }.get(column)
 
 
 def shape_of(shape: Shape, border: Border | None) -> str:
@@ -119,6 +147,11 @@ def edit_text(px: float, unit: LengthUnit) -> str:
 def parse_length(text: str, unit: LengthUnit) -> float:
     """What the user typed -> pixels. A decimal comma is accepted. Raises
     ``ValueError`` with a message fit to show the user."""
+    return from_display(_number_of(text), unit)
+
+
+def _number_of(text: str) -> float:
+    """What the user typed as a plain number (a decimal comma is accepted). Raises ``ValueError`` with a message fit to show the user."""
     cleaned = text.strip().replace(",", ".")
     try:
         value = float(cleaned)
@@ -126,7 +159,37 @@ def parse_length(text: str, unit: LengthUnit) -> float:
         raise ValueError(f"'{text.strip()}' is not a number") from None
     if not math.isfinite(value):
         raise ValueError(f"'{text.strip()}' is not a finite number")
-    return from_display(value, unit)
+    return value
+
+
+def parse_angle(text: str) -> float:
+    """What the user typed -> degrees, clockwise on the screen. Any finite number is an angle (a turn of 370 is a turn of 10): it is stored as typed."""
+    return _number_of(text)
+
+
+def format_angle(degrees: float) -> str:
+    """What a cell shows: one decimal, as a length in px does."""
+    return f"{degrees:.1f}"
+
+
+def angle_edit_text(degrees: float) -> str:
+    """What the cell editor starts with: the precision the cell shows, trailing zeros dropped."""
+    text = f"{degrees:.1f}".rstrip("0").rstrip(".")
+    return "0" if text in ("", "-0") else text
+
+
+ANGLE_STEP_DEG = 1.0
+ANGLE_STEP_DEG_LARGE = 5.0
+"""How far one Up / Down (or Ctrl+wheel) step turns a rectangle; Shift takes the large one."""
+
+
+def angle_step_text(text: str, direction: int, large: bool) -> str | None:
+    """``text`` (degrees) moved one step up (+1) or down (-1), as editor text; ``None`` if ``text`` is not a number. An angle has no lower limit."""
+    try:
+        degrees = parse_angle(text)
+    except ValueError:
+        return None
+    return angle_edit_text(degrees + direction * (ANGLE_STEP_DEG_LARGE if large else ANGLE_STEP_DEG))
 
 
 STEP_PX = 0.5
@@ -137,6 +200,13 @@ STEP_UM_LARGE = 10.0
 In µm (no decimals shown) the step is a whole µm instead."""
 
 
+def step_amount_px(large: bool, unit: LengthUnit) -> float:
+    """How far one step of a length is, in pixels: 0.5 px (large 5 px), or in µm a whole µm (large 10 µm) converted, since µm shows no decimals."""
+    if unit.um_per_px is None:
+        return STEP_PX_LARGE if large else STEP_PX
+    return (STEP_UM_LARGE if large else STEP_UM) / unit.um_per_px
+
+
 def step_text(text: str, direction: int, large: bool, unit: LengthUnit) -> str | None:
     """``text`` (a length in ``unit``) moved one step up (+1) or down (-1), as
     editor text, never below zero; ``None`` if ``text`` is not a number."""
@@ -144,11 +214,7 @@ def step_text(text: str, direction: int, large: bool, unit: LengthUnit) -> str |
         px = parse_length(text, unit)
     except ValueError:
         return None
-    if unit.um_per_px is None:
-        step_px = STEP_PX_LARGE if large else STEP_PX
-    else:  # µm shows no decimals, so a step must be a whole µm to be visible
-        step_px = (STEP_UM_LARGE if large else STEP_UM) / unit.um_per_px
-    return edit_text(max(0.0, px + direction * step_px), unit)
+    return edit_text(max(0.0, px + direction * step_amount_px(large, unit)), unit)
 
 
 # -- rows --------------------------------------------------------------------
@@ -174,6 +240,9 @@ class RoiRow:
     role: str = "sample"  # "reference" shows as "R7" in the first column
     link_note: str = ""  # what the ROI is linked to (or used by), for the first column's tooltip
     shape_note: str = ""  # the size of a rectangle or mask, for the Shape cell's tooltip
+    width: float = 0.0  # a rectangle's width and height along its own axes (px) and its angle (degrees, clockwise); 0 for any other shape
+    height: float = 0.0
+    angle: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -214,6 +283,7 @@ def build_roi_rows(
     for roi in rois:
         # the diameter columns describe a circle (its ring as diameters); any other shape has none to show yet
         inner, outer = ring_diameters(roi.shape, effective_border(roi.border, default_border)) if isinstance(roi.shape, Circle) else (0.0, 0.0)
+        rectangle = roi.shape if isinstance(roi.shape, Rectangle) else None
         rows.append(
             RoiRow(
                 roi_id=roi.area_roi_id,
@@ -234,6 +304,9 @@ def build_roi_rows(
                 role=roi.role,
                 link_note=link_note(roi, effective_border(roi.border, default_border).enabled, users.get(roi.area_roi_id, ()), reference_ids),
                 shape_note=shape_note(roi.shape),
+                width=rectangle.width_px if rectangle else 0.0,
+                height=rectangle.height_px if rectangle else 0.0,
+                angle=rectangle.angle_deg if rectangle else 0.0,
             )
         )
     return rows
@@ -318,6 +391,9 @@ _SORT_KEYS = {
     COLUMN_RING_IN: lambda row: (row.inner, row.roi_id),
     COLUMN_RING_OUT: lambda row: (row.outer, row.roi_id),
     COLUMN_SHAPE: lambda row: (row.shape, row.roi_id),
+    COLUMN_WIDTH: lambda row: (row.width, row.roi_id),
+    COLUMN_HEIGHT: lambda row: (row.height, row.roi_id),
+    COLUMN_ANGLE: lambda row: (row.angle, row.roi_id),
 }
 
 

@@ -36,7 +36,7 @@ from ...storage.ui_state_keys import ROI_TABLE_COMPARE_COLUMNS, ROI_TABLE_STEP_D
 from ..icon_button_style import style_general_icon_button
 from ..plot_export_button import ExportData, PlotExportButton
 from ..ribbon_icon_size import ICON_SIZE
-from ..sensorgram.plan_icons import bulk_picture
+from ..sensorgram.plan_icons import bulk_picture, evaluation_picture
 from ..sensorgram.stat_icons import subtract_icon
 from ..spectra.pick_menu import PickMenu, equation_picture
 from ..spectra.view_menu import IconToggle
@@ -181,11 +181,7 @@ class StepColumnControls(QObject):
         theme = get_active_theme()
         self.separator.setStyleSheet(f"background: {theme.toolbar_border}; border: none;")
         style_general_icon_button(self.columns_button)
-        self.columns_button.setIcon(
-            load_tabler_icon(
-                "layout-columns", color=theme.accent_blue if self.columns_button.isChecked() else theme.text_secondary, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH
-            )
-        )
+        self.columns_button.setIcon(QIcon(evaluation_picture()(theme.accent_blue if self.columns_button.isChecked() else theme.text_secondary)))  # the Sensorgram's Evaluation picture: step numbers per step
         style_general_icon_button(self.refresh_button)
         style_general_icon_button(self.add_compare_button)
         self.add_compare_button.setIcon(load_tabler_icon("math-function", color=theme.text_secondary, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH))

@@ -957,34 +957,46 @@ class RoiToolbox(QObject):
         ROI that still follows the default border is checked against that."""
         rois = self._require_rois(roi_ids)
         default_border = self._detection_settings.default_border()
+        self._check_circle_inputs(sample_diameter_px, reference_inner_diameter_px, reference_outer_diameter_px)
+        targets: list[tuple[AreaRoi, Shape, Border | None]] = []
+        for roi in rois:
+            shape, border = self._resized_circle(
+                roi, geometry_at(roi, cube), default_border, sample_diameter_px, reference_inner_diameter_px, reference_outer_diameter_px
+            )
+            targets.append((roi, shape, border))
+        self._set_shapes(targets, "Resize ROI" if len(targets) == 1 else "Resize ROIs", cube=cube, scope=scope)
+
+    @staticmethod
+    def _check_circle_inputs(sample_diameter_px: float | None, inner_px: float | None, outer_px: float | None) -> None:
+        """The checks of the values themselves (not of the ROI): finite, and a sample diameter of at least `MIN_SAMPLE_DIAMETER_PX`."""
         for value, name in (
             (sample_diameter_px, "sample diameter"),
-            (reference_inner_diameter_px, "reference inner diameter"),
-            (reference_outer_diameter_px, "reference outer diameter"),
+            (inner_px, "reference inner diameter"),
+            (outer_px, "reference outer diameter"),
         ):
             if value is not None and not math.isfinite(float(value)):
                 raise ValueError(f"{name} must be a finite number, got {value!r}")
         if sample_diameter_px is not None and float(sample_diameter_px) < MIN_SAMPLE_DIAMETER_PX:
             raise ValueError(f"sample diameter must be at least {MIN_SAMPLE_DIAMETER_PX:g} px, got {float(sample_diameter_px):g}")
-        targets: list[tuple[AreaRoi, Shape, Border | None]] = []
-        for roi in rois:
-            g = geometry_at(roi, cube)
-            if not isinstance(g.shape, Circle):
-                raise ValueError(f"ROI {roi.area_roi_id} is not a circle: its size is not a diameter")
-            diameter = g.shape.diameter_px if sample_diameter_px is None else float(sample_diameter_px)
-            border = g.border
-            if reference_inner_diameter_px is not None or reference_outer_diameter_px is not None:
-                current_inner, current_outer = ring_diameters(g.shape, effective_border(g.border, default_border))
-                inner = current_inner if reference_inner_diameter_px is None else float(reference_inner_diameter_px)
-                outer = current_outer if reference_outer_diameter_px is None else float(reference_outer_diameter_px)
-                if not 0.0 <= inner < outer:
-                    raise ValueError(
-                        f"ROI {roi.area_roi_id}: the reference ring needs 0 <= inner < outer "
-                        f"(inner {inner:g} px, outer {outer:g} px)"
-                    )
-                border = Border.from_ring_diameters(diameter, inner, outer)
-            targets.append((roi, Circle(diameter), border))
-        self._set_shapes(targets, "Resize ROI" if len(targets) == 1 else "Resize ROIs", cube=cube, scope=scope)
+
+    @staticmethod
+    def _resized_circle(
+        roi: AreaRoi, g: RoiGeometry, default_border: Border, sample_diameter_px: float | None, inner_px: float | None, outer_px: float | None
+    ) -> tuple[Circle, Border | None]:
+        """The circle and border `roi` (geometry `g`) gets from new diameters (``None`` = unchanged): the one rule behind `resize_rois` and `set_cell_values`.
+        A ring edit stores the border that gives exactly those diameters at the (new) sample size; a sample change alone carries the border with it."""
+        if not isinstance(g.shape, Circle):
+            raise ValueError(f"ROI {roi.area_roi_id} is not a circle: its size is not a diameter")
+        diameter = g.shape.diameter_px if sample_diameter_px is None else float(sample_diameter_px)
+        border = g.border
+        if inner_px is not None or outer_px is not None:
+            current_inner, current_outer = ring_diameters(g.shape, effective_border(g.border, default_border))
+            inner = current_inner if inner_px is None else float(inner_px)
+            outer = current_outer if outer_px is None else float(outer_px)
+            if not 0.0 <= inner < outer:
+                raise ValueError(f"ROI {roi.area_roi_id}: the reference ring needs 0 <= inner < outer (inner {inner:g} px, outer {outer:g} px)")
+            border = Border.from_ring_diameters(diameter, inner, outer)
+        return Circle(diameter), border
 
     @instrumented("RoiToolbox.resize_rectangles")
     def resize_rectangles(
@@ -1004,26 +1016,86 @@ class RoiToolbox(QObject):
         Raises ``ValueError``, before changing anything, for a ROI that is not a rectangle, a value that is not finite, or a width or height below
         `MIN_SAMPLE_DIAMETER_PX`."""
         rois = self._require_rois(roi_ids)
+        self._check_rectangle_inputs(width_px, height_px, angle_deg)
+        targets: list[tuple[AreaRoi, Shape, Border | None]] = []
+        for roi in rois:
+            g = geometry_at(roi, cube)
+            shape = self._resized_rectangle(roi, g, width_px, height_px, angle_deg)
+            if shape != g.shape:
+                targets.append((roi, shape, g.border))
+        if targets:
+            self._set_shapes(targets, "Resize rectangle" if len(targets) == 1 else "Resize rectangles", cube=cube, scope=scope)
+
+    @staticmethod
+    def _check_rectangle_inputs(width_px: float | None, height_px: float | None, angle_deg: float | None) -> None:
+        """The checks of the values themselves: finite, and a width and height of at least `MIN_SAMPLE_DIAMETER_PX`."""
         for value, name in ((width_px, "width"), (height_px, "height"), (angle_deg, "angle")):
             if value is not None and not math.isfinite(float(value)):
                 raise ValueError(f"{name} must be a finite number, got {value!r}")
         for value, name in ((width_px, "width"), (height_px, "height")):
             if value is not None and float(value) < MIN_SAMPLE_DIAMETER_PX:
                 raise ValueError(f"{name} must be at least {MIN_SAMPLE_DIAMETER_PX:g} px, got {float(value):g}")
-        targets: list[tuple[AreaRoi, Shape, Border | None]] = []
+
+    @staticmethod
+    def _resized_rectangle(roi: AreaRoi, g: RoiGeometry, width_px: float | None, height_px: float | None, angle_deg: float | None) -> Rectangle:
+        """The rectangle `roi` (geometry `g`) gets from a new width, height and / or angle (``None`` = unchanged): the one rule behind `resize_rectangles` and `set_cell_values`."""
+        if not isinstance(g.shape, Rectangle):
+            raise ValueError(f"ROI {roi.area_roi_id} is not a rectangle: it has no width, height or angle")
+        return Rectangle(
+            g.shape.width_px if width_px is None else float(width_px),
+            g.shape.height_px if height_px is None else float(height_px),
+            g.shape.angle_deg if angle_deg is None else float(angle_deg),
+        )
+
+    CELL_FIELDS = (
+        "x", "y", "sample_diameter_px", "reference_inner_diameter_px", "reference_outer_diameter_px", "width_px", "height_px", "angle_deg",
+    )
+    """The numbers `set_cell_values` can give a ROI (the ROI table's number columns)."""
+
+    @instrumented("RoiToolbox.set_cell_values")
+    def set_cell_values(
+        self, values: Mapping[int, Mapping[str, float]], *, cube: int | None = None, scope: str = SCOPE_PERSISTENT, label: str = "Paste cells"
+    ) -> None:
+        """Give each ROI in ``values`` (id -> {field: number}, fields `CELL_FIELDS`) its own new numbers: **one undo step and one signal**, however many ROIs and fields. This is
+        what pasting cells of the ROI table does (each ROI may get a different value, which ``resize_rois`` / ``place_rois`` cannot say in one step).
+
+        The rules are the ones of typing the value: a position of a pixel mask is refused (`move_refusal`), a diameter needs a circle, a width / height / angle a rectangle, the sample
+        diameter, width and height at least `MIN_SAMPLE_DIAMETER_PX`, the ring ``0 <= inner < outer``. **All or nothing**: the first problem raises ``ValueError`` (naming the ROI)
+        before anything changes. A ROI whose numbers do not differ is left alone; if nothing differs there is no undo entry."""
+        unknown = {field for fields in values.values() for field in fields} - set(self.CELL_FIELDS)
+        if unknown:
+            raise ValueError(f"unknown field {sorted(unknown)}; known: {self.CELL_FIELDS}")
+        rois = self._require_rois(values)
+        refusal = self.move_refusal([roi.area_roi_id for roi in rois if "x" in values[roi.area_roi_id] or "y" in values[roi.area_roi_id]])
+        if refusal:
+            raise ValueError(refusal)
+        default_border = self._detection_settings.default_border()
+        changes: list[tuple[AreaRoi, RoiGeometry]] = []
         for roi in rois:
+            fields = values[roi.area_roi_id]
             g = geometry_at(roi, cube)
-            if not isinstance(g.shape, Rectangle):
-                raise ValueError(f"ROI {roi.area_roi_id} is not a rectangle: it has no width, height or angle")
-            shape = Rectangle(
-                g.shape.width_px if width_px is None else float(width_px),
-                g.shape.height_px if height_px is None else float(height_px),
-                g.shape.angle_deg if angle_deg is None else float(angle_deg),
-            )
-            if shape != g.shape:
-                targets.append((roi, shape, g.border))
-        if targets:
-            self._set_shapes(targets, "Resize rectangle" if len(targets) == 1 else "Resize rectangles", cube=cube, scope=scope)
+            shape, border, x, y = g.shape, g.border, g.center_x, g.center_y
+            try:
+                for name in ("x", "y"):
+                    if name in fields and not math.isfinite(float(fields[name])):
+                        raise ValueError(f"position {name} must be a finite number, got {fields[name]!r}")
+                if "x" in fields:
+                    x = self._rounded(fields["x"])
+                if "y" in fields:
+                    y = self._rounded(fields["y"])
+                circle = (fields.get("sample_diameter_px"), fields.get("reference_inner_diameter_px"), fields.get("reference_outer_diameter_px"))
+                if any(value is not None for value in circle):
+                    self._check_circle_inputs(*circle)
+                    shape, border = self._resized_circle(roi, g, default_border, *circle)
+                rectangle = (fields.get("width_px"), fields.get("height_px"), fields.get("angle_deg"))
+                if any(value is not None for value in rectangle):
+                    self._check_rectangle_inputs(*rectangle)
+                    shape = self._resized_rectangle(roi, g, *rectangle)
+            except ValueError as exc:
+                text = str(exc)
+                raise ValueError(text if text.startswith("ROI ") else f"ROI {roi.area_roi_id}: {text}") from None
+            changes.append((roi, g._replace(center_x=x, center_y=y, shape=shape, border=border)))
+        self._write_geometry(changes, cube, scope, label, "pasted")
 
     @instrumented("RoiToolbox.set_borders")
     def set_borders(self, borders: Mapping[int, Border], *, cube: int | None = None, scope: str = SCOPE_PERSISTENT) -> None:

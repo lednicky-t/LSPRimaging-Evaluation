@@ -256,7 +256,7 @@ CHECKS_WINDOW_SIZE = "checks_window/size"  # [width, height] of the Sensorgram's
 CHECKS_WINDOW_NUMBERS = "checks_window/numbers_open"  # bool: its table of numbers per step is unfolded
 MOTION_WINDOW_SIZE = "motion_window/compact_size"  # [width, height] of the Image panel's image-motion report window (compact since 2026-11-10; the old key "motion_window/size" held a big window's size and is ignored)
 MOTION_WINDOW_NUMBERS = "motion_window/numbers_open"  # bool: its table is unfolded
-ROI_TABLE_COLUMN_WIDTHS = "roi_table/column_widths"  # one width per column (10; a list of the old 7 is still read)
+ROI_TABLE_COLUMN_WIDTHS = "roi_table/column_widths"  # one width per column (11; a list of the old 7 or 8 is still read)
 ROI_TABLE_STEPS_SHOWN = "roi_table/steps_shown"  # bool: the step columns (mean / SD per experiment step) are on
 ROI_TABLE_STEP_DISPLAY = "roi_table/step_display"  # "mean" | "std" | "both" (mean ± SD) | "sem" | "mean_sem": what the step cells show
 ROI_TABLE_STEP_WIDTH_MANUAL = "roi_table/step_width_manual"  # int: the width the user gave every step column by dragging an edge; None or absent = each step column fits its content (the old key "roi_table/step_width" was written automatically and is ignored)

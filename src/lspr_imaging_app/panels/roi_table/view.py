@@ -19,19 +19,25 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 
-from PyQt6.QtCore import QModelIndex, QPoint, QPointF, QRect, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QFontMetrics, QIcon, QKeyEvent, QMouseEvent, QPainter, QPaintEvent, QPalette, QPen, QPolygonF, QWheelEvent
+from dataclasses import dataclass
+
+from PyQt6.QtCore import QModelIndex, QPoint, QPointF, QRect, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QCursor, QFont, QFontMetrics, QIcon, QKeyEvent, QMouseEvent, QPainter, QPaintEvent, QPalette, QPen, QPolygonF, QWheelEvent
 from PyQt6.QtWidgets import QAbstractItemView, QApplication, QHeaderView, QStyle, QStyleOptionFocusRect, QStyleOptionHeader, QStyleOptionViewItem, QTreeView, QWidget
 
 from lspr_ui import get_active_theme
 
 from ...shortcuts import matches
+from .cell_marks import CellMarks, Edges
+from .cell_marks import edges as block_edges
 from .column_keys import ColumnKey
 from .column_keys import column_key as key_of_step_column
 from .delegate import CELL_ROOM, CHEVRON_ZONE, CHIP_SIZE, GROUP_INDENT, STRIP_WIDTH, first_column_collapsed, tinted_text_color
 from .model import COLUMN_KIND_ROLE, DEPTH_ROLE, KIND_ROLE, STEP_TINT_ROLE
 from .rows import (
+    COLUMN_ANGLE,
     COLUMN_COUNT,
+    COLUMN_HEIGHT,
     COLUMN_ID,
     COLUMN_NAME,
     COLUMN_RING_IN,
@@ -39,12 +45,31 @@ from .rows import (
     COLUMN_SAMPLE,
     COLUMN_SHAPE,
     COLUMN_TITLES,
+    COLUMN_WIDTH,
     COLUMN_X,
     COLUMN_Y,
+    NUMERIC_COLUMNS,
+    RECTANGLE_COLUMNS,
     VIEW_MODE_COLUMNS,
 )
 from .step_columns import MAX_STEP_WIDTH, MIN_STEP_WIDTH, STEP_WIDTH_DEFAULT, elide_runs, subscript_runs, widest_text
 
+WHEEL_NOTCH = 120  # `QWheelEvent.angleDelta` units of one notch of a mouse wheel
+AUTOSCROLL_MS = 40  # while a cell range is dragged the table scrolls this often when the pointer is at (or past) its edge
+AUTOSCROLL_EDGE = 10  # px from the viewport's edge that count as "at the edge"
+ANTS_MS = 120  # how often the marching ants of a copied block advance
+
+
+@dataclass
+class _RangeDrag:
+    """A cell range being dragged: where it started and what to measure against (taken once at the press: nothing changes the rows while the button is down)."""
+
+    anchor_id: int
+    anchor_column: int
+    order: list[int]  # the ROIs shown, top to bottom (rows of a collapsed group are not shown)
+    position: dict[int, int]  # ROI id -> its place in `order`
+    selected: frozenset[int]  # the selected ROIs: only these can be in a range
+    last_id: int  # the ROI the range reached last (kept while the pointer is over a group header)
 _ARROW_ZONE = 20  # px at the left end of a comparison column's header: the arrow that opens its operation menu
 _SORT_INDICATOR_ROOM = 22
 _CELL_PADDING = 16
@@ -351,6 +376,8 @@ def suggested_column_widths(metrics: QFontMetrics) -> list[int]:
     widths[COLUMN_RING_IN] = max(diameter, title_width(metrics, COLUMN_TITLES[COLUMN_RING_IN]) + _SORT_INDICATOR_ROOM)
     widths[COLUMN_RING_OUT] = diameter
     widths[COLUMN_SHAPE] = max(32, advance(COLUMN_TITLES[COLUMN_SHAPE]) + _SORT_INDICATOR_ROOM)
+    widths[COLUMN_WIDTH] = widths[COLUMN_HEIGHT] = max(diameter, advance(COLUMN_TITLES[COLUMN_WIDTH]) + _SORT_INDICATOR_ROOM)
+    widths[COLUMN_ANGLE] = max(advance("-999.9") + _CELL_PADDING, advance(COLUMN_TITLES[COLUMN_ANGLE]) + _SORT_INDICATOR_ROOM)  # a turn can be negative
     return widths
 
 
@@ -366,7 +393,7 @@ class RoiTreeView(QTreeView):
     fill_down_requested = pyqtSignal()
     """Ctrl+C / Ctrl+V / Ctrl+D on the current cell (the panel decides what they do)."""
     step_requested = pyqtSignal(QModelIndex, int, bool)
-    """Ctrl+wheel over a cell: index, direction (+1 / -1), large step."""
+    """A turn of the wheel over a cell that steps (see `wheelEvent`): index, direction (+1 / -1), large step."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -374,6 +401,15 @@ class RoiTreeView(QTreeView):
         self._mode_columns: frozenset[int] = frozenset(range(COLUMN_COUNT))  # the fixed columns the view mode shows (`set_view_mode`)
         self._hidden_keys: frozenset = frozenset()  # the columns the user hid, by key (`column_keys.py`)
         self._first_width = 0  # the width #/ROIs had before it was hidden (collapsed to nothing, see `refresh_column_visibility`); 0 = not known yet
+        self._wheel_turn = 0  # wheel units turned so far that are not a whole notch yet (`wheelEvent`)
+        self._marks = CellMarks()  # the picked cell range and the copied cells (`cell_marks.py`)
+        self._range_drag: _RangeDrag | None = None
+        self._autoscroll = QTimer(self)
+        self._autoscroll.setInterval(AUTOSCROLL_MS)
+        self._autoscroll.timeout.connect(self._autoscroll_tick)
+        self._ants = QTimer(self)
+        self._ants.setInterval(ANTS_MS)
+        self._ants.timeout.connect(self._ants_tick)
         header = SubscriptHeader(Qt.Orientation.Horizontal, self)
         header.set_pin_source(self.pinned_columns)
         self.setHeader(header)
@@ -485,21 +521,25 @@ class RoiTreeView(QTreeView):
         return key is not None and key in self._hidden_keys
 
     def refresh_column_visibility(self) -> None:
-        """The one place that decides which columns show: a fixed column when the view mode has it, every step column, and none that the user hid. Cheap; called whenever the
-        mode, the hidden set or the step columns change (a model reset gives new step columns the default, visible).
+        """The one place that decides which columns show: a fixed column when the view mode has it, every step column, and none that the user hid; the width, height and angle
+        columns (`rows.RECTANGLE_COLUMNS`) also only while the table holds a rectangle (2026-11-19: with none they would be three empty columns). Cheap; called whenever the
+        mode, the hidden set, the step columns or the ROIs change (a model reset gives new step columns the default, visible).
 
         **#/ROIs is hidden differently** (2026-11-06): it is collapsed to zero width and stays a column for Qt. A group header is one cell spanning the row that Qt attaches to
         the first column; with that column really hidden Qt paints no group header at all (no chevron, name or step numbers, nothing to click, rename or drop on). With the
         column at zero width the header is drawn and answers as before, a ROI row only loses its dot and number (the delegate skips them), and the section cannot be dragged
         open (fixed size) while it is hidden."""
         model = self.model()
+        no_rectangles = model is not None and not model.has_rectangles()
         for column in range(model.columnCount() if model is not None else 0):
             if column == COLUMN_ID:
                 self._collapse_first_column(self.is_user_hidden(COLUMN_ID))
                 continue
-            hidden = (column < COLUMN_COUNT and column not in self._mode_columns) or self.is_user_hidden(column)
+            hidden = (column < COLUMN_COUNT and column not in self._mode_columns) or self.is_user_hidden(column) or (no_rectangles and column in RECTANGLE_COLUMNS)
             if hidden != self.isColumnHidden(column):
                 self.setColumnHidden(column, hidden)
+        if self._marks.has_range():
+            self.restrict_cell_range(self._marks.range_rows)  # a column that is not shown any more leaves the picked cells
 
     def _collapse_first_column(self, collapsed: bool) -> None:
         header = self.header()
@@ -653,6 +693,10 @@ class RoiTreeView(QTreeView):
             self.viewport().update()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
+        if self._range_drag is not None:  # dragging a cell range: no hover, no drag and drop
+            self._extend_range(event.position().toPoint())
+            event.accept()
+            return
         self._set_hover(self.indexAt(event.position().toPoint()))
         super().mouseMoveEvent(event)
 
@@ -670,7 +714,222 @@ class RoiTreeView(QTreeView):
                 self.setExpanded(index, not self.isExpanded(index))
                 event.accept()
                 return
+            if self._begin_cell_range(event, index):
+                return
+            self._set_range(None)  # a click anywhere else lets go of the picked cells (a right-click does not: its menu acts on them)
         super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
+        if self._range_drag is not None and event.button() == Qt.MouseButton.LeftButton:
+            self._end_range_drag()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    # -- picking cells: click a selected row's number again and drag --------------------------------------------------------------
+
+    def _begin_cell_range(self, event: QMouseEvent, index: QModelIndex) -> bool:
+        """A plain left press on a number (`rows.NUMERIC_COLUMNS`) of a row that is **already selected** starts picking cells (the row selection stays as it is, also with several
+        rows selected); a press anywhere else is the usual row click. Qt's own press runs too, so a double-click still opens the editor; its drag and drop is stopped here."""
+        if event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.AltModifier):
+            return False
+        if not (index.isValid() and index.data(KIND_ROLE) == "roi" and index.column() in NUMERIC_COLUMNS and self.selectionModel().isSelected(index)):
+            return False
+        model = self.model()
+        roi_id = model.roi_id(index)
+        order = self._shown_roi_ids()
+        selected = frozenset(i for i in (model.roi_id(row) for row in self.selectionModel().selectedRows()) if i is not None)
+        super().mousePressEvent(event)  # (it sets what a double-click needs; the selection does not change: the row is selected already)
+        self.setState(QAbstractItemView.State.NoState)  # (and no drag and drop of the row: we own the drag until the button goes up)
+        self._range_drag = _RangeDrag(roi_id, index.column(), order, {r: i for i, r in reversed(list(enumerate(order)))}, selected, roi_id)
+        self._set_range(((roi_id,), (index.column(),)))
+        self._autoscroll.start()
+        event.accept()
+        return True
+
+    def _end_range_drag(self) -> None:
+        self._range_drag = None
+        self._autoscroll.stop()
+
+    def _shown_roi_ids(self) -> list[int]:
+        """The ROIs on screen from top to bottom (the rows of a collapsed group are not)."""
+        model = self.model()
+        ids: list[int] = []
+        for row in range(model.rowCount()):
+            top = model.index(row, 0)
+            if model.is_group(top):
+                if self.isExpanded(top):
+                    ids.extend(i for i in (model.roi_id(model.index(r, 0, top)) for r in range(model.rowCount(top))) if i is not None)
+            elif model.roi_id(top) is not None:
+                ids.append(model.roi_id(top))
+        return ids
+
+    def _shown_numeric_columns(self) -> list[int]:
+        """The number columns that are on screen, left to right."""
+        header = self.header()
+        shown = [c for c in NUMERIC_COLUMNS if c < self.model().columnCount() and not self.isColumnHidden(c) and self.columnWidth(c) > 0]
+        return sorted(shown, key=header.visualIndex)
+
+    def _extend_range(self, pos: QPoint) -> None:
+        """The pointer moved to `pos` (viewport coordinates) while a range is dragged: the range is the rows between the starting row and the one under the pointer **that are
+        selected**, and the number columns between the starting column and the one under the pointer. Past the table's edge the nearest row / column counts."""
+        drag = self._range_drag
+        if drag is None:
+            return
+        area = self.viewport().rect()
+        point = QPoint(max(0, min(pos.x(), area.width() - 1)), max(0, min(pos.y(), area.height() - 1)))
+        index = self.indexAt(point)
+        model = self.model()
+        if not index.isValid():  # below the last row (or between rows): the last row, the column under the pointer
+            row_id = drag.order[-1] if pos.y() >= point.y() and drag.order else drag.last_id
+            column = self._column_at(point.x())
+        elif model.is_group(index):  # a group header is no row to pick: the range stays where it was
+            row_id, column = drag.last_id, self._column_at(point.x())
+        else:
+            row_id, column = model.roi_id(index), index.column()
+        if row_id not in drag.position or column < 0:
+            return
+        drag.last_id = row_id
+        low, high = sorted((drag.position[drag.anchor_id], drag.position[row_id]))
+        rows = tuple(r for r in drag.order[low:high + 1] if r in drag.selected)
+        header = self.header()
+        first, last = sorted((header.visualIndex(drag.anchor_column), header.visualIndex(column)))
+        columns = tuple(c for c in self._shown_numeric_columns() if first <= header.visualIndex(c) <= last)
+        self._set_range((rows, columns))
+
+    def _column_at(self, x: int) -> int:
+        """The column under viewport x, or the last column on screen when x is past the last one."""
+        column = self.header().logicalIndexAt(x)
+        if column >= 0:
+            return column
+        shown = [c for c in range(self.model().columnCount()) if not self.isColumnHidden(c)]
+        return max(shown, key=self.header().visualIndex) if shown else -1
+
+    def _autoscroll_tick(self) -> None:
+        """While the button is down and the pointer is at or past the edge of the table, scroll that way (and let the range follow)."""
+        if self._range_drag is None:
+            self._autoscroll.stop()
+            return
+        pos = self.viewport().mapFromGlobal(QCursor.pos())
+        area = self.viewport().rect()
+        bar = self.verticalScrollBar()
+        if pos.y() < AUTOSCROLL_EDGE:
+            bar.setValue(bar.value() - max(4, min(40, (AUTOSCROLL_EDGE - pos.y()) // 2)))
+        elif pos.y() > area.height() - AUTOSCROLL_EDGE:
+            bar.setValue(bar.value() + max(4, min(40, (pos.y() - area.height() + AUTOSCROLL_EDGE) // 2)))
+        side = self.horizontalScrollBar()
+        if pos.x() < AUTOSCROLL_EDGE:
+            side.setValue(side.value() - 10)
+        elif pos.x() > area.width() - AUTOSCROLL_EDGE:
+            side.setValue(side.value() + 10)
+        self._extend_range(pos)
+
+    # -- the marks: the picked range and the copied block (`cell_marks.py`) -------------------------------------------------------
+
+    def _set_range(self, picked: tuple[tuple[int, ...], tuple[int, ...]] | None) -> None:
+        """Set the picked range to (rows, columns), or drop it (None). Repaints only if it changed."""
+        before = (self._marks.range_rows, self._marks.range_columns)
+        if picked is None:
+            self._marks.clear_range()
+        else:
+            self._marks.set_range(*picked)
+        if before != (self._marks.range_rows, self._marks.range_columns):
+            self.viewport().update()
+
+    def cell_range(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        """The picked range: (ROI ids top to bottom as the table lists them, column numbers left to right); both empty when none is picked."""
+        header = self.header()
+        order = {r: i for i, r in enumerate(self.model().ordered_roi_ids())}
+        rows = tuple(sorted(self._marks.range_rows, key=lambda r: order.get(r, len(order))))
+        return rows, tuple(sorted(self._marks.range_columns, key=header.visualIndex))
+
+    def set_cell_range(self, rows, columns) -> None:
+        self._set_range((tuple(rows), tuple(columns)))
+
+    def restrict_cell_range(self, selected_ids) -> None:
+        """The ROI selection changed: the range keeps only the rows still selected (it goes when none is)."""
+        before = (self._marks.range_rows, self._marks.range_columns)
+        self._marks.restrict_range(selected_ids, self._shown_numeric_columns())
+        if before != (self._marks.range_rows, self._marks.range_columns):
+            self.viewport().update()
+
+    def set_copied_cells(self, rows, columns, token: str) -> None:
+        """Mark the copied block with the marching ants (until `clear_copied_cells`, Esc or the next copy)."""
+        self._marks.set_copied(rows, columns, token)
+        if self._marks.has_copied() and self.isVisible():
+            self._ants.start()
+        self.viewport().update()
+
+    def copied_token(self) -> str:
+        return self._marks.copied_token
+
+    def clear_copied_cells(self) -> None:
+        had = self._marks.has_copied()
+        self._marks.clear_copied()
+        self._ants.stop()
+        if had:
+            self.viewport().update()
+
+    def clear_cell_marks(self) -> None:
+        """Esc / "Cancel cell selection": let go of the picked range and the copied block's ants."""
+        self._end_range_drag()
+        self._set_range(None)
+        self.clear_copied_cells()
+
+    def has_cell_marks(self) -> bool:
+        return self._marks.has_any()
+
+    def _ants_tick(self) -> None:
+        if not self.isVisible() or not self._marks.has_copied():
+            self._ants.stop()  # (a hidden panel does no work: `showEvent` starts it again)
+            return
+        self._marks.step_ants()
+        self.viewport().update()
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        if self._marks.has_copied():
+            self._ants.start()
+
+    def hideEvent(self, event) -> None:  # type: ignore[override]
+        super().hideEvent(event)
+        self._ants.stop()
+
+    def ants_phase(self) -> int:
+        return self._marks.ants_phase
+
+    def range_edges(self, index: QModelIndex) -> Edges | None:
+        """The sides of this cell on the border of the picked range, or None if it is not in it."""
+        return self._edges_of(index, self._marks.range_rows, self._marks.range_columns)
+
+    def copied_edges(self, index: QModelIndex) -> Edges | None:
+        """The sides of this cell on the border of the copied block, or None if it is not in it."""
+        return self._edges_of(index, self._marks.copied_rows, self._marks.copied_columns)
+
+    def _edges_of(self, index: QModelIndex, rows, columns) -> Edges | None:
+        if not rows or not columns:
+            return None
+        model = self.model()
+        roi_id = model.roi_id(index)
+        if roi_id is None or roi_id not in rows or index.column() not in columns:
+            return None
+        above, below = self.indexAbove(index), self.indexBelow(index)
+        return block_edges(
+            roi_id, index.column(), rows, columns,
+            model.roi_id(above) if above.isValid() else None, model.roi_id(below) if below.isValid() else None,
+            self._next_column(index.column(), -1), self._next_column(index.column(), 1),
+        )
+
+    def _next_column(self, column: int, step: int) -> int | None:
+        """The column shown left (step -1) or right (+1) of `column`, or None."""
+        header = self.header()
+        visual = header.visualIndex(column) + step
+        while 0 <= visual < header.count():
+            logical = header.logicalIndex(visual)
+            if not self.isColumnHidden(logical) and self.columnWidth(logical) > 0:
+                return logical
+            visual += step
+        return None
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
         if event.button() == Qt.MouseButton.LeftButton:
@@ -691,13 +950,30 @@ class RoiTreeView(QTreeView):
         start = left + STRIP_WIDTH + 5 + (GROUP_INDENT if index.data(DEPTH_ROLE) else 0)
         return start - 3 <= x <= start + CHIP_SIZE + 3
 
+    def wheel_steps(self, index: QModelIndex) -> bool:
+        """Does a plain wheel turn into a step over this cell? Yes for a number the user can edit (`rows.NUMERIC_COLUMNS`) on a ROI row that is **selected**; anywhere else the
+        wheel scrolls the table as usual (a group header, a blank cell, a row that is not selected, the label)."""
+        return (
+            index.isValid() and index.data(KIND_ROLE) == "roi" and index.column() in NUMERIC_COLUMNS
+            and bool(index.flags() & Qt.ItemFlag.ItemIsEditable) and self.selectionModel().isSelected(index)
+        )
+
     def wheelEvent(self, event: QWheelEvent) -> None:  # type: ignore[override]
-        """Ctrl + wheel over a cell steps its value (a plain wheel still scrolls)."""
-        if event.modifiers() & Qt.KeyboardModifier.ControlModifier and event.angleDelta().y():
+        """Over a number of a selected ROI row the wheel steps its value (Shift: large steps); Ctrl + wheel does it over any cell. Elsewhere a plain wheel scrolls.
+
+        One step per full notch (120 units): a smooth wheel or a touchpad sends many small turns, which add up instead of each being a step."""
+        delta = event.angleDelta().y()
+        if delta and self._range_drag is None:  # (while cells are being picked the wheel only scrolls)
             index = self.indexAt(event.position().toPoint())
-            if index.isValid():
+            if index.isValid() and (event.modifiers() & Qt.KeyboardModifier.ControlModifier or self.wheel_steps(index)):
+                if self._wheel_turn * delta < 0:
+                    self._wheel_turn = 0  # the other way: start counting again
+                self._wheel_turn += delta
                 large = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-                self.step_requested.emit(index, 1 if event.angleDelta().y() > 0 else -1, large)
+                while abs(self._wheel_turn) >= WHEEL_NOTCH:
+                    direction = 1 if self._wheel_turn > 0 else -1
+                    self._wheel_turn -= direction * WHEEL_NOTCH
+                    self.step_requested.emit(index, direction, large)
                 event.accept()
                 return
         super().wheelEvent(event)
@@ -719,6 +995,10 @@ class RoiTreeView(QTreeView):
                 return
             if matches(event, "roi_table.fill_down"):
                 self.fill_down_requested.emit()
+                event.accept()
+                return
+            if matches(event, "roi_table.cancel_selection") and self.has_cell_marks():
+                self.clear_cell_marks()
                 event.accept()
                 return
             if matches(event, "roi_table.delete"):

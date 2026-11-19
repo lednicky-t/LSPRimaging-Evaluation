@@ -22,7 +22,9 @@ from ...selection.step_table_module import StepColumn
 from ...domain.roi_model import AreaRoi, AreaRoiDetectionSettings, AreaRoiGroup
 from ...roi.palette import DEFAULT_ROI_COLOR_HEX
 from .rows import (
+    COLUMN_ANGLE,
     COLUMN_COUNT,
+    COLUMN_HEIGHT,
     COLUMN_ID,
     COLUMN_NAME,
     COLUMN_RING_IN,
@@ -30,22 +32,29 @@ from .rows import (
     COLUMN_SAMPLE,
     COLUMN_SHAPE,
     COLUMN_TITLES,
+    COLUMN_WIDTH,
     COLUMN_X,
     COLUMN_Y,
-    DIAMETER_COLUMNS,
     EDITABLE_COLUMNS,
+    LENGTH_COLUMNS,
+    NUMERIC_COLUMNS,
     PIXELS,
+    RECTANGLE_COLUMNS,
     SHAPE_FIELDS,
     SHAPE_LABELS,
+    SHAPE_RECTANGLE,
+    SIZE_COLUMNS,
     GroupInfo,
     LengthUnit,
     RoiRow,
     Section,
     StepSort,
+    angle_edit_text,
     build_linked_sections,
     build_roi_rows,
     build_sections,
     edit_text,
+    format_angle,
     format_length,
     sort_rows,
 )
@@ -92,7 +101,7 @@ class DropTarget:
     group_id: str | None = None
     position: int = 0
 
-_NUMERIC_COLUMNS = (COLUMN_X, COLUMN_Y, COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT)
+_NUMERIC_COLUMNS = NUMERIC_COLUMNS
 _HEADER_TIPS = {
     COLUMN_ID: "Position in the list. Reordering changes these numbers.",
     COLUMN_NAME: "Label of a group (its name, also drawn on the image). Empty for ROIs.",
@@ -102,6 +111,9 @@ _HEADER_TIPS = {
     COLUMN_SAMPLE: "Sample diameter.",
     COLUMN_RING_IN: "Reference ring, inner diameter. Grey italic: taken from the shared default.",
     COLUMN_RING_OUT: "Reference ring, outer diameter. Grey italic: taken from the shared default.",
+    COLUMN_WIDTH: "Rectangle width, along the rectangle's own x axis. Blank for other shapes.",
+    COLUMN_HEIGHT: "Rectangle height, along the rectangle's own y axis. Blank for other shapes.",
+    COLUMN_ANGLE: "Rectangle angle in degrees, turned clockwise on the screen about its centre. Blank for other shapes.",
 }
 
 
@@ -334,6 +346,26 @@ class RoiTreeModel(QAbstractItemModel):
         """Every ROI's row, unsorted (the toolbox's order)."""
         return list(self._rows)
 
+    def ordered_roi_ids(self) -> list[int]:
+        """Every ROI in the order the table lists them now (sorted, grouped; rows of a collapsed group included), each once (the Linked view may list a shared reference
+        under several samples). What a copy and a paste count rows by."""
+        seen: set[int] = set()
+        ordered: list[int] = []
+        for node in self._iter_roi_nodes():
+            if node.row.roi_id not in seen:
+                seen.add(node.row.roi_id)
+                ordered.append(node.row.roi_id)
+        return ordered
+
+    def edit_text_of(self, row: RoiRow, column: int) -> str:
+        """The text the cell editor would start with for `row` in `column` (the unit as the table shows it now). Asked of a row made from the toolbox's live ROI: the
+        table itself shows a change after a short pause, a step of the mouse wheel must start from the value that is stored."""
+        return self._cell_value(row, column)[1]
+
+    def has_rectangles(self) -> bool:
+        """True if some ROI is a rectangle: the only time the width, height and angle columns have anything to show (`RoiTreeView.refresh_column_visibility`)."""
+        return any(row.shape == SHAPE_RECTANGLE for row in self._rows)
+
     def display_order(self) -> list[tuple[GroupInfo | None, tuple[RoiRow, ...]]]:
         """The table as it is listed now: ``(group header, its ROI rows)`` in order; without groups one entry ``(None, every row)``. Collapsed groups are included."""
         if not self._grouped:
@@ -493,7 +525,7 @@ class RoiTreeModel(QAbstractItemModel):
             return COLUMN_TITLES[section]
         if role == Qt.ItemDataRole.ToolTipRole:
             tip = _HEADER_TIPS[section]
-            return f"{tip} ({self._unit.label})" if section in _NUMERIC_COLUMNS else tip
+            return f"{tip} ({self._unit.label})" if section in LENGTH_COLUMNS else tip  # (the angle is in degrees whatever the unit is)
         if role == Qt.ItemDataRole.TextAlignmentRole:
             right = section in _NUMERIC_COLUMNS
             return int((Qt.AlignmentFlag.AlignRight if right else Qt.AlignmentFlag.AlignLeft) | Qt.AlignmentFlag.AlignVCenter)
@@ -513,8 +545,8 @@ class RoiTreeModel(QAbstractItemModel):
         if not self._linked:
             flags |= Qt.ItemFlag.ItemIsDragEnabled  # ROI rows are not drop targets: a drop lands between rows (nothing is dragged in the Linked view)
         column = index.column()
-        if column in EDITABLE_COLUMNS and not (column in DIAMETER_COLUMNS and column not in SHAPE_FIELDS[node.row.shape]):
-            flags |= Qt.ItemFlag.ItemIsEditable  # a mask has no diameter, a disk no ring
+        if column in EDITABLE_COLUMNS and not (column in SIZE_COLUMNS and column not in SHAPE_FIELDS[node.row.shape]):
+            flags |= Qt.ItemFlag.ItemIsEditable  # a mask has no diameter, a disk no ring, only a rectangle a width, a height and an angle
         return flags
 
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
@@ -620,6 +652,13 @@ class RoiTreeModel(QAbstractItemModel):
             return format_length(value, unit), edit_text(value, unit)
         if column == COLUMN_SHAPE:
             return SHAPE_LABELS[row.shape], ""
+        if column in RECTANGLE_COLUMNS:
+            if column not in SHAPE_FIELDS[row.shape]:
+                return "", ""  # only a rectangle has a width, a height and an angle
+            if column == COLUMN_ANGLE:
+                return format_angle(row.angle), angle_edit_text(row.angle)
+            value = row.width if column == COLUMN_WIDTH else row.height
+            return format_length(value, unit), edit_text(value, unit)
         if row.is_mask:
             return "mask", ""
         if column not in SHAPE_FIELDS[row.shape]:

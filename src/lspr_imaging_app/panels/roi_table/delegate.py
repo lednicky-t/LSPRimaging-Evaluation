@@ -35,15 +35,17 @@ from .model import (
     STEP_TINT_ROLE,
 )
 from .rows import (
+    COLUMN_ANGLE,
     COLUMN_COUNT,
     COLUMN_ID,
     COLUMN_NAME,
     COLUMN_SHAPE,
-    DIAMETER_COLUMNS,
     SHAPE_DISK,
     SHAPE_MASK,
     SHAPE_RECTANGLE,
     SHAPE_RING,
+    SIZE_COLUMNS,
+    angle_step_text,
     step_text,
 )
 
@@ -57,6 +59,9 @@ CHEVRON_ZONE = 28
 _CELL_PAD = 6
 CELL_ROOM = 2 * _CELL_PAD + 4
 """Pixels a number needs around its text to show whole: `_CELL_PAD` on both sides, the 2 px more the right side keeps (`_paint_roi`, `_paint_group_steps`), and 2 px of slack."""
+_RANGE_TINT_ALPHA = 55  # the fill of the cells picked by dragging (of 255)
+_RANGE_EDGE_WIDTH = 2.0  # the border round them, px
+_ANTS_WIDTH = 1.5  # the marching ants round the copied cells, px
 _ROW_LINE_ALPHA = 90
 _COLUMN_LINE_ALPHA = 55
 _STALE_TINTED_TEXT_ALPHA = 135  # a number that is out of date, on a coloured step column: the same text colour, fainter (`text_dim` could vanish into the colour)
@@ -105,17 +110,19 @@ def group_row_height(font_metrics) -> int:
 
 
 class _StepLineEdit(QLineEdit):
-    """The cell editor. In a diameter cell, Up / Down step the value (Shift: the
+    """The cell editor. In a size or angle cell, Up / Down step the value (Shift: the
     large step); Enter then applies it, to every selected ROI like any edit."""
 
-    def __init__(self, parent: QWidget, unit) -> None:
+    def __init__(self, parent: QWidget, unit, *, angle: bool = False) -> None:
         super().__init__(parent)
         self._unit = unit  # None: this cell does not step
+        self._angle = angle  # degrees (stepped by `angle_step_text`) instead of a length in `unit`
 
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
         large = matches(event, "roi_table.cell_step_large")
         if self._unit is not None and (large or matches(event, "roi_table.cell_step")):
-            stepped = step_text(self.text(), 1 if event.key() == Qt.Key.Key_Up else -1, large, self._unit)
+            direction = 1 if event.key() == Qt.Key.Key_Up else -1
+            stepped = angle_step_text(self.text(), direction, large) if self._angle else step_text(self.text(), direction, large, self._unit)
             if stepped is not None:
                 self.setText(stepped)
             event.accept()
@@ -187,6 +194,12 @@ class RoiTableDelegate(QStyledItemDelegate):
         if wash is not None:
             painter.fillRect(rect, wash)  # the ROI's colour, which its dot would have shown in the hidden #/ROIs column
         self._paint_row_background(painter, option, index, theme)
+        picked = option.widget.range_edges(index) if hasattr(option.widget, "range_edges") else None  # the cells picked by clicking a selected row again and dragging
+        copied = option.widget.copied_edges(index) if hasattr(option.widget, "copied_edges") else None  # the cells just copied: the marching ants
+        if picked is not None:
+            fill = QColor(theme.accent_blue)
+            fill.setAlpha(_RANGE_TINT_ALPHA)
+            painter.fillRect(rect, fill)
         self._paint_cell_borders(painter, rect, column, theme, index.model().columnCount() - 1)
         if column == COLUMN_ID and rect.width() <= 0:
             return  # #/ROIs is hidden (collapsed to nothing): its dot would be drawn over the next column
@@ -213,6 +226,33 @@ class RoiTableDelegate(QStyledItemDelegate):
         painter.setFont(font)
         painter.setPen(color)
         painter.drawText(text_rect, int(alignment), option.fontMetrics.elidedText(text, Qt.TextElideMode.ElideRight, text_rect.width()))
+        if picked is not None:
+            self._draw_block_edges(painter, rect, picked, QPen(QColor(theme.accent_blue), _RANGE_EDGE_WIDTH))
+        if copied is not None:
+            ants = QPen(QColor(theme.text_primary), _ANTS_WIDTH)
+            ants.setDashPattern([3.0, 3.0])
+            ants.setDashOffset(float(option.widget.ants_phase()))
+            self._draw_block_edges(painter, rect, copied, ants)
+
+    @staticmethod
+    def _draw_block_edges(painter: QPainter, rect: QRect, edges: tuple[bool, bool, bool, bool], pen: QPen) -> None:
+        """The sides of a cell that lie on the border of a block of cells (`cell_marks.edges`), drawn just inside the cell, clockwise (top left to right, right downwards, bottom right to
+        left, left upwards), so a dashed line marches round the block."""
+        top, right, bottom, left = edges
+        inset = pen.widthF() / 2.0
+        x0, x1 = rect.left() + inset, rect.right() + 1 - inset
+        y0, y1 = rect.top() + inset, rect.bottom() + 1 - inset
+        painter.save()
+        painter.setPen(pen)
+        if top:
+            painter.drawLine(QPointF(x0, y0), QPointF(x1, y0))
+        if right:
+            painter.drawLine(QPointF(x1, y0), QPointF(x1, y1))
+        if bottom:
+            painter.drawLine(QPointF(x1, y1), QPointF(x0, y1))
+        if left:
+            painter.drawLine(QPointF(x0, y1), QPointF(x0, y0))
+        painter.restore()
 
     @staticmethod
     def _paint_shape(painter: QPainter, rect: QRect, index: QModelIndex, theme) -> None:
@@ -425,9 +465,9 @@ class RoiTableDelegate(QStyledItemDelegate):
     def createEditor(self, parent: QWidget, option: QStyleOptionViewItem, index: QModelIndex) -> QWidget:  # type: ignore[override]
         if index.data(KIND_ROLE) == "group":
             self._editing = QPersistentModelIndex(index)
-        steps = index.data(KIND_ROLE) != "group" and index.column() in DIAMETER_COLUMNS
+        steps = index.data(KIND_ROLE) != "group" and index.column() in SIZE_COLUMNS
         unit = getattr(index.model(), "unit", None)
-        editor = _StepLineEdit(parent, unit() if steps and callable(unit) else None)
+        editor = _StepLineEdit(parent, unit() if steps and callable(unit) else None, angle=index.column() == COLUMN_ANGLE)
         theme = get_active_theme()
         editor.setStyleSheet(
             f"QLineEdit {{ background: {theme.control_bg}; color: {theme.text_primary}; "

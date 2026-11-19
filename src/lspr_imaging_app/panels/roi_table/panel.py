@@ -20,7 +20,7 @@ toolbox command, so Ctrl+Z undoes it like any other) and it drives the shared
   Excel-style on the current cell: Ctrl+C copies its value, Ctrl+V pastes it into
   that column of every selected ROI, Ctrl+D copies the topmost selected row's value
   down the selection. In a diameter editor Up/Down step the value by 0.5 px (Shift:
-  5 px); Ctrl+wheel over a diameter cell steps and applies it.
+  5 px); the wheel over a number of a selected row (Ctrl+wheel: of any row) steps and applies it.
 - A group header selects its members; double-click renames, the chevron
   collapses. Double-click a colour chip to change a ROI's colour (or recolour
   the group).
@@ -48,8 +48,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PyQt6.QtCore import QItemSelection, QItemSelectionModel, QModelIndex, QPersistentModelIndex, QPoint, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QActionGroup, QColor, QIcon, QLinearGradient, QPainter
+from PyQt6.QtCore import QItemSelection, QItemSelectionModel, QMimeData, QModelIndex, QPersistentModelIndex, QPoint, QRect, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QAction, QActionGroup, QColor, QCursor, QIcon, QKeySequence, QLinearGradient, QPainter
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -60,12 +60,14 @@ from PyQt6.QtWidgets import (
     QMenu,
     QStackedWidget,
     QToolButton,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
 
 from lspr_ui import get_active_theme, load_tabler_icon
 
+from ...shortcuts import sequences
 from ...selection.step_table_module import StepTableModule
 from ...image_tools import GeometryModule
 from ...roi import RoiToolbox
@@ -88,22 +90,26 @@ from ..subtitle_column import SubtitleColumn
 from ..ui_state import UiStateStore
 from ..visibility_gate import HiddenPanelGate
 from ..unit_toggle import UnitToggle
+from .cell_clipboard import MIME_TYPE, CellBlock, block_from_payload, block_to_payload, block_to_text, names_of, plan_paste
 from .delegate import RoiTableDelegate
 from .dialogs import ShiftDialog
 from .freeze import FreezeColumns
+from .geometry_icon import dimensions_picture
 from .hide_columns import HideColumns
 from .model import DropTarget, RoiTreeModel
 from .rows import (
+    COLUMN_ANGLE,
     COLUMN_COUNT,
+    COLUMN_HEIGHT,
     COLUMN_ID,
     COLUMN_NAME,
     COLUMN_RING_IN,
     COLUMN_RING_OUT,
     COLUMN_SAMPLE,
+    COLUMN_WIDTH,
     COLUMN_X,
     COLUMN_Y,
-    DIAMETER_COLUMNS,
-    EDITABLE_COLUMNS,
+    NUMERIC_COLUMNS,
     PIXELS,
     SHAPE_FIELDS,
     VIEW_GEOMETRY,
@@ -111,10 +117,17 @@ from .rows import (
     VIEW_MODES,
     VIEW_SIMPLE,
     LengthUnit,
+    RoiRow,
+    angle_step_text,
+    build_roi_rows,
+    cell_number,
     from_display,
+    has_cell,
     micrometers,
     movement_scope,
+    parse_angle,
     parse_length,
+    step_amount_px,
     step_target_index,
     step_text,
 )
@@ -123,11 +136,11 @@ from .view import RoiTreeView, suggested_column_widths
 
 TASK_ID = "roi_table_steps"
 
-_LEGACY_COLUMN_COUNT = 7  # a saved width list from before the Position / Shape / Shape vector columns
+_LEGACY_COLUMN_COUNTS = (7, 8)  # saved width lists from before the Position / Shape / Shape vector columns (7) and before the rectangle's width / height / angle (8)
 _REDRAW_COALESCE_MS = 100  # sketch §8
 _NOTICE_MS = 8000
 _ERROR_NOTICE_MS = 15000
-NUMERIC_COLUMNS = (COLUMN_X, COLUMN_Y, *DIAMETER_COLUMNS)
+_PASTE_TIP_MS = 4000  # how long the tip at the pointer stays when a paste cannot be done
 _UNGROUPED_KEY = "__ungrouped__"
 _RENDER_SIZE = ICON_SIZE * 2  # icons are drawn at twice the size and scaled down, as the ribbon does
 _STROKE_WIDTH = 2.1
@@ -220,12 +233,12 @@ class RoiTablePanel(QWidget):
             self._rebuild(lambda: None)
         widths = store.get(ROI_TABLE_COLUMN_WIDTHS)
         if (
-            isinstance(widths, list) and len(widths) in (_LEGACY_COLUMN_COUNT, COLUMN_COUNT)
+            isinstance(widths, list) and len(widths) in (*_LEGACY_COLUMN_COUNTS, COLUMN_COUNT)
             and all(isinstance(w, int) and not isinstance(w, bool) and w > 0 for w in widths)
         ):
             suggested = suggested_column_widths(self._tree.fontMetrics())
             floor = suggested[COLUMN_ID]  # a narrower saved ID column clips 3-digit ids
-            for column, width in enumerate(widths):  # a list of the old 7 columns leaves the three new ones at their default
+            for column, width in enumerate(widths):  # a list of an older, shorter table leaves the columns it did not have at their default
                 if column == COLUMN_NAME and width > 3 * suggested[column]:
                     continue  # a width saved while this column stretched: keep the default
                 self._widths[column] = max(width, floor) if column == COLUMN_ID else width
@@ -260,6 +273,8 @@ class RoiTablePanel(QWidget):
         self._up_button = self._tool_button("arrow-up", lambda: self._move_selected(-1))
         self._down_button = self._tool_button("arrow-down", lambda: self._move_selected(1))
         self._delete_button = self._tool_button("trash", self._delete_selected)
+        self._view_toggle = self._tool_button("dimensions", self._toggle_view_mode, checkable=True)  # Geometry (on, accent) <-> Simple; the header menu's choice, same setting (painted icon)
+        self._sync_view_toggle()
         self._view_menu = QMenu(self)  # opened by a right-click on the column headers (`_show_header_menu`)
         self._view_actions: dict[str, QAction] = {}
         action_group = QActionGroup(self)
@@ -309,6 +324,8 @@ class RoiTablePanel(QWidget):
             toolbar.addWidget(button)
         toolbar.addSpacing(8)
         toolbar.addWidget(self._delete_button)
+        toolbar.addSpacing(8)
+        toolbar.addWidget(self._view_toggle)
         self._step_controls.add_to_toolbar(toolbar)
         toolbar.addStretch(1)
         toolbar.addWidget(self._unit_toggle)
@@ -351,6 +368,7 @@ class RoiTablePanel(QWidget):
         self._tree.copy_requested.connect(self._copy_cell)
         self._tree.paste_requested.connect(self._paste_cells)
         self._tree.fill_down_requested.connect(self._fill_down)
+        QApplication.clipboard().dataChanged.connect(self._on_clipboard_changed)  # the ants end when something else is copied
         self._tree.step_requested.connect(self._step_cell)
         self._tree.chip_double_clicked.connect(self._on_chip_double_clicked)
         self._tree.customContextMenuRequested.connect(self._show_context_menu)
@@ -409,6 +427,9 @@ class RoiTablePanel(QWidget):
             button.setIcon(self._rainbow_icon(icon_name))
             return
         on = button.isCheckable() and button.isChecked()
+        if button is self._view_toggle:  # the dimension lines of a technical drawing (a painted picture, `geometry_icon.py`), in the accent colour while the Geometry view is on
+            button.setIcon(QIcon(dimensions_picture()(theme.accent_blue if on else theme.text_secondary)))
+            return
         button.setIcon(
             load_tabler_icon(
                 icon_name, color=theme.accent_blue if on else theme.text_secondary, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH
@@ -577,6 +598,7 @@ class RoiTablePanel(QWidget):
             self._syncing = False
         shown = self._selection.selected_roi_ids()
         self._model.set_selected_ids(shown)
+        self._tree.restrict_cell_range(shown)  # picked cells stay only on rows that are still selected
         if self._selection.roi_selection_locked() and set(shown) != ids:
             # A locked selection does not follow a click: the module refused (and said so); put the view back on the locked rows.
             self._apply_selection_to_view(shown, reveal=False)
@@ -588,6 +610,7 @@ class RoiTablePanel(QWidget):
         renumbered...). When the change came from this table the view already
         shows it."""
         self._model.set_selected_ids(ids)  # type: ignore[arg-type]
+        self._tree.restrict_cell_range(ids)  # type: ignore[arg-type]
         if not self._syncing:
             self._apply_selection_to_view(ids, reveal=True)  # type: ignore[arg-type]
         self._update_toolbar_state()
@@ -701,12 +724,28 @@ class RoiTablePanel(QWidget):
         if self._store is not None:
             self._store.set(ROI_TABLE_VIEW_MODE, mode)
 
+    def _sync_view_toggle(self) -> None:
+        """Make the toolbar button show the current view mode: checked and in the accent colour = Geometry. `setChecked` does not click it."""
+        geometry = self._view_mode == VIEW_GEOMETRY
+        self._view_toggle.setChecked(geometry)
+        self._view_toggle.setToolTip(
+            "Geometry view: x, y, shape and sizes are shown. Click for the simple view (ID and label only)."
+            if geometry else "Simple view: ID and label only. Click for the geometry view (x, y, shape, sizes)."
+        )
+        self._style_tool_button(self._view_toggle, "dimensions")
+
+    def _toggle_view_mode(self) -> None:
+        """The toolbar's Geometry / Simple button (checked = Geometry): the same choice as the header menu's."""
+        mode = VIEW_GEOMETRY if self._view_toggle.isChecked() else VIEW_SIMPLE
+        self._on_view_mode_chosen(mode)
+
     def _apply_view_mode(self, mode: str) -> None:
         """Show the columns of ``mode``. A sort by a column the new mode hides goes back to the ``#`` order."""
         self._view_mode = mode
         self._tree.set_view_mode(mode)
         self._apply_widths()  # a column hidden at start-up never got its saved width
         self._view_actions[mode].setChecked(True)
+        self._sync_view_toggle()  # (the button follows a choice made in the menu or restored at start-up)
         self._unit_toggle.setVisible(mode == VIEW_GEOMETRY)  # the unit only matters for the geometry columns
         if self._model.sort_state()[0] not in VIEW_MODE_COLUMNS[mode] and not self._model.sorts_by_step():
             self._rebuild(lambda: self._model.set_sort(COLUMN_ID, False), reveal=False)
@@ -831,11 +870,11 @@ class RoiTablePanel(QWidget):
         self._set_numeric_cells(self._edit_targets(roi_id), column, text)
 
     def _set_numeric_cells(self, targets: list[int], column: int, text: str) -> None:
-        """Set one x / y / diameter column to ``text`` (in the display unit) on every
+        """Set one x / y / size / angle column to ``text`` (a length in the display unit, an angle in degrees) on every
         ROI in ``targets``: the one path for an edit, a paste, a fill down and a step."""
         unit = self._model.unit()
         try:
-            value = parse_length(text, unit)
+            value = parse_angle(text) if column == COLUMN_ANGLE else parse_length(text, unit)
         except ValueError as exc:
             self._show_notice(str(exc), error=True)
             return
@@ -845,17 +884,26 @@ class RoiTablePanel(QWidget):
             if self._guarded(f"Set {axis}", lambda: self._toolbox.place_rois(targets, **{axis: value}, **self._edit_kwargs())) and len(targets) > 1:
                 self._show_notice(f"Set {axis} of {noun} to {text.strip()} {unit.label}.")
             return
+        rectangle_field = {COLUMN_WIDTH: "width_px", COLUMN_HEIGHT: "height_px", COLUMN_ANGLE: "angle_deg"}.get(column)
         field = {
             COLUMN_SAMPLE: "sample_diameter_px",
             COLUMN_RING_IN: "reference_inner_diameter_px",
             COLUMN_RING_OUT: "reference_outer_diameter_px",
         }.get(column)
-        if field is None:
+        if field is None and rectangle_field is None:
             return
         shapes = {row.roi_id: row.shape for row in self._model.rows()}
-        targets = [i for i in targets if column in SHAPE_FIELDS.get(shapes.get(i, ""), ())]  # a disk has no ring, a mask no diameter
+        targets = [i for i in targets if column in SHAPE_FIELDS.get(shapes.get(i, ""), ())]  # a disk has no ring, a mask no diameter, a circle no width
+        if rectangle_field is not None:
+            if not targets:
+                self._show_notice("These ROIs are not rectangles: only a rectangle has a width, a height and an angle.")
+                return
+            word = {COLUMN_WIDTH: "width", COLUMN_HEIGHT: "height", COLUMN_ANGLE: "angle"}[column]
+            if self._guarded(f"Set {word}", lambda: self._toolbox.resize_rectangles(targets, **{rectangle_field: value}, **self._edit_kwargs())) and len(targets) > 1:
+                self._show_notice(f"Set the {word} of {len(targets)} rectangles.")
+            return
         if not targets:
-            self._show_notice("These ROIs have no such diameter (a mask has none, a disk has no reference ring).")
+            self._show_notice("These ROIs have no such diameter (a mask or a rectangle has none, a disk has no reference ring).")
             return
         if self._guarded("Set diameter", lambda: self._toolbox.resize_rois(targets, **{field: value}, **self._edit_kwargs())) and len(targets) > 1:
             self._show_notice(f"Set the diameter of {noun}.")
@@ -867,24 +915,98 @@ class RoiTablePanel(QWidget):
         roi_id = self._model.roi_id(index) if index.isValid() else None
         return None if roi_id is None else (index, roi_id)
 
+    def _live_rows(self) -> dict[int, RoiRow]:
+        """Every ROI's row made from the toolbox as it is now (the table shows a change after a short pause; a copy and a paste must go by what is stored)."""
+        rows = build_roi_rows(self._toolbox.rois_at(self._selection.current_cube()), self._toolbox.groups(), self._toolbox.detection_settings())
+        return {row.roi_id: row for row in rows}
+
     def _copy_cell(self) -> None:
-        cell = self._current_roi_cell()
-        if cell is None or cell[0].column() not in EDITABLE_COLUMNS:
+        """Copy the picked cells (`RoiTreeView.cell_range`), or with none picked the current cell. The copy goes to the clipboard as the numbers (for this table: pixels and
+        degrees, so a change of unit in between does no harm) and as tab-separated text (for other programs); the copied cells get the marching ants."""
+        rows, columns = self._tree.cell_range()
+        if not rows:
+            cell = self._current_roi_cell()
+            if cell is None or cell[0].column() not in NUMERIC_COLUMNS:
+                return
+            rows, columns = (cell[1],), (cell[0].column(),)
+        live = self._live_rows()
+        values = tuple(tuple(cell_number(live[r], c) if r in live else None for c in columns) for r in rows)
+        if all(value is None for row in values for value in row):
+            self._show_notice("Nothing to copy: these cells have no value.")
             return
-        text = str(cell[0].data(Qt.ItemDataRole.EditRole) or "")
-        if text:
-            QApplication.clipboard().setText(text)
-            self._show_notice(f"Copied {text}.")
+        block = CellBlock(tuple(columns), values)
+        mime = QMimeData()
+        mime.setText(block_to_text(block, self._model.unit()))
+        mime.setData(MIME_TYPE, block_to_payload(block))
+        QApplication.clipboard().setMimeData(mime)
+        self._tree.set_copied_cells(rows, columns, block.token)
+        count = sum(value is not None for row in values for value in row)
+        self._show_notice(f"Copied {count} cell{'' if count == 1 else 's'} ({names_of(columns)}). Esc lets go of the marks.")
+
+    @staticmethod
+    def _clipboard_block() -> CellBlock | None:
+        """The block the clipboard holds if it came from a copy in this table (`cell_clipboard.MIME_TYPE`), else None."""
+        mime = QApplication.clipboard().mimeData()
+        if mime is None or not mime.hasFormat(MIME_TYPE):
+            return None
+        return block_from_payload(bytes(mime.data(MIME_TYPE)))
+
+    def _on_clipboard_changed(self) -> None:
+        """Something else was copied (here or in another program): the copied cells' ants end, as in Excel."""
+        token = self._tree.copied_token()
+        if token:
+            block = self._clipboard_block()
+            if block is None or block.token != token:
+                self._tree.clear_copied_cells()
+
+    def _refuse_paste(self, text: str) -> None:
+        """A paste that cannot be done says why: in the title bar like every refusal, and in a small tip at the pointer, where the user is looking."""
+        self._show_notice(text, error=True)
+        QToolTip.showText(QCursor.pos(), text, self._tree, QRect(), _PASTE_TIP_MS)
 
     def _paste_cells(self) -> None:
-        """The clipboard's first value goes into the current column of every selected ROI
-        (of the current row alone with none selected)."""
+        """Paste what was copied from this table into the matching columns of the target rows (`cell_clipboard.plan_paste` has the rules): the picked cells if some are picked, else the
+        selected ROIs (the current row alone with none selected). One undo step. What was pasted is then selected (a block that runs on down from one row reaches new rows)."""
+        block = self._clipboard_block()
+        if block is None:
+            self._paste_one_value()
+            return
+        order = self._model.ordered_roi_ids()
+        rows, columns = self._tree.cell_range()
+        if rows:
+            target_ids, target_columns = list(rows), set(columns)
+        else:
+            selected = set(self._selected_ids())
+            target_ids, target_columns = [r for r in order if r in selected], None
+            if not target_ids:
+                cell = self._current_roi_cell()
+                target_ids = [cell[1]] if cell is not None else []
+        live = self._live_rows()
+        plan = plan_paste(block, target_ids, order, target_columns, lambda roi_id, column: roi_id in live and has_cell(live[roi_id], column))
+        if plan.refusal:
+            self._refuse_paste(plan.refusal)
+            return
+        try:
+            self._toolbox.set_cell_values(plan.values, **self._edit_kwargs())
+        except (ValueError, KeyError) as exc:
+            self._refuse_paste(f"Paste: {_message(exc)}")
+            return
+        pasted = set(plan.rows)
+        if not pasted <= set(self._selected_ids()):
+            self._selection.set_roi_selection(pasted)  # a block that ran on down reached rows that were not selected (a locked selection refuses: the range below is then cut to what is selected)
+        self._tree.set_cell_range(plan.rows, plan.columns)
+        self._tree.restrict_cell_range(self._selection.selected_roi_ids())
+        count = plan.cell_count
+        self._show_notice(f"Pasted {count} cell{'' if count == 1 else 's'} into {len(plan.rows)} ROI{'' if len(plan.rows) == 1 else 's'}." + (f" ({plan.note}.)" if plan.note else ""))
+
+    def _paste_one_value(self) -> None:
+        """Text from another program: its first value goes into the current column of every selected ROI (of the current row alone with none selected)."""
         cell = self._current_roi_cell()
         if cell is None:
             return
         index, roi_id = cell
         if index.column() not in NUMERIC_COLUMNS:
-            self._show_notice("Paste works on the x, y and diameter columns.")
+            self._show_notice("Paste works on the x, y, size and angle columns.")
             return
         lines = QApplication.clipboard().text().strip().splitlines()
         text = lines[0].split("\t")[0] if lines else ""
@@ -894,7 +1016,7 @@ class RoiTablePanel(QWidget):
         """The topmost selected row's value in the current column goes to the other selected rows."""
         cell = self._current_roi_cell()
         if cell is None or cell[0].column() not in NUMERIC_COLUMNS:
-            self._show_notice("Fill down works on the x, y and diameter columns.")
+            self._show_notice("Fill down works on the x, y, size and angle columns.")
             return
         column = cell[0].column()
         rows = [r for r in self._tree.selectionModel().selectedRows() if self._model.roi_id(r) is not None]
@@ -906,13 +1028,34 @@ class RoiTablePanel(QWidget):
         self._set_numeric_cells([self._model.roi_id(r) for r in rows[1:]], column, text)  # type: ignore[misc]
 
     def _step_cell(self, index: QModelIndex, direction: int, large: bool) -> None:
-        """Ctrl+wheel over a diameter cell: one step, on every selected ROI if the row is selected."""
+        """One notch of the mouse wheel over a number (a plain wheel on a selected row, Ctrl+wheel on any row): the number steps, on every selected ROI if the row is selected.
+
+        A **position** moves the selected ROIs together by the step, so their arrangement stays (typing an x or y sets one value on all of them, which lines them up);
+        a **size or angle** is set on all of them to the hovered ROI's stepped value, as typing it is. One undo step per notch."""
         roi_id = self._model.roi_id(index)
-        if roi_id is None or index.column() not in DIAMETER_COLUMNS:
+        column = index.column()
+        if roi_id is None or column not in NUMERIC_COLUMNS:
             return
-        stepped = step_text(str(index.data(Qt.ItemDataRole.EditRole) or ""), direction, large, self._model.unit())
+        unit = self._model.unit()
+        if column in (COLUMN_X, COLUMN_Y):
+            step = direction * step_amount_px(large, unit)
+            targets = self._edit_targets(roi_id)
+            dx, dy = (step, 0.0) if column == COLUMN_X else (0.0, step)
+            self._guarded("Move", lambda: self._toolbox.translate_rois(targets, dx, dy, **self._edit_kwargs()))
+            return
+        text = self._live_edit_text(roi_id, column)
+        stepped = angle_step_text(text, direction, large) if column == COLUMN_ANGLE else step_text(text, direction, large, unit)
         if stepped is not None:
-            self._on_cell_edited("roi", roi_id, index.column(), stepped)
+            self._on_cell_edited("roi", roi_id, column, stepped)
+
+    def _live_edit_text(self, roi_id: int, column: int) -> str:
+        """What the cell editor would start with, from the toolbox's ROI as it is now. The table shows a change only after a short pause, so a wheel notch that comes
+        before it must not step from the value the cell still shows (a fast scroll would lose steps)."""
+        roi = next((r for r in self._toolbox.rois_at(self._selection.current_cube()) if r.area_roi_id == roi_id), None)
+        if roi is None:
+            return ""
+        (row,) = build_roi_rows([roi], (), self._toolbox.detection_settings())
+        return self._model.edit_text_of(row, column)
 
     # -- commands ------------------------------------------------------------------------------
 
@@ -1146,6 +1289,8 @@ class RoiTablePanel(QWidget):
             # (A locked selection stays as it is: the menu then acts on the locked ROIs, and says how many in its entries.)
             if roi_id is not None and roi_id not in self._selection.selected_roi_ids() and not self._selection.roi_selection_locked():
                 self._selection.set_roi_selection({roi_id})
+            if roi_id is not None and index.column() in NUMERIC_COLUMNS:
+                self._tree.selectionModel().setCurrentIndex(index, QItemSelectionModel.SelectionFlag.NoUpdate)  # "Copy cells" then means the cell that was clicked
             self._fill_roi_menu(menu)
         if not menu.isEmpty():
             menu.addSeparator()
@@ -1168,9 +1313,27 @@ class RoiTablePanel(QWidget):
         if accepted:
             self._guarded("New group", lambda: self._toolbox.create_group(name))
 
+    @staticmethod
+    def _key_text(binding_id: str) -> str:
+        """The first key of a binding as a menu shows it (``Ctrl+C``)."""
+        return sequences(binding_id)[0].toString(QKeySequence.SequenceFormat.NativeText)
+
+    def _fill_cell_menu(self, menu: QMenu) -> None:
+        """Copy cells / Paste cells / Cancel cell selection: the same actions as the keys, for the picked cells (or the cell that was clicked)."""
+        picked = bool(self._tree.cell_range()[0])
+        cell = self._current_roi_cell()
+        copy = menu.addAction(f"Copy cells\t{self._key_text('roi_table.copy')}", self._copy_cell)
+        copy.setEnabled(picked or (cell is not None and cell[0].column() in NUMERIC_COLUMNS))
+        paste = menu.addAction(f"Paste cells\t{self._key_text('roi_table.paste')}", self._paste_cells)
+        paste.setEnabled(self._clipboard_block() is not None)
+        cancel = menu.addAction(f"Cancel cell selection\t{self._key_text('roi_table.cancel_selection')}", self._tree.clear_cell_marks)
+        cancel.setEnabled(self._tree.has_cell_marks())
+        menu.addSeparator()
+
     def _fill_roi_menu(self, menu: QMenu) -> None:
         ids = self._selected_ids()
         noun = "ROI" if len(ids) == 1 else f"{len(ids)} ROIs"
+        self._fill_cell_menu(menu)
         menu.addAction(f"Group {noun}…", self._group_selected_or_new)
         groups = self._toolbox.groups()
         if groups:

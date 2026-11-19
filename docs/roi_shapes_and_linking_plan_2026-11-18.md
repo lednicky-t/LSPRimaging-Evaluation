@@ -320,8 +320,80 @@ something to link / take apart).
   handle positions and the hit test come from one function and a round-trip test (drag to another rectangle's handle = that rectangle's size / angle) pins them.
   A corner zone never reaches a tiny rectangle's middle (found by a test: a 6 x 6 rectangle had nothing to grab by). Shortcut table row `mouse.view.rectangle_handles`.
 
-**Still not built:** a drag-to-draw rectangle (a click places a 20 x 20 px square), W / H / angle as editable table columns (the dialog and the handles edit them),
-link-aware ROI position tuning (plan 1.2d), and moving a pixel mask (refused, see 2.4).
+**Still not built:** a drag-to-draw rectangle (a click places a 20 x 20 px square), link-aware ROI position tuning (plan 1.2d), and moving a pixel mask
+(refused, see 2.4). (W / H / angle as table columns: built 2026-11-19, next section.)
+
+### Width, height and angle columns (BUILT 2026-11-19, maintainer: "move to point 2"; UNSEEN BY EYE)
+
+Three fixed columns **W**, **H**, **θ** in the ROI / Groups table (`rows.COLUMN_WIDTH / COLUMN_HEIGHT / COLUMN_ANGLE`, `RECTANGLE_COLUMNS`), after D_r, in the Geometry view.
+- **Only a rectangle has a value**: a circle, a mask and a reference-ring cell are blank and not editable (the same rule the diameter columns follow through `SHAPE_FIELDS`;
+  a rectangle's D_s / d_r / D_r are blank). W and H are lengths in the display unit (px or µm); **the angle is degrees clockwise whatever the unit is** (`parse_angle`, test
+  `test_a_length_follows_the_unit_but_the_angle_never_does`: with the angle parsed as a length, 45 typed in µm stored 90).
+- **Edits** go through `RoiToolbox.resize_rectangles` (the same command as the handles and the size dialog: one undo step, a selection of several rectangles all get the
+  value, a circle in the selection is skipped, width / height below the minimum are refused on the status bar). Copy, paste, fill down, Up / Down in the editor and Ctrl+wheel
+  work as on the diameters (an angle steps 1 degree, Shift 5; it has no lower limit and is stored as typed: 370 stays 370). Sorting works (a circle has no width: it sorts first).
+- **The three columns are shown only while the table holds a rectangle** (`RoiTreeModel.has_rectangles`, `RoiTreeView.refresh_column_visibility`, which the panel already calls
+  after every rebuild): in a circle-only session the table looks exactly as before, no empty columns. A column the user hid stays hidden. This is the rule the old
+  `SHAPE_FIELDS` note announced for extra geometry columns ("shown only when some ROI has one"); to show them always, drop the `no_rectangles` clause.
+- **Why appended, not inserted (the plan's worry about renumbering):** the new columns are numbers 8-10, after Shape (7), so every saved hidden-column key and frozen column
+  (fixed columns are saved by number) still means the same column; step columns are found by `COLUMN_COUNT + i` and saved by step reference, so they follow by themselves.
+  The saved width list has 11 entries now; a list of 7 or 8 is still read (the columns it did not have keep their default width). A build older than this one reads the
+  11-entry list as unreadable and falls back to default widths (harmless).
+- Tests: `test_lspri_rewrite_roi_table_rows.py` (angle parse / show / step, rows carry W / H / θ, sorting, the Geometry view's column list), `test_lspri_rewrite_roi_table_panel.py`
+  `RectangleColumnsTest` (16: visibility with and without rectangles, user-hidden, cells and editability, edit + undo, selection, refusals, unit, sort, copy / paste / wheel, editor
+  keys, old width lists, painting). Mutations caught: angle parsed as a length; columns never auto-hidden. Updated: the freeze test's "far right column" was the last *fixed* column
+  and is now the last one on screen (D_r).
+
+### Mouse wheel edits the numbers of a selected row (BUILT 2026-11-19, maintainer's proposal; UNSEEN BY EYE)
+
+In the Geometry view, **the wheel over a number of a selected ROI row steps that number** (x, y, D_s, d_r, D_r, W, H, θ); Shift = the large step; Ctrl+wheel does it over any row's number (as
+before). Over anything else (an unselected row, a group header, the label, the shape, a blank cell) the wheel scrolls the table as usual (`RoiTreeView.wheel_steps`, `wheelEvent`).
+- **Steps:** a length 0.5 px (Shift 5 px; in µm a whole µm, Shift 10 µm); an angle 1 degree (Shift 5). One step per full notch (120 units): smooth wheels and touchpads add up their small turns
+  (the count restarts when the direction changes).
+- **What a step does to several selected ROIs:** a **position moves them all together** by the step (`translate_rois`: the arrangement stays; typing an x or y still sets one value
+  on all of them = lines them up); a **size or angle is set on all of them** to the hovered ROI's stepped value (as typing is, and as the rectangle handles do). A pixel mask in the
+  selection is refused with the usual message and nothing moves.
+- **One undo step per notch** (a 10-notch scroll is 10 undo steps). Merging a burst into one entry would need an open undo batch across a timer; `begin_batch` raises when another batch is
+  open (an image drag within the pause), so it was not done. Say if it is wanted.
+- **Found on the way:** the table shows a change only after a ~100 ms pause, and a step read the number the cell *showed*, so a second notch inside that pause started from the old value
+  and lost a step (the old Ctrl+wheel had the same flaw). A step now starts from the stored value (`panel._live_edit_text`, `model.edit_text_of`); the test fails with the old code
+  (`test_fast_notches_do_not_lose_steps`). Each notch is a geometry change, so the cells it touches go stale like after any edit; the scan is not rerun.
+- Gestures are rows in `shortcuts.py` (`mouse.roi_table.step`, `mouse.roi_table.step_any`, Help -> Keyboard shortcuts). Tests: `WheelEditTest` (10, real `QWheelEvent`s). Mutations caught: step from
+  the displayed text, no "selected" condition, positions set absolutely.
+- **Trade-off to watch:** scrolling the table with the pointer resting on a *selected* row's numbers now edits them. Scroll with the pointer on an unselected row or the label column, or
+  deselect first. Everything is undoable.
+
+### Copy and paste of cells (BUILT 2026-11-19, maintainer's design; UNSEEN BY EYE)
+
+**Picking cells.** A click on a row selects it as always. **A plain click on a number of an already selected row, then dragging, picks cells** (Geometry view, number columns only, no
+Ctrl / Shift / Alt): the row selection stays as it is (also with several rows selected: the click does not collapse it to one row), and the picked range is *the dragged rectangle
+restricted to the selected rows* x the number columns in it (the Shape column between y and D_s is never part of it). It is drawn with a tint and a border where the block ends.
+A click anywhere else, another ROI selection, Esc, the Simple view or hiding a picked column lets go of it (rows no longer selected drop out of the range one by one). The table
+scrolls while the pointer is at or past its edge during the drag; the wheel only scrolls during a drag. **Drag and drop of ROIs (reorder, group) now starts from the ID / Shape cells**
+or from an unselected row; from a selected row's number it is the range. A double-click still opens the editor: the press that starts a range lets Qt's own press run (that is what
+Qt checks before it edits), and the drag-and-drop state it starts is stopped. Code: `RoiTreeView._begin_cell_range / _extend_range / _autoscroll_tick`, state in `cell_marks.py`.
+
+**Copy** (Ctrl+C, the menu): the picked cells, or with none picked the current cell. The clipboard gets the numbers as the table stores them (pixels, degrees, so a unit change in
+between is harmless; MIME `application/x-lspr-roi-cells`, `cell_clipboard.py`) **and** tab-separated text as shown (for other programs). The copied cells get the **marching ants**
+(dashed border that moves, 120 ms steps; stops while the panel is hidden) until **Esc**, "Cancel cell selection" in the menu, or until something else is copied (here or elsewhere:
+the clipboard's `dataChanged` is watched). The copy is remembered by ROI id and column, so the ants survive the table being rebuilt, sorted or re-grouped.
+
+**Paste** (Ctrl+V, the menu), `cell_clipboard.plan_paste` (pure, tested):
+- **Only matching columns are filled** (d_r into d_r, W into W; a position never into a width). The target is the picked cells if some are picked (their rows and columns), else the selected ROIs
+  with every column the copy has (the current row alone if nothing is selected).
+- **One copied row fills every target row; several copied rows repeat in order** down the target rows until they run out. **One target row and several copied rows: the block runs on down from
+  that row** (Excel), is cut where the table ends (said), and **what was pasted is then selected** and picked (so it can be copied again).
+- A cell with no value to copy, or a target row with no such cell (a circle has no width), is skipped and counted in the status line ("2 rows have no W"), never filled with a guess.
+- **A paste that cannot be done is refused with a small tip at the pointer** (and in the title bar): no matching column ("copied d_r, selected D_s"), nothing to paste into, or a value that breaks a
+  rule. **All or nothing**: `RoiToolbox.set_cell_values` checks every ROI first with the rules of typing the value (sample diameter / width / height >= 2 px, ring `0 <= inner < outer`, a
+  pixel mask's position refused) and names the first ROI that fails.
+- **One undo step and one signal** however many ROIs and columns (`set_cell_values`: each ROI gets its own numbers, which `resize_rois` / `place_rois` cannot say; it shares the circle and
+  rectangle rules with them through `_resized_circle` / `_resized_rectangle`, tested equal). Text from another program still pastes its first value into the current column, as before.
+- **Menu** (right-click a ROI row): Copy cells (Ctrl+C), Paste cells (Ctrl+V), Cancel cell selection (Esc), enabled when they can act. A right-click keeps the picked cells.
+
+Tests: `test_lspri_roi_cell_paste.py` (26: payload, paste rules, marks' edges, `set_cell_values`) and `CellCopyPasteTest` in `test_lspri_rewrite_roi_table_panel.py` (27, real mouse events).
+Mutations caught: no Qt press when a range starts (double-click stops editing), unselected rows in the range, columns not matched, no repeating pattern.
+**Not done / open:** an Excel-style multi-value paste *from another program* (its first value only, as before); Shift+click / keyboard extension of the range; dragging the range's edge.
 
 ### Half-pixel fix (DONE 2026-11-18, maintainer's request: "circle half-pixel offset, can you fix it?"; UNSEEN BY EYE)
 
