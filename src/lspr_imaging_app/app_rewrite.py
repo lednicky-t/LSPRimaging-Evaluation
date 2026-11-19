@@ -2029,6 +2029,7 @@ def build_main_window(
         display_style=image_panel.roi_display, step_table=m.step_table,
     )
     roi_table_panel.restore_ui_state(ui_state)
+    image_panel.roi_edit_running.connect(roi_table_panel.set_edit_running)  # no table rebuild in the middle of a ROI drag (2026-11-19)
     spectra_panel = SpectraPanel(m.scan_results, m.roi_toolbox, m.selection, m.analysis_settings, live=m.analysis_live)
     spectra_panel.restore_ui_state(ui_state)
     sensorgram_panel = SensorgramPanel(

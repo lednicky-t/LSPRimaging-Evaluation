@@ -54,7 +54,7 @@ from .roi_context_menu import (
     show_roi_context_menu,
 )
 from .roi_creation import RoiCreation
-from .roi_gestures import RoiGestures
+from .roi_gestures import RoiGestures, RoiHit
 from .resize_cursor import direction_angle_deg, resize_cursor
 from .rotate_cursor import rotate_cursor
 from .rotate_line_tool import RotateLineTool
@@ -638,36 +638,53 @@ class CanvasInteraction:
                 self._roi_cursor = rotate_cursor()
                 self._set_view_cursor(self._roi_cursor)
             self._roi_gestures.update(x, y)
+            self._follow_held_cursor(x, y)
             return True
         if ev.isFinish():
             self._roi_gestures.end(x, y, additive=additive)
             return True
         self._roi_gestures.update(x, y)
+        self._follow_held_cursor(x, y)
         return True
+
+    def _follow_held_cursor(self, x: float, y: float) -> None:
+        """While a resize drag runs, turn the arrow to lie along the direction at the pointer ``(x, y)`` (display units), as the hover does: round a circle the radius
+        turns with the pointer, and a rectangle's corner arrow follows its changing proportions. Nothing for any other drag (a turn keeps the rotate cursor, a move
+        its move cursor)."""
+        held = self._roi_gestures.held
+        if held is not None:
+            self._show_roi_cursor(self._cursor_for_hit(held, x, y))
+
+    def _show_roi_cursor(self, shape: Qt.CursorShape | QCursor | None) -> None:
+        """Set the canvas cursor unless it is already this one (compared by identity: a cursor of our own is cached per step, `resize_cursor.py`)."""
+        if shape is not self._roi_cursor and shape != self._roi_cursor:
+            self._roi_cursor = shape
+            self._set_view_cursor(shape)
+
+    def _cursor_for_hit(self, hit: RoiHit, x: float, y: float) -> Qt.CursorShape | QCursor:
+        """The cursor for holding (or pressing on) ``hit`` with the pointer at ``(x, y)``: the move cursor inside, the rotate cursor on the knob, else the resize arrow."""
+        if hit.zone == "body":
+            return Qt.CursorShape.SizeAllCursor
+        if hit.zone == ZONE_ROTATE:
+            return rotate_cursor()  # the round knob above a selected rectangle: turn it
+        direction = self._roi_gestures.resize_direction(hit, x, y)  # a rectangle's edge, corner or border band: along its own axis, not the radius
+        if direction is None:
+            return self._resize_cursor(hit.center, x, y)
+        return self._resize_cursor(hit.center, hit.center[0] + direction[0], hit.center[1] + direction[1])
 
     def _update_roi_hover_cursor(self, scene_pos: object) -> None:
         """Show what a press here would do: a resize arrow on a selected ROI's
         border (pointing along the radius), a move cursor inside a selected ROI."""
         if self._roi_gestures.busy:
-            return  # keep the cursor the drag started with
+            return  # keep the cursor the drag has; a resize drag turns it itself (`_follow_held_cursor`)
         shape: Qt.CursorShape | QCursor | None = None
         if self._in_view(scene_pos):
             point = self._plot.vb.mapSceneToView(scene_pos)
             x, y = float(point.x()), float(point.y())
             hit = self._roi_gestures.hit(x, y)
-            if hit is not None and hit.zone == "body":
-                shape = Qt.CursorShape.SizeAllCursor
-            elif hit is not None and hit.zone == ZONE_ROTATE:
-                shape = rotate_cursor()  # the round knob above a selected rectangle: turn it
-            elif hit is not None:
-                direction = self._roi_gestures.resize_direction(hit, x, y)  # a rectangle's edge, corner or border band: along its own axis, not the radius
-                if direction is None:
-                    shape = self._resize_cursor(hit.center, x, y)
-                else:
-                    shape = self._resize_cursor(hit.center, hit.center[0] + direction[0], hit.center[1] + direction[1])
-        if shape is not self._roi_cursor and shape != self._roi_cursor:
-            self._roi_cursor = shape
-            self._set_view_cursor(shape)
+            if hit is not None:
+                shape = self._cursor_for_hit(hit, x, y)
+        self._show_roi_cursor(shape)
 
     def _resize_cursor(self, center: tuple[float, float], x: float, y: float) -> QCursor:
         """The two-headed arrow along the direction from ``center`` to ``(x, y)`` *on screen* (a circle's radius, or a rectangle's drag axis), at that exact angle

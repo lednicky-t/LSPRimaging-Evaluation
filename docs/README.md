@@ -157,6 +157,7 @@ Measurements of where time or memory went.
 - [`bulk_analysis_performance_investigation.md`](bulk_analysis_performance_investigation.md): Bulk analysis performance investigation: "Start analysis" slowness
 - [`live_preview_analysis_slowdown_investigation.md`](live_preview_analysis_slowdown_investigation.md): "Live" preview slows down "Start analysis" - root cause (2026-09, not yet fixed)
 - [`roi_mask_cache_memory_investigation.md`](roi_mask_cache_memory_investigation.md): "Start analysis" RAM ballooning to several GB - root cause and fix (2026-09)
+- [`roi_resize_drag_cost_2026-11-19.md`](roi_resize_drag_cost_2026-11-19.md): ROI resize drag: cost per step grows with the total ROI count (options, not built); lag after a stop = ROI table rebuild mid-drag (fixed) (2026-11-19)
 - [`image_panel_test_crash_status_2026-10-11.md`](image_panel_test_crash_status_2026-10-11.md): Image-panel test crash: status as of 2026-10-11
 
 ## Other

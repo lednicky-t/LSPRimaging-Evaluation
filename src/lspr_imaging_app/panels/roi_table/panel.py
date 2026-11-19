@@ -453,6 +453,11 @@ class RoiTablePanel(QWidget):
         """Connected to the dock's `visibilityChanged`: hidden = no table rebuilds; one catch-up when shown again."""
         self._gate.set_visible(visible)
 
+    def set_edit_running(self, running: bool) -> None:
+        """Connected to the Image panel's `roi_edit_running`: while a ROI is being dragged there is no table rebuild (it ran when the mouse paused, ~0.5 s of the GUI
+        thread on a large dataset, and the next move waited behind it); one catch-up when the drag ends."""
+        self._gate.set_held(running)
+
     def _on_cube_changed(self, *_args: object) -> None:
         # Only a ROI with a per-cube timeline looks different on another cube. Without one the rows are the
         # same for every cube, and rebuilding all of them on each cube change cost ~12 % of the GUI thread

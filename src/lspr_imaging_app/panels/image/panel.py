@@ -247,6 +247,7 @@ class ImagePanel(QWidget):
     # drag queues renders faster than they complete), and matching ROI / mask geometry to the wrong frame would be a correctness bug, not a cosmetic lag.
     # `RenderResult.request` carries the frame the array was really requested for (`_on_rendered`); this only forwards it.
     playback_changed = pyqtSignal(bool)  # the slideshow started (True) or stopped (False); other panels lighten their live updates
+    roi_edit_running = pyqtSignal(bool)  # a drag that edits ROIs (move, resize, handle, border edge) started (True) or ended (False): the ROI table holds its rebuild in between
     calm_histogram_changed = pyqtSignal(bool)  # Play is running with "calm histogram" on (True), or not (False)
     display_range_changed = pyqtSignal(bool, float, float)  # the user changed the View tab's Display range: (fixed, black, white)
     play_frame_showing = pyqtSignal(int)
@@ -695,6 +696,7 @@ class ImagePanel(QWidget):
             edit_target=self._edit_target, parent=self,
         )
         roi_gestures.refused.connect(self._on_tool_status)  # e.g. an individual change on a persistent point
+        roi_gestures.edit_running.connect(self.roi_edit_running)
         self._roi_creation = RoiCreation(
             self._roi_toolbox, self._selection, self._area_selection, image_shape=lambda: self._last_image_shape,
             current_affine=self._roi_queries.current_affine, to_reference=self._roi_queries.display_to_reference, action_parent=self,

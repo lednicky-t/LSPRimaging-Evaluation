@@ -20,6 +20,13 @@ How a panel uses it::
 `visible` starts as True and only ever comes from the dock's `visibilityChanged` signal, so a panel that is
 built without a dock (a test, an embedding) behaves exactly as before. Qt reports a dock hidden when it is
 closed, when it is behind another tab, and when the main window is minimised.
+
+**A second reason to wait, "held" (2026-11-19).** While the user is dragging a ROI the panel is visible but
+must not rebuild either: its refresh waits for a quiet moment (~100 ms), and a pause of the mouse *is* a quiet
+moment, so the rebuild ran in the middle of the drag and the next mouse move waited behind it (the ROI / Groups
+table: ~0.5 s with 162 ROIs on a 8,478-plane dataset, measured from the app log). ``set_held(True)`` at the
+start of the drag and ``set_held(False)`` at its end make `defer()` say True in between, and the same single
+catch-up runs on release. Hidden and held are independent: the catch-up waits for both to end.
 """
 
 from __future__ import annotations
@@ -31,6 +38,7 @@ class HiddenPanelGate:
     def __init__(self, on_shown: Callable[[], None]) -> None:
         self._on_shown = on_shown
         self._visible = True
+        self._held = False
         self._stale = False
 
     @property
@@ -38,13 +46,18 @@ class HiddenPanelGate:
         return self._visible
 
     @property
+    def held(self) -> bool:
+        """An edit drag is running: the panel waits for its end, whether visible or not."""
+        return self._held
+
+    @property
     def stale(self) -> bool:
-        """Work was requested while hidden and has not been done yet."""
+        """Work was requested while hidden (or held) and has not been done yet."""
         return self._stale
 
     def defer(self) -> bool:
-        """True (and the request is remembered) while hidden: the caller skips its work."""
-        if self._visible:
+        """True (and the request is remembered) while hidden or held: the caller skips its work."""
+        if self._visible and not self._held:
             return False
         self._stale = True
         return True
@@ -54,6 +67,16 @@ class HiddenPanelGate:
         if visible == self._visible:
             return
         self._visible = visible
-        if visible and self._stale:
+        self._catch_up()
+
+    def set_held(self, held: bool) -> None:
+        held = bool(held)
+        if held == self._held:
+            return
+        self._held = held
+        self._catch_up()
+
+    def _catch_up(self) -> None:
+        if self._visible and not self._held and self._stale:
             self._stale = False
-            self._on_shown()  # one catch-up for everything that was requested while hidden
+            self._on_shown()  # one catch-up for everything that was requested while hidden or held

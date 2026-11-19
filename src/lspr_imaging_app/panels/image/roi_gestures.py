@@ -173,8 +173,15 @@ def hit_test(
     return None
 
 
+_EDIT_MODES = ("move", "resize", "rectangle", "border")
+"""The gestures that change ROIs (the rubber band only selects, a refused drag does nothing): `RoiGestures.edit_running` is True while one of them runs."""
+
+
 class RoiGestures(QObject):
     refused = pyqtSignal(str)  # a drag that cannot edit here (the scope does not fit the cube); the reason, for the status bar
+    edit_running = pyqtSignal(bool)
+    """True when a drag that edits ROIs starts (a move, a resize, a rectangle handle or a border edge), False when it ends (2026-11-19). Other panels hold their
+    refresh in between (`HiddenPanelGate.set_held`): the table's rebuild ran when the mouse paused and the next move waited behind it."""
 
     def __init__(
         self,
@@ -218,6 +225,7 @@ class RoiGestures(QObject):
         self._move_applied = np.zeros(2)
         self._resize_center: tuple[float, float] = (0.0, 0.0)
         self._resize_zone = "edge"
+        self._grab_roi_id: int | None = None  # the ROI whose edge / handle / border the running drag grabbed (for `held`)
         self._ring_start: dict[int, tuple[float, float]] = {}  # roi id -> (inner, outer) at drag start
         self._inverse: np.ndarray | None = None
 
@@ -244,6 +252,15 @@ class RoiGestures(QObject):
     def rotating(self) -> bool:
         """The drag in progress is turning rectangles (the knob was grabbed): the canvas shows the rotate cursor for all of it."""
         return self._mode == "rectangle" and self._resize_zone == ZONE_ROTATE
+
+    @property
+    def held(self) -> RoiHit | None:
+        """What a running resize drag has hold of (a circle's edge or ring, a rectangle's edge / corner, an edge of its border band), so the arrow cursor can follow
+        the pointer: the direction it lies along changes during the drag (round a circle, or as a rectangle's corner changes its proportions). ``None`` for no drag,
+        a move, a rubber band, or the turning knob (that one keeps the rotate cursor)."""
+        if self._mode in ("resize", "rectangle", "border") and not self.rotating and self._grab_roi_id is not None:
+            return RoiHit(self._grab_roi_id, self._resize_zone, self._resize_center)
+        return None
 
     def resize_direction(self, hit: RoiHit, x: float, y: float) -> tuple[float, float] | None:
         """The direction on the screen (display units) along which dragging ``hit`` moves, for the two-headed arrow cursor, when ``hit`` is on a rectangle's
@@ -277,6 +294,8 @@ class RoiGestures(QObject):
             return False
         hit = None if additive else self.hit(x, y)
         if hit is not None and self._begin_edit(hit, x, y):
+            if self._mode in _EDIT_MODES:
+                self.edit_running.emit(True)
             return True
         self._mode = "marquee"
         self._band_start = (x, y)
@@ -303,6 +322,7 @@ class RoiGestures(QObject):
         selected = self._selection.selected_roi_ids()
         self._edit_kwargs = edit_kwargs
         self._edit_cube = None if self._edit_target is None else self._edit_target.cube()
+        self._grab_roi_id = hit.roi_id
         if hit.zone in RECTANGLE_ZONES:
             apertures = self._selected_apertures()
             rectangles = set() if apertures is None or apertures.handles is None else {
@@ -383,12 +403,14 @@ class RoiGestures(QObject):
 
     def end(self, x: float, y: float, *, additive: bool) -> None:
         mode, self._mode = self._mode, None
+        self._grab_roi_id = None
         if mode == "marquee":
             self._end_marquee(x, y, additive=additive)
-        elif mode in ("move", "resize", "rectangle", "border"):
+        elif mode in _EDIT_MODES:
             self._inverse = None
             self._move_start = None
             undo_manager.end_batch()
+            self.edit_running.emit(False)  # after the batch is closed: whoever catches up now sees the finished edit
 
     # -- the three gestures ------------------------------------------------------------
 
