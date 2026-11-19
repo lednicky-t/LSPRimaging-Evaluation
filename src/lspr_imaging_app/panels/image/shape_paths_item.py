@@ -37,10 +37,18 @@ class MaskOutlines:
     def __init__(self) -> None:
         self._sample: OrderedDict[tuple, QPainterPath] = OrderedDict()
         self._border: OrderedDict[tuple, QPainterPath] = OrderedDict()
+        # The same outlines as traced at the mask's own corner (0, 0), remembered by pixels only: a pixel map that is dragged keeps its pixels and only changes
+        # place, so a new position costs a translated copy of this path, not a new trace (`placed_at`).
+        self._traced: OrderedDict[tuple, QPainterPath] = OrderedDict()
 
     @staticmethod
-    def _key(mask: RoiMask) -> tuple:
-        return (int(mask.x0), int(mask.y0), mask.mask.shape, np.ascontiguousarray(mask.mask, dtype=bool).tobytes())
+    def _content(mask: RoiMask) -> tuple:
+        """What the pixels are, without where they sit."""
+        return (mask.mask.shape, np.ascontiguousarray(mask.mask, dtype=bool).tobytes())
+
+    @classmethod
+    def _key(cls, mask: RoiMask) -> tuple:
+        return (int(mask.x0), int(mask.y0), *cls._content(mask))
 
     def _remember(self, store: OrderedDict, key: tuple, make) -> QPainterPath:
         path = store.get(key)
@@ -54,17 +62,23 @@ class MaskOutlines:
 
     def sample(self, mask: RoiMask) -> QPainterPath:
         """The outline of the mask's pixels, in view cells of the unwarped image (a copy is never needed: callers map it, which returns a new path)."""
-        return self._remember(
-            self._sample, self._key(mask), lambda: region_outline(mask.mask).translated(float(mask.x0), float(mask.y0))
-        )
+        def make() -> QPainterPath:
+            traced = self._remember(self._traced, ("sample", *self._content(mask)), lambda: region_outline(mask.mask))
+            return traced.translated(float(mask.x0), float(mask.y0))
+
+        return self._remember(self._sample, self._key(mask), make)
 
     def border(self, mask: RoiMask, border: Border) -> QPainterPath:
         """The outline of the mask's border band (`rasterize.mask_border_pixels`), in view cells of the unwarped image."""
-        key = (*self._key(mask), float(border.gap_px), float(border.thickness_px))
+        key = (*self._key(mask), float(border.gap_px), float(border.thickness_px), border.enabled)
+
+        def trace() -> QPainterPath:
+            x0, y0, band = mask_border_pixels(RoiMask(0, 0, mask.mask), border)  # the band does not depend on where the mask sits: found at the corner (0, 0)
+            return region_outline(band).translated(float(x0), float(y0)) if band.any() else QPainterPath()
 
         def make() -> QPainterPath:
-            x0, y0, band = mask_border_pixels(mask, border)
-            return region_outline(band).translated(float(x0), float(y0)) if band.any() else QPainterPath()
+            traced = self._remember(self._traced, ("border", float(border.gap_px), float(border.thickness_px), border.enabled, *self._content(mask)), trace)
+            return traced.translated(float(mask.x0), float(mask.y0))
 
         return self._remember(self._border, key, make)
 

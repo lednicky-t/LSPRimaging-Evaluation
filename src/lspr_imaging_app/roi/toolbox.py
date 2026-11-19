@@ -135,7 +135,18 @@ from ..domain.roi_model import (
     geometry_at,
     resolved_at,
 )
-from ..domain.roi_shapes import Border, Circle, MaskShape, Rectangle, Shape, effective_border, remap_rectangle, ring_diameters
+from ..domain.roi_shapes import (
+    Border,
+    Circle,
+    MaskShape,
+    Rectangle,
+    Shape,
+    effective_border,
+    remap_rectangle,
+    ring_diameters,
+    shifted_mask,
+    whole_pixels,
+)
 from ..domain.roi_links import (
     ROI_ROLES,
     ROLE_REFERENCE,
@@ -649,8 +660,8 @@ class RoiToolbox(QObject):
         one new ROI per sample (appended after the existing ROIs), the new ids returned in the ascending order of the samples' ids.
 
         The new reference is a **pixel map of the rim's pixels** at the reference wavelength (identity chromatic affine, the frame ``image_shape`` = (rows, columns) of the
-        processed image the ROIs live in), a frozen copy: from now on it is a ROI like any other (it does not follow its sample when that is moved or resized, and being a
-        map it cannot be moved: `move_refusal`). The sample's own rim is **kept, dormant**: a link wins over it (`domain.roi_links.reference_source`), so unlinking, or
+        processed image the ROIs live in), a frozen copy: from now on it is a ROI like any other (it does not follow its sample when that is moved or resized; being a
+        map it moves by whole pixels: `_at_position`). The sample's own rim is **kept, dormant**: a link wins over it (`domain.roi_links.reference_source`), so unlinking, or
         deleting the new reference, brings the rim back. All blobs of a rim form the one new ROI. The pixels of the sample itself are left out of it.
 
         Raises ``ValueError`` (the message is for the status line), before anything changes, for a ROI that is a reference, is linked already, has no rim, or whose rim
@@ -945,16 +956,46 @@ class RoiToolbox(QObject):
             n=len(states), rois=len(self._rois), cube=-1 if cube is None else int(cube), scope=scope, reason=reason,
         )
 
+    def _at_position(self, g: RoiGeometry, x: float, y: float) -> RoiGeometry:
+        """The geometry ``g`` has with its centre put at ``(x, y)``: the one rule behind every position edit (a drag, a typed X / Y, a wheel step, a paste, Accept).
+
+        A circle or a rectangle moves to the point (rounded to ``POSITION_DECIMALS``). **A pixel map moves by whole pixels** (`roi_shapes.shifted_mask`): its pixels
+        are the ROI, and a fraction of a pixel would mean resampling them. The shift is the whole-pixel distance to the asked point, and the label point (the centre)
+        moves by exactly that, so it stays where it was in the map: the X / Y the table shows afterwards are the real ones, up to half a pixel from what was asked."""
+        if isinstance(g.shape, MaskShape):
+            dx, dy = whole_pixels(x - g.center_x), whole_pixels(y - g.center_y)
+            if dx == 0 and dy == 0:
+                return g
+            return g._replace(
+                center_x=self._rounded(g.center_x + dx), center_y=self._rounded(g.center_y + dy), shape=MaskShape(shifted_mask(g.shape.mask, dx, dy))
+            )
+        return g._replace(center_x=self._rounded(x), center_y=self._rounded(y))
+
+    @staticmethod
+    def _stayed_put_refusal(stayed: Sequence[int]) -> str:
+        names = ", ".join(str(i) for i in stayed)
+        return (
+            f"ROI {names} {'is a pixel map' if len(stayed) == 1 else 'are pixel maps'}: it moves by whole pixels, and that is less than half a pixel, "
+            "so nothing was moved."
+        )
+
     def _set_positions(
         self, positions: dict[int, tuple[float, float]], label: str, *, cube: int | None = None, scope: str = SCOPE_PERSISTENT
     ) -> None:
         rois = self._require_rois(positions)
         changes: list[tuple[AreaRoi, RoiGeometry]] = []
+        stayed: list[int] = []  # pixel maps asked to move by less than half a pixel
         for roi in rois:
             x, y = float(positions[roi.area_roi_id][0]), float(positions[roi.area_roi_id][1])
             if not (math.isfinite(x) and math.isfinite(y)):
                 raise ValueError(f"ROI {roi.area_roi_id}: position must be finite, got ({x}, {y})")
-            changes.append((roi, geometry_at(roi, cube)._replace(center_x=self._rounded(x), center_y=self._rounded(y))))
+            g = geometry_at(roi, cube)
+            moved = self._at_position(g, x, y)
+            if isinstance(g.shape, MaskShape) and moved is g and (x != g.center_x or y != g.center_y):
+                stayed.append(roi.area_roi_id)
+            changes.append((roi, moved))
+        if stayed and all(new == geometry_at(roi, cube) for roi, new in changes):  # nothing at all moved although a move was asked: say so (a mixed selection moves what it can)
+            raise ValueError(self._stayed_put_refusal(stayed))
         self._write_geometry(changes, cube, scope, label, "moved")
 
     @instrumented("RoiToolbox.move_roi")
@@ -969,28 +1010,13 @@ class RoiToolbox(QObject):
         one common vector; this is for different positions, e.g. the answer of ROI position tuning.)"""
         self._set_positions({int(roi_id): (float(x), float(y)) for roi_id, (x, y) in positions.items()}, label)
 
-    def move_refusal(self, roi_ids: Collection[int]) -> str | None:
-        """Why these ROIs cannot be moved by a position edit, or ``None``. A **pixel-mask** ROI is the pixels it was made from (`MaskShape`): a position edit
-        would move only its centre, the point it is labelled by, while the pixels that are measured and drawn stayed where they are, so it is refused
-        (a half-moved ROI would look moved and measure the old place). Delete it and make a new one where it should be."""
-        masks = [roi.area_roi_id for roi in self._require_rois(roi_ids) if isinstance(roi.shape, MaskShape)]
-        if not masks:
-            return None
-        names = ", ".join(str(i) for i in masks)
-        return (
-            f"ROI {names} {'is a pixel mask' if len(masks) == 1 else 'are pixel masks'}: its pixels cannot be moved "
-            "(only its label point would move), so nothing was moved. Delete it and make a new one where you want it."
-        )
-
     @instrumented("RoiToolbox.translate_rois")
     def translate_rois(
         self, roi_ids: Collection[int], dx: float, dy: float, *, cube: int | None = None, scope: str = SCOPE_PERSISTENT
     ) -> None:
         """Shift every ROI in ``roi_ids`` by (dx, dy) pixels: the multi-select
-        position edit that keeps the ROIs' arrangement. Refused (`ValueError`, nothing moved) while a pixel mask is among them (`move_refusal`)."""
-        refusal = self.move_refusal(roi_ids)
-        if refusal:
-            raise ValueError(refusal)
+        position edit that keeps the ROIs' arrangement. A pixel map moves by the nearest whole number of pixels (`_at_position`); when that is nothing for every ROI
+        of the call, ``ValueError`` (nothing moved). A caller that moves a map in small steps (a drag) adds up the distance itself and hands over whole pixels."""
         rois = self._require_rois(roi_ids)
         positions = {}
         for roi in rois:
@@ -1013,9 +1039,6 @@ class RoiToolbox(QObject):
         line up a row or a column; giving both stacks the ROIs on one point."""
         if x is None and y is None:
             return
-        refusal = self.move_refusal(roi_ids)
-        if refusal:
-            raise ValueError(refusal)
         rois = self._require_rois(roi_ids)
         positions = {}
         for roi in rois:
@@ -1195,7 +1218,7 @@ class RoiToolbox(QObject):
         """Give each ROI in ``values`` (id -> {field: number}, fields `CELL_FIELDS`) its own new numbers: **one undo step and one signal**, however many ROIs and fields. This is
         what pasting cells of the ROI table does (each ROI may get a different value, which ``resize_rois`` / ``place_rois`` cannot say in one step).
 
-        The rules are the ones of typing the value: a position of a pixel mask is refused (`move_refusal`), a diameter needs a circle, a width / height / angle a rectangle, the sample
+        The rules are the ones of typing the value: a position of a pixel map moves it by whole pixels (`_at_position`), a diameter needs a circle, a width / height / angle a rectangle, the sample
         diameter, width and height at least `MIN_SAMPLE_DIAMETER_PX`, the ring ``0 <= inner < outer``, a rim's offset and thickness (any shape) need a rim (not a reference, not switched off)
         and a thickness of at least 0. **All or nothing**: the first problem raises ``ValueError`` (naming the ROI)
         before anything changes. A ROI whose numbers do not differ is left alone; if nothing differs there is no undo entry."""
@@ -1203,11 +1226,9 @@ class RoiToolbox(QObject):
         if unknown:
             raise ValueError(f"unknown field {sorted(unknown)}; known: {self.CELL_FIELDS}")
         rois = self._require_rois(values)
-        refusal = self.move_refusal([roi.area_roi_id for roi in rois if "x" in values[roi.area_roi_id] or "y" in values[roi.area_roi_id]])
-        if refusal:
-            raise ValueError(refusal)
         default_border = self._detection_settings.default_border()
         changes: list[tuple[AreaRoi, RoiGeometry]] = []
+        stayed: list[int] = []  # pixel maps asked to move by less than half a pixel
         for roi in rois:
             fields = values[roi.area_roi_id]
             g = geometry_at(roi, cube)
@@ -1217,9 +1238,9 @@ class RoiToolbox(QObject):
                     if name in fields and not math.isfinite(float(fields[name])):
                         raise ValueError(f"position {name} must be a finite number, got {fields[name]!r}")
                 if "x" in fields:
-                    x = self._rounded(fields["x"])
+                    x = float(fields["x"])
                 if "y" in fields:
-                    y = self._rounded(fields["y"])
+                    y = float(fields["y"])
                 circle = (fields.get("sample_diameter_px"), fields.get("reference_inner_diameter_px"), fields.get("reference_outer_diameter_px"))
                 if any(value is not None for value in circle):
                     self._check_circle_inputs(*circle)
@@ -1234,7 +1255,13 @@ class RoiToolbox(QObject):
             except ValueError as exc:
                 text = str(exc)
                 raise ValueError(text if text.startswith("ROI ") else f"ROI {roi.area_roi_id}: {text}") from None
-            changes.append((roi, g._replace(center_x=x, center_y=y, shape=shape, border=border)))
+            edited = g._replace(shape=shape, border=border)
+            moved = self._at_position(edited, x, y)
+            if isinstance(shape, MaskShape) and moved.shape is shape and (x != g.center_x or y != g.center_y):
+                stayed.append(roi.area_roi_id)
+            changes.append((roi, moved))
+        if stayed and all(new == geometry_at(roi, cube) for roi, new in changes):  # a paste of positions that moves no pixel map and changes nothing else
+            raise ValueError(self._stayed_put_refusal(stayed))
         self._write_geometry(changes, cube, scope, label, "pasted")
 
     @instrumented("RoiToolbox.set_borders")

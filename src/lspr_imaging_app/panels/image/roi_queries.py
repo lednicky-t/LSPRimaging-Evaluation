@@ -15,7 +15,7 @@ import numpy as np
 from ...image_tools import ChromaticModule
 from ...roi import RoiToolbox
 from ...domain.roi_links import is_reference
-from ...domain.roi_shapes import NO_BORDER, Circle, Rectangle, effective_border, reach_radius, ring_diameters
+from ...domain.roi_shapes import NO_BORDER, Circle, MaskShape, Rectangle, effective_border, reach_radius, ring_diameters
 from ...roi.overlay_geometry import CELL_OFFSET
 from ...roi.rasterize import rasterize_reference, rasterize_sample, rasterize_sample_for_patch
 from ...roi.shape_hits import FrameMap, display_point_in_region, rectangle_border_zone, rectangle_handle_zone
@@ -233,11 +233,11 @@ class RoiQueries:
                 for roi, centre in zip(chosen, centers, strict=True)
             )
         if not resizable.all():
-            # Inside a rectangle means inside its region, so the selection can be moved by it. A pixel mask cannot be moved (its pixels stay: `RoiToolbox.move_refusal`),
-            # so it gets no inside test and a drag that starts on it is a rubber band, as before. No edge handles for either.
+            # Inside a rectangle or a pixel map means inside its region (a map: on one of its pixels, a hole is not inside), so the selection can be moved by it. No edge
+            # handles for either: a map has no size to drag, and a drag that starts anywhere else is a rubber band, as before.
             frame_map = FrameMap.of(self.current_affine())
             body = tuple(
-                None if not isinstance(roi.shape, Rectangle)
+                None if not isinstance(roi.shape, (Rectangle, MaskShape))
                 else (lambda x, y, roi=roi, centre=centre: display_point_in_region(roi, "sample", NO_BORDER, centre, frame_map, x, y))
                 for roi, centre in zip(chosen, centers, strict=True)
             )

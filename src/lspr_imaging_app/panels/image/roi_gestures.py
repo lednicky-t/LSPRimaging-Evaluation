@@ -45,7 +45,7 @@ from ...applog.events import emit_timing
 from ...roi import RoiToolbox
 from ...domain.roi_model import SCOPE_PERSISTENT
 from ...roi.scope import RoiEditTarget
-from ...domain.roi_shapes import Border, Rectangle, effective_border
+from ...domain.roi_shapes import Border, MaskShape, Rectangle, effective_border, whole_pixels
 from ...roi.rasterize import effective_reference_diameters
 from ...roi.shape_hits import (
     BORDER_ZONES,
@@ -221,6 +221,8 @@ class RoiGestures(QObject):
         self._rect_angle = 0.0  # the rectangle's angle when a handle drag began (an edge drag measures along these axes)
         self._band_start: tuple[float, float] | None = None
         self._edit_ids: tuple[int, ...] = ()
+        self._map_ids: tuple[int, ...] = ()  # a move drag: the pixel maps among the selected ROIs (moved by whole pixels; `_edit_ids` then holds the others)
+        self._map_applied = np.zeros(2, dtype=np.int64)  # whole pixels the maps have been moved so far in this drag
         self._move_start: tuple[float, float] | None = None
         self._move_applied = np.zeros(2)
         self._resize_center: tuple[float, float] = (0.0, 0.0)
@@ -375,12 +377,13 @@ class RoiGestures(QObject):
             self._mode = "resize"
             undo_manager.begin_batch("Resize ROIs")
         else:
-            refusal = self._toolbox.move_refusal(selected)  # a pixel mask cannot be moved; said once here, not from inside the mouse-move handler
-            if refusal is not None:
-                self.refused.emit(refusal)
-                self._mode = "refused"
-                return True
-            self._edit_ids = tuple(sorted(selected))
+            # A pixel map moves by whole pixels (`RoiToolbox._at_position`), so it keeps a count of its own: the circles and rectangles of the selection follow the
+            # pointer smoothly, the maps are given whole-pixel steps worked out from the whole distance dragged (a step of the pointer under half a pixel is not lost).
+            shapes = {roi.area_roi_id: roi.shape for roi in self._toolbox.rois_at(self._edit_cube)}
+            maps = {i for i in selected if isinstance(shapes.get(i), MaskShape)}
+            self._edit_ids = tuple(sorted(selected - maps))
+            self._map_ids = tuple(sorted(maps))
+            self._map_applied = np.zeros(2, dtype=np.int64)
             self._move_start = (x, y)
             self._move_applied = np.zeros(2)
             self._mode = "move"
@@ -429,13 +432,20 @@ class RoiGestures(QObject):
         display_delta = np.array([x - self._move_start[0], y - self._move_start[1]])
         reference_delta = self._inverse @ display_delta
         step = reference_delta - self._move_applied
-        if not step.any():
+        map_step = np.array([whole_pixels(v) for v in reference_delta], dtype=np.int64) - self._map_applied  # whole pixels still owed to the maps
+        moves_free = bool(self._edit_ids) and bool(step.any())
+        moves_maps = bool(self._map_ids) and bool(map_step.any())
+        if not (moves_free or moves_maps):
             return
         # Stage timing, DEBUG only, one line per mouse step: the 2026-10-21 "GUI slow while moving ROIs" report
         # needed the toolbox write and the overlay draw told apart (and a drag step is the hot path here).
         started = time.perf_counter()
-        self._toolbox.translate_rois(self._edit_ids, float(step[0]), float(step[1]), **self._edit_kwargs)
-        self._move_applied = reference_delta
+        if moves_free:
+            self._toolbox.translate_rois(self._edit_ids, float(step[0]), float(step[1]), **self._edit_kwargs)
+            self._move_applied = reference_delta
+        if moves_maps:
+            self._toolbox.translate_rois(self._map_ids, float(map_step[0]), float(map_step[1]), **self._edit_kwargs)
+            self._map_applied = self._map_applied + map_step
         written = time.perf_counter()
         self._redraw_now()
         done = time.perf_counter()
@@ -443,7 +453,7 @@ class RoiGestures(QObject):
             logger, "roi.drag_step", (done - started) * 1000.0,
             write_ms=round((written - started) * 1000.0, 2),
             overlay_ms=round((done - written) * 1000.0, 2),
-            n=len(self._edit_ids),
+            n=len(self._edit_ids) + len(self._map_ids),
         )
 
     def _update_rectangle(self, x: float, y: float) -> None:

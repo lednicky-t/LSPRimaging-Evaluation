@@ -264,10 +264,10 @@ in 2.5 (the cell hashes, not that record, decide what is stale).
     (`SelectedApertures.body`) and moved; no edge handles (they resize a diameter).
   - **A pixel mask is drawn and pointed at from its pixels through the frame's affine, never from the ROI's centre** (the scan does exactly that; the centre is
     only the label point). Found in review before it shipped: with a centre-based drawing, dragging a mask would have moved its drawn outline while the
-    measured pixels stayed (a ROI that looks moved and measures the old place). Now `RoiToolbox.move_refusal` refuses `translate_rois` / `place_rois` while a
+    measured pixels stayed (a ROI that looks moved and measures the old place). Then (replaced 2026-11-19, see "Moving a pixel map") `RoiToolbox.move_refusal` refused `translate_rois` / `place_rois` while a
     pixel mask is among the ROIs (nothing is half-moved; the message says to delete it and make a new one), a drag that starts with a mask selected is refused
-    once with that message (`RoiGestures._begin_edit`), and a mask has no inside to grab. To make a mask movable later, `translate_rois` would have to shift
-    `RoiMask.x0 / y0` by whole pixels (a drag is fractional): a decision, not built.
+    once with that message (`RoiGestures._begin_edit`), and a mask has no inside to grab. To make a mask movable, `translate_rois` has to shift
+    `RoiMask.x0 / y0` by whole pixels (a drag is fractional): built 2026-11-19, "Moving a pixel map".
   - The histogram's region uses the box-bounded union (above). `scan_store.layout_json` was already shape-aware.
 - Original outline of this phase (kept): one geometry function per shape (circle, rectangle with rotation, mask), used by the scan, the overlay,
   the histogram, the wand's ROI layer, chunk planning and the session carry.
@@ -320,8 +320,7 @@ something to link / take apart).
   handle positions and the hit test come from one function and a round-trip test (drag to another rectangle's handle = that rectangle's size / angle) pins them.
   A corner zone never reaches a tiny rectangle's middle (found by a test: a 6 x 6 rectangle had nothing to grab by). Shortcut table row `mouse.view.rectangle_handles`.
 
-**Still not built:** a drag-to-draw rectangle (a click places a 20 x 20 px square), link-aware ROI position tuning (plan 1.2d), and moving a pixel mask
-(refused, see 2.4). (W / H / angle as table columns: built 2026-11-19, next section.)
+**Still not built:** a drag-to-draw rectangle (a click places a 20 x 20 px square) and link-aware ROI position tuning (plan 1.2d). (Moving a pixel mask: built 2026-11-19, "Moving a pixel map".) (W / H / angle as table columns: built 2026-11-19, next section.)
 
 ### Width, height and angle columns (BUILT 2026-11-19, maintainer: "move to point 2"; UNSEEN BY EYE)
 
@@ -458,7 +457,7 @@ tracker (`auto_landmarks`: LoG peaks and `cv2.getRectSubPix`, both pixel-index) 
 synthetic sweep (`tests/_lspri_chromatic_synthetic.py`, known disk centres, 12 landmarks): the dots sat **(-0.50, -0.50) px** from the middle of the disk they mark
 (the tracker itself is unbiased); after adding `CELL_OFFSET` in the overlay's one `shown()` step, after the affine, the offset is **(0.000, 0.001) px, worst 0.011 px**
 (reference wavelength, correction on or off). Display only: no tracked number, model, scan or session changes. Test:
-`test_lspri_rewrite_chromatic_tab.py::test_landmarks_are_drawn_on_the_features_they_mark` (fails with the shift removed). A pixel mask still cannot be moved (2.4).
+`test_lspri_rewrite_chromatic_tab.py::test_landmarks_are_drawn_on_the_features_they_mark` (fails with the shift removed). (A pixel map could not be moved then; since 2026-11-19 it can, by whole pixels: see "Moving a pixel map".)
 
 ### Rectangle speed, border drag, rotate cursor (DONE 2026-11-18, maintainer's three requests; UNSEEN BY EYE)
 
@@ -527,7 +526,7 @@ files and the cell hash for nothing).
 
 **Decisions (maintainer, answers to the questions of 2026-11-19).**
 1. **Rim pair -> linked pair:** the rim's pixels become a **pixel map**, a new reference ROI linked to the sample (a frozen copy of the rim as it is at the reference wavelength: it
-   no longer follows the sample, as decision 4 above says; a map cannot be moved, `move_refusal`). One new reference per sample, however many blobs the rim has. Only for a sample that
+   no longer follows the sample, as decision 4 above says; a map moves by whole pixels on its own, "Moving a pixel map"). One new reference per sample, however many blobs the rim has. Only for a sample that
    has a rim and no links. The sample's own rim is **kept, dormant** (the link wins, decision 2 above; Unlink or deleting the new reference brings the rim back). One undo step.
 2. **Pixel map -> rim pair:** a map that is a sample has a rim like any shape (`Border(gap, thickness)`, the shared default 4 + 4 px unless it has its own). New command **Add rim**
    (a free reference or a rim-less sample becomes a sample with a rim; one undo step). Gap and thickness are editable in the table: **the same two columns for every shape**, Offset and Thickness (maintainer, later the same day: they replaced the
@@ -589,3 +588,28 @@ files and the cell hash for nothing).
 **Not built / open.**
 - The Linked view's row order and the table's colour for a *dormant* rim are as described above; nothing marks that a linked sample still has a rim it is not using (the tooltip does not say either).
 - **Unseen by eye:** the pictograms (sizes, the jagged map-with-rim outline), the menu entries and their icons.
+
+### Moving a pixel map (BUILT 2026-11-19, maintainer: "can you make map ROI movable, same like rectangles or circles?"; UNSEEN BY EYE)
+
+A pixel map (`MaskShape`: a ROI made from a selection, or the rim of a sample turned into a reference) moves like a circle or a rectangle: drag it on the image, type X / Y, wheel over X / Y,
+Shift dialog, paste cells. It used to be refused (`RoiToolbox.move_refusal`, section 2.4), because only its label point would have moved.
+
+**The rule (the one decision, flagged to the maintainer): a map moves by whole pixels.** Its pixels *are* the ROI; moving it by a fraction would mean resampling them (grey edge pixels, other pixels
+measured). So `RoiToolbox._at_position(g, x, y)` (the one place a position becomes a geometry, behind `_set_positions`, `translate_rois`, `place_rois`, `move_rois` and `set_cell_values`) shifts the
+pixels by `whole_pixels(asked - centre)` in each axis (`roi_shapes.whole_pixels`: nearest whole number, **a half goes away from zero**, so a wheel step of 0.5 px moves a map one pixel either way) and
+moves the label point (the centre) by exactly that. The mask array is shared (`shifted_mask` changes only `x0 / y0`), nothing is resampled; the stored pixels are bit-identical, only their place changes.
+What the scan measures moves with it: a test compares `rasterize_sample` before and after with `np.roll`.
+
+- **Typed / pasted / wheel numbers:** the X / Y the table shows afterwards are the map's real ones (up to half a pixel from what was typed: type 25.4 for a map at 20.0 and it goes to 25.0).
+  When **every** ROI of the call is a map that would move less than half a pixel (and nothing else in the call changes), the call raises "ROI 7 is a pixel map: it moves by whole pixels, and that
+  is less than half a pixel, so nothing was moved." (status bar), instead of doing nothing silently. A mixed selection moves what it can (the circles take the 0.3 px, the map stays).
+- **Drag** (`RoiGestures._update_move`): circles and rectangles follow the pointer smoothly as before; the maps get **whole-pixel steps worked out from the whole distance dragged so far**
+  (`_map_applied`), never per mouse step: 40 steps of 0.14 px each would otherwise move a map 0 px (a mutation test of exactly that fails both drag tests). A map is grabbed on one of its
+  **pixels** (`SelectedApertures.body` now has a test for a map; a hole is not a grab, a click beside it starts the rubber band as before). One undo step for the whole drag.
+- **Display speed:** `MaskOutlines` now remembers a map's traced outline (sample and rim) **by its pixels, not its place**; a new position costs a translated copy of the path. Measured
+  (160 blobs of r = 4 px in a 674 x 880 box, 7,781 pixels): outline of a map at a new position **44.5 ms (retrace) -> 2.9 ms**, its rim 3.8 ms, the toolbox write 0.29 ms per step
+  (`scratchpad/map_drag_cost.py`, not kept in the repo).
+- **Not changed:** ROI position tuning still refuses maps (`check_tunable`: it scores shifts of a circle's centre); a linked reference still never moves with its sample; a map moved partly
+  or wholly outside the image is clipped by the rasterizer like any ROI there (no clamping, as for a circle). Session files are unchanged (a map stores its `x0 / y0` and its centre).
+- **Tests:** `tests/integration/test_lspri_roi_phase3_ui.py` (grab by pixel, whole-pixel move with a circle + undo, the scan's pixels move, typed / tiny / wheel halves, drag in small steps,
+  drag with a circle), `test_lspri_rewrite_roi_table_panel.py` (wheel, typed value, paste), `test_lspri_roi_cell_paste.py`, `test_lspri_rim_pairs.py`.

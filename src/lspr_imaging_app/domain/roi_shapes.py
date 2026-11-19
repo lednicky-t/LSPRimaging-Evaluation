@@ -86,6 +86,18 @@ def shape_kind(shape: Shape) -> str:
     raise TypeError(f"not a ROI shape: {shape!r}")
 
 
+def whole_pixels(value: float) -> int:
+    """``value`` (pixels) rounded to the nearest whole pixel, a half going away from zero (+0.5 -> 1, -0.5 -> -1: a wheel step up and down moves a pixel map equally far;
+    Python's own ``round`` would send both halves to the nearest even number)."""
+    return int(math.floor(abs(float(value)) + 0.5)) * (1 if value >= 0 else -1)
+
+
+def shifted_mask(mask: RoiMask, dx: int, dy: int) -> RoiMask:
+    """The same pixels ``dx`` columns and ``dy`` rows further on (whole pixels). A pixel map is moved like this and never resampled: a fractional move would blur its
+    edge into grey pixels and the ROI would measure other pixels than the ones it was drawn on. The array is shared, not copied (a mask is never edited in place)."""
+    return RoiMask(int(mask.x0) + int(dx), int(mask.y0) + int(dy), mask.mask)
+
+
 @dataclass(frozen=True, slots=True)
 class Border:
     """The built-in reference region of a shape: ``gap_px`` from its edge, ``thickness_px`` wide (>= 0). ``enabled=False``: no border."""

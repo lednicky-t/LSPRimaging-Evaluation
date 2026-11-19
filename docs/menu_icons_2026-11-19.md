@@ -79,7 +79,7 @@ Use as each need what they act on); the anchor menus (Remove the nearest, Apply 
 
 **Deliberately unchanged**: the menu bar (File / Edit / View / Help keep the convention of greyed entries: Undo, Redo, Show Dataset Folder, ...), the slider's frame-tools menu (the same icon buttons as
 the ribbon, where a greyed button is the convention), and the pick-up menus of the ribbon (they are settings, not commands). **A refusal that explains itself stays an entry**: Reset diameters and Shift position
-stay in the table menu whenever a ROI is selected (the toolbox says why in the title bar when it refuses a pixel mask or a rectangle).
+stay in the table menu whenever a ROI is selected (the toolbox says why in the title bar when it refuses a rectangle, or a pixel map that would move less than half a pixel).
 
 Cost of the rule: the tool tips that explained *why* an entry was greyed ("Cube 0 holds the start layout...", "No column is hidden") are gone with the entries.
 
