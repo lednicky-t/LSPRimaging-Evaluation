@@ -15,7 +15,6 @@ view, the modules, the four tools, and three small callbacks (`image_shape`,
 
 from __future__ import annotations
 
-import math
 from collections.abc import Callable, Mapping
 from typing import Any, Protocol
 
@@ -56,6 +55,7 @@ from .roi_context_menu import (
 )
 from .roi_creation import RoiCreation
 from .roi_gestures import RoiGestures
+from .resize_cursor import direction_angle_deg, resize_cursor
 from .rotate_cursor import rotate_cursor
 from .rotate_line_tool import RotateLineTool
 from .selection_menu_icons import DESELECT_ICON, INVERT_ICON, LOCK_ICON, UNLOCK_ICON, menu_icon
@@ -669,18 +669,12 @@ class CanvasInteraction:
             self._roi_cursor = shape
             self._set_view_cursor(shape)
 
-    def _resize_cursor(self, center: tuple[float, float], x: float, y: float) -> Qt.CursorShape:
-        """The two-headed arrow closest to the direction from ``center`` to ``(x, y)`` *on screen* (the circles' radius, or a rectangle's drag axis; the
-        view may be flipped, so the angle is taken between scene points)."""
+    def _resize_cursor(self, center: tuple[float, float], x: float, y: float) -> QCursor:
+        """The two-headed arrow along the direction from ``center`` to ``(x, y)`` *on screen* (a circle's radius, or a rectangle's drag axis), at that exact angle
+        (to 1.5 degrees: `resize_cursor.py`). The view may be flipped, so the angle is taken between scene points."""
         a = self._plot.vb.mapViewToScene(QPointF(center[0], center[1]))
         b = self._plot.vb.mapViewToScene(QPointF(x, y))
-        sector = round(math.atan2(b.y() - a.y(), b.x() - a.x()) / (math.pi / 4)) % 4
-        return (
-            Qt.CursorShape.SizeHorCursor,
-            Qt.CursorShape.SizeFDiagCursor,  # towards the lower right
-            Qt.CursorShape.SizeVerCursor,
-            Qt.CursorShape.SizeBDiagCursor,  # towards the lower left
-        )[sector]
+        return resize_cursor(direction_angle_deg(b.x() - a.x(), b.y() - a.y()))
 
     def _on_select_area_drag(self, ev: Any) -> bool:
         """Draws the rectangle/lasso while a selection tool is armed."""
