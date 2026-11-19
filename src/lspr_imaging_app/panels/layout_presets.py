@@ -41,6 +41,7 @@ from PyQt6.QtWidgets import QMainWindow, QMenu
 
 from ..shortcuts import PRESET_IDS, bind_action
 from .dock_container import PanelContainer
+from .menu_icons import give_persistent_icon
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +161,7 @@ def wire_view_menu(
     module here follows: the caller (`app_rewrite.py`) saves the preset blobs."""
     manager = LayoutPresetManager(window, docks_by_name, state_version=state_version)
 
-    presets_menu = view_menu.addMenu("Panel Presets")
+    presets_menu = give_persistent_icon(view_menu.addMenu("Panel Presets"), "layouts")
     group = QActionGroup(window)
     group.setExclusive(True)
     actions: dict[str, "object"] = {}
@@ -173,9 +174,9 @@ def wire_view_menu(
         group.addAction(action)
         actions[name] = action
     presets_menu.addSeparator()
-    save_action = presets_menu.addAction("Save Current Layout to Active Preset")
+    save_action = give_persistent_icon(presets_menu.addAction("Save Current Layout to Active Preset"), "save")
     save_action.triggered.connect(lambda: manager.save_current())
-    reset_action = presets_menu.addAction("Reset Active Preset to Default")
+    reset_action = give_persistent_icon(presets_menu.addAction("Reset Active Preset to Default"), "reset")
     reset_action.triggered.connect(lambda: manager.reset_to_default(manager.current()) if manager.current() else None)
 
     def sync_checked_action(name: str) -> None:

@@ -296,23 +296,21 @@ class DriftBaselineControls(QObject):
 
         stats = self._settings.statistics_settings()
         menu.addAction(icon("circle-plus"), "Add anchor point here").triggered.connect(lambda: self.add_point_at(x))
-        nearest = menu.addAction(icon("minus"), "Remove the nearest anchor point")
-        nearest.setEnabled(bool(self.shown_points()))
-        nearest.triggered.connect(lambda: self.remove_point_at(x))
+        if self.shown_points():  # (2026-11-19: an entry that cannot be used is left out, not greyed)
+            menu.addAction(icon("minus"), "Remove the nearest anchor point").triggered.connect(lambda: self.remove_point_at(x))
         menu.addSeparator()
         for scope, name, text in ((SCOPE_ALL, "stack-3", "New points apply to all ROIs"), (SCOPE_SHOWN, "eye", "New points apply to the lines shown only")):
             action = menu.addAction(icon(name), text)
             action.setCheckable(True)
             action.setChecked(self.point_scope == scope)
             action.triggered.connect(lambda _c=False, picked=scope: self.set_point_scope(picked))
-        share = menu.addAction(icon("share"), "Apply the lines' anchor points to all ROIs")
-        share.setToolTip(self.share_tip())
-        share.setEnabled(self.points_to_share() > 0)
-        share.triggered.connect(self.share_points_of_shown)
+        if self.points_to_share() > 0:
+            share = menu.addAction(icon("share"), "Apply the lines' anchor points to all ROIs")
+            share.setToolTip(self.share_tip())
+            share.triggered.connect(self.share_points_of_shown)
         menu.addSeparator()
-        clear = menu.addAction(icon("trash-x"), "Clear all anchor points")
-        clear.setEnabled(bool(stats.baseline_anchor_points))
-        clear.triggered.connect(self.clear_points)
+        if stats.baseline_anchor_points:
+            menu.addAction(icon("trash-x"), "Clear all anchor points").triggered.connect(self.clear_points)
         menu.addAction(icon("x"), "Stop editing anchor points").triggered.connect(lambda: self.edit.setChecked(False))
 
     # -- the Range method's anchor steps ------------------------------------------------------------------------------------
@@ -370,18 +368,18 @@ class DriftBaselineControls(QObject):
         why = self.steps_note(short=True) or (f"Not corrected: {self._uncorrected}" if marked and self._uncorrected else "")
         if why:
             menu.addAction(load_tabler_icon("alert-triangle", color=theme.text_dim, size=18), why).setEnabled(False)
-        make = menu.addAction(
-            load_tabler_icon("anchor", color=theme.text_primary, size=18),
-            f"Make the {len(refs)} steps baseline anchors" if many else "Make this step a baseline anchor",
-        )
-        make.setEnabled(any(r not in marked for r in refs))
-        make.triggered.connect(lambda: self.set_anchor_steps(refs, True))
-        remove = menu.addAction(
-            load_tabler_icon("minus", color=theme.text_primary, size=18),
-            "Remove the steps from the baseline anchors" if many else "Remove this step from the baseline anchors",
-        )
-        remove.setEnabled(any(r in marked for r in refs))
-        remove.triggered.connect(lambda: self.set_anchor_steps(refs, False))
+        if any(r not in marked for r in refs):  # (2026-11-19: an entry that cannot be used is left out, not greyed)
+            make = menu.addAction(
+                load_tabler_icon("anchor", color=theme.text_primary, size=18),
+                f"Make the {len(refs)} steps baseline anchors" if many else "Make this step a baseline anchor",
+            )
+            make.triggered.connect(lambda: self.set_anchor_steps(refs, True))
+        if any(r in marked for r in refs):
+            remove = menu.addAction(
+                load_tabler_icon("minus", color=theme.text_primary, size=18),
+                "Remove the steps from the baseline anchors" if many else "Remove this step from the baseline anchors",
+            )
+            remove.triggered.connect(lambda: self.set_anchor_steps(refs, False))
         if marked:
             clear = menu.addAction(load_tabler_icon("trash-x", color=theme.text_primary, size=18), f"Clear all anchor steps ({len(marked)})")
             clear.triggered.connect(self.clear_anchor_steps)

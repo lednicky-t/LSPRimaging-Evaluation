@@ -23,6 +23,7 @@ from ...domain.roi_model import AreaRoi, AreaRoiDetectionSettings, AreaRoiGroup
 from ...roi.palette import DEFAULT_ROI_COLOR_HEX
 from .rows import (
     COLUMN_ANGLE,
+    COLUMN_AREA,
     COLUMN_COUNT,
     COLUMN_HEIGHT,
     COLUMN_ID,
@@ -50,11 +51,13 @@ from .rows import (
     Section,
     StepSort,
     angle_edit_text,
+    area_tooltip,
     build_linked_sections,
     build_roi_rows,
     build_sections,
     edit_text,
     format_angle,
+    format_area,
     format_length,
     sort_rows,
 )
@@ -102,6 +105,7 @@ class DropTarget:
     position: int = 0
 
 _NUMERIC_COLUMNS = NUMERIC_COLUMNS
+_RIGHT_ALIGNED_COLUMNS = (*NUMERIC_COLUMNS, COLUMN_AREA)  # the Area is a number too, but nothing can be typed, pasted or stepped in it (`NUMERIC_COLUMNS` is that set)
 _HEADER_TIPS = {
     COLUMN_ID: "Position in the list. Reordering changes these numbers.",
     COLUMN_NAME: "Label of a group (its name, also drawn on the image). Empty for ROIs.",
@@ -114,6 +118,7 @@ _HEADER_TIPS = {
     COLUMN_WIDTH: "Rectangle width, along the rectangle's own x axis. Blank for other shapes.",
     COLUMN_HEIGHT: "Rectangle height, along the rectangle's own y axis. Blank for other shapes.",
     COLUMN_ANGLE: "Rectangle angle in degrees, turned clockwise on the screen about its centre. Blank for other shapes.",
+    COLUMN_AREA: "Area of the ROI's own region: a count of pixels with unit px, µm² with unit µm. Circle and rectangle: the shape's area; pixel mask: its pixel count. Read only.",
 }
 
 
@@ -527,7 +532,7 @@ class RoiTreeModel(QAbstractItemModel):
             tip = _HEADER_TIPS[section]
             return f"{tip} ({self._unit.label})" if section in LENGTH_COLUMNS else tip  # (the angle is in degrees whatever the unit is)
         if role == Qt.ItemDataRole.TextAlignmentRole:
-            right = section in _NUMERIC_COLUMNS
+            right = section in _RIGHT_ALIGNED_COLUMNS
             return int((Qt.AlignmentFlag.AlignRight if right else Qt.AlignmentFlag.AlignLeft) | Qt.AlignmentFlag.AlignVCenter)
         return None
 
@@ -603,7 +608,7 @@ class RoiTreeModel(QAbstractItemModel):
         if column >= COLUMN_COUNT:
             return self._step_cell(None, column, role, row=row)
         if role == Qt.ItemDataRole.TextAlignmentRole:
-            right = column in _NUMERIC_COLUMNS
+            right = column in _RIGHT_ALIGNED_COLUMNS
             return int((Qt.AlignmentFlag.AlignRight if right else Qt.AlignmentFlag.AlignLeft) | Qt.AlignmentFlag.AlignVCenter)
         value = self._cell_value(row, column)
         if role == Qt.ItemDataRole.EditRole:
@@ -652,6 +657,8 @@ class RoiTreeModel(QAbstractItemModel):
             return format_length(value, unit), edit_text(value, unit)
         if column == COLUMN_SHAPE:
             return SHAPE_LABELS[row.shape], ""
+        if column == COLUMN_AREA:
+            return format_area(row.area_px, unit), ""  # derived from the shape: nothing to edit
         if column in RECTANGLE_COLUMNS:
             if column not in SHAPE_FIELDS[row.shape]:
                 return "", ""  # only a rectangle has a width, a height and an angle
@@ -672,6 +679,8 @@ class RoiTreeModel(QAbstractItemModel):
             return row.link_note or None
         if column == COLUMN_SHAPE:
             return f"{SHAPE_LABELS[row.shape]}: {row.shape_note}" if row.shape_note else SHAPE_LABELS[row.shape]
+        if column == COLUMN_AREA:
+            return area_tooltip(row, self._unit)
         if column in (COLUMN_X, COLUMN_Y) and row.nudge_count:
             plural = "" if row.nudge_count == 1 else "s"
             return f"Position on the reference image ({unit}). {row.nudge_count} manual per-wavelength nudge{plural}."

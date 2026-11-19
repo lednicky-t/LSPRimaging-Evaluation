@@ -4,8 +4,8 @@ Pure menu construction, like `roi_context_menu.py`: it is handed what to offer a
 `panel.py` turns the choice into `RoiToolbox` commands. Every action works on the **whole point** (every ROI's
 change at that cube), because a cube is one kind of point for the whole layout; the text says how many ROIs that is
 (and how many of them the "only selected ROIs" filter hides). The first cube holds the start layout, which is always
-persistent and no change that could be deleted: its actions are greyed with a reason, and "Go to this cube" keeps the menu
-from opening with nothing clickable (see `context_menu.py`).
+persistent and no change that could be deleted: its two entries are left out (2026-11-19; they were greyed with a reason), and "Go to this cube"
+keeps the menu from opening with nothing in it (see `context_menu.py`).
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import QMenu, QWidget
 
 from ...domain.roi_model import SCOPE_PERSISTENT
+from ..menu_icons import give_icon
 
 GO_TO = "go_to"
 MAKE_INDIVIDUAL = "make_individual"
@@ -46,25 +47,22 @@ def show_layout_point_menu(
     header = menu.addAction(f"{cube_text} - " + ("start layout" if is_start else ("persistent" if persistent else "individual")))
     header.setEnabled(False)
     menu.addSeparator()
-    go_to = menu.addAction("Go to this cube")
+    go_to = give_icon(menu.addAction("Go to this cube"), "go_to")
     menu.addSeparator()
     names = who(roi_count, hidden_count)
-    if persistent:
-        convert = menu.addAction(f"Make individual ({names})")
-        convert.setToolTip("This cube only. The cubes after it go back to the layout before this change.")
-    else:
-        convert = menu.addAction(f"Make persistent ({names})")
-        convert.setToolTip("The layout of this cube carries on to the cubes after it, until the next persistent change.")
-    delete = menu.addAction(f"Delete this change ({names})")
-    delete.setToolTip("Forget the change: this cube follows the earlier layout again. Undo brings it back.")
-    if is_start:
-        reason = "The first cube holds the start layout: it is always persistent and cannot be deleted."
-        for action in (convert, delete):
-            action.setEnabled(False)
-            action.setToolTip(reason)
+    convert = delete = None  # (the first cube holds the start layout: always persistent, no change that could be deleted - so neither entry)
+    if not is_start:
+        if persistent:
+            convert = give_icon(menu.addAction(f"Make individual ({names})"), "individual")
+            convert.setToolTip("This cube only. The cubes after it go back to the layout before this change.")
+        else:
+            convert = give_icon(menu.addAction(f"Make persistent ({names})"), "persistent")
+            convert.setToolTip("The layout of this cube carries on to the cubes after it, until the next persistent change.")
+        delete = give_icon(menu.addAction(f"Delete this change ({names})"), "delete")
+        delete.setToolTip("Forget the change: this cube follows the earlier layout again. Undo brings it back.")
 
     chosen = menu.exec(pos if pos is not None else QCursor.pos())
-    for action, name in ((go_to, GO_TO), (convert, MAKE_PERSISTENT if not persistent else MAKE_INDIVIDUAL), (delete, DELETE)):
-        if chosen is action:
-            return name
-    return None
+    offered = ((go_to, GO_TO), (convert, MAKE_PERSISTENT if not persistent else MAKE_INDIVIDUAL), (delete, DELETE))
+    result = None if chosen is None else next((name for action, name in offered if action is chosen), None)  # (an entry left out is None: never equal to a pick)
+    menu.deleteLater()  # (a child of `parent`: one would be left behind per right-click)
+    return result

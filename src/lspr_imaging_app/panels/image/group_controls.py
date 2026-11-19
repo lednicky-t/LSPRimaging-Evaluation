@@ -16,14 +16,21 @@ from PyQt6.QtWidgets import QHBoxLayout, QMenu, QStackedWidget, QToolButton, QWi
 
 from lspr_ui import get_active_theme, load_tabler_icon
 
+from ...shortcuts import display
 from .general_group import ICON_SIZE, style_general_icon_button
 from .group_label_menu import GroupLabelMenu
 
 _RENDER_SIZE = ICON_SIZE * 2
-_TIPS = {
-    "create": "Group the selected ROIs (an empty group if none are selected). Open the menu for group by rows / by columns.",
-    "ungroup": "Ungroup: take the selected ROIs out of their groups (the ROIs stay; a group left empty goes away).",
-}
+
+
+def _tips() -> dict[str, str]:
+    """The two buttons' tool tips, with their keys (read when the controls are built: the keys come from `shortcuts.py`)."""
+    return {
+        "create": f"Group the selected ROIs ({display('groups.group')}; an empty group if none are selected). Open the menu for group by rows / by columns.",
+        "ungroup": f"Ungroup ({display('groups.ungroup')}): take the selected ROIs out of their groups (the ROIs stay; a group left empty goes away).",
+    }
+
+
 _MENU_TEXT = {"create": "Group", "rows": "Group by rows", "columns": "Group by columns"}
 _MENU_TIPS = {
     "rows": "Group by rows: one group per row of the array, each in its own colour. Works on the selected ROIs, or on all if none are selected.",
@@ -57,7 +64,8 @@ class GroupControls(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._buttons = {key: QToolButton(self) for key in _TIPS}
+        tips = _tips()
+        self._buttons = {key: QToolButton(self) for key in tips}
         self._menu = QMenu(self)
         self._menu_actions: dict[str, QAction] = {}
         for key, signal in (("create", self.create_requested), ("rows", self.by_rows_requested), ("columns", self.by_columns_requested)):
@@ -74,7 +82,7 @@ class GroupControls(QWidget):
         layout.setSpacing(2)
         self._slot = QStackedWidget(self)  # Group and Ungroup share one place: whichever fits the selection
         for key, button in self._buttons.items():
-            button.setToolTip(_TIPS[key])
+            button.setToolTip(tips[key])
             if key in ("create", "ungroup"):
                 self._slot.addWidget(button)
             else:

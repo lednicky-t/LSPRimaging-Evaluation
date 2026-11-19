@@ -34,6 +34,7 @@ from ..analysis.export_tables import Table
 from ..applog import log_event
 from ..storage.plot_export import write_plot_export
 from .icon_button_style import style_general_icon_button
+from .menu_icons import give_persistent_icon
 from .ribbon_icon_size import ICON_SIZE
 from .svg_layers import SvgPart, write_layered_svg
 
@@ -86,6 +87,9 @@ class PlotExportButton(QToolButton):
         self.save_figure_action = QAction("Save figure (PNG or SVG)...", menu)
         self.copy_figure_action = QAction("Copy figure", menu)
         self.save_data_action = QAction("Save data (CSV)...", menu)
+        give_persistent_icon(self.save_figure_action, "save")
+        give_persistent_icon(self.copy_figure_action, "copy")
+        give_persistent_icon(self.save_data_action, "save_data")
         self.save_figure_action.triggered.connect(self._ask_save_figure)
         self.copy_figure_action.triggered.connect(self._copy_with_message)
         self.save_data_action.triggered.connect(self._ask_save_data)

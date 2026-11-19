@@ -28,29 +28,32 @@ from ...roi import RoiToolbox
 from ...roi.shape_hits import ZONE_ROTATE
 from ...selection import AreaSelectionMode, AreaSelectionModule, SelectionModule
 from ...selection.area_selection_module import VALUE_MODES, how_for_keys
+from ..menu_icons import menu_icon
 from .area_selection_tool import AreaSelectionTool
 from .combine_badge import CombineBadge
-from .context_menu import show_tool_context_menu
+from .context_menu import SubmenuFiller, show_tool_context_menu
 from .crop_tool import CropTool
 from .measure_line_tool import MeasureLineTool
 from .roi_context_menu import (
     ADD_RECTANGLE,
     ADD_ROI,
+    ADD_ROI_SUBMENU,
     ADD_SELECTION_BLOBS,
     ADD_SELECTION_ONE,
     ADD_TO_GROUP,
     DELETE,
     DESELECT,
+    DESELECT_AREA,
     GROUP,
     LINK,
     MAKE_REFERENCE,
     MAKE_SAMPLE,
     REMOVE_CUBE_EDIT,
-    RESIZE_RECTANGLE,
     SELECT_GROUP,
     TOGGLE_LOCK,
     UNGROUP,
     UNLINK,
+    fill_add_roi_from_selection,
     show_roi_context_menu,
 )
 from .roi_creation import RoiCreation
@@ -58,7 +61,6 @@ from .roi_gestures import RoiGestures, RoiHit
 from .resize_cursor import direction_angle_deg, resize_cursor
 from .rotate_cursor import rotate_cursor
 from .rotate_line_tool import RotateLineTool
-from .selection_menu_icons import DESELECT_ICON, INVERT_ICON, LOCK_ICON, UNLOCK_ICON, menu_icon
 
 _CURSOR_FOR_CROP_HANDLE: dict[str | None, Qt.CursorShape] = {
     "n": Qt.CursorShape.SizeVerCursor,
@@ -82,6 +84,21 @@ UNLOCK = "Unlock"
 INVERT_SELECTION = "Invert selection"
 DESELECT_SELECTION = "Deselect"
 EXIT_TOOL = "Exit tool"  # always the last entry of a tool's right-click menu (`_context_menu`)
+
+# The icon of each entry of the tools' right-click menus (2026-11-19), as a key of `panels/menu_icons.py` (one icon per command in every menu).
+_TOOL_MENU_ICONS = {
+    "Cancel rotation": "cancel",
+    "Cancel measurement": "cancel",
+    "Apply crop": "apply",
+    "Cancel crop": "cancel",
+    EXIT_TOOL: "cancel",
+    SELECT_ROIS_IN_SELECTION: "select_rois",
+    ADD_ROI_SUBMENU: "add_roi",
+    LOCK_TO_SELECTION: "lock",
+    UNLOCK: "unlock",
+    INVERT_SELECTION: "invert",
+    DESELECT_SELECTION: "deselect",
+}
 """The selection tools' right-click entry: the ROIs inside or partly inside the area selection become selected."""
 
 _NO_CURSOR_YET = object()
@@ -155,7 +172,8 @@ class CanvasInteraction:
         self._roi_cursor: Qt.CursorShape | QCursor | None | object = _NO_CURSOR_YET  # what the ROI hover last set (a QCursor is the rotate cursor: compared by identity)
 
     def handle_key(self, key: int, modifiers: Qt.KeyboardModifier) -> bool:
-        """Arrow keys / Esc for the active tool; `True` when a tool used the key."""
+        """Arrow keys / Esc for the active tool; `True` when a tool used the key (for Esc: it dropped what it was doing; with nothing to drop the key is
+        not used and `ToolEscape` leaves the tool)."""
         return (
             self._rotate_tool.handle_key(key, modifiers)
             or self._crop_tool.handle_key(key)
@@ -403,7 +421,7 @@ class CanvasInteraction:
             selected_roles=self._roi_creation.role_counts(ids),
             can_link=self._roi_creation.can_link(ids),
             can_unlink=self._roi_creation.can_unlink(ids),
-            selected_rectangles=len(self._roi_creation.rectangles_among(ids)),
+            can_deselect_area=self._area_selection.has_selection(),
             can_remove_cube_edit=any(
                 toolbox.roi_by_id(i).timeline and int(self._selection.current_cube()) in toolbox.roi_by_id(i).timeline.cubes() for i in ids
             ),
@@ -426,8 +444,6 @@ class CanvasInteraction:
             self._roi_creation.set_role(ids, "sample")
         elif choice.action == MAKE_REFERENCE:
             self._roi_creation.set_role(ids, "reference")
-        elif choice.action == RESIZE_RECTANGLE:
-            self._roi_creation.resize_rectangles(ids)
         elif choice.action == LINK:
             self._roi_creation.link()
         elif choice.action == UNLINK:
@@ -447,6 +463,8 @@ class CanvasInteraction:
             self._guarded("Remove cube edit", lambda: toolbox.remove_cube_edit(ids, int(self._selection.current_cube())))
         elif choice.action == DESELECT:
             self._selection.set_roi_selection(set())
+        elif choice.action == DESELECT_AREA:
+            self._area_selection.clear()  # one undo step, as the armed tools' menu's Deselect
 
     def _guarded(self, action: str, command: Callable[[], None]) -> None:
         """Run a toolbox command; a refusal (bad value, stale id) goes to the status bar, not nowhere."""
@@ -509,24 +527,29 @@ class CanvasInteraction:
 
     def _show_select_area_context_menu(self, scene_pos: object) -> None:
         """Right-click while a selection tool is armed: "Select ROIs in selection" (2026-11-15, maintainer request: the
-        ROIs inside or partly inside it become the ROI selection), "Exit tool" (leaves the draw tool, keeps the
-        selection), plus Invert/Deselect inside it."""
+        ROIs inside or partly inside it become the ROI selection), "Add ROI > Current selection > ..." (2026-11-19, maintainer
+        request: the same submenu as the ROIs tab's menu; only while there is an area selection to make ROIs from), "Exit tool"
+        (leaves the draw tool, keeps the selection), plus Invert/Deselect inside it."""
         can_pick = (
             self._rois_touching is not None and self._area_selection.has_selection() and not self._selection.roi_selection_locked()
         )
         chosen = self._context_menu(
             [
                 (SELECT_ROIS_IN_SELECTION, can_pick),
+                (ADD_ROI_SUBMENU, self._roi_creation.has_pixel_selection()),
                 (LOCK_TO_SELECTION, self._area_selection.has_selection() and self._lock_to_selection is not None),
                 (UNLOCK, self._area_selection.has_lock() and self._unlock is not None),
                 (EXIT_TOOL, True),
             ],
             scene_pos,
+            submenus={ADD_ROI_SUBMENU: fill_add_roi_from_selection},
         )
         if chosen == EXIT_TOOL:
             self._active_tool.set_active(ImageTool.SELECT_AREA, False)
         elif chosen == SELECT_ROIS_IN_SELECTION:
             self.select_rois_in_selection()  # (Lock / Unlock are handled in `_context_menu`)
+        elif chosen in (ADD_SELECTION_ONE, ADD_SELECTION_BLOBS):
+            self._roi_creation.add_from_selection(together=chosen == ADD_SELECTION_ONE)  # (as the ROIs tab's menu does)
 
     def select_rois_in_selection(self) -> None:
         """Make the ROIs inside or partly inside the area selection the ROI selection (replacing it); the count goes to
@@ -548,12 +571,15 @@ class CanvasInteraction:
         point = self._plot.vb.mapSceneToView(scene_pos)
         return self._area_selection.contains(float(point.x()), float(point.y()), shape)
 
-    def _context_menu(self, actions: list[tuple[str, bool]], scene_pos: object) -> str | None:
+    def _context_menu(
+        self, actions: list[tuple[str, bool]], scene_pos: object, submenus: Mapping[str, SubmenuFiller] | None = None
+    ) -> str | None:
         """`show_tool_context_menu` plus, when the click is inside the
         selection, "Invert selection" and "Deselect" (handled here). Returns
         the chosen *tool* action, or `None` if nothing or a selection entry was
         chosen. Selection entries are always enabled, so the menu never opens
-        with nothing clickable (see `context_menu.py`)."""
+        with nothing clickable (see `context_menu.py`). `submenus` turns a tool
+        entry's label into a submenu (see `show_tool_context_menu`)."""
         # Order (2026-11-16, maintainer): the tool's own entries, Lock / Unlock, Invert + Deselect together, and "Exit tool" always last.
         entries = [entry for entry in actions if entry[0] != EXIT_TOOL]
         exit_entries = [entry for entry in actions if entry[0] == EXIT_TOOL]
@@ -568,13 +594,9 @@ class CanvasInteraction:
         chosen = show_tool_context_menu(
             self._menu_parent,
             entries,
-            icons={
-                LOCK_TO_SELECTION: menu_icon(LOCK_ICON),
-                UNLOCK: menu_icon(UNLOCK_ICON),
-                INVERT_SELECTION: menu_icon(INVERT_ICON),
-                DESELECT_SELECTION: menu_icon(DESELECT_ICON),
-            },
+            icons={label: menu_icon(key) for label, key in _TOOL_MENU_ICONS.items() if any(label == entry[0] for entry in entries)},
             separate_before={INVERT_SELECTION, EXIT_TOOL},
+            submenus=submenus,
         )
         if chosen == LOCK_TO_SELECTION and self._lock_to_selection is not None:
             self._lock_to_selection()

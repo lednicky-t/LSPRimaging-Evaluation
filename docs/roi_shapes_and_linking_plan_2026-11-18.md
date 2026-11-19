@@ -344,6 +344,21 @@ Three fixed columns **W**, **H**, **θ** in the ROI / Groups table (`rows.COLUMN
   keys, old width lists, painting). Mutations caught: angle parsed as a length; columns never auto-hidden. Updated: the freeze test's "far right column" was the last *fixed* column
   and is now the last one on screen (D_r).
 
+### Area column (BUILT 2026-11-19, maintainer's request; UNSEEN BY EYE)
+
+A fixed column **Area** (`rows.COLUMN_AREA` = 11, `COLUMN_COUNT` = 12) in the Geometry view, **on screen right after Shape** (before D_s / W): pixels with unit px (a count, no decimals), µm² with unit µm (one decimal).
+- **What it is:** the area of the ROI's own region, `roi_shapes.shape_area_px`: circle π (D/2)², rectangle W x H, mask = its pixel count (exact). It is the *shape's* area, not the number of pixels the
+  scan measured: that whole number moves with the centre's sub-pixel position and with each wavelength's chromatic shift (so no single count exists) and can differ by a pixel or two at the edge.
+  The cell's tool tip says so. A reference ROI shows its own region; the border ring is not counted.
+- **Read only:** not in `EDITABLE_COLUMNS` / `NUMERIC_COLUMNS` (no paste, fill down, wheel step or cell picking), right-aligned through the model's `_RIGHT_ALIGNED_COLUMNS`. Sorts like any column.
+- **Appended, then moved on screen** (the W / H / θ approach): it is model column 11, `RoiTreeView.set_view_mode` moves it after Shape, so every saved hidden-column key and frozen column still means the same
+  column. A saved width list of 11 entries is read (Area keeps its default; `panel._LEGACY_COLUMN_COUNTS`). The delegate's "no hairline on the last column" now asks the header for the rightmost
+  column on screen (`RoiTableDelegate._last_column_on_screen`), not the model's last one (which would have been the Area, in the middle).
+- Tests: `test_lspri_rewrite_roi_table_rows.py` (area per shape, unit, sort), `test_lspri_rewrite_roi_table_panel.py` `AreaColumnTest` (11: position, Simple view, px and µm values, resize, read only,
+  tool tips, sort, hide, old width list, rightmost column).
+- **Decided (maintainer, 2026-11-19): the shape's area, as built.** Not the pixel count of the layout at the reference wavelength (that needs the image size and a rasterize per ROI on every table
+  refresh). Not built, only if ever wanted: the scan's own `n` per step as a step column.
+
 ### Mouse wheel edits the numbers of a selected row (BUILT 2026-11-19, maintainer's proposal; UNSEEN BY EYE)
 
 In the Geometry view, **the wheel over a number of a selected ROI row steps that number** (x, y, D_s, d_r, D_r, W, H, θ); Shift = the large step; Ctrl+wheel does it over any row's number (as

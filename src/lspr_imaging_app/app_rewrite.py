@@ -92,6 +92,7 @@ from .analysis.signal_map import signal_map_table
 from .panels.image.overlay_cache import environment_budget_mb
 from .panels.image.overlay_style import OverlayStyle
 from .panels.layout_presets import wire_view_menu
+from .panels.menu_icons import give_persistent_icon, refresh_menu_icons
 from .panels.panel_visibility import ensure_floating_panels_on_screen, wire_panel_visibility_menu
 from .panels.preferences_dialog import Preferences, PreferencesDialog
 from .panels.shortcuts_dialog import ShortcutsDialog
@@ -261,8 +262,8 @@ def _wire_edit_menu(
       panel, which is a separate top-level window.
     - Selection is never undoable (`CLAUDE.md`), so Ctrl+Z after clicking a
       ROI undoes the last real edit, not the click."""
-    undo_action = QAction("Undo", window)
-    redo_action = QAction("Redo", window)
+    undo_action = give_persistent_icon(QAction("Undo", window), "undo")
+    redo_action = give_persistent_icon(QAction("Redo", window), "redo")
     bind_action(undo_action, "edit.undo", context=Qt.ShortcutContext.ApplicationShortcut)
     bind_action(redo_action, "edit.redo", context=Qt.ShortcutContext.ApplicationShortcut)
     edit_menu.addAction(undo_action)
@@ -334,16 +335,16 @@ def _wire_theme_menu(
        so this doesn't have to change when they do.
     """
     view_menu.addSeparator()
-    theme_menu = view_menu.addMenu("Theme")
+    theme_menu = give_persistent_icon(view_menu.addMenu("Theme"), "theme")
     group = QActionGroup(window)
     group.setExclusive(True)
 
-    dark_action = theme_menu.addAction("Dark")
+    dark_action = give_persistent_icon(theme_menu.addAction("Dark"), "theme_dark")
     dark_action.setCheckable(True)
     dark_action.setChecked(initial_theme != "bright")
     group.addAction(dark_action)
 
-    bright_action = theme_menu.addAction("Bright")
+    bright_action = give_persistent_icon(theme_menu.addAction("Bright"), "theme_bright")
     bright_action.setCheckable(True)
     bright_action.setChecked(initial_theme == "bright")
     group.addAction(bright_action)
@@ -353,6 +354,7 @@ def _wire_theme_menu(
         app = QApplication.instance()
         if app is not None:
             apply_app_theme(app, theme)
+        refresh_menu_icons()  # the menus' icons are drawn in the theme's text colour (`panels/menu_icons.py`)
         image_panel.refresh_theme()
         for table in window.findChildren(RoiTablePanel):
             table.refresh_theme()
@@ -1875,7 +1877,7 @@ def _wire_shortcuts_dialog(window: QMainWindow, ui_state: UiStateStore) -> QActi
     if help_menu is None:
         return None
     holder: dict[str, ShortcutsDialog] = {}
-    action = help_menu.addAction("Keyboard shortcuts")
+    action = give_persistent_icon(help_menu.addAction("Keyboard shortcuts"), "shortcuts")
     action.setToolTip("Every keyboard shortcut and mouse gesture of the app.")
     bind_action(action, "help.shortcuts", context=Qt.ShortcutContext.ApplicationShortcut)
 
@@ -1905,7 +1907,7 @@ def _wire_about(window: QMainWindow) -> None:
     if help_menu is None:
         return
     help_menu.addSeparator()
-    help_menu.addAction(f"&About {APP_TITLE}...", lambda: _show_about(window))
+    give_persistent_icon(help_menu.addAction(f"&About {APP_TITLE}...", lambda: _show_about(window)), "about")
 
 
 def _show_about(window: QMainWindow) -> None:
@@ -1942,10 +1944,11 @@ def _wire_log_console(window: QMainWindow, ui_state: UiStateStore, image_panel: 
     if help_menu is not None:
         toggle = dock.toggleViewAction()
         toggle.setText("Log Console")
+        give_persistent_icon(toggle, "log")
         bind_action(toggle, "help.log_console", context=Qt.ShortcutContext.ApplicationShortcut)
         toggle.setToolTip("Show the application log: messages, timings and errors.")
         help_menu.addAction(toggle)
-        folder_action = help_menu.addAction("Open Log Folder")
+        folder_action = give_persistent_icon(help_menu.addAction("Open Log Folder"), "folder")
         folder_action.setEnabled(system is not None)
         folder_action.triggered.connect(panel.open_log_folder)
     return dock
@@ -2206,7 +2209,7 @@ def _wire_preferences(
       (2026-10-22) go to the `lspr_core.perf` runtime, which the next export or scan reads, and into the UI-state store.
     - A second press of Ctrl+, while the dialog is open just brings it forward."""
     edit_menu.addSeparator()
-    action = edit_menu.addAction("Preferences...")
+    action = give_persistent_icon(edit_menu.addAction("Preferences..."), "settings")
     bind_action(action, "edit.preferences", context=Qt.ShortcutContext.ApplicationShortcut)
 
     def current() -> Preferences:

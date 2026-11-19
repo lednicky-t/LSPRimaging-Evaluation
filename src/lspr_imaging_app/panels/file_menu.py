@@ -45,6 +45,7 @@ from .dataset_manager import DatasetManagerDialog
 from .dataset_manager.experimental_plan import export_metadata_dialog, import_metadata_dialog
 from .dataset_manager.sessions import session_label
 from .dataset_manager.summary import format_bytes
+from .menu_icons import give_persistent_icon
 
 logger = logging.getLogger(__name__)
 
@@ -85,16 +86,16 @@ class FileMenu(QObject):
         self._manager = manager
         self._plan = experiment_plan
 
-        self.open_action = menu.addAction("Open Dataset...")
+        self.open_action = give_persistent_icon(menu.addAction("Open Dataset..."), "open_dataset")
         bind_action(self.open_action, "file.open_dataset")
         self.open_action.triggered.connect(self.open_dataset)
-        self.show_folder_action = menu.addAction("Show Dataset Folder")
+        self.show_folder_action = give_persistent_icon(menu.addAction("Show Dataset Folder"), "show_folder")
         self.show_folder_action.setToolTip("Open the dataset folder in File Explorer.")
         self.show_folder_action.triggered.connect(self.show_dataset_folder)
         menu.addSeparator()
 
-        self.session_menu = menu.addMenu("Session")
-        self.new_session_action = self.session_menu.addAction("New Session")
+        self.session_menu = give_persistent_icon(menu.addMenu("Session"), "session")
+        self.new_session_action = give_persistent_icon(self.session_menu.addAction("New Session"), "new")
         self.new_session_action.setToolTip("Start a new, blank session over this dataset.")
         self.new_session_action.triggered.connect(self._on_new_session)
         self.session_menu.addSeparator()
@@ -103,14 +104,14 @@ class FileMenu(QObject):
         self._session_actions: list[QAction] = []
         menu.addSeparator()
 
-        import_menu = menu.addMenu("Import")
-        self.import_plan_action = import_menu.addAction("Experiment Plan / Metadata...")
+        import_menu = give_persistent_icon(menu.addMenu("Import"), "import")
+        self.import_plan_action = give_persistent_icon(import_menu.addAction("Experiment Plan / Metadata..."), "import")
         self.import_plan_action.setToolTip(
             "A measuring-times CSV, metaData.txt, the pump-plan CSV, a native measurement file or a previously exported "
             "metadata file. Several files can be picked at once: each is recognised by its content, not its name."
         )
         self.import_plan_action.triggered.connect(self.import_plan)
-        self.import_ri_action = import_menu.addAction("Refractive Indices...")
+        self.import_ri_action = give_persistent_icon(import_menu.addAction("Refractive Indices..."), "import")
         self.import_ri_action.setToolTip(
             "A tab-separated RI table (RIs.txt: Sample, RI, Std, Temp, N, Date). One value per solution, given to every step whose note "
             "starts with that solution's name. The values are copied into the session; RIs.txt in the dataset folder is imported "
@@ -118,16 +119,16 @@ class FileMenu(QObject):
         )
         self.import_ri_action.triggered.connect(self.import_refractive_indices)
         self.import_ri_action.setVisible(experiment_plan is not None)
-        export_menu = menu.addMenu("Export")
-        self.export_metadata_action = export_menu.addAction("Acquisition Metadata (JSON)...")
+        export_menu = give_persistent_icon(menu.addMenu("Export"), "export")
+        self.export_metadata_action = give_persistent_icon(export_menu.addAction("Acquisition Metadata (JSON)..."), "export")
         self.export_metadata_action.triggered.connect(self.export_metadata)
         menu.addSeparator()
 
-        self.manager_action = menu.addAction("Dataset Manager...")
+        self.manager_action = give_persistent_icon(menu.addAction("Dataset Manager..."), "dataset_manager")
         bind_action(self.manager_action, "file.dataset_manager")
         self.manager_action.triggered.connect(lambda: self._manager.present())
         menu.addSeparator()
-        menu.addAction("E&xit", window.close)
+        give_persistent_icon(menu.addAction("E&xit", window.close), "exit")
         menu.setToolTipsVisible(True)
 
         dataset.dataset_loaded.connect(lambda _loaded: self._sync_enabled())

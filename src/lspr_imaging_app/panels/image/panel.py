@@ -194,6 +194,7 @@ from .slideshow import (
     MODE_MASK_STATES,
     MODE_ROW_MARKS,
 )
+from .tool_escape import ToolEscape
 from .tool_ribbon import ROI_TAB, VIEW_TAB
 from .panel_constants import (
     ANALYSIS_TAB,
@@ -725,10 +726,11 @@ class ImagePanel(QWidget):
         )
         scene.sigMouseClicked.connect(self._on_scene_clicked)
         scene.sigMouseMoved.connect(self._on_scene_moved)
-        # Arrow keys/Esc for the active tool. An event filter on the view
+        # Arrow keys for the active tool. An event filter on the view
         # (not `keyPressEvent` here) because the graphics view would
         # otherwise consume arrow keys itself to scroll.
         self._view.installEventFilter(self)
+        self._tool_escape = ToolEscape(self._active_tool, self._interaction.handle_key, action_parent=self)  # Esc leaves the tool that is on (2026-11-19)
 
     def _on_transforms_navigate(self, key: str) -> None:
         """A row of Auto crop's pick-up menu that lives in another ribbon tab: show that tab."""
@@ -1779,8 +1781,8 @@ class ImagePanel(QWidget):
         self._tool_status = ""
         self.tool_status_changed.emit("")  # drop a stale status from the tool just switched away from
         self._refresh_tool_info(tool)
-        if tool is ImageTool.ROTATE:
-            # So the arrow keys reach the tool without an extra click.
+        if tool is not None:
+            # So Esc (and Rotate's arrow keys) reach the tool without an extra click: the tools are armed from buttons that do not take the keyboard.
             self._view.setFocus()
         # Preview tools swap cropped <-> uncropped and show/hide the ROI overlay.
         self._schedule_redraw()

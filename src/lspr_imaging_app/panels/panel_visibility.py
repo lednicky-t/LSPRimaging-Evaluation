@@ -35,6 +35,7 @@ from PyQt6.QtWidgets import QMainWindow, QMenu
 
 from ..shortcuts import PANEL_TOGGLE_IDS, bind_action
 from .dock_container import PanelContainer
+from .menu_icons import PANEL_ICON_KEYS, give_persistent_icon
 
 # The keys (Ctrl+1..6) are in `shortcuts.py`, one per dock title (`PANEL_TOGGLE_IDS`); the order of the docks dict does not matter.
 # Until 2026-10-19 Ctrl+1..5 matched the stable app's and ROI / Groups was Ctrl+6; the maintainer moved ROI / Groups up under
@@ -49,17 +50,19 @@ def wire_panel_visibility_menu(view_menu: QMenu, docks: dict[str, PanelContainer
     the top. *docks* is given in the order its panels should appear in the
     menu; each dock's key (Ctrl+1..6) comes from `shortcuts.PANEL_TOGGLE_IDS`
     by its title, so a dock without an entry there just has no key."""
-    show_all_action = view_menu.addAction("Show all panels")
+    show_all_action = give_persistent_icon(view_menu.addAction("Show all panels"), "show_all")
     show_all_action.setToolTip("Show every workspace panel.")
     show_all_action.triggered.connect(lambda: _set_all_visible(docks, True))
 
-    hide_all_action = view_menu.addAction("Hide all panels")
+    hide_all_action = give_persistent_icon(view_menu.addAction("Hide all panels"), "hide_all")
     hide_all_action.setToolTip("Hide every workspace panel.")
     hide_all_action.triggered.connect(lambda: _set_all_visible(docks, False))
 
     view_menu.addSeparator()
     for name, dock in docks.items():
         action = dock.toggleViewAction()
+        if name in PANEL_ICON_KEYS:
+            give_persistent_icon(action, PANEL_ICON_KEYS[name])
         if name in PANEL_TOGGLE_IDS:  # a dock without an entry in `shortcuts.py` simply has no key
             bind_action(action, PANEL_TOGGLE_IDS[name])
         view_menu.addAction(action)

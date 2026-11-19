@@ -31,6 +31,7 @@ from ...plan.bar_model import boundary_readout
 from ...plan.state import EvalPair
 from ...selection.experiment_plan_module import ExperimentPlanModule
 from ...undo import undo_manager
+from ..menu_icons import give_icon
 from .evaluation_group import MAX_PAIRS
 from .plot import SensorgramPlot
 
@@ -148,7 +149,9 @@ class PlanBarActions(QObject):
 
     def build_menu(self, index: int) -> QMenu | None:
         """The menu for step `index` (None when there is no such step). Colour, Default colour, Reset, Remove and Unify act on all selected steps when the clicked one is
-        selected; Edit text, Add step and the roles on the clicked step only. Each action is connected; `_show_menu` pops it up."""
+        selected; Edit text, Add step and the roles on the clicked step only. Each action is connected; `_show_menu` pops it up. An entry is in the menu only
+        while it can be done (2026-11-19, maintainer): Default colour needs a colour of its own, Reset an edited step, Reset all an edit, Unify steps that touch, Restore
+        a removed step, Add step the plotted axis, Use as a single step."""
         steps = self._plan.steps()
         if not 0 <= index < len(steps):
             return None
@@ -161,19 +164,17 @@ class PlanBarActions(QObject):
         menu.addSeparator()
         if self.baseline_menu is not None and self.baseline_menu(menu, [steps[i] for i in targets]):
             menu.addSeparator()  # the Range baseline's edit is on: its anchor-step items first, the plan's items below
-        menu.addAction("Edit text...").triggered.connect(lambda _checked=False: self._edit_text(index))
-        menu.addAction("Colour...").triggered.connect(lambda _checked=False: self._choose_colour(index, targets))
-        default = menu.addAction("Default colour")
-        default.setEnabled(any(self._has_own_colour(steps[i]) for i in targets))
-        default.triggered.connect(lambda _checked=False: self._plan.set_colors(targets, None))
+        give_icon(menu.addAction("Edit text..."), "rename").triggered.connect(lambda _checked=False: self._edit_text(index))
+        give_icon(menu.addAction("Colour..."), "colour").triggered.connect(lambda _checked=False: self._choose_colour(index, targets))
+        if any(self._has_own_colour(steps[i]) for i in targets):
+            give_icon(menu.addAction("Default colour"), "colour_clear").triggered.connect(lambda _checked=False: self._plan.set_colors(targets, None))
         menu.addSeparator()
-        reset = menu.addAction("Reset steps to measured" if many else "Reset step to measured")
-        reset.setEnabled(any(steps[i].edited for i in targets))
-        reset.triggered.connect(lambda _checked=False: self._plan.reset_steps(targets))
-        reset_all = menu.addAction("Reset all steps")
+        if any(steps[i].edited for i in targets):
+            reset = give_icon(menu.addAction("Reset steps to measured" if many else "Reset step to measured"), "reset")
+            reset.triggered.connect(lambda _checked=False: self._plan.reset_steps(targets))
         state = self._plan.state()
-        reset_all.setEnabled(bool(state.edits or state.removed or state.added))
-        reset_all.triggered.connect(lambda _checked=False: self._plan.reset_all())
+        if state.edits or state.removed or state.added:
+            give_icon(menu.addAction("Reset all steps"), "reset").triggered.connect(lambda _checked=False: self._plan.reset_all())
         if self._structure_tools:
             self._add_structure_items(menu, index, targets, many)
         return menu
@@ -181,21 +182,16 @@ class PlanBarActions(QObject):
     def _add_structure_items(self, menu: QMenu, index: int, targets: list[int], many: bool) -> None:
         """Remove / add / unify steps, restore the removed ones, and "Use as" (the baseline and signal step of each evaluation pair, B1 / S1 ... on the bar)."""
         menu.addSeparator()
-        remove = menu.addAction("Remove steps" if many else "Remove step")
+        remove = give_icon(menu.addAction("Remove steps" if many else "Remove step"), "step_remove")
         remove.triggered.connect(lambda _checked=False: self._plan.remove_steps(targets))
-        add = menu.addMenu("Add step")
-        has_axis = self._context() is not None  # the grid a new boundary snaps to comes from the plotted cubes
-        for text, side in (("In front of this step", "before"), ("Behind this step", "after")):
-            action = add.addAction(text)
-            action.setEnabled(has_axis)
-            action.triggered.connect(lambda _checked=False, where=side: self._add_step(index, where))
-        unify = menu.addAction("Unify selected steps")
-        unify.setEnabled(self._plan.can_unify(targets))
-        unify.setToolTip("Needs two or more selected steps with no other step between them.")
-        unify.triggered.connect(lambda _checked=False: self._unify(targets))
-        restore = menu.addAction("Restore removed steps")
-        restore.setEnabled(self._plan.has_removed())
-        restore.triggered.connect(lambda _checked=False: self._plan.restore_removed())
+        if self._context() is not None:  # the grid a new boundary snaps to comes from the plotted cubes
+            add = give_icon(menu.addMenu("Add step"), "step_add")
+            for text, side, key in (("In front of this step", "before", "step_before"), ("Behind this step", "after", "step_after")):
+                give_icon(add.addAction(text), key).triggered.connect(lambda _checked=False, where=side: self._add_step(index, where))
+        if self._plan.can_unify(targets):  # two or more selected steps with no other step between them
+            give_icon(menu.addAction("Unify selected steps"), "step_merge").triggered.connect(lambda _checked=False: self._unify(targets))
+        if self._plan.has_removed():
+            give_icon(menu.addAction("Restore removed steps"), "step_restore").triggered.connect(lambda _checked=False: self._plan.restore_removed())
         menu.addSeparator()
         self._add_use_as(menu, index, many)
         self._add_use_for_bulk(menu, targets)
@@ -206,7 +202,7 @@ class PlanBarActions(QObject):
         steps = self._plan.steps()
         in_set = {step.ref for step in self._plan.bulk_steps()}
         all_in = bool(targets) and all(steps[i].ref in in_set for i in targets)
-        action = menu.addAction("Use for S_bulk (Sb)")
+        action = give_icon(menu.addAction("Use for S_bulk (Sb)"), "use_bulk")
         action.setCheckable(True)
         action.setChecked(all_in)
         action.setToolTip("Put the step(s) into the bulk sensitivity fit (their means against the solutions' refractive indices); click again to take them out.")
@@ -217,11 +213,12 @@ class PlanBarActions(QObject):
 
     def _add_use_as(self, menu: QMenu, index: int, many: bool) -> None:
         """"Use as" > one submenu per evaluation pair that is on offer (`pairs_offered`) > Baseline / Signal, each a check mark that is on when this step plays that role.
-        The roles belong to one step, so the whole menu is greyed out while several steps are selected."""
+        The roles belong to one step, so the whole menu is left out while several steps are selected."""
+        if many:
+            return
         step = self._plan.steps()[index]
         state = self._plan.state()
-        use_as = menu.addMenu("Use as")
-        use_as.setEnabled(not many)
+        use_as = give_icon(menu.addMenu("Use as"), "use_as")
         for number in range(1, pairs_offered(state.pairs) + 1):
             word = "Pair" if state.pair(number) is not None else "New pair"  # a pair with nothing set yet is the one this menu would start
             pair_menu = use_as.addMenu(f"{word} {number} (B{number} / S{number})")

@@ -20,6 +20,7 @@ from PyQt6.QtCore import QObject
 from PyQt6.QtWidgets import QMenu, QWidget
 
 from ...storage.ui_state_keys import ROI_TABLE_FROZEN_UPTO
+from ..menu_icons import give_persistent_icon
 from ..ui_state import UiStateStore
 from .rows import COLUMN_COUNT, COLUMN_TITLES
 from .view import RoiTreeView
@@ -30,7 +31,6 @@ FREEZE_TIP = (
     "Keep this column and the ones to its left in view when the table is scrolled sideways to the step columns. "
     "A group's name is drawn across the columns after #/ROIs, so freeze up to the second column to keep the names in view too."
 )
-STEP_COLUMN_TIP = "Only the ROI columns (#/ROIs to Shape) can be frozen; the step columns are the ones that scroll."
 
 
 class FreezeColumns(QObject):
@@ -41,8 +41,8 @@ class FreezeColumns(QObject):
         self._store = store
         self._section = -1  # the header the menu was opened on
         menu.addSeparator()
-        self._freeze = menu.addAction("Freeze columns up to here")
-        self._unfreeze = menu.addAction("Unfreeze columns")
+        self._freeze = give_persistent_icon(menu.addAction("Freeze columns up to here"), "freeze")
+        self._unfreeze = give_persistent_icon(menu.addAction("Unfreeze columns"), "unfreeze")
         self._unfreeze.setToolTip("Let every column scroll sideways again.")
         self._freeze.triggered.connect(lambda _checked=False: self._choose(self._section))
         self._unfreeze.triggered.connect(lambda _checked=False: self._choose(NOT_FROZEN))
@@ -54,9 +54,8 @@ class FreezeColumns(QObject):
         frozen = self._tree.frozen_upto()
         is_fixed = 0 <= section < COLUMN_COUNT
         self._freeze.setText(f"Freeze columns up to “{COLUMN_TITLES[section]}”" if is_fixed else "Freeze columns up to here")
-        self._freeze.setEnabled(is_fixed)
-        self._freeze.setToolTip(FREEZE_TIP if is_fixed else STEP_COLUMN_TIP)
-        self._freeze.setVisible(section != frozen)  # the column the freeze already ends at has nothing to offer but "Unfreeze"
+        self._freeze.setToolTip(FREEZE_TIP)
+        self._freeze.setVisible(is_fixed and section != frozen)  # only on an ROI column (the step columns are the ones that scroll), and not on the column the freeze already ends at (it has nothing to offer but "Unfreeze")
         self._unfreeze.setVisible(frozen != NOT_FROZEN)
 
     def _choose(self, column: int) -> None:

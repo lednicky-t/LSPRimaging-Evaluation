@@ -34,6 +34,7 @@ from ...analysis.step_table import OP_BULK, OPERATIONS, GroupMembers
 from ...selection.step_table_module import StepTableModule, compare_title
 from ...storage.ui_state_keys import ROI_TABLE_COMPARE_COLUMNS, ROI_TABLE_STEP_DISPLAY, ROI_TABLE_STEP_WIDTH_MANUAL, ROI_TABLE_STEPS_SHOWN
 from ..icon_button_style import style_general_icon_button
+from ..menu_icons import give_icon, give_persistent_icon
 from ..plot_export_button import ExportData, PlotExportButton
 from ..ribbon_icon_size import ICON_SIZE
 from ..sensorgram.plan_icons import bulk_picture, evaluation_picture
@@ -261,7 +262,7 @@ class StepColumnControls(QObject):
     def add_menu_entries(self, menu: QMenu) -> None:
         """"Fit step columns to content" at the end of the menu a right-click on a column header opens (offered only while there is a manual width to give up)."""
         menu.addSeparator()
-        self._fit_action = menu.addAction("Fit step columns to content")
+        self._fit_action = give_persistent_icon(menu.addAction("Fit step columns to content"), "fit_columns")
         self._fit_action.setToolTip("The step columns are as wide as their title and numbers need, and follow them. (You gave them one width by dragging an edge; double-clicking an edge does the same.)")
         self._fit_action.triggered.connect(lambda _checked=False: self.fit_now())
         self.prepare_menu()
@@ -380,7 +381,7 @@ class StepColumnControls(QObject):
         uid = column.ref[1]  # type: ignore[index]
         if column.op == OP_BULK:  # nothing to choose: the column is the S_bulk set's slope
             menu = QMenu(self._tree)
-            menu.addAction("Remove this column").triggered.connect(lambda _checked=False: self.remove_compare(uid))
+            give_icon(menu.addAction("Remove this column"), "delete").triggered.connect(lambda _checked=False: self.remove_compare(uid))
             menu.exec(pos)
             menu.deleteLater()
             return

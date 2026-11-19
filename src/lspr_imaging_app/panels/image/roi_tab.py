@@ -153,6 +153,7 @@ class RoiTab(QWidget):
             toolbox=roi_toolbox,
             selection=selection,
             dialog_parent=self,
+            action_parent=parent,  # the Image panel: Ctrl+G / Ctrl+Shift+G must work while another ribbon tab hides this one
             parent=self,
         )
         self._group_actions.status.connect(self.status)

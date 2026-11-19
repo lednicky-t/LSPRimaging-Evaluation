@@ -13,16 +13,18 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 
 from ...domain.roi_model import AreaRoi, AreaRoiDetectionSettings, AreaRoiGroup
-from ...domain.roi_shapes import Border, Circle, MaskShape, Rectangle, Shape, effective_border, ring_diameters
+from ...domain.roi_shapes import Border, Circle, MaskShape, Rectangle, Shape, effective_border, ring_diameters, shape_area_px
 from ...roi.palette import DEFAULT_ROI_COLOR_HEX
 
 COLUMN_ID, COLUMN_NAME, COLUMN_X, COLUMN_Y, COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT = range(7)
 COLUMN_SHAPE = 7
 COLUMN_WIDTH, COLUMN_HEIGHT, COLUMN_ANGLE = 8, 9, 10
 """A rectangle's width, height and angle (2026-11-19). Appended after the first eight, so the number every saved column key and frozen column holds still names the same column."""
-COLUMN_COUNT = 11
+COLUMN_AREA = 11
+"""The area of the sample region (2026-11-19): pixels or µm², as the unit says. Appended for the same reason; the view puts it on screen right after Shape (`RoiTreeView.set_view_mode`)."""
+COLUMN_COUNT = 12
 """The fixed columns. The step columns (one per experiment step, ``step_columns.py``) follow them in the model: column ``COLUMN_COUNT + i`` is the i-th step."""
-COLUMN_TITLES = ("#/ROIs", "Label", "x", "y", "D_s", "d_r", "D_r", "Shape", "W", "H", "θ")
+COLUMN_TITLES = ("#/ROIs", "Label", "x", "y", "D_s", "d_r", "D_r", "Shape", "W", "H", "θ", "Area")
 """Header titles; ``X_y`` is drawn as X with a subscript y (`view.SubscriptHeader`)."""
 EDITABLE_COLUMNS = (COLUMN_X, COLUMN_Y, COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT, COLUMN_WIDTH, COLUMN_HEIGHT, COLUMN_ANGLE)
 DIAMETER_COLUMNS = (COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT)
@@ -39,7 +41,7 @@ VIEW_GEOMETRY = "geometry"
 VIEW_MODES = (VIEW_SIMPLE, VIEW_GEOMETRY)
 VIEW_MODE_COLUMNS = {
     VIEW_SIMPLE: (COLUMN_ID, COLUMN_NAME),
-    VIEW_GEOMETRY: (COLUMN_ID, COLUMN_X, COLUMN_Y, COLUMN_SHAPE, COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT, *RECTANGLE_COLUMNS),
+    VIEW_GEOMETRY: (COLUMN_ID, COLUMN_X, COLUMN_Y, COLUMN_SHAPE, COLUMN_AREA, COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT, *RECTANGLE_COLUMNS),
 }
 """Which columns each view mode shows, left to right on screen is the model order; the rest are hidden."""
 
@@ -167,6 +169,33 @@ def parse_angle(text: str) -> float:
     return _number_of(text)
 
 
+def to_display_area(area_px: float, unit: LengthUnit) -> float:
+    """An area stored in px^2 in the display unit: px^2 (a count of pixels) or µm^2 (``um_per_px`` squared)."""
+    return area_px if unit.um_per_px is None else area_px * unit.um_per_px ** 2
+
+
+def format_area(area_px: float, unit: LengthUnit) -> str:
+    """What the Area cell shows: a count of pixels with no decimals, or µm^2 with one (the stored value is always px^2). Display only; an area is never typed in."""
+    if unit.um_per_px is None:
+        return f"{area_px:.0f}"
+    return f"{to_display_area(area_px, unit):.1f}"
+
+
+def area_tooltip(row: RoiRow, unit: LengthUnit) -> str:
+    """What the Area cell's tool tip says: where the number comes from, in px^2 and (with µm chosen) in µm^2."""
+    if row.shape == SHAPE_MASK:
+        text = f"Pixel mask: {row.area_px:,.0f} pixels."
+    elif row.shape == SHAPE_RECTANGLE:
+        text = f"Rectangle, width x height: {row.area_px:,.1f} px²."
+    else:
+        text = f"Circle, π x (diameter / 2)²: {row.area_px:,.1f} px²."
+    if unit.um_per_px is not None:
+        text += f" That is {to_display_area(row.area_px, unit):,.2f} µm²."
+    if row.shape != SHAPE_MASK:
+        text += " The scan measures the pixels whose centres fall inside, which can differ by a pixel or two."
+    return text
+
+
 def format_angle(degrees: float) -> str:
     """What a cell shows: one decimal, as a length in px does."""
     return f"{degrees:.1f}"
@@ -243,6 +272,7 @@ class RoiRow:
     width: float = 0.0  # a rectangle's width and height along its own axes (px) and its angle (degrees, clockwise); 0 for any other shape
     height: float = 0.0
     angle: float = 0.0
+    area_px: float = 0.0  # the area of the ROI's own region in px^2 (`roi_shapes.shape_area_px`); the Area column shows it in the display unit
 
 
 @dataclass(frozen=True)
@@ -307,6 +337,7 @@ def build_roi_rows(
                 width=rectangle.width_px if rectangle else 0.0,
                 height=rectangle.height_px if rectangle else 0.0,
                 angle=rectangle.angle_deg if rectangle else 0.0,
+                area_px=shape_area_px(roi.shape),
             )
         )
     return rows
@@ -394,6 +425,7 @@ _SORT_KEYS = {
     COLUMN_WIDTH: lambda row: (row.width, row.roi_id),
     COLUMN_HEIGHT: lambda row: (row.height, row.roi_id),
     COLUMN_ANGLE: lambda row: (row.angle, row.roi_id),
+    COLUMN_AREA: lambda row: (row.area_px, row.roi_id),
 }
 
 

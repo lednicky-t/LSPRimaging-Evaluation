@@ -271,9 +271,8 @@ class SignalMapGroup(QWidget):
         baseline.setToolTip(self.baseline_check.toolTip())
         baseline.triggered.connect(lambda checked: (self.baseline_check.setChecked(checked), self.baseline_toggled.emit(checked)))
         menu.addSeparator()
-        refresh = menu.addAction("Refresh")
-        refresh.setEnabled(self.map_button.isChecked() and self._needs_refresh)
-        refresh.triggered.connect(lambda _c=False: self.refresh_requested.emit())
+        if self.map_button.isChecked() and self._needs_refresh:  # Refresh only when there is something to refresh
+            menu.addAction("Refresh").triggered.connect(lambda _c=False: self.refresh_requested.emit())
         for button, text in ((self.legend_button, "Legend"), (self.hover_button, "Hover values")):
             action = menu.addAction(text)
             action.setCheckable(True)
@@ -390,7 +389,8 @@ class SignalMapGroup(QWidget):
         combo.activated.emit(index)
 
     def _add_combo_entries(self, menu: QMenu, combo: QComboBox) -> None:
-        """One check-marked entry per drop-down entry. Greyed when the drop-down is (for example Pair while one step's mean is shown)."""
+        """One check-marked entry per drop-down entry. The menu is left out of its parent when the drop-down is disabled (for example Pair while one step's mean is
+        shown; 2026-11-19: an entry that cannot be used is left out, not greyed)."""
         menu.setToolTipsVisible(True)
         for i in range(combo.count()):
             action = menu.addAction(combo.itemIcon(i), combo.itemText(i))
@@ -400,7 +400,7 @@ class SignalMapGroup(QWidget):
             if tip:
                 action.setToolTip(str(tip))
             action.triggered.connect(lambda _c=False, i=i: self._choose(combo, i))
-        menu.setEnabled(combo.isEnabled() and combo.count() > 0)
+        menu.menuAction().setVisible(combo.isEnabled() and combo.count() > 0)
 
     def _add_scheme_entries(self, menu: QMenu) -> None:
         """The colour schemes as buttons showing the colour bar and the name (a menu's own icons are small squares: the bars would be squashed)."""

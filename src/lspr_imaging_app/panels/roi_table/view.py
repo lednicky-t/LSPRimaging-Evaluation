@@ -36,6 +36,7 @@ from .delegate import CELL_ROOM, CHEVRON_ZONE, CHIP_SIZE, GROUP_INDENT, STRIP_WI
 from .model import COLUMN_KIND_ROLE, DEPTH_ROLE, KIND_ROLE, STEP_TINT_ROLE
 from .rows import (
     COLUMN_ANGLE,
+    COLUMN_AREA,
     COLUMN_COUNT,
     COLUMN_HEIGHT,
     COLUMN_ID,
@@ -378,6 +379,7 @@ def suggested_column_widths(metrics: QFontMetrics) -> list[int]:
     widths[COLUMN_SHAPE] = max(32, advance(COLUMN_TITLES[COLUMN_SHAPE]) + _SORT_INDICATOR_ROOM)
     widths[COLUMN_WIDTH] = widths[COLUMN_HEIGHT] = max(diameter, advance(COLUMN_TITLES[COLUMN_WIDTH]) + _SORT_INDICATOR_ROOM)
     widths[COLUMN_ANGLE] = max(advance("-999.9") + _CELL_PADDING, advance(COLUMN_TITLES[COLUMN_ANGLE]) + _SORT_INDICATOR_ROOM)  # a turn can be negative
+    widths[COLUMN_AREA] = max(advance("99999.9") + _CELL_PADDING, title_width(metrics, COLUMN_TITLES[COLUMN_AREA]) + _SORT_INDICATOR_ROOM)  # 99999 px, or 9999.9 µm^2
     return widths
 
 
@@ -490,8 +492,9 @@ class RoiTreeView(QTreeView):
         """Show the columns of a view mode (`rows.VIEW_MODE_COLUMNS`) and hide the others (and the ones the user hid)."""
         self._mode_columns = frozenset(VIEW_MODE_COLUMNS[mode])
         self.refresh_column_visibility()
-        header = self.header()  # the shape sits between the position and the diameters on screen, wherever its column number is
+        header = self.header()  # the shape sits between the position and the diameters on screen, wherever its column number is; the area right after it (2026-11-19)
         header.moveSection(header.visualIndex(COLUMN_SHAPE), header.visualIndex(COLUMN_Y) + 1)
+        header.moveSection(header.visualIndex(COLUMN_AREA), header.visualIndex(COLUMN_SHAPE) + 1)
 
     # -- columns the user hid (`hide_columns.py`) ---------------------------------------------------------------------------------
 

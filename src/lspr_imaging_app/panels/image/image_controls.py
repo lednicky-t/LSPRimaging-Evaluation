@@ -53,7 +53,8 @@ _TOOL_CONTROLS: dict[ImageTool | None, tuple[Control, ...]] = {
     ),
     ImageTool.ROTATE: (
         Control("Left-click", "place point 1, then point 2 - the image rotates so the two points are level"),
-        Control("Right-click", "menu with Cancel rotation - exits Rotate mode (Esc only cancels point 1)"),
+        Control("Right-click", "menu with Cancel rotation - exits Rotate mode"),
+        Control("Esc", "drop point 1; once more leaves Rotate mode"),
         Control("Arrow keys", "rotate by 0.1 deg (Ctrl 1 deg, Shift 5 deg)"),
     ),
     ImageTool.CROP: (
@@ -63,22 +64,25 @@ _TOOL_CONTROLS: dict[ImageTool | None, tuple[Control, ...]] = {
         Control("x: / y: fields", "type an exact width/height"),
         Control("checkmark", "apply the crop"),
         Control("Right-click", "menu with Apply crop / Cancel crop - Cancel exits Crop mode"),
-        Control("Esc", "discard an unapplied resize/move, stay in Crop mode"),
+        Control("Esc", "discard an unapplied resize/move; once more leaves Crop mode"),
     ),
     ImageTool.MEASURE: (
         Control("Left-click", "place point 1, then point 2 - fields update live while positioning point 2"),
         Control("Left-drag (on a placed point)", "move that point to fine-tune the ruler"),
-        Control("Right-click", "menu with Cancel measurement - exits Measure mode (Esc only cancels point 1)"),
+        Control("Right-click", "menu with Cancel measurement - exits Measure mode"),
+        Control("Esc", "drop point 1; once more leaves Measure mode"),
         Control("dx / dy / d fields", "enter any one real distance (the others fill in, assuming square pixels), then apply"),
     ),
     ImageTool.SELECT_AREA: (
         Control("Left-drag", "draw the selection (rectangle, or free-hand lasso, as picked in General)"),
         Control("Right-click (inside selection)", "menu with Invert selection / Deselect"),
+        Control("Esc", "leave the tool (the selection stays)"),
         Control("General > All", "remove the selection - editing tools work everywhere again"),
     ),
     ImageTool.ADD_ROI: (
         Control("Left-click", "place a new ROI at the cursor - stays active for placing several in a row"),
         Control("Right-click", "menu with Exit tool"),
+        Control("Esc", "leave the tool"),
     ),
 }
 

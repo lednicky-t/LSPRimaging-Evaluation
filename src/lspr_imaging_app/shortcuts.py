@@ -60,7 +60,7 @@ PRESET_IDS: dict[str, str] = {
 }
 
 _ROI_TABLE = "ROI table"
-_TOOLS = "Image view, with a tool active"
+_TOOLS = "Image panel, with a tool on"
 _VIEW = "Image view"
 _SLIDERS = "Wavelength and cube sliders"
 _PLAN_EDITOR = "Sensorgram step text editor"
@@ -78,6 +78,13 @@ BINDINGS: tuple[Binding, ...] = (
     Binding("edit.preferences", "Edit", "Open Preferences", keys=("Ctrl+,",)),
     Binding("links.link", "ROIs", "Link the selected sample ROIs to the selected reference ROIs", keys=("Ctrl+L",)),
     Binding("links.unlink", "ROIs", "Take apart the links of the selected ROIs (samples and references)", keys=("Ctrl+K",)),
+    Binding(
+        "groups.group", "ROIs", "Group the selected ROIs under a name (an empty group when none is selected); works from the Image panel and the ROI table",
+        keys=("Ctrl+G",),
+    ),
+    Binding(
+        "groups.ungroup", "ROIs", "Take the selected ROIs out of their groups (the ROIs stay; a group left empty goes away)", keys=("Ctrl+Shift+G",),
+    ),
     Binding("help.log_console", "Help", "Show or hide the Log Console", keys=("Ctrl+Shift+L",)),
     Binding("help.shortcuts", "Help", "Show the keyboard shortcuts", keys=("F1",)),
     *(
@@ -131,7 +138,12 @@ BINDINGS: tuple[Binding, ...] = (
         gesture="Click again and drag", scope=_ROI_TABLE,
     ),
     # -- tools of the Image view -----------------------------------------------------------------
-    Binding("tools.cancel", "Image tools", "Cancel what the Rotate, Crop or Measure tool is doing", keys=("Esc",), scope=_TOOLS),
+    Binding(
+        "tools.cancel", "Image tools",
+        "Leave the tool that is on (Rotate, Crop, Measure, Add ROI, Rectangle, Lasso, Wand, Draw, Histogram range, Threshold, Local contrast): the first Esc drops what the "
+        "tool is in the middle of (a placed first point, a crop that is not applied), the next one leaves it. Not while a number or text field has the keyboard",
+        keys=("Esc",), scope=_TOOLS,
+    ),
     Binding(
         "tools.rotate_nudge", "Image tools", "Rotate tool: turn the image by 0.1 degree (Left / Down: back, Right / Up: forward)",
         keys=_ARROWS, scope=_TOOLS,

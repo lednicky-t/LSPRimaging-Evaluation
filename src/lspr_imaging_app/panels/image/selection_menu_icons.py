@@ -9,9 +9,7 @@ from __future__ import annotations
 
 from PyQt6.QtGui import QIcon
 
-from lspr_ui import get_active_theme, load_tabler_icon
-
-from ..ribbon_icon_size import ICON_SIZE
+from ..menu_icons import tabler_menu_icon
 
 INVERT_ICON = "contrast-2"  # a square split into its two halves: what is selected and what is not swap places
 DESELECT_ICON = "square-off"  # the square with a slash through it: nothing is selected
@@ -21,5 +19,5 @@ UNLOCK_ICON = "lock-open"
 
 
 def menu_icon(name: str) -> QIcon:
-    """The vendored icon `name` as a menu entry wears it (theme text colour, the Modify menu's size and stroke)."""
-    return load_tabler_icon(name, color=get_active_theme().text_primary, size=ICON_SIZE * 2, stroke_width=2.1)
+    """The vendored icon `name` as a menu entry wears it (theme text colour, the Modify menu's size and stroke): `panels/menu_icons.py` draws it."""
+    return tabler_menu_icon(name)

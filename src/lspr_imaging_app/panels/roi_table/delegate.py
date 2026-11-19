@@ -200,7 +200,7 @@ class RoiTableDelegate(QStyledItemDelegate):
             fill = QColor(theme.accent_blue)
             fill.setAlpha(_RANGE_TINT_ALPHA)
             painter.fillRect(rect, fill)
-        self._paint_cell_borders(painter, rect, column, theme, index.model().columnCount() - 1)
+        self._paint_cell_borders(painter, rect, column, theme, self._last_column_on_screen(option.widget, index.model()))
         if column == COLUMN_ID and rect.width() <= 0:
             return  # #/ROIs is hidden (collapsed to nothing): its dot would be drawn over the next column
         if column == COLUMN_SHAPE:
@@ -285,6 +285,18 @@ class RoiTableDelegate(QStyledItemDelegate):
         else:
             painter.setPen(QColor(theme.text_dim))
             painter.drawText(QRectF(center.x() - 8, rect.top(), 16, rect.height()), int(Qt.AlignmentFlag.AlignCenter), "?")
+
+    @staticmethod
+    def _last_column_on_screen(view, model) -> int:
+        """The column drawn rightmost that is not hidden: it gets no hairline on its right. Not simply the model's last column: the shape and the area sit in the
+        middle on screen (2026-11-19), so with no step column the model's last one is no longer the rightmost."""
+        header = view.header() if hasattr(view, "header") else None
+        if header is not None:
+            for visual in range(header.count() - 1, -1, -1):
+                logical = header.logicalIndex(visual)
+                if not header.isSectionHidden(logical):
+                    return logical
+        return model.columnCount() - 1
 
     @staticmethod
     def _paint_cell_borders(painter: QPainter, rect: QRect, column: int, theme, last_column: int = COLUMN_COUNT - 1) -> None:

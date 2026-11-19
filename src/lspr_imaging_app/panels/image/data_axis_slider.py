@@ -53,6 +53,8 @@ from PyQt6.QtWidgets import QAbstractSlider, QMenu, QSlider, QWidget
 
 from lspr_ui import get_active_theme
 
+from ..menu_icons import give_icon
+
 # Room for half of the widest first/last tick label (e.g. "0:00") so it isn't clipped.
 SIDE_INSET = 14.0
 
@@ -400,13 +402,16 @@ class DataAxisSlider(QSlider):
         self.update()
 
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:
-        """Right-click menu: jump the handle to the reference frame's tick (disabled when none is marked)."""
-        menu = QMenu(self)
-        go_to = menu.addAction("Go to reference")
+        """Right-click menu: jump the handle to the reference frame's tick. Without a marked reference there is nothing to offer, so no menu opens."""
         reference = self._reference_tick_index
-        go_to.setEnabled(reference is not None and self.minimum() <= reference <= self.maximum())
-        if menu.exec(event.globalPos()) is go_to and reference is not None:
+        if reference is None or not self.minimum() <= reference <= self.maximum():
+            event.ignore()
+            return
+        menu = QMenu(self)
+        go_to = give_icon(menu.addAction("Go to reference"), "go_to")
+        if menu.exec(event.globalPos()) is go_to:
             self.setValue(reference)
+        menu.deleteLater()
 
     def set_ticks(self, values, major_labels: dict[int, str]) -> None:
         """`values` is the full real-value array this slider indexes into -

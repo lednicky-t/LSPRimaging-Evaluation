@@ -195,3 +195,15 @@ def nominal_diameter(shape: Shape, center_x: float, center_y: float) -> float:
     """One diameter-like number for a ROI of any shape (twice its reach radius; a circle's own diameter), for code that only needs a size
     to scale a grouping band, a label spacing or a default (never to decide which pixels belong to the ROI)."""
     return 2.0 * reach_radius(shape, center_x, center_y)
+
+
+def shape_area_px(shape: Shape) -> float:
+    """The area of a ROI's own region in px^2, for display (the ROI table's Area column): a circle's ``pi (D / 2)^2``, a rectangle's ``W x H`` (turning it changes
+    nothing), a mask's number of pixels (exact). A circle's or rectangle's *measured* pixel count is a whole number that can differ from this by a pixel or two
+    at the edge and moves with the centre's sub-pixel position and with each wavelength's chromatic shift, so there is no single count to show: this is the shape's
+    own area. Never used to decide which pixels belong to a ROI."""
+    if isinstance(shape, Circle):
+        return math.pi * (float(shape.diameter_px) / 2.0) ** 2
+    if isinstance(shape, Rectangle):
+        return float(shape.width_px) * float(shape.height_px)
+    return float(np.count_nonzero(shape.mask.mask))

@@ -23,6 +23,7 @@ from PyQt6.QtCore import QObject, Qt
 from PyQt6.QtWidgets import QMenu, QWidget
 
 from ...storage.ui_state_keys import ROI_TABLE_HIDDEN_COLUMNS
+from ..menu_icons import give_persistent_icon
 from ..ui_state import UiStateStore
 from .column_keys import key_from_payload, key_to_payload
 from .model import COLUMN_KIND_ROLE
@@ -30,7 +31,6 @@ from .step_columns import plain_title
 from .view import RoiTreeView
 
 HIDE_TIP = "Take this column out of the way. Right-click any column header and choose Show hidden column to bring it back."
-NOTHING_HIDDEN_TIP = "No column is hidden."
 
 
 class HideColumns(QObject):
@@ -45,9 +45,9 @@ class HideColumns(QObject):
         self._column_hidden = column_hidden
         self._section = -1  # the header the menu was opened on
         menu.addSeparator()
-        self._hide = menu.addAction("Hide column")
-        self._show_menu = menu.addMenu("Show hidden column")
-        self._show_all = menu.addAction("Show all hidden columns")
+        self._hide = give_persistent_icon(menu.addAction("Hide column"), "hide_column")
+        self._show_menu = give_persistent_icon(menu.addMenu("Show hidden column"), "show_column")
+        self._show_all = give_persistent_icon(menu.addAction("Show all hidden columns"), "show_column")
         self._hide.triggered.connect(lambda _checked=False: self._hide_section(self._section))
         self._show_all.triggered.connect(lambda _checked=False: self._set_hidden(frozenset()))
         self.prepare(-1)
@@ -71,17 +71,17 @@ class HideColumns(QObject):
         self._section = section
         key = self._tree.column_key(section) if section >= 0 else None
         self._hide.setText(f"Hide column “{self._title(section)}”" if key is not None else "Hide column")
-        self._hide.setEnabled(key is not None)
-        self._hide.setToolTip(HIDE_TIP if key is not None else "Right-click the header of the column to hide.")
+        self._hide.setVisible(key is not None)  # (2026-11-19: an entry that cannot be used is left out, not greyed) only on a column's header
+        self._hide.setToolTip(HIDE_TIP)
         hidden = self.hidden_columns()
         self._show_menu.clear()
         for column, title in hidden:
             action = self._show_menu.addAction(title)
             action.triggered.connect(partial(self._show, self._tree.column_key(column)))  # (the key is taken now, when the entry is made: the columns may be renumbered by the time it is clicked)
-        self._show_menu.setEnabled(bool(hidden))
-        self._show_menu.menuAction().setToolTip("Bring one of the hidden columns back." if hidden else NOTHING_HIDDEN_TIP)
-        self._show_all.setEnabled(bool(hidden))
-        self._show_all.setToolTip("Bring every hidden column back." if hidden else NOTHING_HIDDEN_TIP)
+        self._show_menu.menuAction().setVisible(bool(hidden))  # only while a column is hidden
+        self._show_menu.menuAction().setToolTip("Bring one of the hidden columns back.")
+        self._show_all.setVisible(bool(hidden))
+        self._show_all.setToolTip("Bring every hidden column back.")
 
     # -- the actions ----------------------------------------------------------------------------------------------------------
 

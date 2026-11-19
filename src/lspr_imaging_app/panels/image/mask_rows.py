@@ -63,6 +63,19 @@ DISMISS = "dismiss"
 RESTORE = "restore"
 MASK_EVENTS = "mask_events"
 
+# The command whose icon each menu entry wears (`panels/menu_icons.py`; 2026-11-19).
+ENTRY_ICONS = {
+    GO_TO: "go_to",
+    DELETE_PERSISTENT: "delete",
+    DELETE_INDIVIDUAL: "delete",
+    DELETE_ONE: "delete",
+    MAKE_INDIVIDUAL: "individual",
+    MAKE_PERSISTENT: "persistent",
+    DISMISS: "cancel",
+    RESTORE: "reset",
+    MASK_EVENTS: "mask",
+}
+
 
 def _plural(count: int, noun: str) -> str:
     return f"{count} {noun}{'' if count == 1 else 's'}"
@@ -410,7 +423,7 @@ class MaskRows(QObject):
             ),
             MenuEntry(RESTORE, f"Restore the {_plural(len(dismissed), 'dismissed event')}", enabled=bool(dismissed)),
         ]
-        choice = show_entries_menu(self._parent, header=f"{phrase} - scan pointers", entries=entries, pos=pos)
+        choice = show_entries_menu(self._parent, header=f"{phrase} - scan pointers", entries=entries, pos=pos, icons=ENTRY_ICONS)
         if choice == GO_TO:
             self._selection.set_cube(cube)
         elif choice == MASK_EVENTS and self._auto_mask is not None:
@@ -443,7 +456,7 @@ class MaskRows(QObject):
             ),
             MenuEntry(RESTORE, f"Restore the {_plural(len(dismissed), 'dismissed event')}", enabled=bool(dismissed)),
         ]
-        choice = show_entries_menu(self._parent, header=f"{wavelength:g} nm, {phrase} - scan pointers", entries=entries, pos=pos)
+        choice = show_entries_menu(self._parent, header=f"{wavelength:g} nm, {phrase} - scan pointers", entries=entries, pos=pos, icons=ENTRY_ICONS)
         if choice == GO_TO:
             self._selection.set_wavelength(wavelength)
         elif choice == MASK_EVENTS and self._auto_mask is not None:
@@ -499,7 +512,7 @@ class MaskRows(QObject):
                 )
             )
         kind = "persistent and individual" if drawn_at is not None and wavelengths else ("persistent" if drawn_at is not None else "individual")
-        choice = show_entries_menu(self._parent, header=f"{phrase} - {kind} mask", entries=entries, pos=pos)
+        choice = show_entries_menu(self._parent, header=f"{phrase} - {kind} mask", entries=entries, pos=pos, icons=ENTRY_ICONS)
         try:
             if choice == GO_TO:
                 self._selection.set_cube(cube)
@@ -541,7 +554,7 @@ class MaskRows(QObject):
             MenuEntry(DELETE_ONE, f"Delete this mask ({wavelength:g} nm)", tooltip="Ctrl+Z brings it back."),
         ]
         choice = show_entries_menu(
-            self._parent, header=f"{wavelength:g} nm, {phrase} - individual mask", entries=entries, pos=pos
+            self._parent, header=f"{wavelength:g} nm, {phrase} - individual mask", entries=entries, pos=pos, icons=ENTRY_ICONS
         )
         try:
             if choice == GO_TO:

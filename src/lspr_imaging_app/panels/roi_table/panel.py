@@ -84,6 +84,7 @@ from ...storage.ui_state_keys import (
 )
 from .. import roi_selection_lock
 from ..icon_button_style import style_general_icon_button
+from ..menu_icons import give_icon, give_persistent_icon
 from ..panel_task import PanelTask
 from ..ribbon_icon_size import ICON_SIZE
 from ..subtitle_column import SubtitleColumn
@@ -136,7 +137,7 @@ from .view import RoiTreeView, suggested_column_widths
 
 TASK_ID = "roi_table_steps"
 
-_LEGACY_COLUMN_COUNTS = (7, 8)  # saved width lists from before the Position / Shape / Shape vector columns (7) and before the rectangle's width / height / angle (8)
+_LEGACY_COLUMN_COUNTS = (7, 8, 11)  # saved width lists from before the Position / Shape / Shape vector columns (7), before the rectangle's width / height / angle (8) and before the Area (11)
 _REDRAW_COALESCE_MS = 100  # sketch §8
 _NOTICE_MS = 8000
 _ERROR_NOTICE_MS = 15000
@@ -279,15 +280,18 @@ class RoiTablePanel(QWidget):
         self._view_actions: dict[str, QAction] = {}
         action_group = QActionGroup(self)
         action_group.setExclusive(True)
-        for mode, text in ((VIEW_SIMPLE, "Simple view (ID and group label)"), (VIEW_GEOMETRY, "Geometry view (position, shape, diameters)")):
-            action = self._view_menu.addAction(text)
+        for mode, text, icon_key in (
+            (VIEW_SIMPLE, "Simple view (ID and group label)", "view_simple"),
+            (VIEW_GEOMETRY, "Geometry view (position, shape, diameters)", "view_geometry"),
+        ):
+            action = give_persistent_icon(self._view_menu.addAction(text), icon_key)
             action.setCheckable(True)
             action.setChecked(mode == self._view_mode)
             action.triggered.connect(lambda _checked=False, m=mode: self._on_view_mode_chosen(m))
             action_group.addAction(action)
             self._view_actions[mode] = action
         self._view_menu.addSeparator()
-        self._linked_action = self._view_menu.addAction("Linked view (each sample with its references)")
+        self._linked_action = give_persistent_icon(self._view_menu.addAction("Linked view (each sample with its references)"), "linked_view")
         self._linked_action.setCheckable(True)
         self._linked_action.setToolTip(
             "Arrange the table by links instead of groups: each sample that has linked references heads a section holding its own row and its references' rows; "
@@ -822,13 +826,13 @@ class RoiTablePanel(QWidget):
         moving_groups = bool(group_ids) and self._model.is_grouped_view()
 
         self._group_button.setToolTip(
-            f"Group the {len(ids)} selected ROI{'' if len(ids) == 1 else 's'} (each gets its own tint of the group colour)"
-            if ids else "New empty group"
+            f"Group the {len(ids)} selected ROI{'' if len(ids) == 1 else 's'} ({self._key_text('groups.group')}; each gets its own tint of the group colour)"
+            if ids else f"New empty group ({self._key_text('groups.group')})"
         )
         selected_groups = self._selected_group_ids()
         in_group = any(row.group_id is not None for row in rows if row.roi_id in set(ids))
         self._group_slot.setCurrentWidget(self._ungroup_button if selected_groups or in_group else self._group_button)
-        self._ungroup_button.setToolTip("Ungroup: take the selected ROIs or groups out of their groups (the ROIs stay).")
+        self._ungroup_button.setToolTip(f"Ungroup ({self._key_text('groups.ungroup')}): take the selected ROIs or groups out of their groups (the ROIs stay).")
         self._color_button.setEnabled(bool(ids) or bool(headers))
         self._color_button.setToolTip(
             "Recolour the group (every member gets a new tint)." if headers and not _rois else "Set the colour of the selected ROIs."
@@ -1281,7 +1285,7 @@ class RoiTablePanel(QWidget):
         index = self._tree.indexAt(pos)
         menu = QMenu(self)
         if not index.isValid():
-            menu.addAction("New empty group…", self._group_selected_or_new_empty)
+            give_icon(menu.addAction("New empty group…", self._group_selected_or_new_empty), "group")
         elif self._model.is_group(index):
             self._fill_group_menu(menu, index)
         else:
@@ -1294,17 +1298,18 @@ class RoiTablePanel(QWidget):
             self._fill_roi_menu(menu)
         if not menu.isEmpty():
             menu.addSeparator()
-        lock_selection = menu.addAction(roi_selection_lock.MENU_TEXT)
+        lock_selection = give_icon(menu.addAction(roi_selection_lock.MENU_TEXT), "lock")
         lock_selection.setCheckable(True)
         lock_selection.setChecked(self._selection.roi_selection_locked())
         lock_selection.setToolTip(roi_selection_lock.TIP)
         lock_selection.toggled.connect(self._selection.set_roi_selection_locked)
         menu.setToolTipsVisible(True)
-        lock = menu.addAction("Groups-only view (groups stay collapsed)")
+        lock = give_icon(menu.addAction("Groups-only view (groups stay collapsed)"), "groups_only")
         lock.setCheckable(True)
         lock.setChecked(self._group_only)
         lock.triggered.connect(lambda _checked=False: self.set_group_only(not self._group_only))
         menu.exec(self._tree.viewport().mapToGlobal(pos))
+        menu.deleteLater()  # (a child of this panel: one would be left behind per right-click, with its icons)
 
     def _group_selected_or_new_empty(self) -> None:
         name, accepted = QInputDialog.getText(
@@ -1319,59 +1324,72 @@ class RoiTablePanel(QWidget):
         return sequences(binding_id)[0].toString(QKeySequence.SequenceFormat.NativeText)
 
     def _fill_cell_menu(self, menu: QMenu) -> None:
-        """Copy cells / Paste cells / Cancel cell selection: the same actions as the keys, for the picked cells (or the cell that was clicked)."""
+        """Copy cells / Paste cells / Cancel cell selection: the same actions as the keys, for the picked cells (or the cell that was clicked). Each is in the menu
+        only while it can be done (2026-11-19): Copy needs picked cells or a number cell under the pointer, Paste something copied, Cancel a cell selection."""
         picked = bool(self._tree.cell_range()[0])
         cell = self._current_roi_cell()
-        copy = menu.addAction(f"Copy cells\t{self._key_text('roi_table.copy')}", self._copy_cell)
-        copy.setEnabled(picked or (cell is not None and cell[0].column() in NUMERIC_COLUMNS))
-        paste = menu.addAction(f"Paste cells\t{self._key_text('roi_table.paste')}", self._paste_cells)
-        paste.setEnabled(self._clipboard_block() is not None)
-        cancel = menu.addAction(f"Cancel cell selection\t{self._key_text('roi_table.cancel_selection')}", self._tree.clear_cell_marks)
-        cancel.setEnabled(self._tree.has_cell_marks())
+        if picked or (cell is not None and cell[0].column() in NUMERIC_COLUMNS):
+            give_icon(menu.addAction(f"Copy cells\t{self._key_text('roi_table.copy')}", self._copy_cell), "copy")
+        if self._clipboard_block() is not None:
+            give_icon(menu.addAction(f"Paste cells\t{self._key_text('roi_table.paste')}", self._paste_cells), "paste")
+        if self._tree.has_cell_marks():
+            give_icon(
+                menu.addAction(f"Cancel cell selection\t{self._key_text('roi_table.cancel_selection')}", self._tree.clear_cell_marks), "cancel"
+            )
         menu.addSeparator()
 
     def _fill_roi_menu(self, menu: QMenu) -> None:
+        """The menu of a ROI row. An entry is in it only while its prerequisite holds (2026-11-19, maintainer): everything that acts on ROIs needs a selected ROI
+        (a locked, empty selection leaves none), Remove from group a grouped one, Clear color one with a colour of its own, Move an ordering that can be moved."""
         ids = self._selected_ids()
-        noun = "ROI" if len(ids) == 1 else f"{len(ids)} ROIs"
         self._fill_cell_menu(menu)
-        menu.addAction(f"Group {noun}…", self._group_selected_or_new)
+        if not ids:
+            return
+        noun = "ROI" if len(ids) == 1 else f"{len(ids)} ROIs"
+        chosen = set(ids)
+        rows = [row for row in self._model.rows() if row.roi_id in chosen]
+        give_icon(menu.addAction(f"Group {noun}…\t{self._key_text('groups.group')}", self._group_selected_or_new), "group")
         groups = self._toolbox.groups()
         if groups:
-            submenu = menu.addMenu("Add to group")
+            submenu = give_icon(menu.addMenu("Add to group"), "add_to")
             for group in groups:
                 submenu.addAction(group.name, lambda gid=group.group_id: self._add_selected_to_group(gid))
-        in_group = any(row.group_id is not None for row in self._model.rows() if row.roi_id in set(ids))
-        menu.addAction("Remove from group", self._ungroup_selected).setEnabled(in_group)
+        if any(row.group_id is not None for row in rows):
+            give_icon(menu.addAction(f"Remove from group\t{self._key_text('groups.ungroup')}", self._ungroup_selected), "ungroup")
         menu.addSeparator()
-        menu.addAction("Set color…", self._color_selected)
-        menu.addAction("Clear color", self._clear_color_selected)
-        menu.addAction("Reset diameters to default", self._reset_diameters_selected)
-        menu.addAction("Shift position…", self._shift_selected)
+        give_icon(menu.addAction("Set color…", self._color_selected), "colour")
+        if any(row.has_own_color for row in rows):
+            give_icon(menu.addAction("Clear color", self._clear_color_selected), "colour_clear")
+        give_icon(menu.addAction("Reset diameters to default", self._reset_diameters_selected), "reset")
+        give_icon(menu.addAction("Shift position…", self._shift_selected), "shift_position")
         menu.addSeparator()
         movable = (
             self._model.sort_state() == (COLUMN_ID, False)
             and movement_scope(ids, self._model.rows(), grouped=self._model.is_grouped_view()) is not None
         )
-        move_menu = menu.addMenu("Move")
-        move_menu.setEnabled(movable)
-        for text, handler in (
-            ("To top", lambda: self._move_to_edge(top=True)),
-            ("Up", lambda: self._move_selected(-1)),
-            ("Down", lambda: self._move_selected(1)),
-            ("To bottom", lambda: self._move_to_edge(top=False)),
-        ):
-            move_menu.addAction(text, handler)
-        menu.addSeparator()
-        menu.addAction(f"Delete {noun}", self._delete_selected)
+        if movable:
+            move_menu = give_icon(menu.addMenu("Move"), "move")
+            for text, key, handler in (
+                ("To top", "move_top", lambda: self._move_to_edge(top=True)),
+                ("Up", "move_up", lambda: self._move_selected(-1)),
+                ("Down", "move_down", lambda: self._move_selected(1)),
+                ("To bottom", "move_bottom", lambda: self._move_to_edge(top=False)),
+            ):
+                give_icon(move_menu.addAction(text, handler), key)
+            menu.addSeparator()
+        give_icon(menu.addAction(f"Delete {noun}", self._delete_selected), "delete")
 
     def _fill_group_menu(self, menu: QMenu, index: QModelIndex) -> None:
+        """The menu of a group header; like the ROI menu it offers only what can be done now (Expand not in the Groups-only view, Rename for one group, a Move that
+        would go nowhere is left out, and the whole Move submenu while the groups are sorted by name)."""
         group_id = self._model.group_id(index)
         selected = self._selected_group_ids()
         targets = selected if group_id in selected else ([group_id] if group_id is not None else [])
         _rois, headers = self._view_selection()
         shown = headers if any(header == index for header in headers) else [index]  # the headers this menu acts on
-        menu.addAction("Expand", lambda: self._set_groups_expanded(shown, True)).setEnabled(not self._group_only)
-        menu.addAction("Collapse", lambda: self._set_groups_expanded(shown, False))
+        if not self._group_only:
+            give_icon(menu.addAction("Expand", lambda: self._set_groups_expanded(shown, True)), "expand")
+        give_icon(menu.addAction("Collapse", lambda: self._set_groups_expanded(shown, False)), "collapse")
         menu.addSeparator()
         if group_id is None:
             return  # "Ungrouped" is not a real group: nothing else applies
@@ -1380,20 +1398,30 @@ class RoiTablePanel(QWidget):
         positions = sorted(order.index(gid) for gid in targets if gid in order)
         at_top = positions == list(range(len(positions)))
         at_bottom = positions == list(range(len(order) - len(positions), len(order)))
-        menu.addAction("Rename…", lambda: self._tree.edit(index)).setEnabled(not many)
-        menu.addAction("Set color…", lambda: self._recolor_groups(targets))
+        if not many:
+            give_icon(menu.addAction("Rename…", lambda: self._tree.edit(index)), "rename")
+        give_icon(menu.addAction("Set color…", lambda: self._recolor_groups(targets)), "colour")
         menu.addSeparator()
-        move_menu = menu.addMenu("Move groups" if many else "Move group")
-        move_menu.setEnabled(not self._groups_sorted_by_label())
-        move_menu.addAction("To top", lambda: self._move_groups_to_edge(targets, top=True)).setEnabled(not at_top)
-        move_menu.addAction("Up", lambda: self._move_groups(targets, -1)).setEnabled(not at_top)
-        move_menu.addAction("Down", lambda: self._move_groups(targets, 1)).setEnabled(not at_bottom)
-        move_menu.addAction("To bottom", lambda: self._move_groups_to_edge(targets, top=False)).setEnabled(not at_bottom)
-        menu.addSeparator()
-        menu.addAction(
-            "Ungroup (keeps the ROIs)", lambda: self._delete_groups(targets)
+        moves = []  # (text, icon, handler) of the moves that would change something
+        if not at_top:
+            moves += [
+                ("To top", "move_top", lambda: self._move_groups_to_edge(targets, top=True)),
+                ("Up", "move_up", lambda: self._move_groups(targets, -1)),
+            ]
+        if not at_bottom:
+            moves += [
+                ("Down", "move_down", lambda: self._move_groups(targets, 1)),
+                ("To bottom", "move_bottom", lambda: self._move_groups_to_edge(targets, top=False)),
+            ]
+        if moves and not self._groups_sorted_by_label():
+            move_menu = give_icon(menu.addMenu("Move groups" if many else "Move group"), "move")
+            for text, key, handler in moves:
+                give_icon(move_menu.addAction(text, handler), key)
+            menu.addSeparator()
+        give_icon(menu.addAction("Ungroup (keeps the ROIs)", lambda: self._delete_groups(targets)), "ungroup")
+        give_icon(
+            menu.addAction("Delete groups and their ROIs" if many else "Delete group and its ROIs", self._delete_selected_groups_with_rois(targets)), "delete"
         )
-        menu.addAction("Delete groups and their ROIs" if many else "Delete group and its ROIs", self._delete_selected_groups_with_rois(targets))
 
     def _delete_selected_groups_with_rois(self, group_ids: list[str]) -> Callable[[], None]:
         def run() -> None:
