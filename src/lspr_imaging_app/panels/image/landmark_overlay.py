@@ -13,6 +13,7 @@ from PyQt6.QtGui import QColor
 from ...dataset import DatasetModule
 from ...image_tools import ChromaticModule
 from ...image_tools.chromatic.affine import identity_affine_matrix, invert_affine_matrix
+from ...roi.overlay_geometry import CELL_OFFSET
 from ...wavelength_color import wavelength_to_rgb
 
 
@@ -29,7 +30,9 @@ def draw_landmarks(
 ) -> None:
     """Chromatic landmarks (display only), each wavelength in its own colour.
 
-    Positions are in processed image space, like ROIs. *Estimated* =
+    Positions are in processed image space, like ROIs, and are drawn at
+    their pixel-index position + `CELL_OFFSET` (the middle of the pixel's
+    cell on the canvas, as for ROIs). *Estimated* =
     tracked on the image, only at the wavelengths that were tracked
     (crosses). *Fitted* = reference positions pushed through the fitted
     model, at every wavelength (dots), whether or not the correction is
@@ -68,7 +71,9 @@ def draw_landmarks(
 
     def shown(points: np.ndarray, wavelength_nm: float) -> np.ndarray:
         matrix = correction_for(wavelength_nm)
-        return points @ matrix[:, :2].T + matrix[:, 2]
+        # The tracker and the affines work in pixel-index coordinates; the canvas draws pixel (row, col) over [col, col + 1), so the
+        # shift is added once, after the affine (`overlay_geometry.CELL_OFFSET`). Without it every mark sat half a pixel up and left.
+        return points @ matrix[:, :2].T + matrix[:, 2] + CELL_OFFSET
 
     def fitted_at(wavelength_nm: float) -> np.ndarray:
         matrix = chromatic.fitted_affine_for((reference_cube, float(wavelength_nm)))

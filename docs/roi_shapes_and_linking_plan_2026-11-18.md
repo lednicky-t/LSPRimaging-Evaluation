@@ -366,8 +366,12 @@ stored centres. Tests that gave the pointer in stored coordinates now go through
 placed position say "stored + `CELL_OFFSET`" (gestures, timeline, overlay controls, tuning overlay, phase 3 UI, queries); three mutations (no shift in
 `view_centers`, in `display_to_reference`, in the tuning crosses) each fail at least one test.
 
-**Not checked / not changed:** the chromatic landmark overlay (`landmark_overlay.py`: fitted dots and crosses of observed landmarks) is the only other drawing I
-saw that may be in pixel-index coordinates; it is not a ROI and was left alone. A pixel mask still cannot be moved (2.4).
+**Chromatic landmark overlay (checked and fixed 2026-11-19).** `landmark_overlay.py` (fitted dots, tracked crosses, misfit lines) drew pixel-index points unshifted: the
+tracker (`auto_landmarks`: LoG peaks and `cv2.getRectSubPix`, both pixel-index) and the affines are in pixel-index coordinates, the canvas is not. Measured on the
+synthetic sweep (`tests/_lspri_chromatic_synthetic.py`, known disk centres, 12 landmarks): the dots sat **(-0.50, -0.50) px** from the middle of the disk they mark
+(the tracker itself is unbiased); after adding `CELL_OFFSET` in the overlay's one `shown()` step, after the affine, the offset is **(0.000, 0.001) px, worst 0.011 px**
+(reference wavelength, correction on or off). Display only: no tracked number, model, scan or session changes. Test:
+`test_lspri_rewrite_chromatic_tab.py::test_landmarks_are_drawn_on_the_features_they_mark` (fails with the shift removed). A pixel mask still cannot be moved (2.4).
 
 ### Rectangle speed, border drag, rotate cursor (DONE 2026-11-18, maintainer's three requests; UNSEEN BY EYE)
 
