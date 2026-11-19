@@ -8,10 +8,10 @@ toolbox command, so Ctrl+Z undoes it like any other) and it drives the shared
 
 **What the table does**
 - Rows: ``#`` (the ROI's place in the list; reordering changes these) with a colour dot. The
-  view mode (right-click the column headers) picks what else is shown. **Simple**: the group label. **Geometry**: x, y, a
-  shape pictogram and the shape's diameters (a ring: D_s, d_r, D_r; D = outer, d = inner diameter,
-  s = sample, r = reference; a number the shape does not have is left blank). Lengths show in px or µm following the Geometry display unit; the px/µm toggle in the
-  toolbar changes that unit (the same setting as the Image ribbon's View tab). A ring diameter the
+  view mode (right-click the column headers) picks what else is shown. **Simple**: the group label. **Geometry**: x, y, the Type pictogram, the area, the shape's size
+  (a circle: D_s; a rectangle: W, H, θ) and the rim: **Offset** (from the shape's edge; negative = inside it) and **Thickness**, the same two numbers for a circle, a
+  rectangle and a pixel map (a number the ROI does not have is left blank: a reference has no rim). Lengths show in px or µm following the Geometry display unit; the px/µm toggle in the
+  toolbar changes that unit (the same setting as the Image ribbon's View tab). A rim the
   ROI takes from the shared default is dimmed.
 - Click a header to sort ascending/descending. Sorting only changes the view;
   to *reorder* ROIs (change their numbers) sort by ``#`` ascending first.
@@ -46,6 +46,7 @@ in the dock's title bar (where the counts normally are, for a few seconds) and t
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 
 from PyQt6.QtCore import QItemSelection, QItemSelectionModel, QMimeData, QModelIndex, QPersistentModelIndex, QPoint, QRect, Qt, QTimer, pyqtSignal
@@ -67,6 +68,7 @@ from PyQt6.QtWidgets import (
 
 from lspr_ui import get_active_theme, load_tabler_icon
 
+from ...applog import StageTimer
 from ...shortcuts import sequences
 from ...selection.step_table_module import StepTableModule
 from ...image_tools import GeometryModule
@@ -104,14 +106,14 @@ from .rows import (
     COLUMN_HEIGHT,
     COLUMN_ID,
     COLUMN_NAME,
-    COLUMN_RING_IN,
-    COLUMN_RING_OUT,
+    COLUMN_RIM_OFFSET,
     COLUMN_SAMPLE,
     COLUMN_WIDTH,
     COLUMN_X,
     COLUMN_Y,
     NUMERIC_COLUMNS,
     PIXELS,
+    RIM_COLUMNS,
     SHAPE_FIELDS,
     VIEW_GEOMETRY,
     VIEW_MODE_COLUMNS,
@@ -134,6 +136,8 @@ from .rows import (
 )
 from .step_controls import StepColumnControls, StepHost
 from .view import RoiTreeView, suggested_column_widths
+
+logger = logging.getLogger(__name__)
 
 TASK_ID = "roi_table_steps"
 
@@ -231,7 +235,7 @@ class RoiTablePanel(QWidget):
         collapsed = store.get(ROI_TABLE_COLLAPSED)
         if isinstance(collapsed, list) and all(isinstance(item, str) for item in collapsed):
             self._collapsed = set(collapsed)
-            self._rebuild(lambda: None)
+            self._rebuild(lambda: None, restore_view=True)  # (the open / closed groups are what changed)
         widths = store.get(ROI_TABLE_COLUMN_WIDTHS)
         if (
             isinstance(widths, list) and len(widths) in (*_LEGACY_COLUMN_COUNTS, COLUMN_COUNT)
@@ -512,58 +516,91 @@ class RoiTablePanel(QWidget):
             return micrometers(self._geometry.microns_per_pixel_scalar())
         return PIXELS
 
-    def _rebuild(self, change: Callable[[], None], *, reveal: bool = True) -> None:
+    def _rebuild(self, change: Callable[[], None], *, reveal: bool = True, restore_view: bool = False) -> None:
         """Apply ``change`` to the model, then put back what a model reset
         throws away: group expansion, scroll position, selection. With
         ``reveal`` the selected ROIs' groups are expanded so they show; without
-        it (a re-sort) a collapsed group stays collapsed."""
+        it (a re-sort) a collapsed group stays collapsed. When the model reports that it only updated its cells in place (`RoiTreeModel.take_reset_flag`: the same rows in the
+        same groups) the view kept all of that and none of it is put back, unless ``restore_view`` says the thing that changed *is* the view state (which groups are open)."""
+        stages = StageTimer()  # one `roi_table.rebuild` record at the end says where a slow rebuild spent its time (DEBUG; the file log has it whatever the console shows)
         bar = self._tree.verticalScrollBar()
         scroll = bar.value()
         change()
-        self._restoring_view = True
-        try:
-            self._tree.expandAll()
-            for header in self._model.group_headers():
-                self._tree.setFirstColumnSpanned(header.row(), QModelIndex(), True)
-                if self._group_only or self._group_key_of(header) in self._collapsed:
-                    self._tree.collapse(header)
-        finally:
-            self._restoring_view = False
+        stages.mark("model")  # (the model's own stages are in the record too: `RoiTreeModel.last_rebuild_ms`)
+        reset = self._model.take_reset_flag() or restore_view  # False: the same rows in the same groups, only their cells changed: the view kept everything (open groups, selection, scroll, an open editor)
+        if reset:
+            self._restoring_view = True
+            try:
+                self._tree.expandAll()
+                for header in self._model.group_headers():
+                    self._tree.setFirstColumnSpanned(header.row(), QModelIndex(), True)
+                    if self._group_only or self._group_key_of(header) in self._collapsed:
+                        self._tree.collapse(header)
+            finally:
+                self._restoring_view = False
+        stages.mark("view")
         self._stack.setCurrentIndex(0 if self._model.rows() else 1)
         column, descending = self._model.sort_state()
         self._tree.header().setSortIndicator(
             column, Qt.SortOrder.DescendingOrder if descending else Qt.SortOrder.AscendingOrder
         )
-        bar.setValue(scroll)
+        if reset:
+            bar.setValue(scroll)
         ids = self._selection.selected_roi_ids()
         self._model.set_selected_ids(ids)
         keep_groups, self._reselect_groups = self._reselect_groups, None
         if keep_groups:
             self._select_group_headers(keep_groups)  # after moving groups: keep the headers selected, nothing expands
-        else:
+        elif reset:
             self._apply_selection_to_view(ids, reveal=reveal)
+        elif self._view_selected_ids() != set(ids):
+            self._apply_selection_to_view(ids, reveal=False)  # (no scrolling after a value changed: nothing moved)
+        stages.mark("select")
         self._update_toolbar_state()
         self._show_counts()
+        stages.mark("toolbar")
         self._tree.refresh_column_visibility()  # new step columns come visible: the ones the user hid are hidden again
+        stages.mark("columns")
         self._step_controls.fit_if_auto()  # the content may have changed (rows, numbers that came while the panel was hidden): the step columns follow it
+        stages.mark("fit")
         # The rows on screen may be other rows now (at launch the ROIs and groups arrive after the saved "step columns on" was restored, ~100 ms after the step module
         # last spoke): does every one of them have numbers? Without this the refresh button kept the answer it gave for the blank table ("up to date").
         self._step_controls.schedule_state()
+        stages.emit(
+            logger, "roi_table.rebuild", rows=len(self._model.rows()), step_columns=len(self._model.step_columns()), reset=reset, extra={f"model_{k}": v for k, v in self._model.last_rebuild_ms().items()}
+        )
 
     # -- selection ------------------------------------------------------------------------
 
     def _view_selection(self) -> tuple[list[int], list[QModelIndex]]:
-        """``(ROI ids selected as rows, group headers selected)``."""
+        """``(ROI ids selected as rows, group headers selected)``.
+
+        Read from the selection's ranges, not from `QItemSelectionModel.selectedRows`: that asks the model for the flags of every cell of every selected row (1,900 Python calls
+        to select 160 ROIs, 70 ms; this is 1 ms). The view selects whole rows, so a row is selected when a range holds its first column."""
         rois: list[int] = []
         headers: list[QModelIndex] = []
-        for index in self._tree.selectionModel().selectedRows(0):
-            if self._model.is_group(index):
-                headers.append(index)
-            else:
-                roi_id = self._model.roi_id(index)
-                if roi_id is not None:
-                    rois.append(roi_id)
+        model = self._model
+        for selected in self._tree.selectionModel().selection():
+            if selected.left() > 0 or selected.right() < 0:
+                continue  # the first column is not in this range
+            parent = selected.parent()
+            for row in range(selected.top(), selected.bottom() + 1):
+                index = model.index(row, 0, parent)
+                if model.is_group(index):
+                    headers.append(index)
+                else:
+                    roi_id = model.roi_id(index)
+                    if roi_id is not None:
+                        rois.append(roi_id)
         return rois, headers
+
+    def _view_selected_ids(self) -> set[int]:
+        """The ROIs the view shows as selected: the selected rows and every member of a selected group header."""
+        rois, headers = self._view_selection()
+        ids = set(rois)
+        for header in headers:
+            ids.update(self._model.member_ids(header))
+        return ids
 
     _reselect_groups: list[str] | None = None
     """Set by a group move: the next rebuild re-selects these headers instead of their members."""
@@ -584,7 +621,10 @@ class RoiTablePanel(QWidget):
 
     def _selected_group_ids(self) -> list[str]:
         """Real groups whose header is selected ("Ungrouped" is no group), in the groups' display order."""
-        _rois, headers = self._view_selection()
+        return self._group_ids_of(self._view_selection()[1])
+
+    def _group_ids_of(self, headers: list[QModelIndex]) -> list[str]:
+        """The real groups among the selected group ``headers``, in the groups' display order."""
         picked = {self._model.group_id(header) for header in headers}
         return [group.group_id for group in self._toolbox.groups() if group.group_id in picked]
 
@@ -606,7 +646,9 @@ class RoiTablePanel(QWidget):
         if self._selection.roi_selection_locked() and set(shown) != ids:
             # A locked selection does not follow a click: the module refused (and said so); put the view back on the locked rows.
             self._apply_selection_to_view(shown, reveal=False)
-        self._update_toolbar_state()
+            self._update_toolbar_state()
+        else:
+            self._update_toolbar_state((rois, headers))  # the view's selection is what it was a moment ago: not read again
         self._show_counts()
 
     def _on_selection_changed_elsewhere(self, ids: object) -> None:
@@ -623,8 +665,8 @@ class RoiTablePanel(QWidget):
     def _apply_selection_to_view(self, roi_ids: object, *, reveal: bool) -> None:
         indexes = self._model.roi_indexes(roi_ids)  # type: ignore[arg-type]
         selection = QItemSelection()
-        for index in indexes:
-            selection.select(index, index)
+        for first, last in self._model.roi_index_runs(roi_ids):  # type: ignore[arg-type]
+            selection.select(first, last)  # (a run of rows is one range for Qt: see `roi_index_runs`)
         self._syncing = True
         try:
             self._tree.selectionModel().select(
@@ -672,7 +714,7 @@ class RoiTablePanel(QWidget):
             return
         self._group_only = on
         self._tree.setAutoExpandDelay(-1 if on else 500)  # no opening a group by hovering a drag over it
-        self._rebuild(lambda: None, reveal=not on)
+        self._rebuild(lambda: None, reveal=not on, restore_view=True)  # (the open / closed groups are what changed)
         if self._store is not None:
             self._store.set(ROI_TABLE_GROUP_ONLY, on)
         self.group_only_changed.emit(on)
@@ -815,22 +857,24 @@ class RoiTablePanel(QWidget):
 
     # -- toolbar state ----------------------------------------------------------------------
 
-    def _update_toolbar_state(self) -> None:
+    def _update_toolbar_state(self, view_selection: tuple[list[int], list[QModelIndex]] | None = None) -> None:
+        """Enable and explain the toolbar buttons for the selection. ``view_selection``: what `_view_selection` says, when the caller has it already (it is the costly part)."""
         ids = self._selected_ids()
-        _rois, headers = self._view_selection()
+        _rois, headers = view_selection if view_selection is not None else self._view_selection()
         rows = self._model.rows()
         scope = movement_scope(ids, rows, grouped=self._model.is_grouped_view()) if ids else None
         sorted_by_number = self._model.sort_state() == (COLUMN_ID, False)
         movable = scope is not None and sorted_by_number
-        group_ids = self._selected_group_ids() if not _rois else []
+        selected_groups = self._group_ids_of(headers)
+        group_ids = selected_groups if not _rois else []
         moving_groups = bool(group_ids) and self._model.is_grouped_view()
 
         self._group_button.setToolTip(
             f"Group the {len(ids)} selected ROI{'' if len(ids) == 1 else 's'} ({self._key_text('groups.group')}; each gets its own tint of the group colour)"
             if ids else f"New empty group ({self._key_text('groups.group')})"
         )
-        selected_groups = self._selected_group_ids()
-        in_group = any(row.group_id is not None for row in rows if row.roi_id in set(ids))
+        selected = set(ids)  # (made once: inside the loop it was made for every row, 160 x 160 ids)
+        in_group = any(row.group_id is not None for row in rows if row.roi_id in selected)
         self._group_slot.setCurrentWidget(self._ungroup_button if selected_groups or in_group else self._group_button)
         self._ungroup_button.setToolTip(f"Ungroup ({self._key_text('groups.ungroup')}): take the selected ROIs or groups out of their groups (the ROIs stay).")
         self._color_button.setEnabled(bool(ids) or bool(headers))
@@ -889,15 +933,14 @@ class RoiTablePanel(QWidget):
                 self._show_notice(f"Set {axis} of {noun} to {text.strip()} {unit.label}.")
             return
         rectangle_field = {COLUMN_WIDTH: "width_px", COLUMN_HEIGHT: "height_px", COLUMN_ANGLE: "angle_deg"}.get(column)
-        field = {
-            COLUMN_SAMPLE: "sample_diameter_px",
-            COLUMN_RING_IN: "reference_inner_diameter_px",
-            COLUMN_RING_OUT: "reference_outer_diameter_px",
-        }.get(column)
+        if column in RIM_COLUMNS:
+            self._set_rim_cells(targets, column, value, text)
+            return
+        field = "sample_diameter_px" if column == COLUMN_SAMPLE else None
         if field is None and rectangle_field is None:
             return
         shapes = {row.roi_id: row.shape for row in self._model.rows()}
-        targets = [i for i in targets if column in SHAPE_FIELDS.get(shapes.get(i, ""), ())]  # a disk has no ring, a mask no diameter, a circle no width
+        targets = [i for i in targets if column in SHAPE_FIELDS.get(shapes.get(i, ""), ())]  # a mask has no diameter, a circle no width
         if rectangle_field is not None:
             if not targets:
                 self._show_notice("These ROIs are not rectangles: only a rectangle has a width, a height and an angle.")
@@ -907,10 +950,21 @@ class RoiTablePanel(QWidget):
                 self._show_notice(f"Set the {word} of {len(targets)} rectangles.")
             return
         if not targets:
-            self._show_notice("These ROIs have no such diameter (a mask or a rectangle has none, a disk has no reference ring).")
+            self._show_notice("These ROIs have no diameter: only a circle has one.")
             return
         if self._guarded("Set diameter", lambda: self._toolbox.resize_rois(targets, **{field: value}, **self._edit_kwargs())) and len(targets) > 1:
             self._show_notice(f"Set the diameter of {noun}.")
+
+    def _set_rim_cells(self, targets: list[int], column: int, value: float, text: str) -> None:
+        """Set the rim's offset or thickness (px, already parsed) of the ROIs in ``targets`` that have a rim: the same for a circle, a rectangle and a pixel map."""
+        rows = {row.roi_id: row for row in self._model.rows()}
+        targets = [i for i in targets if i in rows and has_cell(rows[i], column)]  # a reference has no rim, nor has a ROI whose rim is switched off
+        if not targets:
+            self._show_notice("These ROIs have no rim to set (a reference has none; Add rim gives a ROI one).")
+            return
+        word, keyword = ("offset", "offset_px") if column == COLUMN_RIM_OFFSET else ("thickness", "thickness_px")
+        if self._guarded(f"Set rim {word}", lambda: self._toolbox.set_rim(targets, **{keyword: value}, **self._edit_kwargs())) and len(targets) > 1:
+            self._show_notice(f"Set the rim {word} of {len(targets)} ROIs to {text.strip()} {self._model.unit().label}.")
 
     # -- Excel-style copy / paste / fill down / step (on the current cell) ---------------------
 
@@ -1048,7 +1102,7 @@ class RoiTablePanel(QWidget):
             self._guarded("Move", lambda: self._toolbox.translate_rois(targets, dx, dy, **self._edit_kwargs()))
             return
         text = self._live_edit_text(roi_id, column)
-        stepped = angle_step_text(text, direction, large) if column == COLUMN_ANGLE else step_text(text, direction, large, unit)
+        stepped = angle_step_text(text, direction, large) if column == COLUMN_ANGLE else step_text(text, direction, large, unit, signed=column == COLUMN_RIM_OFFSET)
         if stepped is not None:
             self._on_cell_edited("roi", roi_id, column, stepped)
 

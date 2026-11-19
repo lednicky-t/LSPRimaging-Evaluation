@@ -37,7 +37,7 @@ class RoiDisplayMenu(QToolButton):
         style_general_icon_button(self)
         self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.setToolTip(
-            "ROI display: show or hide, colour and transparency of the sample circles and reference rings, "
+            "ROI display: show or hide, colour and transparency of the sample circles and reference rims, "
             "and the labels with where they sit around each ROI and their text size."
         )
 

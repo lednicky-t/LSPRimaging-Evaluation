@@ -164,6 +164,48 @@ class RoiCreation(QObject):
 
         self._run("Rectangle size", command)
 
+    # -- rim pairs and linked pairs -----------------------------------------------------------------
+
+    def can_add_rim(self, roi_ids) -> bool:
+        """Some selected ROI would get a rim (an unused reference, a sample whose rim is off)."""
+        return any(self._toolbox.can_add_rim(i) for i in self._known(roi_ids))
+
+    def can_rim_to_reference(self, roi_ids) -> bool:
+        """Some selected ROI is a sample with a rim and no links: its rim can become a linked reference."""
+        return any(self._toolbox.rim_refusal(i) is None for i in self._known(roi_ids))
+
+    def _known(self, roi_ids) -> list[int]:
+        have = {roi.area_roi_id for roi in self._toolbox.rois()}
+        return [int(i) for i in roi_ids if int(i) in have]
+
+    def add_rim(self, roi_ids) -> None:
+        """Give the selected ROIs a rim (`RoiToolbox.add_rim`; the ones that cannot take one are left alone)."""
+        ids = [i for i in self._known(roi_ids) if self._toolbox.can_add_rim(i)]
+
+        def command() -> str:
+            self._toolbox.add_rim(ids)
+            return f"Added a rim to {len(ids)} ROI{'' if len(ids) == 1 else 's'}."
+
+        self._run("Add rim", command)
+
+    def rim_to_reference(self, roi_ids) -> None:
+        """Turn the rim of every selected sample that has one (and no links) into a linked pixel-map reference; say how many were left out and why."""
+        known = self._known(roi_ids)
+        ids = [i for i in known if self._toolbox.rim_refusal(i) is None]
+
+        def command() -> str:
+            shape = self._image_shape()
+            if shape is None:
+                raise ValueError("there is no image on screen to take the rim's pixels from.")
+            if not ids:
+                raise ValueError(self._toolbox.rim_refusal(known[0]) if known else "no ROI is selected.")
+            new_ids = self._toolbox.rims_to_references(ids, (int(shape[0]), int(shape[1])))
+            left_out = len(known) - len(ids)
+            text = f"Turned {len(ids)} rim{'' if len(ids) == 1 else 's'} into linked reference ROI{'' if len(ids) == 1 else 's'} {', '.join(str(i) for i in new_ids)}."
+            return text + (f" {left_out} selected ROI{'' if left_out == 1 else 's'} left out (a reference, already linked, or without a rim)." if left_out else "")
+
+        self._run("Turn rim into linked reference", command)
+
     def can_link(self, roi_ids) -> bool:
         return can_link(self._toolbox, roi_ids)
 

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from .aggregate import TimingAggregator, TimingRow
 from .entry import LogEntry
-from .events import emit_timing, log_event, timed, timed_call
+from .events import StageTimer, emit_timing, log_event, timed, timed_call
 from .filters import EntryFilter
 from .handlers import RingBufferHandler
 from .setup import LogSystem, configure_logging, current
@@ -29,6 +29,7 @@ __all__ = [
     "LogEntry",
     "LogSystem",
     "RingBufferHandler",
+    "StageTimer",
     "TimingAggregator",
     "TimingRow",
     "configure_logging",

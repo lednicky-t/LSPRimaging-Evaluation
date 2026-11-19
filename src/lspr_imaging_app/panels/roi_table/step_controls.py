@@ -20,6 +20,7 @@ and tested apart from the 1,100 lines of the panel. Without a `StepTableModule` 
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
@@ -31,6 +32,7 @@ from lspr_ui import get_active_theme, load_tabler_icon
 
 from ...analysis.export_tables import roi_step_table
 from ...analysis.step_table import OP_BULK, OPERATIONS, GroupMembers
+from ...applog import timed
 from ...selection.step_table_module import StepTableModule, compare_title
 from ...storage.ui_state_keys import ROI_TABLE_COMPARE_COLUMNS, ROI_TABLE_STEP_DISPLAY, ROI_TABLE_STEP_WIDTH_MANUAL, ROI_TABLE_STEPS_SHOWN
 from ..icon_button_style import style_general_icon_button
@@ -75,6 +77,9 @@ _DISPLAY_HTML = {
     DISPLAY_EXCESS_U: "&mu; &minus; &mu;* &plusmn; u",
     DISPLAY_EXCESS_Z: "(&mu; &minus; &mu;*) / u",
 }
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -465,8 +470,10 @@ class StepColumnControls(QObject):
             return
         self._sync_subtract()
         theme = get_active_theme()
-        rois, groups = self.visible_rows()
-        missing = self._steps.count_not_current(rois, groups)
+        with timed(logger, "roi_table.step_state") as t:  # (the rows on screen, and how many of them have no up-to-date numbers: the work behind the refresh button's light)
+            rois, groups = self.visible_rows()
+            missing = self._steps.count_not_current(rois, groups)
+            t.set(rois=len(rois), groups=len(groups), missing=missing)
         total = len(rois) + len(groups)
         busy = self._steps.is_running()
         lit = missing > 0 and not busy

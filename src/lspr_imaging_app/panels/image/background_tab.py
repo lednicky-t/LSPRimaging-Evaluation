@@ -84,7 +84,7 @@ BACKGROUND_INFO_HTML = (
     "&bull; Only smooth illumination (slower than Sigma) is corrected; a small Sigma follows finer structure "
     "but can start absorbing real signal.<br>"
     "&bull; Needs enough free substrate around the ROIs.<br>"
-    "&bull; With a reference ring centred on the sample the gain already cancels, so the benefit is small."
+    "&bull; With a reference rim centred on the sample the gain already cancels, so the benefit is small."
 )
 
 

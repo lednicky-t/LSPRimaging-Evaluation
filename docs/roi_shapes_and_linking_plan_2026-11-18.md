@@ -517,3 +517,75 @@ start, a border drag that stores nothing. Updated: `test_lspri_rectangle_handles
 
 **Open / maintainer's decisions:** handles are drawn for every selected rectangle (150 selected = 150 sets of handles, as before; only the cost is gone); a pixel mask's border cannot be dragged;
 the rotate cursor's look (size, colours) is unseen by eye.
+
+### Rim pairs, linked pairs, the Type column (R1-R5 and the Offset / Thickness columns BUILT 2026-11-19; UNSEEN BY EYE)
+
+**The idea (maintainer).** Two kinds of sample / reference pair, and moves between them: a **rim pair** (the sample measures against its own built-in border) and a **linked pair** (the
+sample is linked to a reference ROI of its own). The table's Shape column becomes **Type** and shows shape *and* kind; its icons are coloured by kind. Terminology: **"rim"**
+in everything the user reads (labels, tool tips, undo labels, the shortcut table, docs); the code keeps `Border`, `border` and the session keys (renaming those would change saved
+files and the cell hash for nothing).
+
+**Decisions (maintainer, answers to the questions of 2026-11-19).**
+1. **Rim pair -> linked pair:** the rim's pixels become a **pixel map**, a new reference ROI linked to the sample (a frozen copy of the rim as it is at the reference wavelength: it
+   no longer follows the sample, as decision 4 above says; a map cannot be moved, `move_refusal`). One new reference per sample, however many blobs the rim has. Only for a sample that
+   has a rim and no links. The sample's own rim is **kept, dormant** (the link wins, decision 2 above; Unlink or deleting the new reference brings the rim back). One undo step.
+2. **Pixel map -> rim pair:** a map that is a sample has a rim like any shape (`Border(gap, thickness)`, the shared default 4 + 4 px unless it has its own). New command **Add rim**
+   (a free reference or a rim-less sample becomes a sample with a rim; one undo step). Gap and thickness are editable in the table: **the same two columns for every shape**, Offset and Thickness (maintainer, later the same day: they replaced the
+   circle's ring-diameter columns d_r / D_r instead of being added; see "Offset and Thickness columns" below).
+3. **Each blob of a map gets its own rim; the rims together are one reference region.** The band is the union of the bands of the blobs (8-connected blobs, as `mask_regions`),
+   each measured from its own edge; the pixels of the map's *other* blobs are left out of a blob's band. (Measured from the map as a whole, a point near blob B but in the band of blob A
+   is excluded; per blob it is included. Identical for a one-blob map: kept bit for bit.) A change of what a multi-blob map's rim covers, so such a ROI's cell hash gets a marker
+   (the `|reference` pattern: only an affected ROI changes, no `SCAN_ALGORITHM_VERSION` bump).
+4. **Type column** (was Shape): one pictogram of the shape (circle, rectangle, map) with a **ring drawn round it when the ROI measures against its own rim** (a linked sample, whose rim is
+   dormant, and a reference show the plain shape). The icon is coloured **by kind**, not by the ROI's own colour (the dot in the first column keeps that): **green** = a sample with a
+   rim or with links, **amber** = a sample with neither (no reference: its numbers are missing), **blue** = a reference linked to a sample, **gray** = a reference nobody uses. The colours
+   apply to the Type icons only (not to the dot, the image or the plots).
+
+**Build order (each step tested before the next; relevant test files only until the end).**
+- **R1** per-blob rim in `roi/rasterize.py` + cell-hash marker; before / after on realistic masks; `test_lspri_roi_shapes.py`, golden pins untouched.
+- **R2** toolbox: `rim_to_reference` (needs the frame shape: the panel hands it over), `add_rim`; tests incl. a **numbers check**: the new reference's pixels against the rim's, per wavelength
+  of a realistic chromatic affine (the map is warped, the rim is measured: the two pixel tests differ at the edge; quantify).
+- **R3** menus (the one ROI menu builder, `menu_icons.ICONS` lines), status-bar messages.
+- **R4** Type column: keys, icons, colours, tool tips; then Gap / Thickness columns.
+- **R5** wording: "ring" -> "rim" in the user's text; docs; the eva `CLAUDE.md` lines.
+
+**What was built (2026-11-19) and measured.**
+- **R1 per-blob rim** (`roi/rasterize._mask_band`, `_mask_band_at`; `mask_regions.EIGHT_CONNECTED` / `blob_count`): a pixel map's rim is the union of the bands of its 8-connected blobs, each from
+  its own edge, without the pixels of the other blobs; a one-blob map is bit for bit what it was (the old whole-map band is the one-blob case). The cell hash of a many-blob map with a rim carries
+  `|blob-rims` (`frame_reduce._update_with_free_shape`), so only such a ROI goes stale; every pin of `test_lspri_scan_circle_golden.py` is untouched. **Measured** (1 ROI = 10 x 16 disc blobs of 10 px,
+  1200 x 1000 frame, rim 4 + 4 px): pitch 40 and 25 px identical (44,160 and 41,220 rim pixels); pitch 20 px 20,346 -> 32,694 pixels, 16 px 5,247 -> 23,415, 12 px 2,580 -> 11,772: **only gains**
+  (the whole-map band had dropped every pixel near a neighbouring blob), never a pixel lost; also **3-5 x faster** to build (31-71 ms against 206-292 ms: a small distance map per blob instead of one
+  for the whole bounding box). Tests: `tests/unit/test_lspri_pixel_map_rim.py` (9, brute force with `cdist`; the whole-map mutation fails 2).
+- **R2 toolbox** (`RoiToolbox.rims_to_references(sample_ids, image_shape)`, `rim_refusal`, `add_rim`, `can_add_rim`): the rim's pixels at the reference wavelength (identity affine, the sample's own pixels
+  left out) become one pixel-map reference ROI per sample, linked; the sample's own rim is kept (dormant); one undo step; refusals (a reference, already linked, no rim, rim outside the image)
+  change nothing. `add_rim`: an unused reference becomes a sample, a sample with its rim off gets the shared default (4 + 4 px); one undo step (batch). **Measured, the conversion's numbers**
+  (1200 x 1000 sloped noisy frame, noise sigma 6 counts, reference-mean SEM 0.3): at the reference wavelength **identical** (0 pixels differ, circle and rectangle); under the golden set's chromatic
+  affine (shift ~2.5 px, scale 0.4 %) about 3 % of the rim's pixels differ (circle D 20: 13 out, 12 in of 405; rectangle 24 x 12: 23 and 23 of 436), under a ~10 px shift 7-10 % (the map is warped
+  nearest neighbour, the rim measured exactly: a pixel in on one side for a pixel out on the other); the reference mean moves by **0.1-0.25 counts on 1000 (100-250 ppm), the size of its own noise**,
+  with no sign. A converted reference is a frozen copy of the rim at the reference wavelength. Tests: `tests/unit/test_lspri_rim_pairs.py` (15).
+- **R3 menus**: right-click ROI menu **Add rim** and **Turn rim into linked reference** (left out when they cannot be used; `roi_context_menu.py`, `roi_creation.py`, `interaction.py`; icons
+  `add_rim` = the ROI tab's sample-in-rim picture, `rim_to_reference` = the link icon, in `menu_icons.ICONS`; no new vendored icon). The status line names what was done and how many selected
+  ROIs were left out. Tests: `test_lspri_roi_phase3_ui.py`.
+- **R4 Type column** (was Shape): `rows.icon_of` / `kind_of` (`ICON_*`, `KIND_*`), `type_icons.py` (painting, `kind_color`), `RoiRow.type_icon` / `.kind`, `TYPE_ROLE`; a ring (blue, the reference colour)
+  round the shape only while the ROI measures against its own rim; fill: green (rim or links), amber (no reference), blue (reference used), gray (reference free); the dot of the first column keeps
+  the ROI's colour. The cell text is "Circle with rim", "Pixel map", ...; the tooltip adds what it is measured against and the size; the column sorts the kinds together. `row.shape` (the editing key,
+  `SHAPE_FIELDS`) is unchanged. Tests: `test_lspri_roi_table_type_column.py` (13, pictograms painted into an image and read back).
+- **R5 wording**: "ring" and "border" became "rim" in everything the user reads (labels, tool tips, status and error messages, undo labels, the shortcut table); code identifiers (`Border`, `ring_radii`,
+  `border` in the session file, `scan.h5` `layout_json`) are unchanged on purpose: a rename there would change saved files and cell hashes for nothing.
+
+**Offset and Thickness columns (BUILT 2026-11-19, maintainer: "the rim columns should be the same for rectangle, circle and map, thus offset from edge and thickness of band/rim"; UNSEEN BY EYE).**
+- **Headers are short: `d` (offset) and `w` (thickness)** (maintainer, same day; `COLUMN_TITLES`; the header tool tips spell them out, like D_s / W / H). Model columns 5 and 6 (`rows.COLUMN_RIM_OFFSET`, `COLUMN_RIM_THICKNESS`, were the circle's `COLUMN_RING_IN` / `COLUMN_RING_OUT`, the ring's inner and outer *diameters* d_r / D_r) now show the rim's
+  **offset** from the shape's edge (negative = the rim starts inside the shape) and its **thickness**: the same two numbers for a circle, a rectangle and a pixel map, in the display unit. No new
+  column and no renumbering: every saved hidden-column key, frozen column and width list still names the same two columns (a saved width may be too narrow for the longer title "Thickness"; drag it).
+- A ROI has the cells while it has a rim to measure (`RoiRow.has_rim`: not a reference, rim not switched off; a linked sample's dormant rim counts); otherwise blank and not editable. Grey italic
+  while the rim is the shared default's. `rows.has_cell` is the one answer; `SHAPE_FIELDS` now lists only D_s (circle) and W / H / θ (rectangle).
+- Editing: `RoiToolbox.set_rim(ids, offset_px=, thickness_px=)` (any shape; one undo step; refuses a reference, a ROI without a rim, a non-finite number, a negative thickness) and the same rule inside
+  `set_cell_values` (paste, fields `rim_offset_px` / `rim_thickness_px`: all or nothing). A ROI that follows the default gets a rim of its own with the typed number and the default's other one. Up / Down and the
+  wheel step an offset through zero (`step_text(signed=True)`); a thickness stops at 0. A circle's numbers are the same rim `resize_rois` stores for ring diameters (identical radii, tested): the circle's
+  ring drag on the image still works in diameters, the table shows the result as offset / thickness. A pixel map's rim can now be sized (per blob, see above).
+- **Not changed:** `resize_rois(reference_inner_diameter_px=...)` and the cell fields `reference_inner_diameter_px` / `reference_outer_diameter_px` stay in the toolbox API (the image's ring drag and the Array
+  tools use diameters); the table no longer uses them. Tests: `test_lspri_roi_table_rim_columns.py` (12); the five older table test files were updated from diameters to offset / thickness.
+
+**Not built / open.**
+- The Linked view's row order and the table's colour for a *dormant* rim are as described above; nothing marks that a linked sample still has a rim it is not using (the tooltip does not say either).
+- **Unseen by eye:** the pictograms (sizes, the jagged map-with-rim outline), the menu entries and their icons.

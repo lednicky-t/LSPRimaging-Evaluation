@@ -135,7 +135,7 @@ class RoiQueries:
             return None
         roi = rois[best[1]]
         ring = rasterize_reference(roi, shape, affine, default_border=default_border)
-        return ring, f"ROI {roi.area_roi_id} reference {'ring' if isinstance(roi.shape, Circle) else 'border'}"
+        return ring, f"ROI {roi.area_roi_id} reference rim"
 
     def rois_in_rect(self, x0: float, y0: float, x1: float, y1: float) -> set[int]:
         """Ids of the ROIs whose display-space *centre* lies in the rectangle

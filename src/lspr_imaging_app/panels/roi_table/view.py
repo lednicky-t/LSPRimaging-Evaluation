@@ -16,7 +16,9 @@ to Qt. A freeze that would fill more than `_FREEZE_MAX_SHARE` of the view is not
 
 from __future__ import annotations
 
+import logging
 import math
+import time
 from collections.abc import Callable
 
 from dataclasses import dataclass
@@ -27,13 +29,14 @@ from PyQt6.QtWidgets import QAbstractItemView, QApplication, QHeaderView, QStyle
 
 from lspr_ui import get_active_theme
 
+from ...applog import StageTimer, log_event
 from ...shortcuts import matches
 from .cell_marks import CellMarks, Edges
 from .cell_marks import edges as block_edges
 from .column_keys import ColumnKey
 from .column_keys import column_key as key_of_step_column
 from .delegate import CELL_ROOM, CHEVRON_ZONE, CHIP_SIZE, GROUP_INDENT, STRIP_WIDTH, first_column_collapsed, tinted_text_color
-from .model import COLUMN_KIND_ROLE, DEPTH_ROLE, KIND_ROLE, STEP_TINT_ROLE
+from .model import COLUMN_KIND_ROLE, DEPTH_ROLE, KIND_ROLE, STEP_TINT_ROLE, VALUES_ONLY_ROLE
 from .rows import (
     COLUMN_ANGLE,
     COLUMN_AREA,
@@ -41,8 +44,8 @@ from .rows import (
     COLUMN_HEIGHT,
     COLUMN_ID,
     COLUMN_NAME,
-    COLUMN_RING_IN,
-    COLUMN_RING_OUT,
+    COLUMN_RIM_OFFSET,
+    COLUMN_RIM_THICKNESS,
     COLUMN_SAMPLE,
     COLUMN_SHAPE,
     COLUMN_TITLES,
@@ -110,6 +113,12 @@ def runs_width(font: QFont, runs: list[tuple[str, bool]]) -> int:
     """Width in px of a title written as `step_columns.subscript_runs` gives it, in `font` (subscripts in the smaller font `SubscriptHeader` draws them in)."""
     base, small = QFontMetrics(font), QFontMetrics(_subscript_font(font))
     return sum((small if sub else base).horizontalAdvance(text) for text, sub in runs)
+
+
+logger = logging.getLogger(__name__)
+_SLOW_PAINT_MS = 20.0
+"""A paint of the table longer than this is logged (`roi_table.slow_paint`, DEBUG). A full viewport of 26 rows is 27-31 ms on the development laptop (2026-11-19), so this notes the big ones;
+the one-row repaints of a hover are a few ms."""
 
 
 class SubscriptHeader(QHeaderView):
@@ -368,14 +377,14 @@ def suggested_column_widths(metrics: QFontMetrics) -> list[int]:
     guessed, so figures are not clipped in the user's font."""
     advance = metrics.horizontalAdvance
     number = advance("9999.9") + _CELL_PADDING
-    diameter = max(advance("999.9") + _CELL_PADDING, title_width(metrics, COLUMN_TITLES[COLUMN_RING_OUT]) + _SORT_INDICATOR_ROOM)
+    diameter = max(advance("999.9") + _CELL_PADDING, title_width(metrics, COLUMN_TITLES[COLUMN_SAMPLE]) + _SORT_INDICATOR_ROOM)
     widths = [0] * COLUMN_COUNT
     widths[COLUMN_ID] = STRIP_WIDTH + 5 + GROUP_INDENT + CHIP_SIZE + 7 + advance("9999") + 10
     widths[COLUMN_NAME] = advance("Group label 99") + _CELL_PADDING
     widths[COLUMN_X] = widths[COLUMN_Y] = max(number, advance(COLUMN_TITLES[COLUMN_X]) + _SORT_INDICATOR_ROOM)
     widths[COLUMN_SAMPLE] = max(diameter, title_width(metrics, COLUMN_TITLES[COLUMN_SAMPLE]) + _SORT_INDICATOR_ROOM)
-    widths[COLUMN_RING_IN] = max(diameter, title_width(metrics, COLUMN_TITLES[COLUMN_RING_IN]) + _SORT_INDICATOR_ROOM)
-    widths[COLUMN_RING_OUT] = diameter
+    widths[COLUMN_RIM_OFFSET] = max(advance("-999.9") + _CELL_PADDING, title_width(metrics, COLUMN_TITLES[COLUMN_RIM_OFFSET]) + _SORT_INDICATOR_ROOM)  # an offset can be negative
+    widths[COLUMN_RIM_THICKNESS] = max(diameter, title_width(metrics, COLUMN_TITLES[COLUMN_RIM_THICKNESS]) + _SORT_INDICATOR_ROOM)
     widths[COLUMN_SHAPE] = max(32, advance(COLUMN_TITLES[COLUMN_SHAPE]) + _SORT_INDICATOR_ROOM)
     widths[COLUMN_WIDTH] = widths[COLUMN_HEIGHT] = max(diameter, advance(COLUMN_TITLES[COLUMN_WIDTH]) + _SORT_INDICATOR_ROOM)
     widths[COLUMN_ANGLE] = max(advance("-999.9") + _CELL_PADDING, advance(COLUMN_TITLES[COLUMN_ANGLE]) + _SORT_INDICATOR_ROOM)  # a turn can be negative
@@ -458,7 +467,7 @@ class RoiTreeView(QTreeView):
             self.setColumnWidth(column, width)
             self.setColumnHidden(column, self.is_user_hidden(column))
 
-    def step_column_fit(self, column: int) -> int:
+    def step_column_fit(self, column: int, stages: StageTimer | None = None) -> int:
         """The width a step column needs: wide enough for its title (bold, as the header draws it, with the room for the sort triangle or the comparison menu's arrow) and for
         the widest thing any row shows in it. A column with no numbers yet gets the old default, so it does not jump narrow and then wide when the first calculation ends."""
         model = self.model()
@@ -469,17 +478,30 @@ class RoiTreeView(QTreeView):
         runs = subscript_runs(title) if compare else []  # (a comparison column's title is drawn with subscripts, which are narrower than the underscore text)
         text_width = runs_width(bold, runs) if any(sub for _text, sub in runs) else QFontMetrics(bold).horizontalAdvance(title)
         title_room = text_width + 2 * _SECTION_PADDING + (_ARROW_ZONE if compare else _SORT_ARROW_ROOM)
+        if stages is not None:
+            stages.mark("title")
         texts = model.step_texts(column - COLUMN_COUNT)
+        if stages is not None:
+            stages.mark("format")  # (every row's and group's number written as the cell shows it)
         if not texts:
             return min(max(title_room, STEP_WIDTH_DEFAULT), MAX_STEP_WIDTH)
         cells = widest_text(texts, self.fontMetrics().horizontalAdvance) + CELL_ROOM
+        if stages is not None:
+            stages.mark("measure")
         return min(max(title_room, cells, MIN_STEP_WIDTH), MAX_STEP_WIDTH)
 
     def fit_step_columns(self) -> None:
-        """Every step column gets the width its own content needs (`step_column_fit`); the fixed columns are not touched."""
-        for column in range(COLUMN_COUNT, self.model().columnCount() if self.model() is not None else 0):
-            self.setColumnWidth(column, self.step_column_fit(column))  # (a column the user hid keeps its fitted width for when it is shown again)
+        """Every step column gets the width its own content needs (`step_column_fit`); the fixed columns are not touched. One ``roi_table.fit_step_columns`` record (DEBUG) says how
+        long it took and in which stage, summed over the columns: ``title`` (measuring the header text), ``format`` (writing every row's and group's number as its cell shows it),
+        ``measure`` (the widest of those texts), ``set`` (setting the widths: Qt's resize signals run in there)."""
+        model = self.model()
+        stages = StageTimer()
+        for column in range(COLUMN_COUNT, model.columnCount() if model is not None else 0):
+            self.setColumnWidth(column, self.step_column_fit(column, stages))  # (a column the user hid keeps its fitted width for when it is shown again)
             self.setColumnHidden(column, self.is_user_hidden(column))
+            stages.mark("set")
+        if model is not None:
+            stages.emit(logger, "roi_table.fit_step_columns", columns=model.columnCount() - COLUMN_COUNT, rows=len(model.rows()))
 
     def sizeHintForColumn(self, column: int) -> int:  # type: ignore[override]
         """What Qt's "resize to contents" (a double-click on a section's edge) asks for. The delegate gives no width of its own, so for a step column the answer is the fit."""
@@ -664,12 +686,19 @@ class RoiTreeView(QTreeView):
             self._repaint_all()  # Qt moved the pixels of the frozen cells with the rest: draw them again in place
 
     def dataChanged(self, top_left: QModelIndex, bottom_right: QModelIndex, roles=()) -> None:  # type: ignore[override]
+        if VALUES_ONLY_ROLE in roles:
+            self.viewport().update()  # only what the cells say changed: nothing to lay out again (Qt's handler asks the delegate for the size of every cell of the range)
+            return
         super().dataChanged(top_left, bottom_right, roles)
         if self._frozen_upto >= 0 and self.header().offset() > 0:
             self.viewport().update()  # `visualRect` of a frozen cell is not where Qt looks for the scrolled copy
 
     def paintEvent(self, event: QPaintEvent) -> None:  # type: ignore[override]
+        started = time.perf_counter()
         super().paintEvent(event)
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        if elapsed_ms > _SLOW_PAINT_MS:  # only a slow paint is logged (a table repaints on every hover and scroll step: one record each would be a flood)
+            log_event(logger, "roi_table.slow_paint", logging.DEBUG, ms=round(elapsed_ms, 1), width=event.rect().width(), height=event.rect().height())
         width = self.pinned_width() if self._frozen_upto >= 0 else 0
         if width:  # a line at the frozen columns' right edge, so a frozen table looks frozen before it is scrolled
             painter = QPainter(self.viewport())

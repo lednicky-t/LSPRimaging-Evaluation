@@ -27,27 +27,26 @@ from .model import (
     COUNT_ROLE,
     DEPTH_ROLE,
     GROUP_ID_ROLE,
-    INHERITED_ROLE,
     KIND_ROLE,
-    MASK_ROLE,
-    SHAPE_ROLE,
+    PAINT_ROLE,
     STEP_STALE_ROLE,
     STEP_TINT_ROLE,
+    TYPE_ROLE,
 )
 from .rows import (
     COLUMN_ANGLE,
     COLUMN_COUNT,
     COLUMN_ID,
     COLUMN_NAME,
+    COLUMN_RIM_OFFSET,
     COLUMN_SHAPE,
-    SHAPE_DISK,
-    SHAPE_MASK,
-    SHAPE_RECTANGLE,
-    SHAPE_RING,
+    ICON_OTHER,
+    KIND_REFERENCE_FREE,
     SIZE_COLUMNS,
     angle_step_text,
     step_text,
 )
+from .type_icons import paint_type_icon
 
 STRIP_WIDTH = 3
 """Left edge of every ROI row, left clear for a status strip (analysis state)
@@ -67,6 +66,23 @@ _COLUMN_LINE_ALPHA = 55
 _STALE_TINTED_TEXT_ALPHA = 135  # a number that is out of date, on a coloured step column: the same text colour, fainter (`text_dim` could vanish into the colour)
 LABEL_WASH_ALPHA = 0.5
 """While #/ROIs is hidden, the colour its dot / chip carried is painted behind the label instead, at this opacity (the same as the plan bar's default for a step colour)."""
+
+
+_STATE_SELECTED = QStyle.StateFlag.State_Selected.value  # (`state & State_Selected` builds a new enum each time: 1.5 µs, for every cell painted)
+_ELIDE_RIGHT = Qt.TextElideMode.ElideRight
+_ANTIALIASING = QPainter.RenderHint.Antialiasing
+_LINE_PENS: dict[str, tuple[QPen, QPen]] = {}
+
+
+def _line_pens(theme) -> tuple[QPen, QPen]:
+    """The two hairline pens (under a row, between columns) in the theme's border colour, made once per colour: a pen and two colours were made for every cell painted."""
+    pens = _LINE_PENS.get(theme.toolbar_border)
+    if pens is None:
+        row, column = QColor(theme.toolbar_border), QColor(theme.toolbar_border)
+        row.setAlpha(_ROW_LINE_ALPHA)
+        column.setAlpha(_COLUMN_LINE_ALPHA)
+        pens = _LINE_PENS[theme.toolbar_border] = (QPen(row, 1), QPen(column, 1))
+    return pens
 
 
 def first_column_collapsed(view) -> bool:
@@ -113,16 +129,17 @@ class _StepLineEdit(QLineEdit):
     """The cell editor. In a size or angle cell, Up / Down step the value (Shift: the
     large step); Enter then applies it, to every selected ROI like any edit."""
 
-    def __init__(self, parent: QWidget, unit, *, angle: bool = False) -> None:
+    def __init__(self, parent: QWidget, unit, *, angle: bool = False, signed: bool = False) -> None:
         super().__init__(parent)
         self._unit = unit  # None: this cell does not step
         self._angle = angle  # degrees (stepped by `angle_step_text`) instead of a length in `unit`
+        self._signed = signed  # a length that may go below zero (a rim's offset)
 
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
         large = matches(event, "roi_table.cell_step_large")
         if self._unit is not None and (large or matches(event, "roi_table.cell_step")):
             direction = 1 if event.key() == Qt.Key.Key_Up else -1
-            stepped = angle_step_text(self.text(), direction, large) if self._angle else step_text(self.text(), direction, large, self._unit)
+            stepped = angle_step_text(self.text(), direction, large) if self._angle else step_text(self.text(), direction, large, self._unit, signed=self._signed)
             if stepped is not None:
                 self.setText(stepped)
             event.accept()
@@ -176,7 +193,7 @@ class RoiTableDelegate(QStyledItemDelegate):
         return color
 
     def _paint_row_background(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex, theme) -> None:
-        if option.state & QStyle.StateFlag.State_Selected:
+        if option.state.value & _STATE_SELECTED:
             painter.fillRect(option.rect, self._selected_tint(theme))
         elif self._hovered(option, index):
             hover = QColor(theme.control_bg_hover)
@@ -186,7 +203,9 @@ class RoiTableDelegate(QStyledItemDelegate):
     def _paint_roi(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
         theme = get_active_theme()
         rect = option.rect
-        tint = step_tint_of(index)
+        text, dim, stale, alignment, tint = index.data(PAINT_ROLE)  # one question for everything the cell shows (it was seven)
+        if tint is not None and not (isinstance(tint, QColor) and tint.isValid()):
+            tint = None
         column = index.column()
         if tint is not None:
             painter.fillRect(rect, tint)  # under the selection / hover tint, which therefore still shows
@@ -206,26 +225,22 @@ class RoiTableDelegate(QStyledItemDelegate):
         if column == COLUMN_SHAPE:
             self._paint_shape(painter, rect, index, theme)
             return
-        font = QFont(option.font)
         color = QColor(theme.text_primary)
-        text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
-        if index.data(INHERITED_ROLE) or (index.data(MASK_ROLE) and text == "mask") or index.data(STEP_STALE_ROLE):
+        if dim or stale:
             color = QColor(theme.text_dim)  # dim, not italic: italics read as "different kind of value" (a step number that is out of date is dimmed the same way)
         if tint is not None:
-            color = tinted_text_color(tint, QColor(theme.toolbar_bg), stale=bool(index.data(STEP_STALE_ROLE)))
+            color = tinted_text_color(tint, QColor(theme.toolbar_bg), stale=stale)
         elif wash is not None:
             color = tinted_text_color(wash, QColor(theme.toolbar_bg))  # readable on any colour, as on a step colour
-        alignment =index.data(Qt.ItemDataRole.TextAlignmentRole)
-        alignment = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter if alignment is None else Qt.AlignmentFlag(alignment)
         if column == COLUMN_ID:
             left = rect.left() + STRIP_WIDTH + 5 + (GROUP_INDENT if index.data(DEPTH_ROLE) else 0)
             self._paint_dot(painter, QRectF(left, rect.center().y() - CHIP_SIZE / 2 + 0.5, CHIP_SIZE, CHIP_SIZE), index.data(COLOR_ROLE), theme)
             text_rect = QRect(left + CHIP_SIZE + 7, rect.top(), max(0, rect.right() - left - CHIP_SIZE - 7), rect.height())
         else:
             text_rect = rect.adjusted(_CELL_PAD, 0, -_CELL_PAD - 2, 0)
-        painter.setFont(font)
+        painter.setFont(option.font)
         painter.setPen(color)
-        painter.drawText(text_rect, int(alignment), option.fontMetrics.elidedText(text, Qt.TextElideMode.ElideRight, text_rect.width()))
+        painter.drawText(text_rect, alignment, option.fontMetrics.elidedText(text, _ELIDE_RIGHT, text_rect.width()))
         if picked is not None:
             self._draw_block_edges(painter, rect, picked, QPen(QColor(theme.accent_blue), _RANGE_EDGE_WIDTH))
         if copied is not None:
@@ -256,35 +271,10 @@ class RoiTableDelegate(QStyledItemDelegate):
 
     @staticmethod
     def _paint_shape(painter: QPainter, rect: QRect, index: QModelIndex, theme) -> None:
-        """A small pictogram of the ROI's shape, in the ROI's own colour (the name is the tooltip).
-
-        TODO(shapes): rectangle with frame, polygon and freehand have no pictogram yet; they
-        fall under "other" (drawn as a question mark) until they are implemented."""
-        shape = index.data(SHAPE_ROLE)
-        fill = QColor(index.data(COLOR_ROLE) or theme.text_dim)
-        outline = QPen(QColor(theme.text_secondary), 1.3)
-        center = QPointF(rect.left() + _CELL_PAD + 8.0, rect.center().y() + 0.5)
-        painter.setPen(outline)
-        if shape == SHAPE_RING:
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawEllipse(center, 7.0, 7.0)
-            painter.setBrush(fill)
-            painter.drawEllipse(center, 3.2, 3.2)
-        elif shape == SHAPE_DISK:
-            painter.setBrush(fill)
-            painter.drawEllipse(center, 5.0, 5.0)
-        elif shape == SHAPE_RECTANGLE:
-            painter.setBrush(fill)
-            painter.drawRect(QRectF(center.x() - 7.0, center.y() - 4.5, 14.0, 9.0))
-        elif shape == SHAPE_MASK:
-            outline.setStyle(Qt.PenStyle.DashLine)
-            painter.setPen(outline)
-            painter.setBrush(fill)
-            points = [(-6, -2), (-3, -6), (2, -5), (6, -1), (4, 5), (-1, 6), (-5, 3)]
-            painter.drawPolygon(QPolygonF([QPointF(center.x() + dx, center.y() + dy) for dx, dy in points]))
-        else:
-            painter.setPen(QColor(theme.text_dim))
-            painter.drawText(QRectF(center.x() - 8, rect.top(), 16, rect.height()), int(Qt.AlignmentFlag.AlignCenter), "?")
+        """The Type cell's pictogram: the ROI's shape, a ring round it while it measures against its own rim, filled in the colour of its kind of pair (green, amber,
+        blue, gray: `type_icons`). The name and the kind in words are the tooltip."""
+        icon, kind = index.data(TYPE_ROLE) or (ICON_OTHER, KIND_REFERENCE_FREE)
+        paint_type_icon(painter, QPointF(rect.left() + _CELL_PAD + 8.0, rect.center().y() + 0.5), icon, kind, theme)
 
     @staticmethod
     def _last_column_on_screen(view, model) -> int:
@@ -302,16 +292,14 @@ class RoiTableDelegate(QStyledItemDelegate):
     def _paint_cell_borders(painter: QPainter, rect: QRect, column: int, theme, last_column: int = COLUMN_COUNT - 1) -> None:
         """Hairlines under the row and between the value columns: faint enough
         to guide the eye along a row and down a column, never a heavy grid."""
-        line = QColor(theme.toolbar_border)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        line.setAlpha(_ROW_LINE_ALPHA)
-        painter.setPen(QPen(line, 1))
+        row_pen, column_pen = _line_pens(theme)
+        painter.setRenderHint(_ANTIALIASING, False)
+        painter.setPen(row_pen)
         painter.drawLine(rect.bottomLeft(), rect.bottomRight())
         if column != last_column:
-            line.setAlpha(_COLUMN_LINE_ALPHA)
-            painter.setPen(QPen(line, 1))
+            painter.setPen(column_pen)
             painter.drawLine(rect.topRight(), rect.bottomRight())
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(_ANTIALIASING, True)
 
     @staticmethod
     def _paint_dot(painter: QPainter, rect: QRectF, color_hex: str | None, theme) -> None:
@@ -479,7 +467,7 @@ class RoiTableDelegate(QStyledItemDelegate):
             self._editing = QPersistentModelIndex(index)
         steps = index.data(KIND_ROLE) != "group" and index.column() in SIZE_COLUMNS
         unit = getattr(index.model(), "unit", None)
-        editor = _StepLineEdit(parent, unit() if steps and callable(unit) else None, angle=index.column() == COLUMN_ANGLE)
+        editor = _StepLineEdit(parent, unit() if steps and callable(unit) else None, angle=index.column() == COLUMN_ANGLE, signed=index.column() == COLUMN_RIM_OFFSET)
         theme = get_active_theme()
         editor.setStyleSheet(
             f"QLineEdit {{ background: {theme.control_bg}; color: {theme.text_primary}; "

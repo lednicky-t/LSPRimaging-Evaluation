@@ -117,7 +117,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from ..applog.events import emit_timing
 from ..change_events import RoiComputationalChange, RoiCosmeticChange, RoiLinkChange
 from ..diagnostics import instrumented
-from ..image_tools.chromatic.affine import apply_affine_to_points
+from ..image_tools.chromatic.affine import apply_affine_to_points, identity_affine_matrix
 from ..undo import FunctionCommand, undo_manager
 from ..domain.roi_model import (
     GEOMETRY_SCOPES,
@@ -139,6 +139,7 @@ from ..domain.roi_shapes import Border, Circle, MaskShape, Rectangle, Shape, eff
 from ..domain.roi_links import (
     ROI_ROLES,
     ROLE_REFERENCE,
+    ROLE_SAMPLE,
     cleaned_links,
     is_reference,
     link_refusal,
@@ -148,6 +149,7 @@ from ..domain.roi_links import (
 )
 from .mask_regions import mask_regions
 from .ordering import move_block, renumbering
+from .rasterize import rasterize_reference, rasterize_sample
 from .palette import first_free_tint_index, gradient_tints, next_group_color, normalize_hex, tint_color
 
 logger = logging.getLogger(__name__)
@@ -628,6 +630,107 @@ class RoiToolbox(QObject):
         undo_manager.push(FunctionCommand("Add ROI from selection" if len(new_rois) == 1 else f"Add {len(new_rois)} ROIs from selection", undo_fn=revert, redo_fn=apply))
         return ids
 
+    # -- command API: rim pair <-> linked pair (plan 2026-11-19, "Rim pairs, linked pairs, the Type column") ----------
+
+    def rim_refusal(self, roi_id: int) -> str | None:
+        """Why ROI ``roi_id``'s rim cannot become a linked reference, or ``None`` when it can: only a sample that has a rim and no links has a *rim pair*."""
+        roi = self._rois[int(roi_id)]
+        if is_reference(roi):
+            return f"ROI {roi.area_roi_id} is a reference: it has no rim of its own."
+        if roi.reference_roi_ids:
+            return f"ROI {roi.area_roi_id} is already linked to reference ROIs: it measures against those, not against a rim."
+        if not effective_border(roi.border, self._detection_settings.default_border()).enabled:
+            return f"ROI {roi.area_roi_id} has no rim."
+        return None
+
+    @instrumented("RoiToolbox.rims_to_references")
+    def rims_to_references(self, sample_ids: Collection[int], image_shape: tuple[int, int]) -> tuple[int, ...]:
+        """Turn the rim of each sample ROI in ``sample_ids`` into a reference ROI of its own, linked to that sample: a *rim pair* becomes a *linked pair*. One undo step,
+        one new ROI per sample (appended after the existing ROIs), the new ids returned in the ascending order of the samples' ids.
+
+        The new reference is a **pixel map of the rim's pixels** at the reference wavelength (identity chromatic affine, the frame ``image_shape`` = (rows, columns) of the
+        processed image the ROIs live in), a frozen copy: from now on it is a ROI like any other (it does not follow its sample when that is moved or resized, and being a
+        map it cannot be moved: `move_refusal`). The sample's own rim is **kept, dormant**: a link wins over it (`domain.roi_links.reference_source`), so unlinking, or
+        deleting the new reference, brings the rim back. All blobs of a rim form the one new ROI. The pixels of the sample itself are left out of it.
+
+        Raises ``ValueError`` (the message is for the status line), before anything changes, for a ROI that is a reference, is linked already, has no rim, or whose rim
+        has no pixel inside the image."""
+        rois = self._require_rois(sample_ids)  # ascending ids
+        height, width = int(image_shape[0]), int(image_shape[1])
+        default_border = self._detection_settings.default_border()
+        identity = identity_affine_matrix()
+        planned: list[tuple[AreaRoi, RoiMask, float, float]] = []
+        for roi in rois:
+            refusal = self.rim_refusal(roi.area_roi_id)
+            if refusal:
+                raise ValueError(refusal)
+            rim = rasterize_reference(roi, (height, width), identity, default_border=default_border)
+            rim &= ~rasterize_sample(roi, (height, width), identity)  # the sample's own pixels are not its reference (a negative gap reaches inside it)
+            regions = mask_regions(rim, together=True)
+            if not regions:
+                raise ValueError(f"ROI {roi.area_roi_id}: its rim has no pixel inside the image.")
+            mask, cx, cy = regions[0]
+            planned.append((roi, mask, cx, cy))
+        new_rois: list[AreaRoi] = []
+        for _sample, mask, cx, cy in planned:
+            new_rois.append(
+                AreaRoi(area_roi_id=next(self._roi_id_counter), center_x=self._rounded(cx), center_y=self._rounded(cy), shape=MaskShape(mask), border=None, role=ROLE_REFERENCE)
+            )
+        pairs = [(roi, new.area_roi_id) for (roi, *_), new in zip(planned, new_rois)]
+        before = {roi.area_roi_id: roi.reference_roi_ids for roi, _ in pairs}
+        new_ids = tuple(new.area_roi_id for new in new_rois)
+        sample_set = tuple(sorted(before))
+
+        def apply() -> None:
+            for new in new_rois:
+                self._rois[new.area_roi_id] = new
+            for roi, new_id in pairs:
+                roi.reference_roi_ids = (new_id,)
+            self.geometry_changed.emit(RoiComputationalChange(roi_ids=tuple(sorted(new_ids)), reason="added"))
+            self.links_changed.emit(RoiLinkChange(sample_ids=sample_set, reason="linked"))
+
+        def revert() -> None:
+            for new in new_rois:
+                self._rois.pop(new.area_roi_id, None)
+            for roi, _ in pairs:
+                roi.reference_roi_ids = before[roi.area_roi_id]
+            self.geometry_changed.emit(RoiComputationalChange(roi_ids=tuple(sorted(new_ids)), reason="deleted"))
+            self.links_changed.emit(RoiLinkChange(sample_ids=sample_set, reason="unlinked"))
+
+        apply()
+        label = "Turn rim into linked reference" if len(pairs) == 1 else f"Turn {len(pairs)} rims into linked references"
+        undo_manager.push(FunctionCommand(label, undo_fn=revert, redo_fn=apply))
+        return new_ids
+
+    def can_add_rim(self, roi_id: int) -> bool:
+        """True when `add_rim` would change ROI ``roi_id``: a reference that nobody uses, or a sample whose rim is switched off (a reference that samples are linked to keeps its job)."""
+        roi = self._rois[int(roi_id)]
+        if is_reference(roi):
+            return not samples_linked_to(self._rois.values(), roi.area_roi_id)
+        return not effective_border(roi.border, self._detection_settings.default_border()).enabled
+
+    @instrumented("RoiToolbox.add_rim")
+    def add_rim(self, roi_ids: Collection[int]) -> None:
+        """Give each ROI in ``roi_ids`` a rim: an unused reference becomes a sample (it then measures against its rim), and a sample whose rim is switched off gets a rim of the
+        shared default size (gap and thickness from its shape's edge). Any shape; for a pixel map every blob gets its own. One undo step; a ROI that `can_add_rim` says no to is
+        left alone, and nothing to change pushes no step. Raises ``KeyError`` for an unknown id."""
+        rois = self._require_rois(roi_ids)
+        targets = [roi for roi in rois if self.can_add_rim(roi.area_roi_id)]
+        if not targets:
+            return
+        default = self._detection_settings.default_border()
+        needs_role = [roi.area_roi_id for roi in targets if is_reference(roi)]
+        needs_rim = {roi.area_roi_id: Border(default.gap_px, default.thickness_px) for roi in targets if not effective_border(roi.border, default).enabled}
+        label = "Add rim" if len(targets) == 1 else f"Add rim to {len(targets)} ROIs"
+        undo_manager.begin_batch(label)  # the role and the rim are one step for the user
+        try:
+            if needs_role:
+                self.set_roi_role(needs_role, ROLE_SAMPLE)
+            if needs_rim:
+                self.set_borders(needs_rim)
+        finally:
+            undo_manager.end_batch()
+
     # -- multi-ROI helpers ----------------------------------------------
 
     def _require_rois(self, roi_ids: Collection[int]) -> list[AreaRoi]:
@@ -994,7 +1097,7 @@ class RoiToolbox(QObject):
             inner = current_inner if inner_px is None else float(inner_px)
             outer = current_outer if outer_px is None else float(outer_px)
             if not 0.0 <= inner < outer:
-                raise ValueError(f"ROI {roi.area_roi_id}: the reference ring needs 0 <= inner < outer (inner {inner:g} px, outer {outer:g} px)")
+                raise ValueError(f"ROI {roi.area_roi_id}: the rim needs 0 <= inner < outer (inner {inner:g} px, outer {outer:g} px)")
             border = Border.from_ring_diameters(diameter, inner, outer)
         return Circle(diameter), border
 
@@ -1049,8 +1152,41 @@ class RoiToolbox(QObject):
 
     CELL_FIELDS = (
         "x", "y", "sample_diameter_px", "reference_inner_diameter_px", "reference_outer_diameter_px", "width_px", "height_px", "angle_deg",
+        "rim_offset_px", "rim_thickness_px",
     )
-    """The numbers `set_cell_values` can give a ROI (the ROI table's number columns)."""
+    """The numbers `set_cell_values` can give a ROI (the ROI table's number columns: the table's Offset and Thickness are ``rim_offset_px`` / ``rim_thickness_px``, the same for every shape)."""
+
+    def _edited_rim(self, roi: AreaRoi, border: Border | None, default_border: Border, offset_px: float | None, thickness_px: float | None) -> Border:
+        """The rim ``roi`` gets when its offset (gap from the shape's edge, negative = starts inside it) and / or thickness are set (``None`` = unchanged): the one rule behind
+        `set_rim` and `set_cell_values`, **the same for a circle, a rectangle and a pixel map**. ``border`` is the ROI's own border (``None`` = the shared default). Raises
+        ``ValueError`` for a reference ROI or a ROI whose rim is off (they have none to set), a number that is not finite, or a negative thickness."""
+        if is_reference(roi):
+            raise ValueError(f"ROI {roi.area_roi_id} is a reference: it has no rim of its own.")
+        current = effective_border(border, default_border)
+        if not current.enabled:
+            raise ValueError(f"ROI {roi.area_roi_id} has no rim (use Add rim first).")
+        for value, name in ((offset_px, "offset"), (thickness_px, "thickness")):
+            if value is not None and not math.isfinite(float(value)):
+                raise ValueError(f"the rim's {name} must be a finite number, got {value!r}")
+        if thickness_px is not None and float(thickness_px) < 0.0:
+            raise ValueError(f"the rim's thickness cannot be negative, got {float(thickness_px):g} px")
+        return Border(current.gap_px if offset_px is None else float(offset_px), current.thickness_px if thickness_px is None else float(thickness_px))
+
+    @instrumented("RoiToolbox.set_rim")
+    def set_rim(
+        self, roi_ids: Collection[int], *, offset_px: float | None = None, thickness_px: float | None = None, cube: int | None = None, scope: str = SCOPE_PERSISTENT
+    ) -> None:
+        """Set the rim's offset (px from the shape's edge, negative = starts inside it) and / or thickness (px) of every ROI in ``roi_ids``; a field left ``None`` is unchanged. **The same
+        for a circle, a rectangle and a pixel map**; the shape is left alone. One undo step; a no-op (no undo entry) if nothing differs. A ROI that follows the shared default rim gets a rim of
+        its own with the new number and the default's other one. Raises ``ValueError`` (naming the ROI), before changing anything, for a reference ROI, a ROI without a rim, a number that is not
+        finite or a negative thickness."""
+        rois = self._require_rois(roi_ids)
+        default_border = self._detection_settings.default_border()
+        targets: list[tuple[AreaRoi, Shape, Border | None]] = []
+        for roi in rois:
+            g = geometry_at(roi, cube)
+            targets.append((roi, g.shape, self._edited_rim(roi, g.border, default_border, offset_px, thickness_px)))
+        self._set_shapes(targets, "Set rim" if len(targets) == 1 else "Set rims", cube=cube, scope=scope)
 
     @instrumented("RoiToolbox.set_cell_values")
     def set_cell_values(
@@ -1060,7 +1196,8 @@ class RoiToolbox(QObject):
         what pasting cells of the ROI table does (each ROI may get a different value, which ``resize_rois`` / ``place_rois`` cannot say in one step).
 
         The rules are the ones of typing the value: a position of a pixel mask is refused (`move_refusal`), a diameter needs a circle, a width / height / angle a rectangle, the sample
-        diameter, width and height at least `MIN_SAMPLE_DIAMETER_PX`, the ring ``0 <= inner < outer``. **All or nothing**: the first problem raises ``ValueError`` (naming the ROI)
+        diameter, width and height at least `MIN_SAMPLE_DIAMETER_PX`, the ring ``0 <= inner < outer``, a rim's offset and thickness (any shape) need a rim (not a reference, not switched off)
+        and a thickness of at least 0. **All or nothing**: the first problem raises ``ValueError`` (naming the ROI)
         before anything changes. A ROI whose numbers do not differ is left alone; if nothing differs there is no undo entry."""
         unknown = {field for fields in values.values() for field in fields} - set(self.CELL_FIELDS)
         if unknown:
@@ -1091,6 +1228,9 @@ class RoiToolbox(QObject):
                 if any(value is not None for value in rectangle):
                     self._check_rectangle_inputs(*rectangle)
                     shape = self._resized_rectangle(roi, g, *rectangle)
+                rim = (fields.get("rim_offset_px"), fields.get("rim_thickness_px"))
+                if any(value is not None for value in rim):
+                    border = self._edited_rim(roi, border, default_border, *rim)
             except ValueError as exc:
                 text = str(exc)
                 raise ValueError(text if text.startswith("ROI ") else f"ROI {roi.area_roi_id}: {text}") from None
@@ -1109,9 +1249,9 @@ class RoiToolbox(QObject):
         for roi in rois:
             border = borders[roi.area_roi_id]
             if not math.isfinite(float(border.gap_px)) or not math.isfinite(float(border.thickness_px)):
-                raise ValueError(f"ROI {roi.area_roi_id}: a border needs a finite gap and thickness, got {border!r}")
+                raise ValueError(f"ROI {roi.area_roi_id}: a rim needs a finite gap and thickness, got {border!r}")
         targets: list[tuple[AreaRoi, Shape, Border | None]] = [(roi, geometry_at(roi, cube).shape, borders[roi.area_roi_id]) for roi in rois]
-        self._set_shapes(targets, "Resize border" if len(targets) == 1 else "Resize borders", cube=cube, scope=scope)
+        self._set_shapes(targets, "Resize rim" if len(targets) == 1 else "Resize rims", cube=cube, scope=scope)
 
     @instrumented("RoiToolbox.resize_roi")
     def resize_roi(
@@ -1423,7 +1563,7 @@ class RoiToolbox(QObject):
         if (sample < MIN_SAMPLE_DIAMETER_PX).any():
             raise ValueError(f"sample diameter must be at least {MIN_SAMPLE_DIAMETER_PX:g} px")
         if not ((inner >= 0.0) & (inner < outer)).all():
-            raise ValueError("the reference ring needs 0 <= inner < outer for every ROI")
+            raise ValueError("the rim needs 0 <= inner < outer for every ROI")
         located_flags = [True] * count if located is None else [bool(v) for v in located]
 
         replaced = {int(i) for i in replace_ids if int(i) in self._rois}
@@ -1545,7 +1685,7 @@ class RoiToolbox(QObject):
             if sample < MIN_SAMPLE_DIAMETER_PX:
                 raise ValueError(f"ROI {roi.area_roi_id}: sample diameter must be at least {MIN_SAMPLE_DIAMETER_PX:g} px")
             if not 0.0 <= inner < outer:
-                raise ValueError(f"ROI {roi.area_roi_id}: the reference ring needs 0 <= inner < outer")
+                raise ValueError(f"ROI {roi.area_roi_id}: the rim needs 0 <= inner < outer")
             targets.append((roi, Circle(sample), Border.from_ring_diameters(sample, inner, outer)))
         undo_manager.begin_batch(label)
         try:

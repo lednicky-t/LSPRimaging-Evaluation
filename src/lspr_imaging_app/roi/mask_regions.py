@@ -15,7 +15,13 @@ from scipy import ndimage
 
 from ..domain.roi_shapes import RoiMask
 
-_EIGHT_CONNECTED = np.ones((3, 3), dtype=bool)
+EIGHT_CONNECTED = np.ones((3, 3), dtype=bool)
+"""Which pixels make one blob: those that touch by an edge or a corner. The one definition of "a blob" (the regions below, the rim of a pixel map in `rasterize`)."""
+
+
+def blob_count(pixels: np.ndarray) -> int:
+    """How many separate blobs (`EIGHT_CONNECTED`) the ``True`` pixels of a bool image form (0 for an empty image)."""
+    return int(ndimage.label(np.asarray(pixels, dtype=bool), structure=EIGHT_CONNECTED)[1])
 
 
 def mask_regions(plane: np.ndarray, *, together: bool) -> list[tuple[RoiMask, float, float]]:
@@ -27,7 +33,7 @@ def mask_regions(plane: np.ndarray, *, together: bool) -> list[tuple[RoiMask, fl
         labels, count = selected.astype(np.uint8), 1
         slices = ndimage.find_objects(labels)
     else:
-        labels, count = ndimage.label(selected, structure=_EIGHT_CONNECTED)
+        labels, count = ndimage.label(selected, structure=EIGHT_CONNECTED)
         slices = ndimage.find_objects(labels)
     regions: list[tuple[RoiMask, float, float]] = []
     for number in range(1, count + 1):

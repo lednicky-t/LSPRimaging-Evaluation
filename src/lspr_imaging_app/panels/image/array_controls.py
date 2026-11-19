@@ -51,7 +51,7 @@ from .array_reorder_picker import ArrayReorderPicker
 from .general_group import ICON_SIZE, style_general_icon_button
 
 _MODE_TIPS = {
-    "auto": "Auto: find the array, its spacing, the disk size and the rings from the image alone.",
+    "auto": "Auto: find the array, its spacing, the disk size and the rims from the image alone.",
     "semi": "Semi: like Auto, but values typed in the settings menu (rows, columns, diameter, pitch) are checked against the result.",
     "manual": "Manual: place the array from the numbers typed in the settings menu (optionally snapping to the image).",
 }
@@ -67,8 +67,8 @@ _THICKNESS_LABELS = {"equal_area": "Equal area to the disk", "thickness": "Fixed
 _SIZE_LABELS = {"uniform": "One value for the array", "individual": "Each ROI its own"}
 
 OVERLAP_INFO = (
-    "Reference rings may overlap each other. A ring never counts pixels of sample disks: the analysis removes "
-    "every sample disk from every ring. Sample disks are masked by your mask only, never by a ring."
+    "Reference rims may overlap each other. A rim never counts pixels of sample disks: the analysis removes "
+    "every sample disk from every rim. Sample disks are masked by your mask only, never by a rim."
 )
 
 
@@ -268,13 +268,13 @@ class _Popover(QWidget):
         form.addRow("Noise", self.edge_sigma)
         form.addRow("Sizes", self.size_mode)
 
-        form = section("Reference ring")
-        self.inner_mode = combo(_INNER_LABELS, "Inner diameter: measured so no disk pixel is inside the ring, or a ratio of the sample diameter.")
+        form = section("Reference rim")
+        self.inner_mode = combo(_INNER_LABELS, "Inner diameter: measured so no disk pixel is inside the rim, or a ratio of the sample diameter.")
         self.ring_fraction = dspin(1.0, 50.0, 1, 1.0, "Measured: background is within this fraction of the contrast.", " %")
         self.ring_margin = length("Measured: extra gap added to the measured inner diameter.")
         self.inner_ratio = dspin(1.01, 5.0, 2, 0.05, "Ratio: inner diameter = ratio x sample diameter.", " ×")
         self.thickness_mode = combo(_THICKNESS_LABELS, "How the outer diameter follows from the inner one.")
-        self.thickness = length("Fixed width: ring width (outer - inner) / 2.")
+        self.thickness = length("Fixed width: rim width (outer - inner) / 2.")
         self.outer_ratio = dspin(1.01, 5.0, 2, 0.05, "Ratio: outer diameter = ratio x inner diameter.", " ×")
         self.ring_size_mode = combo(_SIZE_LABELS, "One value = the robust maximum inner diameter (clear of every disk); or each ROI its own.")
         form.addRow("Inner diameter", self.inner_mode)
@@ -282,7 +282,7 @@ class _Popover(QWidget):
         form.addRow("Extra gap", self.ring_margin)
         form.addRow("Inner ratio", self.inner_ratio)
         form.addRow("Outer diameter", self.thickness_mode)
-        form.addRow("Ring width", self.thickness)
+        form.addRow("Rim width", self.thickness)
         form.addRow("Outer ratio", self.outer_ratio)
         form.addRow("Sizes", self.ring_size_mode)
 
@@ -427,7 +427,7 @@ class ArrayControls(QWidget):
         else:
             self._run.setIcon(_find_array_icon(theme.text_primary, theme.accent_blue))
             self._run.setToolTip(
-                "Find the array in the image at the reference wavelength, measure the sample disks and reference rings, "
+                "Find the array in the image at the reference wavelength, measure the sample disks and reference rims, "
                 "and replace the selected ROIs with it (all ROIs stay if none are selected).\n" + OVERLAP_INFO
             )
         self._refine.setIcon(
@@ -435,7 +435,7 @@ class ArrayControls(QWidget):
         )
         self._refine.setEnabled(bool(self._selected) and not self._running)
         self._refine.setToolTip(
-            "Refine the selected ROIs: move each onto its spot and re-measure the sample disk and the reference ring."
+            "Refine the selected ROIs: move each onto its spot and re-measure the sample disk and the reference rim."
             if self._selected
             else "Refine: select the ROIs of an array first."
         )

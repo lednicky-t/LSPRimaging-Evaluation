@@ -83,6 +83,7 @@ from ..image_tools.chromatic.affine import apply_affine_to_points, invert_affine
 from ..image_tools.geometry.model import GeometrySettings
 from ..image_tools.geometry.transform import combined_geometry_affine_xy
 from ..progress import Cancelled
+from .mask_regions import EIGHT_CONNECTED
 from ..domain.roi_model import AreaRoi, RoiMask
 from ..domain.roi_shapes import (
     MASK_BORDER_SLACK_PX,
@@ -545,6 +546,51 @@ def _mask_sdf(x0: int, y0: int, mask_bytes: bytes, height: int, width: int, pad:
     return sdf, x0 - pad, y0 - pad
 
 
+@functools.lru_cache(maxsize=512)
+def _mask_band(x0: int, y0: int, mask_bytes: bytes, height: int, width: int, pad: int, gap: float, thickness: float) -> tuple[np.ndarray, int, int]:
+    """The rim of a pixel map: a bool array over the map's bounding box padded by ``pad`` pixels, and the source position of its pixel (0, 0).
+
+    **Every blob has a rim of its own** (maintainer, 2026-11-19): a pixel is in the rim when its distance from the edge of *some* blob is between ``gap`` and
+    ``gap + thickness`` (the distance of `_mask_sdf`, measured from that blob alone), and it is not a pixel of another blob. The rims of the blobs
+    together are the one reference region of the ROI. Measured from the map as a whole instead, a pixel that lies in blob A's band but near blob B would
+    be dropped; per blob it is kept. A map of one blob (or none) is exactly what it was: the distance map of the whole map, cut at the same two numbers.
+    Blobs are 8-connected (`mask_regions.EIGHT_CONNECTED`). Cached, with the distance map under it: the map does not change between the frames of a scan."""
+    padded = np.pad(np.frombuffer(mask_bytes, dtype=bool).reshape(height, width), pad, constant_values=False)
+    labels, count = ndimage.label(padded, structure=EIGHT_CONNECTED)
+    if count <= 1:
+        sdf, _, _ = _mask_sdf(x0, y0, mask_bytes, height, width, pad)
+        band = (sdf >= gap) & (sdf <= gap + thickness)
+    else:
+        band = np.zeros(padded.shape, dtype=bool)
+        for number, window in enumerate(ndimage.find_objects(labels), start=1):
+            if window is None:
+                continue
+            rows = slice(max(window[0].start - pad, 0), min(window[0].stop + pad, padded.shape[0]))  # the blob's box and the rim's reach: nothing farther can be in its rim
+            cols = slice(max(window[1].start - pad, 0), min(window[1].stop + pad, padded.shape[1]))
+            blob = labels[rows, cols] == number
+            sdf = np.where(blob, 0.5 - ndimage.distance_transform_edt(blob), ndimage.distance_transform_edt(~blob) - 0.5)
+            hit = (sdf >= gap) & (sdf <= gap + thickness)
+            hit &= ~(padded[rows, cols] & ~blob)  # a pixel of another blob is that blob's own, never this blob's rim
+            band[rows, cols] |= hit
+    band.flags.writeable = False
+    return band, x0 - pad, y0 - pad
+
+
+def _mask_band_at(mask: RoiMask, border: Border, sx: np.ndarray, sy: np.ndarray) -> np.ndarray:
+    """Which (source-space) points lie in the rim of a pixel map (`_mask_band`), read at the nearest stored pixel; ``False`` beyond the padded box."""
+    height, width = mask.mask.shape[:2]
+    band, origin_x, origin_y = _mask_band(
+        int(mask.x0), int(mask.y0), np.ascontiguousarray(mask.mask, dtype=bool).tobytes(), int(height), int(width),
+        int(np.ceil(_border_extent(border))) + 2, float(border.gap_px), float(border.thickness_px),
+    )
+    col = np.round(sx - origin_x).astype(np.int64)
+    row = np.round(sy - origin_y).astype(np.int64)
+    inside = (row >= 0) & (row < band.shape[0]) & (col >= 0) & (col < band.shape[1])
+    out = np.zeros(sx.shape, dtype=bool)
+    out[inside] = band[row[inside], col[inside]]
+    return out
+
+
 def _signed_distance_mask(mask: RoiMask, extra: float, sx: np.ndarray, sy: np.ndarray) -> np.ndarray:
     """Signed distance of the (source-space) points from a mask's edge, nearest stored pixel; ``+inf`` farther than ``extra`` outside the mask."""
     height, width = mask.mask.shape[:2]
@@ -573,7 +619,9 @@ def _region_test(roi: AreaRoi, region: str, border: Border, sx: np.ndarray, sy: 
     if isinstance(shape, Rectangle):
         distance = _signed_distance_rectangle(sx, sy, cx, cy, shape)
     elif isinstance(shape, MaskShape):
-        distance = _signed_distance_mask(shape.mask, _border_extent(border) if region == "border" else 0.0, sx, sy)
+        if region == "border":
+            return _mask_band_at(shape.mask, border, sx, sy)  # a rim of its own for every blob, not a band from the whole map
+        distance = _signed_distance_mask(shape.mask, 0.0, sx, sy)
     else:
         raise TypeError(f"_region_test serves rectangles and masks, not {type(shape).__name__}")
     if region == "sample":
@@ -726,9 +774,11 @@ def mask_border_pixels(mask: RoiMask, border: Border) -> tuple[int, int, np.ndar
         return int(mask.x0), int(mask.y0), np.zeros((0, 0), dtype=bool)
     height, width = mask.mask.shape[:2]
     pad = int(np.ceil(_border_extent(border))) + 2
-    sdf, origin_x, origin_y = _mask_sdf(int(mask.x0), int(mask.y0), np.ascontiguousarray(mask.mask, dtype=bool).tobytes(), int(height), int(width), pad)
-    gap = float(border.gap_px)
-    return origin_x, origin_y, (sdf >= gap) & (sdf <= gap + float(border.thickness_px))
+    band, origin_x, origin_y = _mask_band(
+        int(mask.x0), int(mask.y0), np.ascontiguousarray(mask.mask, dtype=bool).tobytes(), int(height), int(width), pad,
+        float(border.gap_px), float(border.thickness_px),
+    )
+    return origin_x, origin_y, band  # read only and shared: a caller copies before changing it
 
 
 def _ring_diameters_of(circle: Circle, border: Border) -> tuple[float, float]:

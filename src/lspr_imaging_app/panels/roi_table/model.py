@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from PyQt6.QtCore import QAbstractItemModel, QMimeData, QModelIndex, Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 
+from ...applog import StageTimer
 from ...selection.step_table_module import StepColumn
 from ...domain.roi_model import AreaRoi, AreaRoiDetectionSettings, AreaRoiGroup
 from ...roi.palette import DEFAULT_ROI_COLOR_HEX
@@ -28,8 +29,8 @@ from .rows import (
     COLUMN_HEIGHT,
     COLUMN_ID,
     COLUMN_NAME,
-    COLUMN_RING_IN,
-    COLUMN_RING_OUT,
+    COLUMN_RIM_OFFSET,
+    COLUMN_RIM_THICKNESS,
     COLUMN_SAMPLE,
     COLUMN_SHAPE,
     COLUMN_TITLES,
@@ -41,10 +42,11 @@ from .rows import (
     NUMERIC_COLUMNS,
     PIXELS,
     RECTANGLE_COLUMNS,
+    RIM_COLUMNS,
     SHAPE_FIELDS,
-    SHAPE_LABELS,
     SHAPE_RECTANGLE,
     SIZE_COLUMNS,
+    TYPE_LABELS,
     GroupInfo,
     LengthUnit,
     RoiRow,
@@ -58,6 +60,7 @@ from .rows import (
     edit_text,
     format_angle,
     format_area,
+    has_cell,
     format_length,
     sort_rows,
 )
@@ -77,7 +80,16 @@ ALL_SELECTED_ROLE = Qt.ItemDataRole.UserRole + 7
 DEPTH_ROLE = Qt.ItemDataRole.UserRole + 8
 MASK_ROLE = Qt.ItemDataRole.UserRole + 9
 SHAPE_ROLE = Qt.ItemDataRole.UserRole + 11
-"""A ROI row's shape key (``rows.SHAPE_RING`` ...)."""
+"""A ROI row's shape key (``rows.SHAPE_RING`` ...): what decides which size columns it has."""
+TYPE_ROLE = Qt.ItemDataRole.UserRole + 15
+"""A ROI row's Type pictogram and the kind of pair it is in: ``(rows.ICON_*, rows.KIND_*)``; the delegate paints it (`type_icons`)."""
+VALUES_ONLY_ROLE = Qt.ItemDataRole.UserRole + 16
+"""Not data: the role list of a ``dataChanged`` that says "the cells' numbers and looks changed, no row came or went and none changed size" (`RoiTreeModel._adopt`). `RoiTreeView.dataChanged` then
+only repaints: Qt's own handler asks the delegate for the size of every cell of the range, 40 ms for 160 ROIs."""
+PAINT_ROLE = Qt.ItemDataRole.UserRole + 17
+"""A ROI row's cell, everything the delegate needs to paint it in one answer: ``(text, dim, stale, alignment, tint)`` (``dim``: the value is the shared default's or a mask's;
+``stale``: a step number that is out of date; ``alignment``: an int; ``tint``: a step column's background or ``None``). Asking role by role was six to seven Python calls a cell, a quarter of
+a repaint (`docs/roi_table_performance_2026-11-19.md`). ``None`` for a group header."""
 STEP_STALE_ROLE = Qt.ItemDataRole.UserRole + 12
 """A step-column cell with a number that is out of date (the delegate dims it)."""
 COLUMN_KIND_ROLE = Qt.ItemDataRole.UserRole + 13
@@ -105,16 +117,40 @@ class DropTarget:
     position: int = 0
 
 _NUMERIC_COLUMNS = NUMERIC_COLUMNS
+_ITEM = Qt.ItemFlag
+_BASE_FLAGS = _ITEM.ItemIsEnabled | _ITEM.ItemIsSelectable
+_ROI_FLAGS = {  # (linked view, editable): the flags of a ROI row's cell. Made once: `flags` is asked for every cell of every selected row by `QItemSelectionModel.selectedRows`, for every cell Qt paints, ...
+    (linked, editable): _BASE_FLAGS | (_ITEM.NoItemFlags if linked else _ITEM.ItemIsDragEnabled) | (_ITEM.ItemIsEditable if editable else _ITEM.NoItemFlags)  # ROI rows are not drop targets: a drop lands between rows (nothing is dragged in the Linked view)
+    for linked in (False, True)
+    for editable in (False, True)
+}
+_GROUP_FLAGS = {  # (linked view, editable): a group header cell; a drop on a header puts the ROIs in that group
+    (linked, editable): _BASE_FLAGS | (_ITEM.NoItemFlags if linked else _ITEM.ItemIsDropEnabled) | (_ITEM.ItemIsEditable if editable else _ITEM.NoItemFlags)
+    for linked in (False, True)
+    for editable in (False, True)
+}
+"""A flag combination built with `|` runs PyQt's enum code in Python (about 10 µs); a table of 160 ROIs asked for 27,000 of them to select everything (2026-11-19, `docs/roi_table_performance_2026-11-19.md`)."""
+_ALIGN_RIGHT = int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+_ALIGN_LEFT = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 _RIGHT_ALIGNED_COLUMNS = (*NUMERIC_COLUMNS, COLUMN_AREA)  # the Area is a number too, but nothing can be typed, pasted or stepped in it (`NUMERIC_COLUMNS` is that set)
 _HEADER_TIPS = {
     COLUMN_ID: "Position in the list. Reordering changes these numbers.",
     COLUMN_NAME: "Label of a group (its name, also drawn on the image). Empty for ROIs.",
     COLUMN_X: "Centre x on the reference image.",
     COLUMN_Y: "Centre y on the reference image.",
-    COLUMN_SHAPE: "Shape of the ROI. D = outer and d = inner diameter, s = sample and r = reference.",
+    COLUMN_SHAPE: (
+        "Type of the ROI: its shape (circle, rectangle, pixel map), with a ring round it while it is measured against its own rim. "
+        "Green: a sample with a rim or with links. Amber: a sample with neither (no reference). Blue: a reference some sample uses. Gray: a reference nobody uses."
+    ),
     COLUMN_SAMPLE: "Sample diameter.",
-    COLUMN_RING_IN: "Reference ring, inner diameter. Grey italic: taken from the shared default.",
-    COLUMN_RING_OUT: "Reference ring, outer diameter. Grey italic: taken from the shared default.",
+    COLUMN_RIM_OFFSET: (
+        "d = rim offset: how far the rim starts from the shape's edge (negative: it starts inside the shape). The same for a circle, a rectangle and a pixel map. "
+        "Grey italic: taken from the shared default. Blank: a reference has no rim."
+    ),
+    COLUMN_RIM_THICKNESS: (
+        "w = rim thickness: the width of the rim band, measured outwards from the offset. The same for a circle, a rectangle and a pixel map. "
+        "Grey italic: taken from the shared default. Blank: a reference has no rim."
+    ),
     COLUMN_WIDTH: "Rectangle width, along the rectangle's own x axis. Blank for other shapes.",
     COLUMN_HEIGHT: "Rectangle height, along the rectangle's own y axis. Blank for other shapes.",
     COLUMN_ANGLE: "Rectangle angle in degrees, turned clockwise on the screen about its centre. Blank for other shapes.",
@@ -155,6 +191,9 @@ class RoiTreeModel(QAbstractItemModel):
         super().__init__(parent)
         self._root = _Node("root", None)
         self._previous_root: _Node | None = None  # kept alive one generation: see set_content
+        self._stages = StageTimer()  # the stages of the last rebuild (`last_rebuild_ms`)
+        self._layout: tuple | None = None  # what the tree lists (`_layout_of`): a rebuild that lists the same rows in the same groups updates the cells in place (`_adopt`)
+        self._reset_happened = False  # see `take_reset_flag`
         self._unit: LengthUnit = PIXELS
         self._sort_column = COLUMN_ID
         self._descending = False
@@ -378,10 +417,13 @@ class RoiTreeModel(QAbstractItemModel):
         return [(node.section.group, node.section.rows) for node in self._root.children]
 
     def _rebuild(self) -> None:
+        stages = self._stages = StageTimer()
         self._rows = build_roi_rows(self._rois, self._groups, self._defaults, self._default_color_hex)
+        stages.mark("rows")
         self._grouped = bool(self._groups) or self._linked
         if self._step_columns:
             self._refresh_decimals()  # one number of decimals for the rows as they are now
+        stages.mark("decimals")
         root = _Node("root", None)
         if self._grouped:
             colors = {group.group_id: group.sample_color_hex for group in self._groups}
@@ -406,12 +448,63 @@ class RoiTreeModel(QAbstractItemModel):
                 child = _Node("roi", root, row=row)
                 child.position = len(root.children)
                 root.children.append(child)
+        stages.mark("tree")  # (the sections, sorting and nodes)
+        layout = self._layout_of(root)
+        if layout == self._layout:
+            self._adopt(root)  # the same rows in the same groups: only their numbers can have changed
+            stages.mark("apply")
+            return
+        self._layout = layout
+        self._reset_happened = True
         self.beginResetModel()
         # The old tree is kept alive until the next rebuild: Qt may still hold
         # indexes into it (they point at these Python objects) until the reset
         # has been fully processed by every view and selection model.
         self._previous_root, self._root = self._root, root
         self.endResetModel()
+        stages.mark("apply")
+
+    def last_rebuild_ms(self) -> dict[str, float]:
+        """How long the stages of the last rebuild took, in ms: ``rows`` (the rows from the ROIs), ``decimals`` (the step numbers' common number of decimals; 0 without step columns),
+        ``tree`` (sections, sort, nodes), ``apply`` (the reset, or the in-place update). For the panel's ``roi_table.rebuild`` log line."""
+        return self._stages.ms()
+
+    def _layout_of(self, root: _Node) -> tuple:
+        """What the tree lists, without any value: the number of columns, the arrangement, and for each group header its identity and the ROI ids under it (a flat table: the ROI ids in order).
+        Two rebuilds with the same layout differ only in what the cells say."""
+        parts: list = [self.columnCount(), self._grouped, self._linked]
+        for node in root.children:
+            if node.kind == "group":
+                group = node.section.group
+                parts.append((group.group_id, group.collapse_key, group.synthetic, tuple(child.row.roi_id for child in node.children)))
+            else:
+                parts.append(node.row.roi_id)
+        return tuple(parts)
+
+    def _adopt(self, root: _Node) -> None:
+        """``root`` lists the same rows in the same groups as the tree on show: put its rows and headers into the old nodes and say that the cells changed. Every index, the view's
+        selection, which groups are open, the scroll position and an open cell editor all stay, and the view does not lay out its rows again (a reset made it ask the delegate for the
+        height of every cell: 20 - 30 ms for 160 ROIs, `docs/roi_table_performance_2026-11-19.md`)."""
+        for old, new in zip(self._root.children, root.children):
+            old.row, old.section, old.members = new.row, new.section, new.members
+            for old_child, new_child in zip(old.children, new.children):
+                old_child.row = new_child.row
+        top = self._root.children
+        if not top:
+            return
+        last_column = self.columnCount() - 1
+        self.dataChanged.emit(self.createIndex(0, 0, top[0]), self.createIndex(len(top) - 1, last_column, top[-1]), [VALUES_ONLY_ROLE])
+        for node in top:
+            if node.kind == "group" and node.children:
+                self.dataChanged.emit(
+                    self.createIndex(0, 0, node.children[0]), self.createIndex(len(node.children) - 1, last_column, node.children[-1]), [VALUES_ONLY_ROLE]
+                )
+
+    def take_reset_flag(self) -> bool:
+        """True if the model was reset (its rows or groups changed, or the columns, the sort, the arrangement) since this was last asked; False if every rebuild since only updated the
+        cells in place. The view puts back what a reset throws away (open groups, selection, scroll) only after a reset."""
+        flag, self._reset_happened = self._reset_happened, False
+        return flag
 
     # -- selection highlight for group headers ------------------------------------
 
@@ -465,6 +558,25 @@ class RoiTreeModel(QAbstractItemModel):
         pass over the tree (asking `roi_index` once per ROI would be quadratic)."""
         wanted = set(roi_ids)
         return [self.createIndex(node.position, 0, node) for node in self._iter_roi_nodes() if node.row.roi_id in wanted]
+
+    def roi_index_runs(self, roi_ids: Collection[int]) -> list[tuple[QModelIndex, QModelIndex]]:
+        """The ROIs in ``roi_ids`` that are shown, as runs of rows that follow each other under one parent: ``(first, last)`` column-0 indexes of each run, in table order. Selecting
+        a run is one range for Qt; selecting the ROIs one by one made 160 ranges to merge for 160 ROIs (50 ms; 16 runs of a grouped table: 5 ms)."""
+        wanted = set(roi_ids)
+        runs: list[tuple[QModelIndex, QModelIndex]] = []
+        first = last = None
+        for node in self._iter_roi_nodes():
+            if node.row.roi_id not in wanted:
+                continue
+            if last is not None and node.parent is last.parent and node.position == last.position + 1:
+                last = node
+                continue
+            if first is not None:
+                runs.append((self.createIndex(first.position, 0, first), self.createIndex(last.position, 0, last)))
+            first = last = node
+        if first is not None:
+            runs.append((self.createIndex(first.position, 0, first), self.createIndex(last.position, 0, last)))
+        return runs
 
     def group_index(self, group_id: str | None) -> QModelIndex:
         for node in self._root.children:
@@ -540,19 +652,11 @@ class RoiTreeModel(QAbstractItemModel):
         if not index.isValid():
             return Qt.ItemFlag.NoItemFlags
         node = index.internalPointer()
-        flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
         if node.kind == "group":
-            if not self._linked:
-                flags |= Qt.ItemFlag.ItemIsDropEnabled  # drop ROIs on a header to put them in that group
-            if index.column() == 0 and node.section.group.group_id is not None:
-                flags |= Qt.ItemFlag.ItemIsEditable
-            return flags
-        if not self._linked:
-            flags |= Qt.ItemFlag.ItemIsDragEnabled  # ROI rows are not drop targets: a drop lands between rows (nothing is dragged in the Linked view)
+            return _GROUP_FLAGS[self._linked, index.column() == 0 and node.section.group.group_id is not None]  # only a real group's name can be edited
         column = index.column()
-        if column in EDITABLE_COLUMNS and not (column in SIZE_COLUMNS and column not in SHAPE_FIELDS[node.row.shape]):
-            flags |= Qt.ItemFlag.ItemIsEditable  # a mask has no diameter, a disk no ring, only a rectangle a width, a height and an angle
-        return flags
+        editable = column in EDITABLE_COLUMNS and not (column in SIZE_COLUMNS and not has_cell(node.row, column))  # a mask has no diameter, a reference no rim, only a rectangle a width, a height and an angle
+        return _ROI_FLAGS[self._linked, editable]
 
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
         if not index.isValid():
@@ -564,8 +668,24 @@ class RoiTreeModel(QAbstractItemModel):
         if role == DEPTH_ROLE:
             return 0 if node.parent is self._root else 1
         if node.kind == "group":
-            return self._group_data(node, column, role)
+            return None if role == PAINT_ROLE else self._group_data(node, column, role)
+        if role == PAINT_ROLE:
+            return self._paint_data(node.row, column)
         return self._roi_data(node.row, column, role)
+
+    def _paint_data(self, row: RoiRow, column: int) -> tuple[str, bool, bool, int, QColor | None]:
+        """`PAINT_ROLE`: what the delegate paints in a ROI row's cell, the same answers `DisplayRole`, `INHERITED_ROLE`, `MASK_ROLE`, `STEP_STALE_ROLE`, `TextAlignmentRole` and
+        `STEP_TINT_ROLE` give one by one (a step cell's number is looked up once instead of twice)."""
+        if column >= COLUMN_COUNT:
+            if self._cells is None or not 0 <= column - COLUMN_COUNT < len(self._step_columns):
+                return "", False, False, _ALIGN_RIGHT, None
+            step = self._step_columns[column - COLUMN_COUNT]
+            value = self._cells.roi_cell(row.roi_id, step.ref)
+            text = format_cell(value, self._mode_of(step), self._decimals if step.decimals is None else step.decimals)
+            return text or "", False, value is not None and not value.current, _ALIGN_RIGHT, self._tint_of(column)
+        text = self._cell_value(row, column)[0]
+        dim = (column in RIM_COLUMNS and row.rim_inherited and row.has_rim) or (row.is_mask and text == "mask")
+        return text, dim, False, _ALIGN_RIGHT if column in _RIGHT_ALIGNED_COLUMNS else _ALIGN_LEFT, None
 
     def _group_data(self, node: _Node, column: int, role: int):
         group: GroupInfo = node.section.group
@@ -603,8 +723,10 @@ class RoiTreeModel(QAbstractItemModel):
             return row.is_mask
         if role == SHAPE_ROLE:
             return row.shape
+        if role == TYPE_ROLE:
+            return (row.type_icon, row.kind)
         if role == INHERITED_ROLE:
-            return (column == COLUMN_RING_IN and row.inner_inherited) or (column == COLUMN_RING_OUT and row.outer_inherited)
+            return column in RIM_COLUMNS and row.rim_inherited and row.has_rim
         if column >= COLUMN_COUNT:
             return self._step_cell(None, column, role, row=row)
         if role == Qt.ItemDataRole.TextAlignmentRole:
@@ -656,7 +778,7 @@ class RoiTreeModel(QAbstractItemModel):
             value = row.x if column == COLUMN_X else row.y
             return format_length(value, unit), edit_text(value, unit)
         if column == COLUMN_SHAPE:
-            return SHAPE_LABELS[row.shape], ""
+            return TYPE_LABELS[row.type_icon], ""
         if column == COLUMN_AREA:
             return format_area(row.area_px, unit), ""  # derived from the shape: nothing to edit
         if column in RECTANGLE_COLUMNS:
@@ -666,27 +788,30 @@ class RoiTreeModel(QAbstractItemModel):
                 return format_angle(row.angle), angle_edit_text(row.angle)
             value = row.width if column == COLUMN_WIDTH else row.height
             return format_length(value, unit), edit_text(value, unit)
+        if column in RIM_COLUMNS:
+            if not row.has_rim:
+                return "", ""  # a reference has no rim, nor has a ROI whose rim is switched off
+            value = row.rim_offset if column == COLUMN_RIM_OFFSET else row.rim_thickness
+            return format_length(value, unit), edit_text(value, unit)
         if row.is_mask:
             return "mask", ""
         if column not in SHAPE_FIELDS[row.shape]:
-            return "", ""  # this shape has no such number (a disk has no reference ring)
-        value = {COLUMN_SAMPLE: row.sample, COLUMN_RING_IN: row.inner, COLUMN_RING_OUT: row.outer}[column]
-        return format_length(value, unit), edit_text(value, unit)
+            return "", ""  # this shape has no such number
+        return format_length(row.sample, unit), edit_text(row.sample, unit)
 
     def _tooltip(self, row: RoiRow, column: int) -> str | None:
         unit = self._unit.label
         if column == COLUMN_ID:
             return row.link_note or None
         if column == COLUMN_SHAPE:
-            return f"{SHAPE_LABELS[row.shape]}: {row.shape_note}" if row.shape_note else SHAPE_LABELS[row.shape]
+            return " ".join(part for part in (f"{TYPE_LABELS[row.type_icon]}.", row.link_note, row.shape_note) if part)  # "Circle with rim. Measured against its own rim."
         if column == COLUMN_AREA:
             return area_tooltip(row, self._unit)
         if column in (COLUMN_X, COLUMN_Y) and row.nudge_count:
             plural = "" if row.nudge_count == 1 else "s"
             return f"Position on the reference image ({unit}). {row.nudge_count} manual per-wavelength nudge{plural}."
-        if column in (COLUMN_RING_IN, COLUMN_RING_OUT) and column in SHAPE_FIELDS[row.shape]:
-            inherited = row.inner_inherited if column == COLUMN_RING_IN else row.outer_inherited
-            return f"Taken from the shared default ({unit}). Edit to set this ROI's own." if inherited else f"This ROI's own value ({unit})."
+        if column in RIM_COLUMNS and row.has_rim:
+            return f"Taken from the shared default ({unit}). Edit to set this ROI's own." if row.rim_inherited else f"This ROI's own value ({unit})."
         if column == COLUMN_SAMPLE and row.is_mask:
             return "This ROI is drawn as a mask, so it has no diameter."
         return None

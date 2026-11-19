@@ -13,10 +13,11 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 
 from ...domain.roi_model import AreaRoi, AreaRoiDetectionSettings, AreaRoiGroup
-from ...domain.roi_shapes import Border, Circle, MaskShape, Rectangle, Shape, effective_border, ring_diameters, shape_area_px
+from ...domain.roi_shapes import Border, Circle, MaskShape, Rectangle, Shape, effective_border, shape_area_px
 from ...roi.palette import DEFAULT_ROI_COLOR_HEX
 
-COLUMN_ID, COLUMN_NAME, COLUMN_X, COLUMN_Y, COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT = range(7)
+COLUMN_ID, COLUMN_NAME, COLUMN_X, COLUMN_Y, COLUMN_SAMPLE, COLUMN_RIM_OFFSET, COLUMN_RIM_THICKNESS = range(7)
+"""Columns 5 and 6 are the rim: its **offset** from the shape's edge and its **thickness**, the same two numbers for a circle, a rectangle and a pixel map (2026-11-19; they were the circle's inner and outer ring diameters d_r / D_r: the numbers every saved column key and frozen column holds still name the same columns)."""
 COLUMN_SHAPE = 7
 COLUMN_WIDTH, COLUMN_HEIGHT, COLUMN_ANGLE = 8, 9, 10
 """A rectangle's width, height and angle (2026-11-19). Appended after the first eight, so the number every saved column key and frozen column holds still names the same column."""
@@ -24,16 +25,18 @@ COLUMN_AREA = 11
 """The area of the sample region (2026-11-19): pixels or µm², as the unit says. Appended for the same reason; the view puts it on screen right after Shape (`RoiTreeView.set_view_mode`)."""
 COLUMN_COUNT = 12
 """The fixed columns. The step columns (one per experiment step, ``step_columns.py``) follow them in the model: column ``COLUMN_COUNT + i`` is the i-th step."""
-COLUMN_TITLES = ("#/ROIs", "Label", "x", "y", "D_s", "d_r", "D_r", "Shape", "W", "H", "θ", "Area")
-"""Header titles; ``X_y`` is drawn as X with a subscript y (`view.SubscriptHeader`)."""
-EDITABLE_COLUMNS = (COLUMN_X, COLUMN_Y, COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT, COLUMN_WIDTH, COLUMN_HEIGHT, COLUMN_ANGLE)
-DIAMETER_COLUMNS = (COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT)
+COLUMN_TITLES = ("#/ROIs", "Label", "x", "y", "D_s", "d", "w", "Type", "W", "H", "θ", "Area")  # (column 7 was "Shape" until 2026-11-19: it shows the shape and the kind of pair)
+"""Header titles; ``X_y`` is drawn as X with a subscript y (`view.SubscriptHeader`). ``d`` = the rim's offset from the shape's edge, ``w`` = its thickness (width), short on purpose (maintainer, 2026-11-19);
+the header's tool tip spells them out."""
+EDITABLE_COLUMNS = (COLUMN_X, COLUMN_Y, COLUMN_SAMPLE, COLUMN_RIM_OFFSET, COLUMN_RIM_THICKNESS, COLUMN_WIDTH, COLUMN_HEIGHT, COLUMN_ANGLE)
+RIM_COLUMNS = (COLUMN_RIM_OFFSET, COLUMN_RIM_THICKNESS)
+"""The rim's offset and thickness. A ROI has these cells while it has a rim of its own to measure (`RoiRow.has_rim`: not a reference, rim not switched off), whatever its shape."""
 RECTANGLE_COLUMNS = (COLUMN_WIDTH, COLUMN_HEIGHT, COLUMN_ANGLE)
 """The columns only a rectangle has. The view shows them only while the table holds a rectangle (`RoiTreeView.refresh_column_visibility`)."""
-LENGTH_COLUMNS = (COLUMN_X, COLUMN_Y, *DIAMETER_COLUMNS, COLUMN_WIDTH, COLUMN_HEIGHT)
+LENGTH_COLUMNS = (COLUMN_X, COLUMN_Y, COLUMN_SAMPLE, *RIM_COLUMNS, COLUMN_WIDTH, COLUMN_HEIGHT)
 """Columns in the display unit (px or µm). The angle is in degrees whatever the unit is."""
-SIZE_COLUMNS = (*DIAMETER_COLUMNS, *RECTANGLE_COLUMNS)
-"""The columns whose cell exists only for some shapes (`SHAPE_FIELDS`)."""
+SIZE_COLUMNS = (COLUMN_SAMPLE, *RIM_COLUMNS, *RECTANGLE_COLUMNS)
+"""The columns whose cell exists only for some ROIs (`has_cell`): by shape (`SHAPE_FIELDS`) or by whether the ROI has a rim."""
 NUMERIC_COLUMNS = (*LENGTH_COLUMNS, COLUMN_ANGLE)
 """Every column that holds a number a ROI row can change: what a paste, a fill down, Up / Down and the mouse wheel work on."""
 VIEW_SIMPLE = "simple"
@@ -41,34 +44,27 @@ VIEW_GEOMETRY = "geometry"
 VIEW_MODES = (VIEW_SIMPLE, VIEW_GEOMETRY)
 VIEW_MODE_COLUMNS = {
     VIEW_SIMPLE: (COLUMN_ID, COLUMN_NAME),
-    VIEW_GEOMETRY: (COLUMN_ID, COLUMN_X, COLUMN_Y, COLUMN_SHAPE, COLUMN_AREA, COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT, *RECTANGLE_COLUMNS),
+    VIEW_GEOMETRY: (COLUMN_ID, COLUMN_X, COLUMN_Y, COLUMN_SHAPE, COLUMN_AREA, COLUMN_SAMPLE, *RIM_COLUMNS, *RECTANGLE_COLUMNS),
 }
 """Which columns each view mode shows, left to right on screen is the model order; the rest are hidden."""
 
 FIELD_NAMES = {
-    COLUMN_X: "x", COLUMN_Y: "y", COLUMN_SAMPLE: "D_s", COLUMN_RING_IN: "d_r", COLUMN_RING_OUT: "D_r",
+    COLUMN_X: "x", COLUMN_Y: "y", COLUMN_SAMPLE: "D_s", COLUMN_RIM_OFFSET: "offset", COLUMN_RIM_THICKNESS: "thickness",
     COLUMN_WIDTH: "W", COLUMN_HEIGHT: "H", COLUMN_ANGLE: "θ",
 }
-"""D = outer / d = inner diameter; s = sample, r = reference. W / H = a rectangle's width / height along its own axes, θ = its angle (degrees, clockwise on the screen)."""
+"""D_s = a circle's sample diameter; offset / thickness = the rim (any shape); W / H = a rectangle's width / height along its own axes, θ = its angle (degrees, clockwise on the screen)."""
 
 # -- shapes ---------------------------------------------------------------------
 
 SHAPE_RING, SHAPE_DISK, SHAPE_MASK, SHAPE_RECTANGLE, SHAPE_OTHER = "ring", "disk", "mask", "rectangle", "other"
-SHAPE_LABELS = {
-    SHAPE_RING: "Circle with reference ring",
-    SHAPE_DISK: "Circle, no reference",
-    SHAPE_MASK: "Pixel mask",
-    SHAPE_RECTANGLE: "Rectangle",
-    SHAPE_OTHER: "Other shape",
-}
 SHAPE_FIELDS = {
-    SHAPE_RING: (COLUMN_SAMPLE, COLUMN_RING_IN, COLUMN_RING_OUT),
+    SHAPE_RING: (COLUMN_SAMPLE,),
     SHAPE_DISK: (COLUMN_SAMPLE,),
     SHAPE_MASK: (),
     SHAPE_RECTANGLE: RECTANGLE_COLUMNS,  # a rectangle has a width, a height and an angle, not diameters (the Shape cell's tooltip says the size too)
     SHAPE_OTHER: (),
 }
-"""The size columns each shape has, in order (a ring: D_s, d_r, D_r; a rectangle: W, H, θ); the others stay blank.
+"""The size columns each shape has (a circle: D_s; a rectangle: W, H, θ); the others stay blank. The rim's columns are not here: any shape has them while it has a rim (`has_cell`).
 Offsets of the ring centre from the sample centre (``Δx, Δy``) are not stored yet (always 0);
 when they are, they get columns of their own, shown only when some ROI has a non-zero one.
 
@@ -77,8 +73,53 @@ app. `shape_of` calls any other sample/reference pairing "other"; give each new 
 own key, label, columns and pictogram (`delegate._paint_shape`) here when it arrives."""
 
 
+# -- type: the shape, the rim, and the kind of pair (plan 2026-11-19, "Rim pairs, linked pairs, the Type column") ---------------------------------
+
+ICON_CIRCLE, ICON_CIRCLE_RIM, ICON_RECTANGLE, ICON_RECTANGLE_RIM, ICON_MAP, ICON_MAP_RIM, ICON_OTHER = (
+    "circle", "circle_rim", "rectangle", "rectangle_rim", "map", "map_rim", "other",
+)
+TYPE_LABELS = {
+    ICON_CIRCLE: "Circle",
+    ICON_CIRCLE_RIM: "Circle with rim",
+    ICON_RECTANGLE: "Rectangle",
+    ICON_RECTANGLE_RIM: "Rectangle with rim",
+    ICON_MAP: "Pixel map",
+    ICON_MAP_RIM: "Pixel map with rim",
+    ICON_OTHER: "Other shape",
+}
+KIND_RIM, KIND_LINKED, KIND_BARE, KIND_REFERENCE_USED, KIND_REFERENCE_FREE = "rim", "linked", "bare", "reference_used", "reference_free"
+KIND_ORDER = {KIND_RIM: 0, KIND_LINKED: 1, KIND_BARE: 2, KIND_REFERENCE_USED: 3, KIND_REFERENCE_FREE: 4}
+"""What a ROI is in a pair: a sample measured against its **own rim**, a sample measured against **linked** reference ROIs (its own rim, if it has one, is dormant), a
+**bare** sample (no rim, no links: it has no reference and its results are missing), a reference **used** by at least one sample, a reference **free** (nobody uses it).
+Green, green, amber, blue, gray in the Type column (`type_icons.kind_color`)."""
+
+
+def kind_of(role: str, has_rim: bool, linked: bool, used: bool) -> str:
+    """The kind of pair of a ROI: ``linked`` = a sample with links to reference ROIs, ``used`` = a reference some sample is linked to (`KIND_*`)."""
+    if role == "reference":
+        return KIND_REFERENCE_USED if used else KIND_REFERENCE_FREE
+    if linked:
+        return KIND_LINKED
+    return KIND_RIM if has_rim else KIND_BARE
+
+
+def icon_of(shape: Shape, kind: str) -> str:
+    """The Type pictogram: the shape's, with a ring round it only while the ROI measures against its own rim (a linked sample and a reference show the plain shape)."""
+    rim = kind == KIND_RIM
+    if isinstance(shape, Circle):
+        return ICON_CIRCLE_RIM if rim else ICON_CIRCLE
+    if isinstance(shape, Rectangle):
+        return ICON_RECTANGLE_RIM if rim else ICON_RECTANGLE
+    if isinstance(shape, MaskShape):
+        return ICON_MAP_RIM if rim else ICON_MAP
+    return ICON_OTHER
+
+
 def has_cell(row: RoiRow, column: int) -> bool:
-    """Does this ROI have a cell in this number column? A position every ROI has; a size or angle only the shapes `SHAPE_FIELDS` names."""
+    """Does this ROI have a cell in this number column? A position every ROI has; a size or angle only the shapes `SHAPE_FIELDS` names; the rim's offset and thickness any
+    ROI that has a rim (`RoiRow.has_rim`), whatever its shape."""
+    if column in RIM_COLUMNS:
+        return row.has_rim
     return column in (COLUMN_X, COLUMN_Y) or column in SHAPE_FIELDS.get(row.shape, ())
 
 
@@ -87,7 +128,7 @@ def cell_number(row: RoiRow, column: int) -> float | None:
     if not has_cell(row, column):
         return None
     return {
-        COLUMN_X: row.x, COLUMN_Y: row.y, COLUMN_SAMPLE: row.sample, COLUMN_RING_IN: row.inner, COLUMN_RING_OUT: row.outer,
+        COLUMN_X: row.x, COLUMN_Y: row.y, COLUMN_SAMPLE: row.sample, COLUMN_RIM_OFFSET: row.rim_offset, COLUMN_RIM_THICKNESS: row.rim_thickness,
         COLUMN_WIDTH: row.width, COLUMN_HEIGHT: row.height, COLUMN_ANGLE: row.angle,
     }.get(column)
 
@@ -236,14 +277,15 @@ def step_amount_px(large: bool, unit: LengthUnit) -> float:
     return (STEP_UM_LARGE if large else STEP_UM) / unit.um_per_px
 
 
-def step_text(text: str, direction: int, large: bool, unit: LengthUnit) -> str | None:
-    """``text`` (a length in ``unit``) moved one step up (+1) or down (-1), as
-    editor text, never below zero; ``None`` if ``text`` is not a number."""
+def step_text(text: str, direction: int, large: bool, unit: LengthUnit, *, signed: bool = False) -> str | None:
+    """``text`` (a length in ``unit``) moved one step up (+1) or down (-1), as editor text, never below zero (``signed``: it may, as a rim's offset does: negative
+    means the rim starts inside the shape); ``None`` if ``text`` is not a number."""
     try:
         px = parse_length(text, unit)
     except ValueError:
         return None
-    return edit_text(max(0.0, px + direction * step_amount_px(large, unit)), unit)
+    stepped = px + direction * step_amount_px(large, unit)
+    return edit_text(stepped if signed else max(0.0, stepped), unit)
 
 
 # -- rows --------------------------------------------------------------------
@@ -259,10 +301,10 @@ class RoiRow:
     x: float
     y: float
     sample: float
-    inner: float
-    outer: float
-    inner_inherited: bool
-    outer_inherited: bool
+    rim_offset: float  # the rim's offset from the shape's edge (px, negative = starts inside the shape) and its thickness (px): the same for every shape
+    rim_thickness: float
+    rim_inherited: bool  # the rim is the shared default's (the ROI has none of its own)
+    has_rim: bool  # the ROI has a rim to measure: not a reference, and the rim is not switched off; the Offset and Thickness cells exist only then
     is_mask: bool
     nudge_count: int
     shape: str = SHAPE_RING
@@ -273,6 +315,8 @@ class RoiRow:
     height: float = 0.0
     angle: float = 0.0
     area_px: float = 0.0  # the area of the ROI's own region in px^2 (`roi_shapes.shape_area_px`); the Area column shows it in the display unit
+    type_icon: str = ICON_CIRCLE_RIM  # the Type column's pictogram (`ICON_*`) ...
+    kind: str = KIND_RIM  # ... and its colour: the kind of pair (`KIND_*`)
 
 
 @dataclass(frozen=True)
@@ -311,9 +355,9 @@ def build_roi_rows(
             users.setdefault(reference_id, []).append(roi.area_roi_id)
     reference_ids = {roi.area_roi_id for roi in rois if roi.role == "reference"}
     for roi in rois:
-        # the diameter columns describe a circle (its ring as diameters); any other shape has none to show yet
-        inner, outer = ring_diameters(roi.shape, effective_border(roi.border, default_border)) if isinstance(roi.shape, Circle) else (0.0, 0.0)
+        border = effective_border(roi.border, default_border)  # the rim: offset and thickness from the shape's edge, for a circle, a rectangle and a pixel map alike
         rectangle = roi.shape if isinstance(roi.shape, Rectangle) else None
+        kind = kind_of(roi.role, border.enabled, any(i in reference_ids for i in roi.reference_roi_ids), bool(users.get(roi.area_roi_id)))
         rows.append(
             RoiRow(
                 roi_id=roi.area_roi_id,
@@ -324,20 +368,22 @@ def build_roi_rows(
                 x=roi.center_x,
                 y=roi.center_y,
                 sample=roi.shape.diameter_px if isinstance(roi.shape, Circle) else 0.0,
-                inner=inner,
-                outer=outer,
-                inner_inherited=roi.border is None,
-                outer_inherited=roi.border is None,
+                rim_offset=float(border.gap_px),
+                rim_thickness=float(border.thickness_px),
+                rim_inherited=roi.border is None,
+                has_rim=border.enabled and roi.role != "reference",
                 is_mask=isinstance(roi.shape, MaskShape),
                 nudge_count=len(roi.per_wavelength or {}),
                 shape=shape_of(roi.shape, roi.border),
                 role=roi.role,
-                link_note=link_note(roi, effective_border(roi.border, default_border).enabled, users.get(roi.area_roi_id, ()), reference_ids),
+                link_note=link_note(roi, border.enabled, users.get(roi.area_roi_id, ()), reference_ids),
                 shape_note=shape_note(roi.shape),
                 width=rectangle.width_px if rectangle else 0.0,
                 height=rectangle.height_px if rectangle else 0.0,
                 angle=rectangle.angle_deg if rectangle else 0.0,
                 area_px=shape_area_px(roi.shape),
+                type_icon=icon_of(roi.shape, kind),
+                kind=kind,
             )
         )
     return rows
@@ -353,7 +399,7 @@ def link_note(roi: AreaRoi, has_border: bool, used_by: Sequence[int], reference_
     linked = [i for i in roi.reference_roi_ids if i in reference_ids]
     if linked:
         return "Measured against reference" + ("" if len(linked) == 1 else "s (pooled by pixel)") + " " + ", ".join(f"R{i}" for i in linked) + "."
-    return "Measured against its own border." if has_border else "No reference: its results are missing."
+    return "Measured against its own rim." if has_border else "No reference: its results are missing."
 
 
 def shape_note(shape: Shape) -> str:
@@ -403,7 +449,7 @@ def build_linked_sections(rows: Sequence[RoiRow], rois: Sequence[AreaRoi], not_l
             Section(
                 GroupInfo(
                     None, "Not linked", not_linked_color_hex, synthetic=True, collapse_key=LINKED_NOT_LINKED_KEY,
-                    note="Samples measured against their own border (or against nothing) and reference ROIs no sample uses.",
+                    note="Samples measured against their own rim (or against nothing) and reference ROIs no sample uses.",
                 ),
                 tuple(sorted(unlinked, key=lambda r: r.roi_id)),
             )
@@ -419,9 +465,9 @@ _SORT_KEYS = {
     COLUMN_X: lambda row: (row.x, row.roi_id),
     COLUMN_Y: lambda row: (row.y, row.roi_id),
     COLUMN_SAMPLE: lambda row: (row.sample, row.roi_id),
-    COLUMN_RING_IN: lambda row: (row.inner, row.roi_id),
-    COLUMN_RING_OUT: lambda row: (row.outer, row.roi_id),
-    COLUMN_SHAPE: lambda row: (row.shape, row.roi_id),
+    COLUMN_RIM_OFFSET: lambda row: (row.has_rim, row.rim_offset if row.has_rim else 0.0, row.roi_id),  # a ROI with no rim has no number: first, by id
+    COLUMN_RIM_THICKNESS: lambda row: (row.has_rim, row.rim_thickness if row.has_rim else 0.0, row.roi_id),
+    COLUMN_SHAPE: lambda row: (KIND_ORDER[row.kind], row.type_icon, row.roi_id),  # the Type column: the kinds together (green, amber, blue, gray), then by pictogram
     COLUMN_WIDTH: lambda row: (row.width, row.roi_id),
     COLUMN_HEIGHT: lambda row: (row.height, row.roi_id),
     COLUMN_ANGLE: lambda row: (row.angle, row.roi_id),

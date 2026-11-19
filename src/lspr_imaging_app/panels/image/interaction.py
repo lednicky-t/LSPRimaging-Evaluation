@@ -37,6 +37,7 @@ from .measure_line_tool import MeasureLineTool
 from .roi_context_menu import (
     ADD_RECTANGLE,
     ADD_ROI,
+    ADD_RIM,
     ADD_ROI_SUBMENU,
     ADD_SELECTION_BLOBS,
     ADD_SELECTION_ONE,
@@ -49,6 +50,7 @@ from .roi_context_menu import (
     MAKE_REFERENCE,
     MAKE_SAMPLE,
     REMOVE_CUBE_EDIT,
+    RIM_TO_REFERENCE,
     SELECT_GROUP,
     TOGGLE_LOCK,
     UNGROUP,
@@ -421,6 +423,8 @@ class CanvasInteraction:
             selected_roles=self._roi_creation.role_counts(ids),
             can_link=self._roi_creation.can_link(ids),
             can_unlink=self._roi_creation.can_unlink(ids),
+            can_add_rim=self._roi_creation.can_add_rim(ids),
+            can_rim_to_reference=self._roi_creation.can_rim_to_reference(ids),
             can_deselect_area=self._area_selection.has_selection(),
             can_remove_cube_edit=any(
                 toolbox.roi_by_id(i).timeline and int(self._selection.current_cube()) in toolbox.roi_by_id(i).timeline.cubes() for i in ids
@@ -444,6 +448,10 @@ class CanvasInteraction:
             self._roi_creation.set_role(ids, "sample")
         elif choice.action == MAKE_REFERENCE:
             self._roi_creation.set_role(ids, "reference")
+        elif choice.action == ADD_RIM:
+            self._roi_creation.add_rim(ids)
+        elif choice.action == RIM_TO_REFERENCE:
+            self._roi_creation.rim_to_reference(ids)
         elif choice.action == LINK:
             self._roi_creation.link()
         elif choice.action == UNLINK:

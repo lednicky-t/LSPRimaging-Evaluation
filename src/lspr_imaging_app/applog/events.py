@@ -135,6 +135,45 @@ def timed(logger: logging.Logger, event: str, level: int = logging.DEBUG, **fiel
     return _Timer(logger, event, level, dict(fields))
 
 
+class StageTimer:
+    """Stage timing of one unit of work (one rebuild, one cube, one frame): ``stages = StageTimer()``, ``stages.mark("name")`` after each stage, and **one**
+    ``stages.emit(logger, "domain.action", rows=n)`` at the end: a single DEBUG record that carries the total as ``dur_ms`` and every stage as ``<name>_ms``.
+
+    This is the shape the logging rules ask for (a record per unit of work, never per ROI or per pixel). **Cost:** a ``mark`` is one clock reading and one dict write (about 0.3 µs);
+    ``emit`` returns at once unless the logger takes ``level`` (so it is fine to leave in permanently); stages are in the order they were first marked. A stage marked twice adds up
+    (a loop's stage), and `add` takes a time measured elsewhere (a callee's own stages, passed as ``extra`` to ``emit`` instead)."""
+
+    __slots__ = ("_start", "_last", "_ms")
+
+    def __init__(self) -> None:
+        self._start = self._last = time.perf_counter()
+        self._ms: dict[str, float] = {}
+
+    def mark(self, stage: str) -> None:
+        """The stage that has just ended is ``stage``: it took the time since the previous mark (or the start)."""
+        now = time.perf_counter()
+        self._ms[stage] = self._ms.get(stage, 0.0) + (now - self._last) * 1000.0
+        self._last = now
+
+    def add(self, stage: str, ms: float) -> None:
+        """Add ``ms`` to ``stage`` without moving the clock (a time you measured yourself, inside a stage already marked or still to be)."""
+        self._ms[stage] = self._ms.get(stage, 0.0) + float(ms)
+
+    def ms(self) -> dict[str, float]:
+        """The stages so far, in milliseconds (a copy)."""
+        return dict(self._ms)
+
+    def emit(self, logger: logging.Logger, event: str, level: int = logging.DEBUG, *, extra: dict[str, float] | None = None, **fields: Any) -> None:
+        """Log the unit of work: ``dur_ms`` = the time since the timer was made, ``fields`` as given, each stage as ``<stage>_ms`` (milliseconds, two decimals), then ``extra``
+        (another timer's `ms()`, each as ``<name>_ms`` too). Nothing at all when the logger does not take ``level``."""
+        if not logger.isEnabledFor(level):
+            return
+        stages = {f"{name}_ms": round(value, 2) for name, value in self._ms.items()}
+        if extra:
+            stages.update({f"{name}_ms": round(value, 2) for name, value in extra.items()})
+        _emit(logger, level, event, {**fields, **stages}, (time.perf_counter() - self._start) * 1000.0, None, _current_span.get())
+
+
 def timed_call(event: str, level: int = logging.DEBUG) -> Callable[[_F], _F]:
     """Decorator: time every call of the function as *event* (logger = the function's module)."""
 

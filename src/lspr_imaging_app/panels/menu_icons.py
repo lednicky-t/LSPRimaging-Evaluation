@@ -59,6 +59,13 @@ def _reference_ring() -> QIcon:
     return ring_icon(True, ink, ink)  # the ROI tab's reference ring
 
 
+def _sample_with_rim() -> QIcon:
+    from .image.roi_icons import display_icon
+
+    ink = get_active_theme().text_primary
+    return display_icon(ink, ink)  # a filled disc inside a wider-gapped ring: a sample with its rim
+
+
 def _plan_step(name: str, accent: str) -> Callable[[], QIcon]:
     """One of the plan bar's step icons (`sensorgram/plan_icons.py`), coloured as the ribbon's Edit group colours it
     (new = green, removed = red, restored = blue, split = gold; ``"none"`` for the one with no accent)."""
@@ -117,6 +124,8 @@ ICONS: dict[str, str | Callable[[], QIcon]] = {
     "make_role": "replace",  # "Make this ROI" > Sample / Reference: the ROI changes sides
     "link": "link",
     "unlink": "link-off",
+    "add_rim": _sample_with_rim,  # "Add rim": the ROI measures against a rim of its own
+    "rim_to_reference": "link",  # "Turn rim into linked reference": the rim becomes a reference ROI, linked
     "group": "group-rois",
     "ungroup": "ungroup-rois",
     "add_to": "square-rounded-plus",  # "Add to group" (also "Add selection to the mask")

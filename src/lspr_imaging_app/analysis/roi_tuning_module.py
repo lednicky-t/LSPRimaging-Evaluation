@@ -487,7 +487,7 @@ class RoiTuningModule(QObject):
         if edge:
             message += f" {edge} of {total} have their best centre at the edge of the lattice: the peak may lie further out."
         if result.matrix.interacting_pairs:
-            message += f" {len(result.matrix.interacting_pairs)} ROI pairs are close enough to affect each other's reference ring: their numbers are approximate."
+            message += f" {len(result.matrix.interacting_pairs)} ROI pairs are close enough to affect each other's reference rim: their numbers are approximate."
         if result.request.drift_anchors is not None:
             message += " The Sensorgram's drift baseline was taken off every position's trace first."
         return message
@@ -544,7 +544,7 @@ class RoiTuningModule(QObject):
             shown = ", ".join(str(r) for r in linked[:3]) + (" ..." if len(linked) > 3 else "")
             return _Problem(
                 f"ROI {shown} {'is' if len(linked) == 1 else 'are'} linked to reference ROIs, and position tuning does not follow links yet: it would score "
-                f"{'it' if len(linked) == 1 else 'them'} against the moving border. Unlink {'it' if len(linked) == 1 else 'them'} or leave "
+                f"{'it' if len(linked) == 1 else 'them'} against the moving rim. Unlink {'it' if len(linked) == 1 else 'them'} or leave "
                 f"{'it' if len(linked) == 1 else 'them'} out of the selection."
             )
         baseline, signal = self._plan.baseline_step(), self._plan.signal_step()

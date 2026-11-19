@@ -54,6 +54,7 @@ import numpy as np
 
 from ..image_tools.chromatic.affine import apply_affine_to_points, invert_affine_matrix
 from ..roi import rasterize as rz
+from ..roi.mask_regions import blob_count
 from ..domain.roi_links import is_reference
 from ..domain.roi_model import AreaRoi
 from ..domain.roi_shapes import (
@@ -170,6 +171,8 @@ def _update_with_free_shape(digest, roi: AreaRoi, default_border: Border) -> Non
         mask = shape.mask
         digest.update(repr((mask.x0, mask.y0, mask.mask.shape)).encode())
         digest.update(np.ascontiguousarray(mask.mask, dtype=bool).tobytes())
+        if border.enabled and blob_count(mask.mask) > 1:  # each blob has a rim of its own since 2026-11-19 (`rasterize._mask_band`): a many-blob map's rim covers other pixels than
+            digest.update(b"|blob-rims")  # it did, so only such a ROI's hash changes (the `|reference` pattern); a one-blob map and every other ROI keep theirs
 
 
 def ring_reach_matrix(rs: RoiSet, rows, margin_px: float = NEIGHBOUR_REACH_MARGIN_PX) -> np.ndarray:

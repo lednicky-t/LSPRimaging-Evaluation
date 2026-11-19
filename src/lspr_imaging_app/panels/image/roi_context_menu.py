@@ -41,6 +41,8 @@ MAKE_SAMPLE = "make_sample"
 MAKE_REFERENCE = "make_reference"
 LINK = "link"
 UNLINK = "unlink"
+ADD_RIM = "add_rim"
+RIM_TO_REFERENCE = "rim_to_reference"
 GROUP = "group"
 ADD_TO_GROUP = "add_to_group"
 UNGROUP = "ungroup"
@@ -104,6 +106,8 @@ def show_roi_context_menu(
     selected_roles: tuple[int, int] = (0, 0),
     can_link: bool = False,
     can_unlink: bool = False,
+    can_add_rim: bool = False,
+    can_rim_to_reference: bool = False,
     can_deselect_area: bool = False,
 ) -> RoiMenuChoice | None:
     """Pop the menu at the cursor. ``groups`` is ``(group_id, name)`` pairs.
@@ -113,7 +117,8 @@ def show_roi_context_menu(
     ``can_add``: the click is somewhere a circle or rectangle may be added; ``can_add_from_selection``: there is an area selection to make ROIs from (the
     Add ROI submenu offers only what can be done, and is left out when neither). ``selected_roles``: how many of the selected ROIs are samples and
     how many references (the Make entry that already holds for all of them is checked). ``can_link`` / ``can_unlink``: the selection holds something to
-    link or to take apart (`roi.link_actions`); the entry is left out otherwise. ``any_selected_grouped``: Ungroup is offered. ``can_deselect_area``: there is an
+    link or to take apart (`roi.link_actions`); the entry is left out otherwise. ``can_add_rim`` / ``can_rim_to_reference``: the selection holds a ROI that can get a
+    rim (an unused reference, a sample whose rim is off), or a sample whose rim can become a linked reference (left out otherwise). ``any_selected_grouped``: Ungroup is offered. ``can_deselect_area``: there is an
     area selection (the marching ants), so "Deselect area" is offered.
     Returns the choice, or `None` if dismissed."""
     plural = "" if selected_count == 1 else "s"
@@ -162,6 +167,16 @@ def show_roi_context_menu(
         make_reference = entry(make_menu, "Reference", "reference", MAKE_REFERENCE)
         make_reference.setCheckable(True)
         make_reference.setChecked(n_references > 0 and n_samples == 0)
+    if can_add_rim:
+        entry(menu, "Add rim", "add_rim", ADD_RIM).setToolTip(
+            "Measure against a rim of the shape's own: a reference that no sample uses becomes a sample, a sample without a rim gets the default one "
+            "(gap and thickness from its edge; a pixel map gets a rim round each of its blobs)."
+        )
+    if can_rim_to_reference:
+        entry(menu, "Turn rim into linked reference", "rim_to_reference", RIM_TO_REFERENCE).setToolTip(
+            "The rim's pixels become a pixel-map reference ROI of their own, linked to the sample. A frozen copy: it no longer follows the sample, and the sample's own "
+            "rim is kept for when you unlink."
+        )
     if can_link:
         link = entry(menu, "Link references", "link", LINK)
         bind_action(link, "links.link")

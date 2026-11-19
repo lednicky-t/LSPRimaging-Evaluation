@@ -32,7 +32,7 @@ _TIP = (
     "Layers: the selection tools work on the active layer (this icon).\n"
     "Wheel: change the active layer. Click: show / hide layers, pick the active one.\n"
     "Image: the wand picks image features, Histogram range / Threshold / Local contrast work.\n"
-    "ROI: the wand picks the ROI disk or reference ring under the click.\n"
+    "ROI: the wand picks the ROI disk or reference rim under the click.\n"
     "Ignore mask: the wand picks the mask blob under the click.\n"
     "Rectangle, Lasso, Draw and Modify work the same on every layer."
 )

@@ -26,7 +26,7 @@ class OverlayAllControls(QWidget):
         super().__init__(parent)
         self._show_button = QToolButton(self)
         self._show_button.setToolTip(
-            "Show all: switch every overlay on (histogram highlight, mask, landmarks, ROI circles, rings and labels, "
+            "Show all: switch every overlay on (histogram highlight, mask, landmarks, ROI circles, rims and labels, "
             "group labels, scale bar)."
         )
         self._show_button.clicked.connect(lambda _checked=False: self.show_all_requested.emit())

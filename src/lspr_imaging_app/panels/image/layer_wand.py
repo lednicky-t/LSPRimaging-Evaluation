@@ -94,7 +94,7 @@ class LayerWand:
         else:
             found = self._roi_region(x, y, shape)
             if found is None:
-                self._status("Wand (ROI): no shown ROI disk or reference ring under the click.")
+                self._status("Wand (ROI): no shown ROI disk or reference rim under the click.")
                 return
             region, what = found
         area = int(np.count_nonzero(region if fence is None else region & fence))

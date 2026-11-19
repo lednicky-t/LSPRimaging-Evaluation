@@ -27,8 +27,8 @@ from .roi_icons import ring_icon, spot_icon
 
 _SWATCH_SIZE = 14
 _OVERLAP_INFO = (
-    "Rings may overlap each other. A ring never counts pixels of sample disks (the analysis removes every sample disk "
-    "from every ring); sample disks are masked by your mask only."
+    "Rims may overlap each other. A rim never counts pixels of sample disks (the analysis removes every sample disk "
+    "from every rim); sample disks are masked by your mask only."
 )
 _SLIDER_WIDTH = 18  # the same narrow, steep wedge as the Mask tab's
 
@@ -50,10 +50,10 @@ _SPECS: dict[str, OverlaySpec] = {
     ),
     "reference": (
         ring_icon, REFERENCE_ON_COLOR,
-        "Show or hide the reference rings.\n" + _OVERLAP_INFO,
-        "Colour of the reference rings.",
-        "Reference ring transparency.",
-        "Choose the reference ring colour",
+        "Show or hide the reference rims.\n" + _OVERLAP_INFO,
+        "Colour of the reference rims.",
+        "Reference rim transparency.",
+        "Choose the reference rim colour",
     ),
 }
 

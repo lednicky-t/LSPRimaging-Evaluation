@@ -356,7 +356,7 @@ class RoiGestures(QObject):
                 if isinstance(by_id[i].shape, Rectangle)
             }
             self._mode = "border"
-            undo_manager.begin_batch("Resize borders")
+            undo_manager.begin_batch("Resize rims")
         elif hit.zone in ("edge", "ring_inner", "ring_outer"):
             apertures = self._selected_apertures()
             resizable = set() if apertures is None else {int(i) for i, ok in zip(apertures.ids, apertures.resizable, strict=True) if ok}

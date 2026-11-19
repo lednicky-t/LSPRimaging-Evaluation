@@ -437,7 +437,7 @@ class ArrayActions(QObject):
             f"{crop.pitch_x:.1f} x {crop.pitch_y:.1f} px, margin {crop.margin_x} x {crop.margin_y} px."
         )
         if crop.widened:
-            text += (" The margin is wider than half the pitch: a reference ring (with the chromatic shift) reaches "
+            text += (" The margin is wider than half the pitch: a reference rim (with the chromatic shift) reaches "
                      "further, and cropping at half the pitch would have cut into the edge ROIs.")
         if crop.clamped:
             text += " One or more sides hit the image edge, so that margin is narrower than asked."
