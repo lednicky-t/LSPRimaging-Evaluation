@@ -138,7 +138,8 @@ BINDINGS: tuple[Binding, ...] = (
     ),
     Binding(
         "mouse.view.rectangle_handles", "Mouse: image view",
-        "Selected rectangle ROI: drag an edge or a corner to change its width / height, drag the round knob above it to turn it (every selected rectangle gets the value)",
+        "Selected rectangle ROI: drag an edge or a corner to change its width / height, drag the round knob above it to turn it, drag an edge of its reference "
+        "border (shown with the reference rings) to change the gap (inner edge) or the thickness (outer edge) (every selected rectangle gets the value)",
         gesture="Drag", scope=_VIEW,
     ),
     Binding("mouse.view.wand", "Mouse: image view", "Magic wand (armed in the selection toolbar): select the feature under the pointer", gesture="Click", scope=_VIEW),

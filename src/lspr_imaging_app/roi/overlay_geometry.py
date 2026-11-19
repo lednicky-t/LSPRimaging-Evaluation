@@ -26,8 +26,20 @@ DEFAULT_CIRCLE_POINTS = 48
 
 CELL_OFFSET = 0.5
 """A pixel's index is the middle of its cell in the view (the image's pixel ``(row, col)`` covers ``[col, col + 1) x [row, row + 1)``): the shift between
-the pixel-index coordinates a mask is stored in and the view's. Circles and rectangles are drawn around their centre as given (no shift, the existing
-convention); a mask is drawn along the cells of its pixels, so it needs this shift (`panels/image/shape_paths_item.py`, `roi/shape_hits.py`)."""
+the **pixel-index coordinates** everything stored and measured is in, and the view's.
+
+Two coordinate systems meet here, and this constant is the whole difference between them:
+
+* *Pixel-index coordinates*: pixel ``(row, col)`` is the point ``(col, row)``. The scan (`roi/rasterize.py`, `analysis/frame_reduce.py`), the detectors,
+  a ROI's stored centre (the ROI table's X / Y) and a mask's pixels are in it, and so is `RoiToolbox.display_positions` (the stored centre carried through
+  the frame's affine). A ROI at X = 100, Y = 80 measures the pixels whose index is within the radius of (100, 80): pixel (80, 100) is its middle.
+* *View coordinates*: what the pointer reports and what the canvas draws in; pixel ``(row, col)`` is the cell ``[col, col + 1)``, its middle at ``col + 0.5``.
+
+Every outline drawn from a ROI centre is therefore drawn around ``display_position + CELL_OFFSET`` and every pointer position is turned into a stored
+one by subtracting it first (`panels/image/roi_queries.RoiQueries.view_centers` / `display_to_reference`). Until 2026-11-18 circles and rectangles were drawn
+around the stored centre as it was, half a pixel up and to the left of the pixels they measure (found while drawing masks, which need this shift
+to outline their own cells: `panels/image/shape_paths_item.py`, `roi/shape_hits.py`). The shift is applied after the affine, never inside it: the affine maps
+pixel-index coordinates to pixel-index coordinates. No stored number or scan result depends on it."""
 
 
 def circle_points(

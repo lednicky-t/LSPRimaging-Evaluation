@@ -1599,7 +1599,7 @@ class ImagePanel(QWidget):
         detection = self._roi_toolbox.detection_settings()
         self._roi_overlay.draw(
             rois,
-            self._with_tuning_best(rois, self._roi_toolbox.display_positions(frame, affine), affine),
+            self._with_tuning_best(rois, self._roi_queries.view_centers(frame, affine), affine),
             self._selection.selected_roi_ids(),
             affine,
             detection.default_border(),
@@ -1628,7 +1628,7 @@ class ImagePanel(QWidget):
         return view.revision if view is not None and view.show_best and view.moves_any else None
 
     def _with_tuning_best(self, rois, centers: np.ndarray, affine: np.ndarray) -> np.ndarray:
-        """``centers`` (display positions of ``rois``) with the tuned ROIs moved to their best centres when the view shows them there. A shift of ``(dx, dy)`` in
+        """``centers`` (view centres of ``rois``, `RoiQueries.view_centers`) with the tuned ROIs moved to their best centres when the view shows them there. A shift of ``(dx, dy)`` in
         processed pixels moves a display centre by the affine's image of the shift, as the chromatic correction carries a shifted ROI to every wavelength."""
         view = self._tuning_view
         if self._tuning_best_key() is None or view is None:

@@ -18,6 +18,7 @@ from PyQt6.QtCore import Qt
 
 from ...analysis.roi_tuning_module import TuningView
 from ...image_tools.chromatic.affine import apply_affine_to_points
+from ...roi.overlay_geometry import CELL_OFFSET
 
 CROSS_SIZE = 9
 BEST_CROSS_SIZE = 15
@@ -97,7 +98,7 @@ class TuningOverlay:
         n_positions, n_rois = view.scores.shape
         # Position-major, like the arrays: crosses[p * n_rois + r] is ROI r at lattice position p.
         points = (view.roi_xy[None, :, :] + view.offsets[:, None, :]).reshape(-1, 2)
-        shown = apply_affine_to_points(points, affine)
+        shown = apply_affine_to_points(points, affine) + CELL_OFFSET  # pixel-index coordinates -> the canvas's (`overlay_geometry.CELL_OFFSET`)
         scores = view.scores.reshape(-1)
         is_best = np.zeros((n_positions, n_rois), dtype=bool)
         ranked = view.best >= 0

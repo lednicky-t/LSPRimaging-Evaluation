@@ -1025,6 +1025,22 @@ class RoiToolbox(QObject):
         if targets:
             self._set_shapes(targets, "Resize rectangle" if len(targets) == 1 else "Resize rectangles", cube=cube, scope=scope)
 
+    @instrumented("RoiToolbox.set_borders")
+    def set_borders(self, borders: Mapping[int, Border], *, cube: int | None = None, scope: str = SCOPE_PERSISTENT) -> None:
+        """Give every ROI in ``borders`` (id -> :class:`Border`) the border of its own (gap and thickness from its shape's edge, `roi_shapes`); the shape is
+        left alone. This is what dragging the edges of a rectangle's border band stores (a circle's ring goes through `resize_rois`, which says it as
+        diameters). One undo step; a no-op (no undo entry) if every ROI already has exactly that border.
+
+        Raises ``ValueError``, before changing anything, for an unknown id or a gap that is not finite (a thickness below zero is refused by
+        :class:`Border` itself)."""
+        rois = self._require_rois(borders)
+        for roi in rois:
+            border = borders[roi.area_roi_id]
+            if not math.isfinite(float(border.gap_px)) or not math.isfinite(float(border.thickness_px)):
+                raise ValueError(f"ROI {roi.area_roi_id}: a border needs a finite gap and thickness, got {border!r}")
+        targets: list[tuple[AreaRoi, Shape, Border | None]] = [(roi, geometry_at(roi, cube).shape, borders[roi.area_roi_id]) for roi in rois]
+        self._set_shapes(targets, "Resize border" if len(targets) == 1 else "Resize borders", cube=cube, scope=scope)
+
     @instrumented("RoiToolbox.resize_roi")
     def resize_roi(
         self,

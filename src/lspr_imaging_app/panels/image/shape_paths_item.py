@@ -6,9 +6,10 @@ ROI is a set of pixels: its outline has as many corners as its boundary has, and
 under a cosmetic outline of constant screen width. There are few mask ROIs next to circles, so one path each is cheap.
 
 **The outline is the pixels as they are shown.** The image's pixel ``(row, col)`` covers ``[col, col + 1) x [row, row + 1)`` in the view, so a mask's
-outline is traced along those cell edges (`image_tools`' selection outline tracer, `region_outline`) and not drawn around the pixel *indices* the way a
-circle's centre is. A mask made from a selection is therefore drawn exactly where the selection was. Under a chromatic affine the traced outline is bent
-the way the measurement bends the mask (the affine's linear part about the ROI's centre, `placed`), so the drawn outline follows the measured pixels.
+outline is traced along those cell edges (`image_tools`' selection outline tracer, `region_outline`). A mask made from a selection is therefore drawn exactly
+where the selection was. Under a chromatic affine the traced outline is carried the way the measurement carries the mask: through the frame's affine, whatever
+the ROI's centre is (`placed`), so the drawn outline follows the measured pixels. Circles and rectangles reach the same result by another route: they are drawn
+around their stored centre plus the same half cell (`overlay_geometry.CELL_OFFSET`, since 2026-11-18), so all three shapes outline the pixels they measure.
 """
 
 from __future__ import annotations

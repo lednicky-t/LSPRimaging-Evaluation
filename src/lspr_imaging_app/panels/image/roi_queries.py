@@ -16,10 +16,20 @@ from ...image_tools import ChromaticModule
 from ...roi import RoiToolbox
 from ...domain.roi_links import is_reference
 from ...domain.roi_shapes import NO_BORDER, Circle, Rectangle, effective_border, reach_radius, ring_diameters
+from ...roi.overlay_geometry import CELL_OFFSET
 from ...roi.rasterize import rasterize_reference, rasterize_sample, rasterize_sample_for_patch
-from ...roi.shape_hits import FrameMap, display_point_in_region, rectangle_handle_zone
+from ...roi.shape_hits import FrameMap, display_point_in_region, rectangle_border_zone, rectangle_handle_zone
 from ...selection import SelectionModule
 from .roi_gestures import SelectedApertures
+
+
+def _border_zone_finder(roi, centre, frame: FrameMap, default_border):
+    """``border(x, y, tolerance)`` for a selected rectangle whose border band can be dragged (`rectangle_border_zone`), else ``None``: a reference ROI is one
+    region with no border of its own, and a border that is switched off or has no thickness has no edges to grab."""
+    border = effective_border(roi.border, default_border)
+    if not isinstance(roi.shape, Rectangle) or is_reference(roi) or not border.enabled or border.thickness_px <= 0.0:
+        return None
+    return lambda x, y, tolerance: rectangle_border_zone(roi.shape, centre, frame, x, y, border, tolerance)
 
 
 def _stretch(linear: np.ndarray) -> float:
@@ -47,6 +57,13 @@ class RoiQueries:
         self._current_wavelength = current_wavelength
         self._reference_visible = reference_visible
 
+    def view_centers(self, frame: tuple[int, float], affine: np.ndarray) -> np.ndarray:
+        """Where every ROI's centre is **on the canvas** at ``frame``: an (N, 2) array in ``rois()`` order, in the view's coordinates (the pointer's and the
+        drawing's). `RoiToolbox.display_positions` are in pixel-index coordinates, the ones the scan measures in; the canvas draws pixel ``(row, col)`` over
+        ``[col, col + 1)``, so the two differ by `CELL_OFFSET` (see its docstring). Every drawing of a ROI and every question about where the pointer is
+        relative to one goes through here, so a circle outlines the pixels it measures."""
+        return self._roi_toolbox.display_positions(frame, affine) + CELL_OFFSET
+
     def roi_at(self, x: float, y: float) -> int | None:
         """The ROI whose sample aperture contains display-space point
         (x, y), or `None`. Public because it is the one piece of this
@@ -61,7 +78,7 @@ class RoiQueries:
         rois = self._roi_toolbox.rois_at(frame[0])
         if not rois:
             return None
-        centers = self._roi_toolbox.display_positions(frame, affine)
+        centers = self.view_centers(frame, affine)
         distances = np.hypot(x - centers[:, 0], y - centers[:, 1])
         # a rectangle or a mask is hit within the circle that holds it until the shape UI (plan phase 3) gives each its own test
         radii = np.fromiter((reach_radius(roi.shape, roi.center_x, roi.center_y) for roi in rois), dtype=np.float64, count=len(rois))
@@ -99,7 +116,7 @@ class RoiQueries:
             return None
         detection = self._roi_toolbox.detection_settings()
         default_border = detection.default_border()
-        centers = self._roi_toolbox.display_positions(frame, affine)
+        centers = self.view_centers(frame, affine)
         distances = np.hypot(x - centers[:, 0], y - centers[:, 1])
         frame_map = FrameMap.of(affine)
         best: tuple[float, int] | None = None
@@ -127,7 +144,7 @@ class RoiQueries:
         if not rois:
             return set()
         frame = (self._current_cube(), self._current_wavelength())
-        centers = self._roi_toolbox.display_positions(frame, self._chromatic.affine_for(frame))
+        centers = self.view_centers(frame, self._chromatic.affine_for(frame))
         inside = (centers[:, 0] >= x0) & (centers[:, 0] <= x1) & (centers[:, 1] >= y0) & (centers[:, 1] <= y1)
         return {roi.area_roi_id for roi, hit in zip(rois, inside, strict=True) if hit}
 
@@ -141,7 +158,7 @@ class RoiQueries:
         if not rois or not mask.any():
             return set()
         affine = self._chromatic.affine_for(frame)
-        centers = self._roi_toolbox.display_positions(frame, affine)
+        centers = self.view_centers(frame, affine)
         stretch = _stretch(np.asarray(affine, dtype=np.float64)[:2, :2])
         rows, cols = mask.shape[:2]
         hits: set[int] = set()
@@ -184,7 +201,7 @@ class RoiQueries:
         if not keep.any():
             return None
         frame = (self._current_cube(), self._current_wavelength())
-        centers = self._roi_toolbox.display_positions(frame, self._chromatic.affine_for(frame))[keep]
+        centers = self.view_centers(frame, self._chromatic.affine_for(frame))[keep]
         chosen = [roi for roi, hit in zip(rois, keep, strict=True) if hit]
         detection = self._roi_toolbox.detection_settings()
         default_border = detection.default_border()
@@ -198,8 +215,14 @@ class RoiQueries:
         resizable = np.array([isinstance(roi.shape, Circle) for roi in chosen], dtype=bool)  # the aperture handles resize a diameter
         body = None
         handles = None
+        borders = None
         if any(isinstance(roi.shape, Rectangle) for roi in chosen):
             frame_for_handles = FrameMap.of(self.current_affine())
+            if self._reference_visible():  # an invisible border must not be grabbable (as for a circle's ring)
+                found = tuple(
+                    _border_zone_finder(roi, centre, frame_for_handles, default_border) for roi, centre in zip(chosen, centers, strict=True)
+                )
+                borders = found if any(finder is not None for finder in found) else None
             handles = tuple(
                 None if not isinstance(roi.shape, Rectangle)
                 else (
@@ -228,6 +251,7 @@ class RoiQueries:
             ring_resizable=resizable & bool(self._reference_visible()) & (rings[:, 1] > rings[:, 0]),
             body=body,
             handles=handles,
+            borders=borders,
         )
 
     def current_affine(self) -> np.ndarray:
@@ -239,11 +263,12 @@ class RoiQueries:
         return self.current_affine()[:2, :2]
 
     def display_to_reference(self, x: float, y: float) -> tuple[float, float]:
-        """Display-space point -> reference-frame point (what `RoiToolbox` stores), by inverting the affine."""
+        """View point (what the pointer reports) -> reference-frame point in pixel-index coordinates (what `RoiToolbox` stores): the cell shift is taken
+        off first (`CELL_OFFSET`), then the affine is inverted. The exact inverse of `view_centers`."""
         matrix = self.current_affine()
         linear, shift = matrix[:2, :2], matrix[:2, 2]
         try:
-            reference = np.linalg.solve(linear, np.array([x, y]) - shift)
+            reference = np.linalg.solve(linear, np.array([x - CELL_OFFSET, y - CELL_OFFSET]) - shift)
         except np.linalg.LinAlgError:
             return x, y
         return float(reference[0]), float(reference[1])

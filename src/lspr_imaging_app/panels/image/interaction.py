@@ -21,10 +21,12 @@ from typing import Any, Protocol
 
 import pyqtgraph as pg
 from PyQt6.QtCore import QPointF, Qt
+from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import QGraphicsView, QInputDialog, QWidget
 
 from ...image_tools import ActiveToolModule, ImageTool
 from ...roi import RoiToolbox
+from ...roi.shape_hits import ZONE_ROTATE
 from ...selection import AreaSelectionMode, AreaSelectionModule, SelectionModule
 from ...selection.area_selection_module import VALUE_MODES, how_for_keys
 from .area_selection_tool import AreaSelectionTool
@@ -54,6 +56,7 @@ from .roi_context_menu import (
 )
 from .roi_creation import RoiCreation
 from .roi_gestures import RoiGestures
+from .rotate_cursor import rotate_cursor
 from .rotate_line_tool import RotateLineTool
 from .selection_menu_icons import DESELECT_ICON, INVERT_ICON, LOCK_ICON, UNLOCK_ICON, menu_icon
 
@@ -149,7 +152,7 @@ class CanvasInteraction:
         self._unlock = unlock
         self._combine_badge = combine_badge  # the + / - / x beside the pointer; follows it while a selection tool is armed
         self._armed_cursor = False  # whether the cursor on the canvas is a selection tool's (the cross, or the brush's blank)
-        self._roi_cursor: Qt.CursorShape | None | object = _NO_CURSOR_YET  # what the ROI hover last set
+        self._roi_cursor: Qt.CursorShape | QCursor | None | object = _NO_CURSOR_YET  # what the ROI hover last set (a QCursor is the rotate cursor: compared by identity)
 
     def handle_key(self, key: int, modifiers: Qt.KeyboardModifier) -> bool:
         """Arrow keys / Esc for the active tool; `True` when a tool used the key."""
@@ -162,8 +165,8 @@ class CanvasInteraction:
     def _in_view(self, scene_pos: object) -> bool:
         return bool(self._plot.vb.sceneBoundingRect().contains(scene_pos))
 
-    def _set_view_cursor(self, shape: Qt.CursorShape | None) -> None:
-        """Set the canvas cursor, or drop any custom one (`None`)."""
+    def _set_view_cursor(self, shape: Qt.CursorShape | QCursor | None) -> None:
+        """Set the canvas cursor (a standard shape, or a cursor of our own such as the rotate cursor), or drop any custom one (`None`)."""
         viewport = self._view.viewport()
         if viewport is None:
             return
@@ -631,6 +634,9 @@ class CanvasInteraction:
             down_point = self._plot.vb.mapSceneToView(down)
             if not self._roi_gestures.begin(float(down_point.x()), float(down_point.y()), additive=additive):
                 return False
+            if self._roi_gestures.rotating:  # turning shows the rotate cursor for the whole drag, even if the press came without a hover first
+                self._roi_cursor = rotate_cursor()
+                self._set_view_cursor(self._roi_cursor)
             self._roi_gestures.update(x, y)
             return True
         if ev.isFinish():
@@ -644,23 +650,27 @@ class CanvasInteraction:
         border (pointing along the radius), a move cursor inside a selected ROI."""
         if self._roi_gestures.busy:
             return  # keep the cursor the drag started with
-        shape: Qt.CursorShape | None = None
+        shape: Qt.CursorShape | QCursor | None = None
         if self._in_view(scene_pos):
             point = self._plot.vb.mapSceneToView(scene_pos)
             x, y = float(point.x()), float(point.y())
             hit = self._roi_gestures.hit(x, y)
             if hit is not None and hit.zone == "body":
                 shape = Qt.CursorShape.SizeAllCursor
-            elif hit is not None and hit.zone == "rect_rotate":
-                shape = Qt.CursorShape.OpenHandCursor  # the round knob above a selected rectangle: turn it
+            elif hit is not None and hit.zone == ZONE_ROTATE:
+                shape = rotate_cursor()  # the round knob above a selected rectangle: turn it
             elif hit is not None:
-                shape = self._resize_cursor(hit.center, x, y)
-        if shape != self._roi_cursor:
+                direction = self._roi_gestures.resize_direction(hit, x, y)  # a rectangle's edge, corner or border band: along its own axis, not the radius
+                if direction is None:
+                    shape = self._resize_cursor(hit.center, x, y)
+                else:
+                    shape = self._resize_cursor(hit.center, hit.center[0] + direction[0], hit.center[1] + direction[1])
+        if shape is not self._roi_cursor and shape != self._roi_cursor:
             self._roi_cursor = shape
             self._set_view_cursor(shape)
 
     def _resize_cursor(self, center: tuple[float, float], x: float, y: float) -> Qt.CursorShape:
-        """The two-headed arrow closest to the radius direction *on screen* (the
+        """The two-headed arrow closest to the direction from ``center`` to ``(x, y)`` *on screen* (the circles' radius, or a rectangle's drag axis; the
         view may be flipped, so the angle is taken between scene points)."""
         a = self._plot.vb.mapViewToScene(QPointF(center[0], center[1]))
         b = self._plot.vb.mapViewToScene(QPointF(x, y))

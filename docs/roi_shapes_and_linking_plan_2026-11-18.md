@@ -255,10 +255,10 @@ in 2.5 (the cell hashes, not that record, decide what is stale).
   - Drawing: circles and rectangles are rows of the same arrays (`overlay_geometry.rectangle_points`: rotated, rounded corners for a border, bent by the
     affine like a circle); a mask is drawn as its **traced pixel outline** in a small painted item (`panels/image/shape_paths_item.py`, one path per ROI,
     even-odd so a hole stays empty), the border of a mask as the traced band. A circle-only session takes exactly the old code path.
-  - **Half-pixel convention (observation, not changed):** ROI centres are view coordinates (pixel `(row, col)` covers `[col, col+1)`) while the
-    rasterizer treats a pixel *index* as its coordinate, so a circle is drawn about 0.5 px (both axes) off the pixel set it measures. Nothing in the app
-    corrects for it. A mask is therefore drawn along the cells of its pixels (`overlay_geometry.CELL_OFFSET`), so a lasso-made mask outlines exactly where it
-    was drawn; circles and rectangles keep the existing convention. Whether to shift the circles is the maintainer's decision.
+  - **Half-pixel convention (observed here; FIXED later the same day, see "Half-pixel fix" below):** the rasterizer treats a pixel *index* as its coordinate,
+    the canvas draws pixel `(row, col)` over `[col, col+1)`, and circles were drawn around the stored centre as it stood, so a circle was about 0.5 px
+    (both axes) off the pixel set it measures. A mask is drawn along the cells of its pixels (`overlay_geometry.CELL_OFFSET`), so a lasso-made mask
+    outlines exactly where it was drawn.
   - Pointing (`roi/shape_hits.py`, same region test as the scan): `roi_at` is exact for rectangles and masks (a hole is not a hit), the wand's ROI layer
     finds a rectangle's or mask's border, `rois_touching` uses the ROI's pixels, and a selected **rectangle** can be grabbed by its inside
     (`SelectedApertures.body`) and moved; no edge handles (they resize a diameter).
@@ -322,3 +322,107 @@ something to link / take apart).
 
 **Still not built:** a drag-to-draw rectangle (a click places a 20 x 20 px square), W / H / angle as editable table columns (the dialog and the handles edit them),
 link-aware ROI position tuning (plan 1.2d), and moving a pixel mask (refused, see 2.4).
+
+### Half-pixel fix (DONE 2026-11-18, maintainer's request: "circle half-pixel offset, can you fix it?"; UNSEEN BY EYE)
+
+**The finding, stated exactly.** Two coordinate systems meet at a ROI. *Pixel-index coordinates* (pixel `(row, col)` is the point `(col, row)`): the scan, the
+detectors, the ROI's stored centre (the ROI table's X / Y), a mask's pixels and `RoiToolbox.display_positions`. *View coordinates* (what the pointer reports and the
+canvas draws in; pixel `(row, col)` is the cell `[col, col+1)`, its middle at `col + 0.5`). A circle was drawn around the stored centre as it stood, so it sat
+0.5 px up and to the left of the pixels it measures; a ROI placed by a click was stored in view coordinates, so it measured pixels 0.5 px down and to the right of
+where it was clicked. (The detectors, e.g. refine, work on pixel arrays and always stored index coordinates, which is why the drawing, not the storage, was
+the odd one out.)
+
+**The fix is at the view boundary only; no stored number changes.** Nothing in the scan, the rasterizer, the cell hashes, the circle golden pins, a saved session
+or `scan.h5` is touched (`SCAN_ALGORITHM_VERSION` is not bumped, no scan goes stale). Where the shift lives:
+- `overlay_geometry.CELL_OFFSET` (docstring: the whole convention) and `RoiQueries.view_centers(frame, affine)` = `display_positions + CELL_OFFSET` (the shift
+  is added **after** the affine: the affine maps pixel-index coordinates to pixel-index coordinates). Every drawing of a ROI (`ImagePanel._draw_overlay_items`:
+  circles, rectangles, borders, labels, link lines, rectangle handles, signal-map colours) and every question of "where is the pointer relative to a ROI"
+  (`roi_at`, `region_at`, `rois_in_rect`, `rois_touching`, `selected_apertures` -> the border / handle / move / resize gestures) takes its centres from there.
+- `RoiQueries.display_to_reference(x, y)` (view point -> stored centre) subtracts the shift first. It is the exact inverse of `view_centers` (round-trip tested).
+  Used by the right-click Add ROI > Circle / Rectangle, and **now also by the Add ROI tool's click** (`RoiCreation.add_picked`), which used to store the raw pointer
+  position (so it also ignored the chromatic affine away from the reference wavelength; both are fixed by the one call).
+- `tuning_overlay` (the crosses of ROI position tuning) adds the shift to its points, so a cross at a ROI's own centre is the middle of that ROI's circle.
+- Masks needed no change (`shape_paths_item.placed` and `shape_hits` already used `CELL_OFFSET`); a mask's stored centre is the mean of its pixel indices, so its
+  label point is shifted like every other centre. `shape_hits` and the gestures work on differences between the pointer and a centre, so the shift cancels there.
+- The ROI refine action (`array_actions`) deliberately still passes pixel-index centres: it reads pixels.
+
+**Before / after** (`scratchpad` script, 300 random ROIs per row, the pixels the scan reads, `rasterize_sample`, against the middle of the drawn outline, both in
+view coordinates; same code as `tests/unit/test_lspri_roi_cell_offset.py`, which keeps the check):
+
+| shape, frame | mean offset before (x, y) | after (x, y) | worst single ROI before -> after |
+|---|---|---|---|
+| circle 12 px, identity | (-0.500, -0.501) | (-0.000, -0.001) | 0.663 -> 0.164 px |
+| circle 20 px, identity | (-0.502, -0.504) | (-0.002, -0.004) | 0.646 -> 0.148 px |
+| circle 40 px, identity | (-0.501, -0.500) | (-0.001, -0.000) | 0.579 -> 0.079 px |
+| circle 12 / 20 / 40 px, chromatic and rotated frames | -0.50 .. -0.50 | within +-0.005 | worst 0.66 -> 0.18 px |
+| rectangle 30 x 14 at 33 deg, identity / chromatic / rotated | (-0.50, -0.50) | within +-0.002 | 0.59 -> 0.09 px |
+
+The residual per ROI (worst 0.18 px for the smallest circle) is the pixel grid's own rounding of which pixels count; averaged over ROIs it is zero.
+
+**What the maintainer will see.** Every circle and rectangle is drawn half a pixel further down and to the right than before, now on the pixels it measures
+(the measured pixels and numbers are exactly as before). A ROI added by a click is stored half a pixel back from the click, so its table X / Y read the pixel index of
+its middle pixel (click in the middle of pixel 100 -> X = 100.0), which is also what the cursor readout's `(col, row)` shows. ROIs already in a session keep their
+stored centres. Tests that gave the pointer in stored coordinates now go through a `scene()` helper that adds half a cell; the ones that checked a drawn or
+placed position say "stored + `CELL_OFFSET`" (gestures, timeline, overlay controls, tuning overlay, phase 3 UI, queries); three mutations (no shift in
+`view_centers`, in `display_to_reference`, in the tuning crosses) each fail at least one test.
+
+**Not checked / not changed:** the chromatic landmark overlay (`landmark_overlay.py`: fitted dots and crosses of observed landmarks) is the only other drawing I
+saw that may be in pixel-index coordinates; it is not a ROI and was left alone. A pixel mask still cannot be moved (2.4).
+
+### Rectangle speed, border drag, rotate cursor (DONE 2026-11-18, maintainer's three requests; UNSEEN BY EYE)
+
+The maintainer reported: rectangle ROIs draw / redraw slowly, especially while resizing or rotating; the cursor while rotating should be a rotate cursor, not the "hold
+handle" hand; and a rectangle's reference ring (border) cannot be dragged the way a circle's ring can.
+
+**1 Speed: what was measured.** Offscreen, a 1200 x 1000 frame, ROIs on a lattice, a real window with every panel; times per drag step (toolbox write + overlay draw) and
+for a repaint of the view. The scripts were scratch (not kept).
+- One rectangle selected among many: draw and paint were about the same as circles (draw 9.6-11.9 ms vs 6.5 ms at 150 ROIs, repaint 22 ms both). Not where the report came from.
+- **Many rectangles selected** (a resize or a turn applies to every selected rectangle, so this is the usual case): the repaint cost **3.4 x** that of the same number of
+  selected circles (150: 112-128 ms vs 34 ms; 500: 332 ms vs 108 ms, a busy machine), and the toolbox write (0.5 ms) and the overlay data (6-12 ms) were not the problem.
+  Per overlay item, with all selected, the rectangle handles alone were 26 ms of 49 ms at 500; the rectangles' own outlines were cheaper to paint than circles' (4 vs 14 ms).
+
+**Causes and fixes** (`panels/image/rectangle_handles_item.py`, `roi/shape_hits.rectangle_handle_arrays`):
+1. The item worked out every handle position in Python inside `boundingRect()` (Qt calls it several times per paint) and again in `paint()`. Now one numpy calculation
+   (`rectangle_handle_arrays`, `(N, 9, 2)`; `rectangle_handle_points` is its one-rectangle form, so what is drawn is what the hit test grabs) made when the rectangles or the zoom
+   change and kept until then. A test counts the calculations: none for 25 `boundingRect()` calls and two repaints, one after a change.
+2. **A path of 4,000 antialiased squares costs 43 ms to paint, one `drawRect` per square 7.5 ms, `drawPoints` with a square-capped cosmetic pen 2.7 ms** (benchmarked in
+   isolation, 500 rectangles = 4,000 squares): a cosmetic point *is* a square of constant screen size. My first rewrite (one path) was slower to paint than the code it replaced;
+   the benchmark is what showed it. A handle is a dark point under a smaller light one, the knob a round-capped pair, the stems one path.
+   **Rule: many small marks are drawn with `drawPoints` and a cosmetic pen, never as antialiased path subshapes** (eva `CLAUDE.md`, Pitfalls).
+
+**Result** (repaint of the view, every ROI selected; the old item loaded from git next to the new one, same machine, back to back): 150 rectangles **53 -> 12 ms**,
+500 rectangles **170 -> 37 ms**; the same numbers of selected circles took 11 and 36 ms. Repeated on a busier machine: rectangles 21-22 ms vs circles 19 ms (150), 55-56 vs 56-57 ms (500):
+rectangles now paint like circles. A drag step (write + draw) is 4-7 ms at 150 and 13-21 ms at 500.
+
+**Still slow, not rectangle-specific (not changed):** `roi_overlay.set_fill_outlines` (the reference-ring fill: one `addPolygon` per ring, about 9 ms of a 24 ms draw at 500 ROIs,
+circles pay it too); the Histogram's ROI-mask union (`histogram/roi_masks.py`, 130 ms for 150 circles, 175-260 ms for 150 rectangles, on a worker thread restarted by every
+drag step: it costs the GUI thread about 2 ms per step through the interpreter lock, and the ROI-count limit for doing it inline is 40). Both are candidates if a drag still
+feels slow with hundreds of ROIs.
+
+**2 The border band of a selected rectangle can be dragged** (`roi/shape_hits.py`, `RoiGestures` mode `"border"`, `RoiToolbox.set_borders`).
+- The band is the pixels `gap` to `gap + thickness` from the rectangle's edge (`roi_shapes.Border`); the two edges of the drawn band are the offset outlines
+  `rectangle_points` draws (rounded outside, a smaller sharp rectangle inside). `rectangle_signed_distance` is the distance a border is measured by (positive outside), the same
+  for every frame (identity, chromatic, rotated, stretched: tested against the drawn outlines). `rectangle_border_zone` says which edge a point is on: the zone reaches the screen tolerance
+  either side of the edge but at most half the thickness (as a circle's ring), and returns its distance to the band edge and to the rectangle's own edge, so the nearer wins
+  (a thin gap does not hide the width / height handles; the knob always wins).
+- **Inner edge: sets the gap** of every selected rectangle to the distance under the cursor (each keeps its own thickness, as a circle's ring keeps its width); it cannot go past the middle
+  of a rectangle's shorter side (a negative gap, a band starting inside the shape, is allowed). **Outer edge: sets the outer distance**, so each rectangle's thickness is that distance
+  minus its own gap (never below `MIN_RING_GAP_PX / 2` = 0.5 px). One undo step for the drag; the first edit gives the ROI a border of its own (it followed the shared default before; undo
+  puts that back).
+- Grabbable only for a selected rectangle with a border that is enabled and has a thickness, that is not a reference ROI (it is one region with no border), and while the reference rings are
+  shown (an invisible border must not be grabbable). A circle in the selection, an unselected rectangle and a pixel mask are left alone (a mask's border has no drag: not built).
+- Help -> Keyboard shortcuts: the rectangle row now says so.
+
+**3 Cursors** (`panels/image/rotate_cursor.py`, `interaction.py`, `RoiGestures.rotating` / `resize_direction`).
+- The knob shows a **rotate cursor** (Qt has none: the app's own Rotate-tool glyph, Tabler `rotate-clockwise-2`, white over dark so it reads on any image, 26 px) on hover and **for the whole
+  turning drag**, also when the press came without a hover first. Nowhere else.
+- A rectangle's edge, corner or border edge shows the two-headed arrow along **its own drag axis** (width edge: the rectangle's x axis on screen; height edge: its y axis; a corner: its
+  diagonal; a border edge: the outward normal where the pointer is), not along the radius from the centre (which was diagonal for a point on an edge away from its middle). A circle keeps the radial arrow.
+
+**Tests:** `tests/unit/test_lspri_rectangle_border_geometry.py` (vectorised = one-rectangle handles, signed distance against the drawn outlines in four frames, zones, nearest-edge distances,
+cursor directions), `tests/integration/test_lspri_rectangle_border_panel.py` (the drag with every rule above, undo, clamps, multi-select, reference ROI, hidden rings, the cursors on hover and
+through a drag, no recalculation per `boundingRect()` call, handles painted where they can be grabbed). Mutations the tests catch: no handle cache, open hand again on the knob, no cursor at drag
+start, a border drag that stores nothing. Updated: `test_lspri_rectangle_handles_panel.py` (view coordinates, the rotate cursor).
+
+**Open / maintainer's decisions:** handles are drawn for every selected rectangle (150 selected = 150 sets of handles, as before; only the cost is gone); a pixel mask's border cannot be dragged;
+the rotate cursor's look (size, colours) is unseen by eye.

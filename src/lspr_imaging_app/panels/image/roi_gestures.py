@@ -45,9 +45,18 @@ from ...applog.events import emit_timing
 from ...roi import RoiToolbox
 from ...domain.roi_model import SCOPE_PERSISTENT
 from ...roi.scope import RoiEditTarget
-from ...domain.roi_shapes import Rectangle
+from ...domain.roi_shapes import Border, Rectangle, effective_border
 from ...roi.rasterize import effective_reference_diameters
-from ...roi.shape_hits import RECTANGLE_ZONES, ZONE_ROTATE, FrameMap, rectangle_size_at
+from ...roi.shape_hits import (
+    BORDER_ZONES,
+    RECTANGLE_ZONES,
+    ZONE_BORDER_INNER,
+    ZONE_ROTATE,
+    FrameMap,
+    rectangle_signed_distance,
+    rectangle_size_at,
+    rectangle_zone_direction,
+)
 from ...roi.toolbox import MIN_SAMPLE_DIAMETER_PX
 from ...selection import SelectionModule
 from ...undo import undo_manager
@@ -58,7 +67,8 @@ _BAND_COLOR = "#38bdf8"
 _Z_VALUE = 60  # above the ROI curves, as the area-selection outline is
 
 MIN_RING_GAP_PX = 1.0
-"""Smallest ring thickness (diameter difference, reference px) a drag of the outer border can leave."""
+"""Smallest ring thickness (diameter difference, reference px) a drag of the outer border can leave. A rectangle's border band keeps half of it as its
+thickness (a rectangle's band is measured outwards from the edge, so a thickness is half the difference of two diameters)."""
 
 HIT_TOLERANCE_PX = 6.0
 """How far (screen pixels) from a selected ROI's border still counts as on it."""
@@ -87,12 +97,15 @@ class SelectedApertures:
     body: tuple[Callable[[float, float], bool] | None, ...] | None = None
     # per selected ROI, ``None`` unless it is a rectangle: ``handle(x, y, tolerance, knob)`` -> the handle zone under the display point (`shape_hits`), or ``None``
     handles: tuple[Callable[[float, float, float, float], str | None] | None, ...] | None = None
+    # per selected ROI, ``None`` unless it is a rectangle whose border band can be dragged (it has a border, is not a reference ROI, and the reference rings are
+    # shown): ``border(x, y, tolerance)`` -> ``(zone, distance from that band edge, distance from the rectangle's own edge)`` or ``None`` (`rectangle_border_zone`)
+    borders: tuple[Callable[[float, float, float], tuple[str, float, float] | None] | None, ...] | None = None
 
 
 @dataclass(frozen=True)
 class RoiHit:
     roi_id: int
-    zone: str  # "edge" (sample border), "ring_inner", "ring_outer" or "body"
+    zone: str  # "edge" (sample border), "ring_inner", "ring_outer", a rectangle's `RECTANGLE_ZONES` / `BORDER_ZONES`, or "body"
     center: tuple[float, float]  # display space
 
 
@@ -136,9 +149,17 @@ def hit_test(
         return RoiHit(
             int(selected.ids[index]), zones[int(zone_index)], (float(selected.centers[index, 0]), float(selected.centers[index, 1]))
         )
-    if selected.handles is not None:  # a selected rectangle's edges, corners and knob (after the circles' borders)
-        for index, handle in enumerate(selected.handles):
+    if selected.handles is not None or selected.borders is not None:
+        # A selected rectangle's knob, edges, corners and border band (after the circles' borders). The knob wins outright; between the rectangle's own edge
+        # and an edge of its border band the nearer one wins (as the nearest border wins for a circle), so a thin gap does not hide the band.
+        for index in range(len(selected.ids)):
+            handle = None if selected.handles is None else selected.handles[index]
+            border = None if selected.borders is None else selected.borders[index]
             zone = None if handle is None else handle(x, y, tolerance, knob)
+            if zone != ZONE_ROTATE and border is not None:
+                found = border(x, y, tolerance)
+                if found is not None and (zone is None or found[1] < found[2]):
+                    zone = found[0]
             if zone is not None:
                 return RoiHit(int(selected.ids[index]), zone, (float(selected.centers[index, 0]), float(selected.centers[index, 1])))
     inside = distance <= radius
@@ -187,7 +208,9 @@ class RoiGestures(QObject):
         self._edit_target = edit_target
         self._edit_kwargs: dict = {}  # fixed at the start of a drag: the scope or cube must not change under it
         self._edit_cube: int | None = None
-        self._mode: str | None = None  # "marquee" | "move" | "resize" | "rectangle" while a gesture runs
+        self._mode: str | None = None  # "marquee" | "move" | "resize" | "rectangle" | "border" while a gesture runs
+        self._border_start: dict[int, tuple[Border, float]] = {}  # rectangle border drag: roi id -> (its border, half its shorter side) at drag start
+        self._border_anchor: Rectangle | None = None  # the rectangle whose border edge was grabbed (the distance is measured from its edge)
         self._rect_angle = 0.0  # the rectangle's angle when a handle drag began (an edge drag measures along these axes)
         self._band_start: tuple[float, float] | None = None
         self._edit_ids: tuple[int, ...] = ()
@@ -216,6 +239,26 @@ class RoiGestures(QObject):
     def busy(self) -> bool:
         """A drag is in progress (the hover cursor must not change under it)."""
         return self._mode is not None
+
+    @property
+    def rotating(self) -> bool:
+        """The drag in progress is turning rectangles (the knob was grabbed): the canvas shows the rotate cursor for all of it."""
+        return self._mode == "rectangle" and self._resize_zone == ZONE_ROTATE
+
+    def resize_direction(self, hit: RoiHit, x: float, y: float) -> tuple[float, float] | None:
+        """The direction on the screen (display units) along which dragging ``hit`` moves, for the two-headed arrow cursor, when ``hit`` is on a rectangle's
+        edge, corner or border band; ``None`` otherwise (a circle's border points along its radius, and the knob has its own cursor)."""
+        if hit.zone == ZONE_ROTATE or hit.zone not in RECTANGLE_ZONES + BORDER_ZONES:
+            return None
+        rect = next((roi.shape for roi in self._toolbox.rois_at(self._selection.current_cube()) if roi.area_roi_id == hit.roi_id), None)
+        if not isinstance(rect, Rectangle):
+            return None
+        try:
+            inverse = np.linalg.inv(np.asarray(self._display_linear(), dtype=np.float64)[:2, :2])
+        except np.linalg.LinAlgError:
+            return None
+        frame = FrameMap(np.linalg.inv(inverse), inverse, np.zeros(2))
+        return rectangle_zone_direction(hit.zone, rect, hit.center, frame, x, y)
 
     def hit(self, x: float, y: float) -> RoiHit | None:
         """What display point (x, y) is over among the selected ROIs (see `hit_test`)."""
@@ -272,6 +315,28 @@ class RoiGestures(QObject):
             self._rect_angle = float(anchor.shape.angle_deg) if anchor is not None and isinstance(anchor.shape, Rectangle) else 0.0
             self._mode = "rectangle"
             undo_manager.begin_batch("Resize rectangles" if hit.zone != ZONE_ROTATE else "Turn rectangles")
+        elif hit.zone in BORDER_ZONES:
+            apertures = self._selected_apertures()
+            grabbable = set() if apertures is None or apertures.borders is None else {
+                int(i) for i, border in zip(apertures.ids, apertures.borders, strict=True) if border is not None
+            }
+            self._edit_ids = tuple(sorted(selected & grabbable))
+            self._resize_center = hit.center
+            self._resize_zone = hit.zone
+            default_border = self._toolbox.detection_settings().default_border()
+            by_id = {roi.area_roi_id: roi for roi in self._toolbox.rois_at(self._edit_cube)}
+            anchor = by_id.get(hit.roi_id)
+            if anchor is None or not isinstance(anchor.shape, Rectangle) or hit.roi_id not in self._edit_ids:
+                return False
+            self._border_anchor = anchor.shape
+            # Each rectangle keeps its own thickness (inner edge dragged) or gap (outer edge dragged); remember where they started.
+            self._border_start = {
+                i: (effective_border(by_id[i].border, default_border), min(by_id[i].shape.width_px, by_id[i].shape.height_px) / 2.0)
+                for i in self._edit_ids
+                if isinstance(by_id[i].shape, Rectangle)
+            }
+            self._mode = "border"
+            undo_manager.begin_batch("Resize borders")
         elif hit.zone in ("edge", "ring_inner", "ring_outer"):
             apertures = self._selected_apertures()
             resizable = set() if apertures is None else {int(i) for i, ok in zip(apertures.ids, apertures.resizable, strict=True) if ok}
@@ -313,12 +378,14 @@ class RoiGestures(QObject):
             self._update_resize(x, y)
         elif self._mode == "rectangle":
             self._update_rectangle(x, y)
+        elif self._mode == "border":
+            self._update_border(x, y)
 
     def end(self, x: float, y: float, *, additive: bool) -> None:
         mode, self._mode = self._mode, None
         if mode == "marquee":
             self._end_marquee(x, y, additive=additive)
-        elif mode in ("move", "resize", "rectangle"):
+        elif mode in ("move", "resize", "rectangle", "border"):
             self._inverse = None
             self._move_start = None
             undo_manager.end_batch()
@@ -367,6 +434,26 @@ class RoiGestures(QObject):
         if sizes:
             self._toolbox.resize_rectangles(self._edit_ids, **sizes, **self._edit_kwargs)
             self._redraw_now()
+
+    def _update_border(self, x: float, y: float) -> None:
+        """Dragging an edge of a rectangle's border band. The distance from the grabbed rectangle's edge to the pointer is the value, in reference pixels: the
+        inner edge sets the **gap** of every selected rectangle to it (each keeps its thickness, as a circle's ring keeps its width), the outer edge sets the
+        outer distance, i.e. each rectangle's **thickness** (never below `MIN_RING_GAP_PX` / 2; the gap stays). The inner edge cannot go past the middle of a
+        rectangle's shorter side. One undo step for the whole drag."""
+        if self._inverse is None or not self._edit_ids or self._border_anchor is None or not self._border_start:
+            return
+        frame = FrameMap(np.linalg.inv(self._inverse), self._inverse, np.zeros(2))
+        distance = rectangle_signed_distance(self._border_anchor, self._resize_center, frame, x, y)
+        if distance is None:
+            return
+        borders: dict[int, Border] = {}
+        for roi_id, (start, half_side) in self._border_start.items():
+            if self._resize_zone == ZONE_BORDER_INNER:
+                borders[roi_id] = Border(max(distance, -half_side), start.thickness_px, start.enabled)
+            else:
+                borders[roi_id] = Border(start.gap_px, max(distance - start.gap_px, MIN_RING_GAP_PX / 2.0), start.enabled)
+        self._toolbox.set_borders(borders, **self._edit_kwargs)
+        self._redraw_now()
 
     def _update_resize(self, x: float, y: float) -> None:
         if self._inverse is None or not self._edit_ids:
