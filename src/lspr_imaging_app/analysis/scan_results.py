@@ -123,8 +123,8 @@ class ScanResultsModule(QObject):
         returns publishes ``results_changed`` (every panel redraws and every cache of fitted traces is dropped); nothing is scanned and the file is untouched."""
         mode = str(mode).strip().lower()
 
-        def in_force(bands: Passbands | None, picked: str) -> tuple[str, str]:  # what the display would show: no correction at all is one state whatever the table
-            return ("", "none") if bands is None or picked == "none" else (bands.sha256, picked)
+        def in_force(bands: Passbands | None, picked: str) -> tuple[str, str, str]:  # what the display would show: no correction at all is one state whatever the table
+            return ("", "", "none") if bands is None or picked == "none" else (bands.sha256, bands.camera_sha256, picked)
 
         before = in_force(self._passbands, self._spectral_mode)
         self._passbands, self._spectral_mode = passbands, mode

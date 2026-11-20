@@ -69,6 +69,9 @@ class FormulaSpectrum:
     passband: np.ndarray | None = None
     """``[point, order + 1]`` central moments of each point's measured LCTF band (``spectral_passband``), aligned with ``wavelengths_nm``, when the spectral
     correction is the full profile; None otherwise. Only the polynomial fit reads it (the design matrix of the passband-averaged points)."""
+    band: np.ndarray | None = None
+    """``[point, 3]`` ``(sigma_nm, mean photon energy eV, energy std eV)`` of each point's band (``CorrectionAxis.band``), aligned with ``wavelengths_nm``, for the full-profile correction; None otherwise.
+    The Gaussian fit reads column 0, the Voigt fit columns 1-2 (the band average of the peak, ``gaussian_fit`` / ``voigt_fit``)."""
 
 
 @dataclass(slots=True)
@@ -119,6 +122,7 @@ def formula_spectrum(
     reference_values,
     formula_key: str,
     passband: np.ndarray | None = None,
+    band: np.ndarray | None = None,
 ) -> FormulaSpectrum:
     """Layer 2: one ROI's stored pairs -> that ROI's own spectrum.
 
@@ -138,6 +142,7 @@ def formula_spectrum(
         reference_values=reference,
         formula_key=str(formula_key).strip().lower(),
         passband=None if passband is None else np.asarray(passband, dtype=np.float64),
+        band=None if band is None else np.asarray(band, dtype=np.float64),
     )
 
 
@@ -267,6 +272,17 @@ def _gaussian_model(x: np.ndarray, amplitude: float, center: float, sigma: float
     return amplitude * np.exp(-((x - center) ** 2) / (2.0 * sigma * sigma)) + offset
 
 
+def _banded_gaussian_model(band_sigma: np.ndarray):
+    """``_gaussian_model`` averaged over each point's filter band (a Gaussian of standard deviation ``band_sigma``): ``(sigma / tau) exp(-d^2 / 2 tau^2)``, ``tau^2 = sigma^2 + band_sigma^2``."""
+    var = np.asarray(band_sigma, dtype=np.float64) ** 2
+
+    def model(x: np.ndarray, amplitude: float, center: float, sigma: float, offset: float) -> np.ndarray:
+        u = sigma * sigma + var
+        return amplitude * (sigma / np.sqrt(u)) * np.exp(-((x - center) ** 2) / (2.0 * u)) + offset
+
+    return model
+
+
 def fit_gaussian(
     wavelengths_nm,
     values,
@@ -275,8 +291,11 @@ def fit_gaussian(
     sample_count: int = 400,
     fast_first: bool = True,
     solved: np.ndarray | None = None,
+    band: np.ndarray | None = None,
 ) -> FitResult:
-    """`coefficients` holds `[amplitude, center, sigma, offset]`. ``solved``: these coefficients from the batch solver (the Spectra panel solves
+    """`coefficients` holds `[amplitude, center, sigma, offset]`. ``band`` (``[point, 3]`` ``FormulaSpectrum.band``, aligned with the points): the filter bands of the full-profile spectral
+    correction; the fit then models each point as the peak averaged over its band and the coefficients are those of the underlying peak.
+     ``solved``: these coefficients from the batch solver (the Spectra panel solves
     all its spectra in one call, 2026-11-03), so the solver is not run again; everything after the solve is the same.
 
     Solved by `gaussian_fit.solve_gaussian` (centre and width iterated, amplitude and offset solved directly; the same solver the Sensorgram
@@ -286,14 +305,20 @@ def fit_gaussian(
 
     Returns an empty `FitResult` - the same shape as the too-few-points case - when there aren't enough points for 4 parameters or when
     `curve_fit` fails to converge as well. A stuck, flat or very noisy spectrum should cost that one cube its metric, not kill the run."""
-    x, y = _windowed(wavelengths_nm, values, wl_min, wl_max)
+    band_sigma = None
+    if band is None:
+        x, y = _windowed(wavelengths_nm, values, wl_min, wl_max)
+    else:
+        x_all = np.asarray(wavelengths_nm, dtype=np.float64)
+        index = _window_index(x_all, values, wl_min, wl_max)
+        x, y, band_sigma = x_all[index], np.asarray(values, dtype=np.float64)[index], np.asarray(band, dtype=np.float64)[index, 0]
     if x.size < 4:
         return FitResult(x.copy(), y.copy())
 
     x_min, x_max = float(np.min(x)), float(np.max(x))
     coefficients = None if solved is None else np.asarray(solved, dtype=np.float64)
     if coefficients is None and fast_first:
-        params, converged = solve_gaussian(x, y[None, :])
+        params, converged = solve_gaussian(x, y[None, :], band_sigma=band_sigma)
         if converged[0]:
             coefficients = params[0]
     if coefficients is None:
@@ -303,7 +328,7 @@ def fit_gaussian(
         sigma_guess = max((x_max - x_min) / 6.0, 1.0e-3)
         try:
             coefficients, _covariance = curve_fit(
-                _gaussian_model, x, y,
+                _gaussian_model if band_sigma is None else _banded_gaussian_model(band_sigma), x, y,
                 p0=[amplitude_guess, center_guess, sigma_guess, offset_guess],
                 maxfev=10000,
             )
@@ -351,8 +376,9 @@ def fit_voigt(
     sample_count: int = 400,
     fast_first: bool = True,
     solved: np.ndarray | None = None,
+    band: np.ndarray | None = None,
 ) -> FitResult:
-    """(``solved``: as for ``fit_gaussian``.) A Voigt peak on a flat offset, fitted in photon energy (``voigt_fit.py``, 2026-11-02). ``coefficients`` holds ``voigt_fit.VOIGT_PARAMS``:
+    """(``solved`` and ``band``: as for ``fit_gaussian``; the Voigt fit reads the band's mean energy and energy width, columns 1-2.) A Voigt peak on a flat offset, fitted in photon energy (``voigt_fit.py``, 2026-11-02). ``coefficients`` holds ``voigt_fit.VOIGT_PARAMS``:
     ``[amplitude, centre_ev, sigma_ev, gamma_ev, offset]``.
 
     Solved by ``voigt_fit.solve_voigt`` (the batch solver, here one spectrum); where it does not converge, by scipy's ``least_squares`` from the
@@ -362,17 +388,24 @@ def fit_voigt(
     from .voigt_fit import model as voigt_model
     from .voigt_fit import peak_wavelength_nm, solve_voigt, solve_voigt_scipy
 
-    x, y = _windowed(wavelengths_nm, values, wl_min, wl_max)
+    energy_band = None
+    if band is None:
+        x, y = _windowed(wavelengths_nm, values, wl_min, wl_max)
+    else:
+        x_all = np.asarray(wavelengths_nm, dtype=np.float64)
+        index = _window_index(x_all, values, wl_min, wl_max)
+        x, y = x_all[index], np.asarray(values, dtype=np.float64)[index]
+        energy_band = (np.asarray(band, dtype=np.float64)[index, 1], np.asarray(band, dtype=np.float64)[index, 2])
     if x.size < 5:
         return FitResult(x.copy(), y.copy())
     x_min, x_max = float(np.min(x)), float(np.max(x))
     coefficients = None if solved is None else np.asarray(solved, dtype=np.float64)
     if coefficients is None and fast_first:
-        params, converged = solve_voigt(x, y[None, :])
+        params, converged = solve_voigt(x, y[None, :], band=energy_band)
         if converged[0]:
             coefficients = params[0]
     if coefficients is None:
-        coefficients = solve_voigt_scipy(x, y)
+        coefficients = solve_voigt_scipy(x, y, band=energy_band)
         if coefficients is None:
             return FitResult(x.copy(), y.copy())
     fitted_x = np.asarray([x_min]) if x_max <= x_min else np.linspace(x_min, x_max, max(int(sample_count), int(x.size)))
@@ -423,9 +456,9 @@ def fit_spectrum(
     if key == "response":  # learned from every ROI of the group, not from one spectrum (scan_trace.response_traces); never fall through to the polynomial
         raise ValueError("The response shape is not a fit of one spectrum: it is computed for every ROI at once (scan_trace.response_traces).")
     if key == "gaussian":
-        return fit_gaussian(spectrum.wavelengths_nm, spectrum.values, wl_min=wl_min, wl_max=wl_max, fast_first=gaussian_fast_first, solved=solved)
+        return fit_gaussian(spectrum.wavelengths_nm, spectrum.values, wl_min=wl_min, wl_max=wl_max, fast_first=gaussian_fast_first, solved=solved, band=spectrum.band)
     if key == "voigt":
-        return fit_voigt(spectrum.wavelengths_nm, spectrum.values, wl_min=wl_min, wl_max=wl_max, fast_first=gaussian_fast_first, solved=solved)
+        return fit_voigt(spectrum.wavelengths_nm, spectrum.values, wl_min=wl_min, wl_max=wl_max, fast_first=gaussian_fast_first, solved=solved, band=spectrum.band)
     return fit_polynomial(
         spectrum.wavelengths_nm, spectrum.values,
         poly_order=poly_order, wl_min=wl_min, wl_max=wl_max, moments=spectrum.passband,

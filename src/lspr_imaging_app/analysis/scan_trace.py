@@ -164,7 +164,7 @@ def trace_input(stored: StoredScan, roi_id: int) -> TraceInput | None:
     usable = np.isfinite(sample) & np.isfinite(reference) & (stored.n_valid[:, row, :, SAMPLE] > 0) & (stored.n_valid[:, row, :, REFERENCE] > 0)
     return TraceInput(
         stored.abscissa_nm(), sample, reference, usable, stored.cell_hash[:, row] != 0,
-        np.asarray(stored.cube_indices, dtype=np.int64), stored.passband_moments(),
+        np.asarray(stored.cube_indices, dtype=np.int64), stored.band_widths(), stored.passband_moments(),
     )
 
 

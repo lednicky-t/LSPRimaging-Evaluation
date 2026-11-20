@@ -18,7 +18,10 @@ A result from before the session changed is dropped (``_generation``).
 Spectra panel's "i" text and the status bar show it), the display uses no correction meanwhile, and the session keeps its block unchanged, so the table can still be found
 again (a moved folder, a drive that was not connected).
 
-Not built yet (``docs/spectral_correction_2026-11-20.md``): a temperature series (one table per filter temperature, interpolated), a detector (camera) response curve.
+The **camera response** (a manufacturer's relative spectral sensitivity, File -> Import -> Camera Response...) is a second, separate import: it belongs to the camera, not the lamp. It is small
+(about 200 points), so it is kept in the session's JSON block itself; it weights every band when the bands are derived (``derive``), so importing or removing one re-derives the bands (~50 ms, on a thread).
+
+Not built yet (``docs/spectral_correction_2026-11-20.md``): a temperature series (one table per filter temperature, interpolated).
 """
 
 from __future__ import annotations
@@ -31,8 +34,8 @@ from pathlib import Path
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from ..analysis.passband_store import FILE_NAME, read_sweep, read_table, write_table
-from ..analysis.spectral_passband import MODE_LABELS, MODES, PassbandError, PassbandTable, Passbands, derive, describe
+from ..analysis.passband_store import FILE_NAME, read_camera_response, read_sweep, read_table, write_table
+from ..analysis.spectral_passband import MODE_LABELS, MODES, CameraResponse, PassbandError, PassbandTable, Passbands, derive, describe
 from ..applog.events import log_event
 
 logger = logging.getLogger(__name__)
@@ -44,8 +47,10 @@ class SpectralCorrectionModule(QObject):
     changed = pyqtSignal()  # the table or the mode changed: the display recomputes, the session is worth saving
     notice = pyqtSignal(str)  # a line for the status bar
     import_finished = pyqtSignal(object, str)  # PassbandTable | None, error sentence ('' when it worked)
+    response_finished = pyqtSignal(object, str)  # CameraResponse | None, error sentence ('' when it worked; None and '' = the response was removed)
 
     _loaded = pyqtSignal(int, object, object, str, bool)  # generation, table, passbands, error, is it an import (else: a session restore)
+    _response_loaded = pyqtSignal(int, object, object, str)  # generation, response (None: removed), passbands (None: no table), error
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -55,10 +60,13 @@ class SpectralCorrectionModule(QObject):
         self._mode = "none"
         self._problem = ""
         self._kept: dict | None = None  # the session block of a table that could not be read: written back as it was
+        self._response: CameraResponse | None = None
+        self._kept_response: object = None  # the block's camera response when it could not be read: written back as it was
         self._generation = 0
         self._wavelengths: Callable[[], Sequence[float] | None] = lambda: None
         self._threads: list[threading.Thread] = []
         self._loaded.connect(self._on_loaded)
+        self._response_loaded.connect(self._on_response_loaded)
 
     # -- query interface -------------------------------------------------------------------------------------------------------
 
@@ -78,6 +86,12 @@ class SpectralCorrectionModule(QObject):
 
     def has_table(self) -> bool:
         return self._passbands is not None
+
+    def camera_response(self) -> CameraResponse | None:
+        return self._response
+
+    def has_response(self) -> bool:
+        return self._response is not None
 
     def table_path(self) -> Path | None:
         return None if self._root is None else self._root / SUBFOLDER / FILE_NAME
@@ -114,14 +128,14 @@ class SpectralCorrectionModule(QObject):
         if path is None:
             self.import_finished.emit(None, "No session is open: open a dataset first.")
             return
-        generation = self._generation
-        self._start(lambda: self._import_work(generation, path, Path(sweep), None if dark is None else Path(dark), illumination), "spectral-correction-import")
+        generation, response = self._generation, self._response
+        self._start(lambda: self._import_work(generation, path, Path(sweep), None if dark is None else Path(dark), illumination, response), "spectral-correction-import")
 
-    def _import_work(self, generation: int, path: Path, sweep: Path, dark: Path | None, illumination: str) -> None:
+    def _import_work(self, generation: int, path: Path, sweep: Path, dark: Path | None, illumination: str, response: CameraResponse | None) -> None:
         started = time.perf_counter()
         try:
             table = read_sweep(sweep, dark, illumination)
-            passbands = derive(table)
+            passbands = derive(table, response)
             path.parent.mkdir(parents=True, exist_ok=True)
             write_table(path, table)
         except (PassbandError, OSError, UnicodeDecodeError, ValueError) as exc:
@@ -134,6 +148,62 @@ class SpectralCorrectionModule(QObject):
         log_event(logger, "spectral_correction.import", logging.INFO, rows=table.n_rows, usable=int(passbands.usable.sum()), ms=round((time.perf_counter() - started) * 1000))
         self._loaded.emit(generation, table, passbands, "", True)
 
+    def import_camera_response(self, path: Path) -> None:
+        """Read a camera's relative spectral response (``passband_store.parse_camera_response``) and weight the bands by it. Returns at once; ``response_finished`` says how it went. The table
+        and the mode are left as they are; a response is kept with the session, so a session must be open."""
+        if self._root is None:
+            self.response_finished.emit(None, "No session is open: open a dataset first.")
+            return
+        generation, table = self._generation, self._table
+        self._start(lambda: self._response_work(generation, Path(path), table), "spectral-correction-camera")
+
+    def _response_work(self, generation: int, path: Path, table: PassbandTable | None) -> None:
+        try:
+            response = read_camera_response(path)
+            passbands = None if table is None else derive(table, response)
+        except (PassbandError, OSError, UnicodeDecodeError, ValueError) as exc:
+            self._response_loaded.emit(generation, None, None, f"{path.name}: {exc}")
+            return
+        except BaseException as exc:  # nothing may escape a thread silently
+            logger.exception("Importing the camera response failed")
+            self._response_loaded.emit(generation, None, None, f"{path.name}: {exc}")
+            return
+        self._response_loaded.emit(generation, response, passbands, "")
+
+    def remove_camera_response(self) -> None:
+        """Go back to a flat camera: the bands are derived again without the response."""
+        if self._response is None and self._kept_response is None:
+            return
+        self._kept_response = None
+        if self._table is None:
+            self._response = None
+            self.changed.emit()
+            self.response_finished.emit(None, "")
+            return
+        generation, table = self._generation, self._table
+        self._start(lambda: self._rederive_work(generation, table), "spectral-correction-camera")
+
+    def _rederive_work(self, generation: int, table: PassbandTable) -> None:
+        try:
+            passbands = derive(table)
+        except (PassbandError, ValueError) as exc:
+            self._response_loaded.emit(generation, None, None, str(exc))
+            return
+        self._response_loaded.emit(generation, None, passbands, "")
+
+    def _on_response_loaded(self, generation: int, response: object, passbands: object, error: str) -> None:
+        if generation != self._generation:
+            return  # the session changed meanwhile
+        if error:
+            self.response_finished.emit(None, error)
+            return
+        self._response = response if isinstance(response, CameraResponse) else None
+        self._kept_response = None
+        if passbands is not None:
+            self._passbands = passbands
+        self.changed.emit()
+        self.response_finished.emit(self._response, "")
+
     # -- the session -----------------------------------------------------------------------------------------------------------
 
     def set_root(self, root: Path | None) -> None:
@@ -143,37 +213,56 @@ class SpectralCorrectionModule(QObject):
 
     def state(self) -> dict | None:
         """The session's block (plain data, safe for the autosave thread), or None when there is nothing to keep."""
-        if self._table is None:
-            return None if self._kept is None else dict(self._kept)
-        t = self._table
-        return {
-            "mode": self._mode,
-            "file": f"{SUBFOLDER}/{FILE_NAME}",
-            "sha256": t.sha256,
-            "source_name": t.source_name,
-            "illumination": t.illumination,
-            "imported_at": t.imported_at,
-        }
+        block: dict = {}
+        if self._table is not None:
+            t = self._table
+            block = {
+                "mode": self._mode,
+                "file": f"{SUBFOLDER}/{FILE_NAME}",
+                "sha256": t.sha256,
+                "source_name": t.source_name,
+                "illumination": t.illumination,
+                "imported_at": t.imported_at,
+            }
+        elif self._kept is not None:
+            block = dict(self._kept)
+        block.pop("camera_response", None)
+        if self._response is not None:
+            block["camera_response"] = self._response.to_payload()
+        elif self._kept_response is not None:
+            block["camera_response"] = self._kept_response
+        if not block:
+            return None
+        block.setdefault("mode", self._mode)
+        return block
 
     def restore_state(self, payload: object) -> None:
         """Replace everything with a session's block (None: a blank session) and read its table back on a thread."""
         self._generation += 1
         self._table = self._passbands = None
+        self._response = None
+        self._kept_response = None
         self._problem = ""
         self._kept = None
         self._mode = "none"
+        if isinstance(payload, dict) and payload.get("camera_response") is not None:
+            try:
+                self._response = CameraResponse.from_payload(payload["camera_response"])
+            except PassbandError as exc:
+                self._kept_response = payload["camera_response"]  # written back as it was; said, not hidden
+                self._problem = f"The session's camera response could not be used: {exc}"
         if isinstance(payload, dict) and payload.get("file") and self._root is not None:
             mode = str(payload.get("mode", "none"))
             self._mode = mode if mode in MODES else "none"
             self._kept = dict(payload)  # kept until the table has been read; a failed read leaves it in place
-            generation, root, relative, sha = self._generation, self._root, str(payload["file"]), str(payload.get("sha256", ""))
-            self._start(lambda: self._read_work(generation, root, relative, sha), "spectral-correction-load")
-        elif isinstance(payload, dict):
+            generation, root, relative, sha, response = self._generation, self._root, str(payload["file"]), str(payload.get("sha256", "")), self._response
+            self._start(lambda: self._read_work(generation, root, relative, sha, response), "spectral-correction-load")
+        elif isinstance(payload, dict) and payload.get("file"):
             self._problem = "The session has a spectral-correction table, but its folder is not known."
             self._kept = dict(payload)
         self.changed.emit()
 
-    def _read_work(self, generation: int, root: Path, relative: str, sha256: str) -> None:
+    def _read_work(self, generation: int, root: Path, relative: str, sha256: str, response: CameraResponse | None) -> None:
         try:
             path = (root / relative).resolve()
             if root.resolve() not in path.parents:  # the block comes from a JSON file: it may not point outside the session
@@ -181,7 +270,7 @@ class SpectralCorrectionModule(QObject):
             table = read_table(path)
             if sha256 and table.sha256 != sha256:
                 raise PassbandError("The spectral-correction file is not the one the session was saved with (its checksum differs).")
-            passbands = derive(table)
+            passbands = derive(table, response)
         except (PassbandError, OSError, ValueError) as exc:
             self._loaded.emit(generation, None, None, str(exc), False)
             return
@@ -219,6 +308,23 @@ class SpectralCorrectionModule(QObject):
     def shutdown(self) -> None:
         for thread in self._threads:
             thread.join(timeout=2.0)
+
+
+def camera_report(response: CameraResponse, passbands: Passbands | None, mode: str) -> str:
+    """The sentences the camera-response import shows (what was read, what it does to the bands, what it is not)."""
+    peak = float(response.wavelength_nm[int(response.response.argmax())])
+    lines = [f"Camera response read from {response.source_name}: {response.wavelength_nm.size} points, {response.wavelength_nm[0]:g}-{response.wavelength_nm[-1]:g} nm, highest at {peak:g} nm."]
+    if passbands is None:
+        lines.append("There is no spectral-correction table yet: the response is kept with the session and weights the bands once a table is imported.")
+    else:
+        d = describe(passbands)
+        lines.append(
+            f"Weighted by it, the band centres move by {d['camera_shift_mean_nm']:+.2f} nm on average (from {d['camera_shift_min_nm']:+.2f} to {d['camera_shift_max_nm']:+.2f} nm; "
+            "the red end moves most)."
+        )
+        lines.append(f"Spectral correction is {MODE_LABELS.get(mode, mode)}: " + ("the shown numbers do not change until you pick Centroid or Full profile." if mode == "none" else "the shown numbers change now."))
+    lines.append("It is a relative sensitivity of the sensor only: the lens and the microscope's optics are not in it. File -> Import -> Remove Camera Response goes back to a flat camera.")
+    return "\n".join(lines)
 
 
 def import_report(table: PassbandTable, passbands: Passbands, wavelengths: Sequence[float] | None, mode: str) -> str:

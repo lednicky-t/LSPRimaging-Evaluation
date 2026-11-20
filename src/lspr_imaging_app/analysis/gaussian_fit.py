@@ -25,6 +25,12 @@ every Gaussian fit in the rewrite (2026-10-24; no switch back to scipy as a sett
 overhead, so the cost per spectrum falls with the batch size up to ~2000 spectra (``trace_fit`` merges the ROIs it is given into such batches).
 ``docs/sensorgram_fit_freeze_2026-10-24.md``.
 
+**Bands (2026-11-20, spectral correction).** With ``band_sigma`` (the standard deviation of the measured filter band of each point, nm) the model is the Gaussian peak *averaged over each point's
+band*, the band taken as a Gaussian: ``g_k = (sigma / tau_k) exp(-d_k^2 / 2 tau_k^2)``, ``tau_k^2 = sigma^2 + s_k^2``, ``d_k = x_k - centre``. Everything else (variable projection, exact
+Newton steps) is unchanged; only the bell and its five derivatives change (``_reduced_terms``). With ``L_s = 1/sigma - sigma/u + sigma d^2/u^2`` (``u = tau^2``):
+``g_c = g d/u``, ``g_s = g L_s``, ``g_cc = g (d^2/u^2 - 1/u)``, ``g_cs = g d (L_s/u - 2 sigma/u^2)``, ``g_ss = g (L_s^2 + dL_s/d sigma)``; for ``s = 0`` they are the formulas above (tested to
+finite differences). No band (or all widths zero) takes the original code path, so existing numbers are bit-identical. The coefficients returned are those of the *underlying* peak.
+
 **First guess** as in ``query.fit_gaussian``: the centre at the highest point, sigma a sixth of the wavelength span. (A data-based guess and a
 warm start from neighbouring cubes were tried and did not pay: the passes needed are set by the convergence rate, not by the start.)
 
@@ -63,7 +69,23 @@ def _linear_part(y: np.ndarray, bell: np.ndarray):
     return amplitude, offset, residual, bell_centred, sum_bb
 
 
-def _reduced_terms(x: np.ndarray, y: np.ndarray, centre: np.ndarray, sigma: np.ndarray, *, curvature: bool = True):
+def _band_variance(band_sigma) -> np.ndarray | None:
+    """The squared band widths ``[point]``, or None when there is no band to average over (None, or every width zero: the point-sample model, original code)."""
+    if band_sigma is None:
+        return None
+    var = np.asarray(band_sigma, dtype=np.float64) ** 2
+    return var if np.any(var > 0.0) else None
+
+
+def _bell_at(x: np.ndarray, centre: np.ndarray, sigma: np.ndarray, band_var: np.ndarray | None) -> np.ndarray:
+    """``[row, point]``: the bell of each row, or (with ``band_var``) its average over each point's band."""
+    if band_var is None:
+        return np.exp(-((x[None, :] - centre[:, None]) ** 2) / (2.0 * sigma[:, None] ** 2))
+    u = sigma[:, None] ** 2 + band_var[None, :]
+    return (sigma[:, None] / np.sqrt(u)) * np.exp(-((x[None, :] - centre[:, None]) ** 2) / (2.0 * u))
+
+
+def _reduced_terms(x: np.ndarray, y: np.ndarray, centre: np.ndarray, sigma: np.ndarray, *, curvature: bool = True, band_var: np.ndarray | None = None):
     """The cost ``0.5 * sum(residual^2)`` of the two remaining parameters (centre, sigma) at the best amplitude and offset: its gradient and its
     curvature, per row of ``y``.
 
@@ -79,11 +101,20 @@ def _reduced_terms(x: np.ndarray, y: np.ndarray, centre: np.ndarray, sigma: np.n
     dx = x[None, :] - centre[:, None]
     s1 = sigma[:, None]
     s2 = s1 * s1
-    bell = np.exp(-(dx * dx) / (2.0 * s2))
+    if band_var is None:
+        bell = np.exp(-(dx * dx) / (2.0 * s2))
+    else:  # the bell averaged over each point's band (module docstring)
+        u = s2 + band_var[None, :]
+        bell = (s1 / np.sqrt(u)) * np.exp(-(dx * dx) / (2.0 * u))
     amplitude, _offset, residual, bell_centred, sum_bb = _linear_part(y, bell)
     d2 = dx * dx
-    g_c = bell * dx / s2
-    g_s = bell * d2 / (s2 * s1)
+    if band_var is None:
+        g_c = bell * dx / s2
+        g_s = bell * d2 / (s2 * s1)
+    else:
+        l_s = 1.0 / s1 - s1 / u + s1 * d2 / (u * u)
+        g_c = bell * dx / u
+        g_s = bell * l_s
     e = np.einsum
     mean_c, mean_s = g_c.mean(axis=1), g_s.mean(axis=1)
     beta_c, beta_s = e("ij,ij->i", bell_centred, g_c) / sum_bb, e("ij,ij->i", bell_centred, g_s) / sum_bb
@@ -97,24 +128,33 @@ def _reduced_terms(x: np.ndarray, y: np.ndarray, centre: np.ndarray, sigma: np.n
     if not curvature:
         return amplitude, residual, sum_bb, gradient, gauss_newton, None
     rb = residual * bell
-    s4 = s2 * s2
-    rg_cc = e("ij,ij->i", rb, d2 / s4 - 1.0 / s2)
-    rg_cs = e("ij,ij->i", rb, dx * (d2 / (s4 * s1) - 2.0 / (s2 * s1)))
-    rg_ss = e("ij,ij->i", rb, d2 * (d2 / (s4 * s2) - 3.0 / s4))
+    if band_var is None:
+        s4 = s2 * s2
+        rg_cc = e("ij,ij->i", rb, d2 / s4 - 1.0 / s2)
+        rg_cs = e("ij,ij->i", rb, dx * (d2 / (s4 * s1) - 2.0 / (s2 * s1)))
+        rg_ss = e("ij,ij->i", rb, d2 * (d2 / (s4 * s2) - 3.0 / s4))
+    else:
+        u2 = u * u
+        d_ls = -1.0 / s2 - 1.0 / u + 2.0 * s2 / u2 + d2 / u2 - 4.0 * s2 * d2 / (u2 * u)  # d L_s / d sigma
+        rg_cc = e("ij,ij->i", rb, d2 / u2 - 1.0 / u)
+        rg_cs = e("ij,ij->i", rb, dx * (l_s / u - 2.0 * s1 / u2))
+        rg_ss = e("ij,ij->i", rb, l_s * l_s + d_ls)
     h_cc = gauss_newton[0] - amplitude * rg_cc + 2.0 * amplitude * r_c * beta_c - r_c * r_c / sum_bb
     h_cs = gauss_newton[1] - amplitude * rg_cs + amplitude * (r_s * beta_c + r_c * beta_s) - r_c * r_s / sum_bb
     h_ss = gauss_newton[2] - amplitude * rg_ss + 2.0 * amplitude * r_s * beta_s - r_s * r_s / sum_bb
     return amplitude, residual, sum_bb, gradient, gauss_newton, (h_cc, h_cs, h_ss)
 
 
-def solve_gaussian(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Fit ``y[i]`` (one spectrum per row) against the shared ``x`` (ascending, at least 4 points).
+def solve_gaussian(x: np.ndarray, y: np.ndarray, band_sigma: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """Fit ``y[i]`` (one spectrum per row) against the shared ``x`` (ascending, at least 4 points). ``band_sigma`` (``[point]``, nm): the
+    standard deviation of each point's filter band, for the full-profile spectral correction (module docstring); None = point samples.
 
     Returns ``(params, ok)``: ``params[i] = [amplitude, centre, sigma, offset]`` (sigma > 0) and ``ok[i]``, whether spectrum ``i`` converged
     (the other rows are NaN)."""
     x = np.asarray(x, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
     n_spectra = y.shape[0]
+    band_var = _band_variance(band_sigma)
     span = max(float(x[-1] - x[0]), 1.0e-12)
     params = np.full((n_spectra, 4), np.nan)
     ok = np.zeros(n_spectra, dtype=bool)
@@ -122,7 +162,7 @@ def solve_gaussian(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray
     sigma = np.full(n_spectra, max(span / 6.0, 1.0e-3))
     damping = np.full(n_spectra, _DAMPING_START)
     with np.errstate(all="ignore"):
-        bell = np.exp(-((x[None, :] - centre[:, None]) ** 2) / (2.0 * sigma[:, None] ** 2))
+        bell = _bell_at(x, centre, sigma, band_var)
         _a, _o, residual, _bc, sum_bb = _linear_part(y, bell)
     cost = 0.5 * np.einsum("ij,ij->i", residual, residual)
     active = np.flatnonzero(np.isfinite(cost) & (sum_bb > _TINY))
@@ -131,7 +171,7 @@ def solve_gaussian(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray
             break
         c, s, ya, lam = centre[active], sigma[active], y[active], damping[active]
         with np.errstate(all="ignore"):
-            _amplitude, _residual, _sum_bb, gradient, gauss_newton, newton = _reduced_terms(x, ya, c, s, curvature=_USE_NEWTON)
+            _amplitude, _residual, _sum_bb, gradient, gauss_newton, newton = _reduced_terms(x, ya, c, s, curvature=_USE_NEWTON, band_var=band_var)
             g_c, g_s = gradient[:, 0], gradient[:, 1]
             m_cc, m_cs, m_ss = gauss_newton
             if newton is not None:  # the exact curvature where it is positive definite, the Gauss-Newton matrix elsewhere
@@ -147,7 +187,7 @@ def solve_gaussian(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray
             new_c, new_s = c + step_c, s + step_s
             valid = np.isfinite(new_c) & np.isfinite(new_s) & (new_s > 0.0) & np.isfinite(det)
             new_s_safe = np.where(valid, new_s, 1.0)
-            new_bell = np.exp(-((x[None, :] - np.where(valid, new_c, 0.0)[:, None]) ** 2) / (2.0 * new_s_safe[:, None] ** 2))
+            new_bell = _bell_at(x, np.where(valid, new_c, 0.0), new_s_safe, band_var)
             _na, _no, new_residual, _nb, new_sum_bb = _linear_part(ya, new_bell)
             new_cost = 0.5 * np.einsum("ij,ij->i", new_residual, new_residual)
             current = cost[active]
@@ -165,7 +205,7 @@ def solve_gaussian(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray
     finished = np.flatnonzero(ok)
     if finished.size:
         with np.errstate(all="ignore"):
-            bell = np.exp(-((x[None, :] - centre[finished, None]) ** 2) / (2.0 * sigma[finished, None] ** 2))
+            bell = _bell_at(x, centre[finished], sigma[finished], band_var)
             amplitude, offset, _r, _bc, sum_bb = _linear_part(y[finished], bell)
         good = np.isfinite(amplitude) & np.isfinite(offset) & (sum_bb > _TINY)
         params[finished[good]] = np.stack([amplitude, centre[finished], sigma[finished], offset], axis=1)[good]

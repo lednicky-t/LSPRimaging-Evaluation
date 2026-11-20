@@ -52,10 +52,25 @@ def energy_ev(wavelength_nm: np.ndarray) -> np.ndarray:
     return HC_EV_NM / np.asarray(wavelength_nm, dtype=np.float64)
 
 
-def profile(energy: np.ndarray, centre: np.ndarray, sigma: np.ndarray, gamma: np.ndarray) -> np.ndarray:
-    """``Re w(z)`` (the Voigt shape up to a constant) for column vectors of parameters: ``[spectrum, point]``."""
-    z = (energy[None, :] - centre[:, None] + 1j * gamma[:, None]) / (_SQRT2 * sigma[:, None])
-    return wofz(z).real
+def _band_variance(band_sigma) -> np.ndarray | None:
+    """The squared energy widths of the bands ``[point]``, or None (no band, or every width zero: the point-sample model, original code)."""
+    if band_sigma is None:
+        return None
+    var = np.asarray(band_sigma, dtype=np.float64) ** 2
+    return var if np.any(var > 0.0) else None
+
+
+def profile(energy: np.ndarray, centre: np.ndarray, sigma: np.ndarray, gamma: np.ndarray, band_sigma: np.ndarray | None = None) -> np.ndarray:
+    """``Re w(z)`` (the Voigt shape up to a constant) for column vectors of parameters: ``[spectrum, point]``. With ``band_sigma`` (``[point]``, eV: the standard deviation in energy of each point's filter band,
+    ``energy`` then the band's mean energy) the shape *averaged over each band*, the band taken as a Gaussian: a Voigt ``(sigma, gamma)`` convolved with it is a Voigt ``(sigma', gamma)``,
+    ``sigma'^2 = sigma^2 + S^2``, and ``Re w`` carries a factor ``sigma / sigma'`` (the amplitude is defined through ``sigma``)."""
+    band_var = _band_variance(band_sigma)
+    if band_var is None:
+        z = (energy[None, :] - centre[:, None] + 1j * gamma[:, None]) / (_SQRT2 * sigma[:, None])
+        return wofz(z).real
+    sp = np.sqrt(sigma[:, None] ** 2 + band_var[None, :])
+    z = (energy[None, :] - centre[:, None] + 1j * gamma[:, None]) / (_SQRT2 * sp)
+    return (sigma[:, None] / sp) * wofz(z).real
 
 
 def model(wavelength_nm: np.ndarray, params: np.ndarray) -> np.ndarray:
@@ -83,26 +98,39 @@ def _linear_part(y: np.ndarray, shape: np.ndarray):
     return amplitude, offset, residual, shape_centred, sum_ss
 
 
-def _terms(energy: np.ndarray, y: np.ndarray, centre: np.ndarray, sigma: np.ndarray, gamma: np.ndarray):
+def _terms(energy: np.ndarray, y: np.ndarray, centre: np.ndarray, sigma: np.ndarray, gamma: np.ndarray, band_var: np.ndarray | None = None):
     """Cost, gradient ``[n, 3]`` and Gauss-Newton matrix ``[n, 3, 3]`` of the reduced problem in (centre, sigma, gamma).
 
     With r the residual at the best amplitude a and offset, g_j = d shape / d theta_j, its centred version g^_j, the centred shape s^ (sum of squares
     S) and beta_j = s^ . g_j / S: gradient_j = -a r . g_j, M_jk = a^2 (g^_j . g^_k - S beta_j beta_k) (the derivative projected off the
     straight lines of the shape, as in ``gaussian_fit._reduced_terms``)."""
-    scale = 1.0 / (_SQRT2 * sigma[:, None])
-    z = (energy[None, :] - centre[:, None] + 1j * gamma[:, None]) * scale
-    w = wofz(z)
-    shape = w.real
+    if band_var is None:
+        scale = 1.0 / (_SQRT2 * sigma[:, None])
+        z = (energy[None, :] - centre[:, None] + 1j * gamma[:, None]) * scale
+        w = wofz(z)
+        shape = w.real
+    else:  # the shape averaged over each point's band: q Re w(z'), sigma' = sqrt(sigma^2 + S^2), q = sigma / sigma' (``profile``)
+        sp = np.sqrt(sigma[:, None] ** 2 + band_var[None, :])
+        q = sigma[:, None] / sp
+        scale = 1.0 / (_SQRT2 * sp)
+        z = (energy[None, :] - centre[:, None] + 1j * gamma[:, None]) * scale
+        w = wofz(z)
+        shape = q * w.real
     amplitude, offset, residual, shape_centred, sum_ss = _linear_part(y, shape)
     dw = -2.0 * z * w + 1j * _TWO_OVER_SQRT_PI  # dw / dz
-    derivs = np.stack(
-        [
+    if band_var is None:
+        parts = [
             (dw * -scale).real,  # dz / d centre = -1 / (sigma sqrt 2)
             (dw * (-z / sigma[:, None])).real,  # dz / d sigma = -z / sigma
             (dw * (1j * scale)).real,  # dz / d gamma = i / (sigma sqrt 2)
-        ],
-        axis=1,
-    )  # [n, 3, point]
+        ]
+    else:  # d q / d sigma = S^2 / sigma'^3 and d z' / d sigma = -z' q / sigma' (d sigma' / d sigma = q)
+        parts = [
+            (q * (dw * -scale)).real,
+            (band_var[None, :] / sp**3) * w.real + q * (dw * (-z * q / sp)).real,
+            (q * (dw * (1j * scale))).real,
+        ]
+    derivs = np.stack(parts, axis=1)  # [n, 3, point]
     centred = derivs - derivs.mean(axis=2, keepdims=True)
     beta = np.einsum("ip,ijp->ij", shape_centred, derivs) / sum_ss[:, None]
     gram = np.einsum("ijp,ikp->ijk", centred, centred) - sum_ss[:, None, None] * beta[:, :, None] * beta[:, None, :]
@@ -128,12 +156,24 @@ def first_guess(energy: np.ndarray, y: np.ndarray, sigma_floor: float) -> tuple[
     return centre, np.maximum(sigma, sigma_floor), np.zeros(y.shape[0])
 
 
-def solve_voigt(wavelength_nm: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Fit ``y[i]`` (one spectrum per row) against the shared wavelengths (nm, at least 5 points).
+def _energies(wavelength_nm: np.ndarray, band: tuple[np.ndarray, np.ndarray] | None) -> tuple[np.ndarray, np.ndarray | None]:
+    """``(energy, band_var)``: the points' energies (eV) and the squared widths of their bands, or (hc / wavelength, None). ``band`` = (mean energy of each point's band, its standard deviation), eV
+    (``CorrectionAxis.band``); with every width zero the band is dropped and the original expressions are used."""
+    if band is None:
+        return energy_ev(wavelength_nm), None
+    band_var = _band_variance(band[1])
+    if band_var is None:
+        return energy_ev(wavelength_nm), None
+    return np.asarray(band[0], dtype=np.float64), band_var
+
+
+def solve_voigt(wavelength_nm: np.ndarray, y: np.ndarray, band: tuple[np.ndarray, np.ndarray] | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """Fit ``y[i]`` (one spectrum per row) against the shared wavelengths (nm, at least 5 points). ``band``: the filter band of each point as (mean energy eV, energy std eV) for the full-profile
+    spectral correction (``profile``); None = point samples. The parameters returned are those of the *underlying* peak.
 
     Returns ``(params, ok)``: ``params[i]`` = ``VOIGT_PARAMS`` (centre, sigma, gamma in eV; sigma > 0, gamma >= 0) and whether spectrum ``i``
     converged (the other rows are NaN)."""
-    energy = energy_ev(wavelength_nm)
+    energy, band_var = _energies(wavelength_nm, band)
     y = np.asarray(y, dtype=np.float64)
     n_spectra = y.shape[0]
     params = np.full((n_spectra, 5), np.nan)
@@ -148,7 +188,7 @@ def solve_voigt(wavelength_nm: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, n
     # The cost, gradient and matrix at each spectrum's current point. A trial point is evaluated in full (one Faddeeva call, the expensive
     # part); when it is accepted its terms are the next iteration's, so each iteration costs one evaluation, not two.
     with np.errstate(all="ignore"):
-        cost, gradient_all, matrix_all, _a, _o, sum_ss_all = _terms(energy, y, theta[:, 0], theta[:, 1], theta[:, 2])
+        cost, gradient_all, matrix_all, _a, _o, sum_ss_all = _terms(energy, y, theta[:, 0], theta[:, 1], theta[:, 2], band_var)
     active = np.flatnonzero(np.isfinite(cost))
     eye = np.eye(3)
     for _iteration in range(_MAX_ITERATIONS):
@@ -179,7 +219,7 @@ def solve_voigt(wavelength_nm: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, n
             new[:, 1:] = np.clip(new[:, 1:], low[None, :], high)
             step = new - th  # the step actually taken (after the bounds)
             predicted = -np.einsum("ij,ij->i", step, gradient)
-            new_cost, new_gradient, new_matrix, _na, _no, new_sum_ss = _terms(energy, ya, new[:, 0], new[:, 1], new[:, 2])
+            new_cost, new_gradient, new_matrix, _na, _no, new_sum_ss = _terms(energy, ya, new[:, 0], new[:, 1], new[:, 2], band_var)
             better = usable & np.isfinite(new_cost) & (new_cost < current)
             nothing_left = (np.abs(predicted) <= _CONVERGED_REDUCTION * current) | (current <= _TINY)
             small = np.all(np.abs(step) <= _CONVERGED_STEP * span, axis=1)
@@ -196,25 +236,26 @@ def solve_voigt(wavelength_nm: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, n
     if finished.size:
         c, s, g = theta[finished, 0], theta[finished, 1], theta[finished, 2]
         with np.errstate(all="ignore"):
-            amplitude, offset, _r, _sc, sum_ss = _linear_part(y[finished], profile(energy, c, s, g))
+            amplitude, offset, _r, _sc, sum_ss = _linear_part(y[finished], profile(energy, c, s, g, None if band_var is None else np.sqrt(band_var)))
         good = np.isfinite(amplitude) & np.isfinite(offset) & (sum_ss > _TINY)
         params[finished[good]] = np.stack([amplitude, c, s, g, offset], axis=1)[good]
         ok[finished[~good]] = False
     return params, ok
 
 
-def solve_voigt_scipy(wavelength_nm: np.ndarray, y: np.ndarray) -> np.ndarray | None:
+def solve_voigt_scipy(wavelength_nm: np.ndarray, y: np.ndarray, band: tuple[np.ndarray, np.ndarray] | None = None) -> np.ndarray | None:
     """One spectrum with scipy's ``least_squares`` from the same first guess (all five parameters, the same bounds on the widths): the fallback for
     a spectrum ``solve_voigt`` did not converge on. None when it fails too."""
     from scipy.optimize import least_squares
 
-    energy = energy_ev(wavelength_nm)
+    energy, band_var = _energies(wavelength_nm, band)
+    band_sigma = None if band_var is None else np.sqrt(band_var)
     y = np.asarray(y, dtype=np.float64)
     span = max(float(np.max(energy) - np.min(energy)), 1.0e-12)
     sigma_floor, high = _MIN_SIGMA_SPANS * span, _MAX_WIDTH_SPANS * span
     with np.errstate(all="ignore"):
         centre, sigma, gamma = first_guess(energy, y[None, :], sigma_floor)
-        amplitude, offset, *_ = _linear_part(y[None, :], profile(energy, centre, sigma, gamma))
+        amplitude, offset, *_ = _linear_part(y[None, :], profile(energy, centre, sigma, gamma, band_sigma))
     start = np.array([amplitude[0], centre[0], sigma[0], gamma[0], offset[0]])
     if not np.all(np.isfinite(start)):
         return None
@@ -222,7 +263,7 @@ def solve_voigt_scipy(wavelength_nm: np.ndarray, y: np.ndarray) -> np.ndarray | 
     start[3] = np.clip(start[3], 0.0, high * 0.5)
 
     def residual(p: np.ndarray) -> np.ndarray:
-        return p[0] * profile(energy, p[1:2], p[2:3], p[3:4])[0] + p[4] - y
+        return p[0] * profile(energy, p[1:2], p[2:3], p[3:4], band_sigma)[0] + p[4] - y
 
     try:
         result = least_squares(residual, start, bounds=([-np.inf, -np.inf, sigma_floor, 0.0, -np.inf], [np.inf, np.inf, high, high, np.inf]))

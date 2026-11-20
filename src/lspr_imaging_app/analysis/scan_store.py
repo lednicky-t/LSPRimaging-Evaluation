@@ -118,6 +118,10 @@ class StoredScan:
         """``[wavelength, order + 1]`` central moments of each band when the correction is the full profile, else None."""
         return None if self.spectral is None else self.spectral.moments
 
+    def band_widths(self) -> np.ndarray | None:
+        """``[wavelength, 3]`` ``(sigma_nm, mean photon energy eV, energy std eV)`` of each band when the correction is the full profile, else None (what the Gaussian and Voigt fits average over)."""
+        return None if self.spectral is None else self.spectral.band
+
     def spectral_info(self) -> dict:
         """The spectral correction as plain data for the record beside an exported table (``{"mode": "none"}`` without one)."""
         return {"mode": "none"} if self.spectral is None else dict(self.spectral.info)

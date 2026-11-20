@@ -29,7 +29,7 @@ from .pick_menu import PickMenu, correction_picture
 CHOICE_TIPS = {
     "none": "The commanded wavelength of each point is its x value, as before.",
     "centroid": "Each point's x value is the centre of gravity of its measured band (where the light really was).",
-    "profile": "The fit also models that each point is an average over its band: the curve is the spectrum with that broadening taken out (polynomial fit; other fits read Centroid).",
+    "profile": "The fit also models that each point is an average over its band: the curve is the spectrum with that broadening taken out (polynomial, Gaussian and Voigt fits; the others read Centroid).",
 }
 
 
@@ -42,8 +42,13 @@ def fit_effect(mode: str, fit_method: str) -> str:
         return "Every fit reads the centres of the bands as its x values."
     if method == "polynomial":
         return "Polynomial fit: the full profile is applied. The drawn curve and the maximum / centroid are those of the underlying spectrum; the points are its band averages."
-    if method in ("gaussian", "voigt"):
-        return f"{method.capitalize()} fit: read as Centroid. The band averaging is built for the polynomial fit only; the {method} fit uses the band centres."
+    if method == "gaussian":
+        return (
+            "Gaussian fit: the full profile is applied. Each point is the peak averaged over its band, the band taken as a Gaussian of its own width: exact for broad peaks "
+            "(error 0.13 % of the peak height at FWHM 82 nm, 0.6 % at 47 nm, 2 % at 28 nm; 0.07 % for the 109 nm of the Bulk data)."
+        )
+    if method == "voigt":
+        return "Voigt fit: the full profile is applied, in photon energy: each point is the peak averaged over its band, the band taken as a Gaussian in energy (the same accuracy as for the Gaussian fit)."
     if method == "template":
         return ("Template shift: read as Centroid. The reference spectrum has the same broadening as the spectrum, so only the x values need the correction.")
     if method == "response":
@@ -59,6 +64,7 @@ def info_html(
     fit_method: str,
     wavelengths: Sequence[float] | None,
     problem: str = "",
+    camera_name: str = "",
 ) -> str:
     """The "i" text (rich text). Everything that depends on the session is in the "Now" paragraph; the rest is the explanation."""
     now: list[str] = []
@@ -66,6 +72,8 @@ def info_html(
         now.append(f"<span style='color:#d9822b'><b>{escape(problem)}</b></span> No correction is applied meanwhile.")
     elif passbands is None:
         now.append("No table imported: File &rarr; Import &rarr; Spectral Correction&hellip; (the probe's spectral sweep). Nothing is corrected until then.")
+        if camera_name:
+            now.append(f"Camera response: {escape(camera_name)} (kept; it weights the bands once a table is imported).")
     else:
         d = describe(passbands, wavelengths)
         temp = "no temperature given" if d["temperature_c"] is None else f"filter at {d['temperature_c']:.1f}&nbsp;&deg;C"
@@ -74,6 +82,13 @@ def info_html(
             f"({d['set_min_nm']:g}&ndash;{d['set_max_nm']:g}&nbsp;nm), width (FWHM) {d['fwhm_min_nm']:.1f}&ndash;{d['fwhm_max_nm']:.1f}&nbsp;nm. "
             f"Band centre minus setting: mean {d['shift_mean_nm']:+.2f}&nbsp;nm, scatter {d['shift_sd_nm']:.2f}&nbsp;nm."
         )
+        if d["camera"]:
+            now.append(
+                f"Camera response: {escape(str(d['camera']))}: the bands are weighted by it; their centres move by {d['camera_shift_mean_nm']:+.2f}&nbsp;nm on average "
+                f"({d['camera_shift_min_nm']:+.2f} to {d['camera_shift_max_nm']:+.2f}&nbsp;nm; the red end moves most)."
+            )
+        else:
+            now.append("Camera: taken as flat (File &rarr; Import &rarr; Camera Response&hellip; for the manufacturer's curve).")
         if wavelengths:
             n, k = d["scan_points"], d["scan_covered"]
             tail = "" if k == n else f" The other {n - k} keep their commanded wavelength."
@@ -95,16 +110,17 @@ def info_html(
         "&lambda;&#772;<sub>k</sub> = &int; &lambda; <i>w</i><sub>k</sub> d&lambda;. Expanding around it, "
         "<i>y</i><sub>k</sub> = <i>f</i>(&lambda;&#772;<sub>k</sub>) + &frac12;&sigma;<sub>k</sub>&sup2; <i>f</i>&Prime;(&lambda;&#772;<sub>k</sub>) + &hellip; "
         "(&sigma;<sub>k</sub>: the band's standard deviation, 1.6&ndash;7&nbsp;nm): the first-order error is gone, the curvature term stays.<br>"
-        "<b>Full profile.</b> The polynomial <i>P</i> is fitted so that its band averages match the points: "
+        "<b>Full profile.</b> The fit is made so that its band averages match the points. Polynomial <i>P</i>: "
         "<i>y</i><sub>k</sub> = &Sigma;<sub>m</sub> <i>c</i><sub>m</sub> <i>B</i><sub>km</sub>, with "
         "<i>B</i><sub>km</sub> = &int; <i>w</i><sub>k</sub> <i>t</i><sup>m</sup> d&lambda; (<i>t</i>: the window's scaled wavelength). That is the usual least-squares fit with "
         "the Vandermonde matrix <i>t</i><sub>k</sub><sup>m</sup> replaced by <i>B</i>; <i>B</i> follows from the band's central moments "
         "&mu;<sub>i</sub> = &int; (&lambda; &minus; &lambda;&#772;)<sup>i</sup> <i>w</i> d&lambda;. The curve drawn, and its maximum or centroid, are <i>P</i>: the spectrum with the "
-        "band's broadening taken out (simulated: without it a 30&nbsp;nm wide peak at 700&nbsp;nm reads 8&nbsp;nm too wide and 9&nbsp;% too low; a 100&nbsp;nm wide one at 600&nbsp;nm, 1&nbsp;nm and 2&nbsp;%).</p>"
+        "band's broadening taken out. The Gaussian and Voigt fits do the same with their peak, each band taken as a Gaussian of its own width (a peak averaged over such a band is a wider, "
+        "lower peak of the same kind, in closed form; the real bands have heavier wings, so this is an approximation, exact for broad peaks). Simulated for the polynomial: without it a 30&nbsp;nm wide peak at 700&nbsp;nm reads 8&nbsp;nm too wide and 9&nbsp;% too low; a 100&nbsp;nm wide one at 600&nbsp;nm, 1&nbsp;nm and 2&nbsp;%.</p>"
         f"<p><b>Now.</b> {'<br>'.join(now)}</p>"
         "<p><b>What it does not know.</b> The table is right only for the lamp, filter and <b>temperature</b> of the sweep; the filter temperature during your measurement is not "
-        "recorded (two sweeps suggest about &minus;0.1&nbsp;nm per &deg;C: not verified). The camera and the spectrometer are taken as flat; a slope <i>s</i> of lamp&times;camera "
-        "response moves the true centre by &sigma;&sup2;<i>s</i> (0.17&nbsp;nm at 700&nbsp;nm for a sensitivity falling 0.4&nbsp;%/nm). The polynomial averages the absorbance, not "
+        "recorded (two sweeps suggest about &minus;0.1&nbsp;nm per &deg;C: not verified). The spectrometer is taken as flat, and the camera too unless a camera response is imported; the microscope's optics are in no table. A slope <i>s</i> of "
+        "lamp&times;camera response moves the true centre by &sigma;&sup2;<i>s</i> (0.17&nbsp;nm at 700&nbsp;nm for a sensitivity falling 0.4&nbsp;%/nm). The polynomial averages the absorbance, not "
         "the transmittance: up to 0.8&nbsp;% of a peak's height at A&nbsp;=&nbsp;0.3 (2.8&nbsp;% at A&nbsp;=&nbsp;1, a 30&nbsp;nm wide peak at 700&nbsp;nm), none for the ratio formula. "
         "Choose a mode and compare: the three can be switched freely.</p>"
         "</td></tr></table>"
@@ -166,6 +182,7 @@ class CorrectionControls(QObject):
                 self._settings.metric_settings().fit_method,
                 None if stored is None else stored.wavelength_nm,
                 self._spectral.problem(),
+                "" if self._spectral.camera_response() is None else self._spectral.camera_response().source_name,
             )
         )
 

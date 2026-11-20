@@ -336,7 +336,8 @@ used by `storage/session.py`), so a session saved before a key existed gives the
 Steps 2-5 above place each point at its commanded wavelength and treat it as a point sample. The tunable filter passes a band instead (FWHM 4 nm at 420 nm to 15 nm at 700 nm) whose centre is off
 its setting by -0.2 nm on average with 0.4 nm scatter (the real August 2026 sweep). With a table of the measured bands (File -> Import -> Spectral Correction...) the Spectra ribbon's first group picks:
 **None** (as above), **Centroid** (x = the band's centre of gravity: the first-order error vanishes there; the `sigma^2/2 f''` term stays) or **Full profile** (the polynomial fit is fitted through the band
-averages: the Vandermonde matrix is replaced by `B_km = integral w_k t^m`, same cost; the curve and its maximum / centroid are the underlying spectrum). Gaussian, Voigt, template, response and "no fit" read
+averages: the Vandermonde matrix is replaced by `B_km = integral w_k t^m`, same cost; the curve and its maximum / centroid are the underlying spectrum; the **Gaussian** and **Voigt** fits average their peak over each
+band in closed form, the band taken as a Gaussian of its own width: exact for broad peaks, 0.07 % of the peak height for the Bulk data's 109 nm peaks, 2 % for 28 nm ones; Voigt in photon energy). Template, response and "no fit" read
 Centroid under Full profile. The scan is untouched; everything is recomputed live; the default is None. The measured effect on the real Bulk scan: baseline position -0.2 to -0.3 nm, event shift -1.4 to +0.2 %,
 noise unchanged. Maths, formats, limits (temperature, lamp, camera, absorbance averaging) and what is not built: `spectral_correction_2026-11-20.md`.
 

@@ -29,6 +29,7 @@ from __future__ import annotations
 import csv
 import io
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -36,7 +37,7 @@ import h5py
 import numpy as np
 
 from ..version import APP_NAME, APP_VERSION
-from .spectral_passband import PassbandError, PassbandTable, file_digest
+from .spectral_passband import CameraResponse, PassbandError, PassbandTable, file_digest
 
 SCHEMA_NAME = "lspri_spectral_correction"
 SCHEMA_VERSION = "1.0"
@@ -130,6 +131,48 @@ def _parse_dark(data: bytes, pixel_nm: np.ndarray) -> np.ndarray:
     if len(wl) != pixel_nm.size or not np.allclose(wl, pixel_nm, atol=1e-3):
         raise PassbandError("The dark spectrum is not on the sweep's spectrometer axis (a different spectrometer or pixel count).")
     return np.array(val, dtype=np.float64)
+
+
+def parse_camera_response(data: bytes, name: str) -> CameraResponse:
+    """A camera response from the bytes of a CSV (or whitespace / semicolon separated) file: ``#`` lines are comments, a first line whose first cell is not a number is a header, every
+    other line is a wavelength in nm and a response (the *second* column; a third one, such as "relative to peak", is ignored). Quantum efficiency in per cent, a fraction or a
+    relative response all do: only the shape is used. Raises ``PassbandError`` with a sentence naming the line for anything it cannot read."""
+    wl: list[float] = []
+    val: list[float] = []
+    header_seen = False
+    for line_no, raw in enumerate(data.decode("utf-8-sig").splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        cells = [c for c in re.split(r"[,;\t ]+", line) if c != ""]
+        try:
+            first = float(cells[0].replace(",", "."))
+        except ValueError:
+            if header_seen or wl:
+                raise PassbandError(f"Line {line_no}: a wavelength is expected, found {cells[0]!r}.") from None
+            header_seen = True
+            continue
+        if len(cells) < 2:
+            raise PassbandError(f"Line {line_no}: a wavelength and a response are expected.")
+        try:
+            second = float(cells[1].replace(",", "."))
+        except ValueError:
+            raise PassbandError(f"Line {line_no}: the response {cells[1]!r} is not a number.") from None
+        wl.append(first)
+        val.append(second)
+    if not wl:
+        raise PassbandError("The file has no camera response: wavelength (nm) and response, one pair per line.")
+    out = CameraResponse(
+        np.array(wl, dtype=np.float64), np.array(val, dtype=np.float64), name, file_digest(data), datetime.now().astimezone().isoformat(timespec="seconds")
+    )
+    out.validate()
+    return out
+
+
+def read_camera_response(path: str | Path) -> CameraResponse:
+    """``parse_camera_response`` for a file on disk (the source name is the file's name)."""
+    path = Path(path)
+    return parse_camera_response(path.read_bytes(), path.name)
 
 
 def read_sweep(path: str | Path, dark_path: str | Path | None = None, illumination: str = "") -> PassbandTable:

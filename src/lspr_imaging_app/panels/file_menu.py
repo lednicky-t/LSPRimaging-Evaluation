@@ -38,7 +38,7 @@ from ..dataset.io import DatasetLoadChoice, resolve_remembered_dataset_choice, s
 from ..dataset.model import ImageDataset
 from ..plan.refractive_index import RiFileError, step_numbers_text
 from ..selection.experiment_plan_module import ExperimentPlanModule
-from ..selection.spectral_correction_module import SpectralCorrectionModule, import_report
+from ..selection.spectral_correction_module import SpectralCorrectionModule, camera_report, import_report
 from ..shortcuts import bind_action
 from ..storage.session_coordinator import SessionCoordinator
 from ..storage.session_index import SessionRecord
@@ -139,8 +139,21 @@ class FileMenu(QObject):
         )
         self.import_spectral_action.triggered.connect(self.import_spectral_correction)
         self.import_spectral_action.setVisible(spectral is not None)
+        self.import_camera_action = give_persistent_icon(import_menu.addAction("Camera Response..."), "import")
+        self.import_camera_action.setToolTip(
+            "A camera's relative spectral sensitivity (wavelength in nm and response, one pair per line; # lines are comments; quantum efficiency in per cent or a relative response: only the shape "
+            "is used), for instance from the manufacturer. It weights the measured filter bands. Copied into the session."
+        )
+        self.import_camera_action.triggered.connect(self.import_camera_response)
+        self.import_camera_action.setVisible(spectral is not None)
+        self.remove_camera_action = give_persistent_icon(import_menu.addAction("Remove Camera Response"), "delete")
+        self.remove_camera_action.setToolTip("Go back to a flat camera: the bands are not weighted by any response.")
+        self.remove_camera_action.triggered.connect(lambda: self._spectral.remove_camera_response() if self._spectral is not None else None)
+        self.remove_camera_action.setVisible(spectral is not None)
         if spectral is not None:
             spectral.import_finished.connect(self._on_spectral_imported)
+            spectral.response_finished.connect(self._on_camera_response_imported)
+            spectral.changed.connect(self._sync_enabled)
         export_menu = give_persistent_icon(menu.addMenu("Export"), "export")
         self.export_metadata_action = give_persistent_icon(export_menu.addAction("Acquisition Metadata (JSON)..."), "export")
         self.export_metadata_action.triggered.connect(self.export_metadata)
@@ -322,6 +335,40 @@ class FileMenu(QObject):
         self.status_message.emit(f"Importing {sweep.name} ...")
         self._spectral.import_sweep(sweep, dark, lamp)
 
+    def import_camera_response(self) -> None:
+        """Pick a camera response file (the module reads it on a thread; ``_on_camera_response_imported`` reports)."""
+        if self._spectral is None:
+            return
+        start = self._dataset.dataset_home()
+        path_text, _ = QFileDialog.getOpenFileName(
+            self._window, "Import camera response", str(start) if start is not None else "", "Camera response (*.csv *.txt *.tsv);;All files (*)"
+        )
+        if not path_text:
+            return
+        previous = self._spectral.camera_response()
+        if previous is not None:
+            answer = QMessageBox.question(
+                self._window, "Replace the camera response?",
+                f"This session already has a camera response ({previous.source_name}).\n\nImporting {Path(path_text).name} replaces it, so the bands and, if a correction is on, the numbers shown change.\n\nImport anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self.status_message.emit(f"Importing {Path(path_text).name} ...")
+        self._spectral.import_camera_response(Path(path_text))
+
+    def _on_camera_response_imported(self, response: object, error: str) -> None:
+        if self._spectral is None:
+            return
+        if error:
+            QMessageBox.critical(self._window, "Camera response not imported", error)
+            return
+        if response is None:
+            self.status_message.emit("Camera response removed: the camera is taken as flat.")
+            return
+        QMessageBox.information(self._window, "Camera response imported", camera_report(response, self._spectral.passbands(), self._spectral.mode()))
+        self.status_message.emit(f"Camera response imported from {response.source_name}.")
+
     def _on_spectral_imported(self, table: object, error: str) -> None:
         if self._spectral is None:
             return
@@ -369,8 +416,9 @@ class FileMenu(QObject):
 
     def _sync_enabled(self) -> None:
         loaded = self._dataset.dataset_home() is not None
-        for action in (self.show_folder_action, self.import_plan_action, self.import_ri_action, self.import_spectral_action, self.export_metadata_action):
+        for action in (self.show_folder_action, self.import_plan_action, self.import_ri_action, self.import_spectral_action, self.import_camera_action, self.export_metadata_action):
             action.setEnabled(loaded)
+        self.remove_camera_action.setEnabled(loaded and self._spectral is not None and self._spectral.has_response())
 
     @property
     def manager(self) -> DatasetManagerDialog:

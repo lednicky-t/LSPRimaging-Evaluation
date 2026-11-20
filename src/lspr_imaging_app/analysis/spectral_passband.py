@@ -8,9 +8,11 @@ spectrum *averaged over that point's passband*. A spectrometer looking at the fi
 
 **The model.** For setting ``k`` let ``w_k(lambda)`` be the weight of the light that reaches the camera (lamp x filter band x optics x camera sensitivity),
 normalised to an area of 1. The camera signal of a ROI with transmittance ``tau(lambda)`` is ``I_k = integral w_k tau``. The spectrometer is taken as flat
-(the maintainer's assumption: calibrated, response flat) and so is the camera: ``w_k`` is the measured profile itself. *This is an assumption, and it
-matters at the red end*: a slope ``s`` of the lamp x camera response shifts the true centre of gravity by ``sigma_k^2 s`` (a camera sensitivity falling by
-0.4 %/nm gives 0.17 nm at 700 nm, where ``sigma`` is 7 nm). The stored table has a reserved slot for a detector-response curve (not used yet).
+(the maintainer's assumption: calibrated, response flat). The camera is flat too unless a **camera response** ``R(lambda)`` is imported (``CameraResponse``, a relative
+spectral sensitivity from the manufacturer's data, 2026-11-20): the band is then weighted by it, ``w_k ~ S_k(lambda) R(lambda)``, before it is normalised. *This matters at the
+red end*: a slope ``s`` of the lamp x camera response shifts the true centre of gravity by ``sigma_k^2 s`` (a camera sensitivity falling by 0.4 %/nm gives 0.17 nm at 700 nm,
+where ``sigma`` is 7 nm); the real Basler a2A3840-45umBAS curve moves the August bands by -0.03 nm below 620 nm and -0.11 to -0.13 nm at 700-720 nm. The microscope's own optics are
+not in any table.
 
 The three ways to use it (``MODES``):
 
@@ -30,6 +32,14 @@ The three ways to use it (``MODES``):
 
               The curve that is drawn and whose maximum / centroid is read is ``P`` itself: the *underlying* spectrum with the band's broadening taken out
               (an apparent width too large by 1-9 nm and a height too small by 1-10 % in the simulation, ``docs/spectral_correction_2026-11-20.md``).
+              **Gaussian and Voigt** (2026-11-20, analytic band approximation): each band is taken as a Gaussian of its own width. A Gaussian peak ``exp(-d^2 / 2 sigma^2)``
+              averaged over a Gaussian band of variance ``s_k^2`` is ``(sigma / tau_k) exp(-d_k^2 / 2 tau_k^2)`` with ``tau_k^2 = sigma^2 + s_k^2``: a wider, lower Gaussian, in closed form
+              (``gaussian_fit``: same cost as before, exact derivatives). The Voigt fit works in photon energy, where the band's mean ``E_k`` and standard deviation ``S_k`` (eV) come from the
+              measured band; a Gaussian band turns a Voigt ``(sigma, gamma)`` into ``(sigma', gamma)``, ``sigma'^2 = sigma^2 + S_k^2``, scaled by ``sigma / sigma'`` (``voigt_fit``). The
+              fitted coefficients are those of the *underlying* peak. **Why an approximation:** the real bands are not Gaussian (kurtosis median 11, heavy wings), so the closed form leaves
+              |exact - approximate| = 0.026 % of the peak height for a Gaussian peak of FWHM 141 nm, 0.13 % at 82 nm, 0.6 % at 47 nm and 2 % at 28 nm (measured on the August sweep); LSPR peaks
+              of the Bulk dataset are 109 nm wide (0.07 %). An exact band average would need ~30 nodes per band or a mixture of Gaussians (5-30x slower; not built).
+
               The averaging is linear in the formula value (absorbance): the exact average is of ``10^-A``, and the difference is the band-variance term
               ``(ln 10 / 2) Var_w(A)``. Measured on Lorentzian peaks through the real bands (``test_lspri_spectral_passband.py``), as a share of the peak height:
               at most 0.25 % for A = 0.1, 0.76 % for A = 0.3 and 2.8 % for A = 1, always for a 30 nm wide peak at 700 nm (band 15 nm wide); about a third of that for
@@ -139,6 +149,64 @@ def file_digest(*parts: bytes) -> str:
     return h.hexdigest()
 
 
+MIN_RESPONSE_POINTS = 5
+HC_EV_NM = 1239.84198
+"""h c in eV nm: photon energy (eV) = HC_EV_NM / wavelength (nm); the same number as ``voigt_fit.HC_EV_NM`` (pinned by a test)."""
+
+
+@dataclass(frozen=True, eq=False)
+class CameraResponse:
+    """A camera's relative spectral sensitivity: ``response`` at ``wavelength_nm`` (ascending), as read from the manufacturer's data. Only its *shape* matters (it is normalised
+    away with the band), so quantum efficiency in per cent, a fraction, or a relative response all do. Outside its range the nearest end value is used (``evaluate``)."""
+
+    wavelength_nm: np.ndarray
+    response: np.ndarray
+    source_name: str = ""
+    sha256: str = ""
+    imported_at: str = ""
+
+    def validate(self) -> None:
+        """Raise ``PassbandError`` for a curve that cannot weight a band."""
+        wl, r = np.asarray(self.wavelength_nm), np.asarray(self.response)
+        if wl.ndim != 1 or wl.shape != r.shape or wl.size < MIN_RESPONSE_POINTS:
+            raise PassbandError(f"The camera response needs at least {MIN_RESPONSE_POINTS} points (wavelength and response).")
+        if not (np.all(np.isfinite(wl)) and np.all(np.isfinite(r))):
+            raise PassbandError("The camera response has a value that is not a number.")
+        if not np.all(np.diff(wl) > 0):
+            raise PassbandError("The wavelengths of the camera response must increase (a repeated or reversed wavelength).")
+        if not np.all(r > 0):
+            raise PassbandError("The camera response must be positive everywhere (a zero or negative value cannot weight a band).")
+
+    def evaluate(self, lam: np.ndarray) -> np.ndarray:
+        """The response at the wavelengths *lam*, linear between the points, the nearest end value outside the curve, normalised to a maximum of 1."""
+        return np.interp(lam, self.wavelength_nm, self.response / float(np.max(self.response)))
+
+    def covers(self, low_nm: float, high_nm: float) -> bool:
+        return bool(self.wavelength_nm[0] <= low_nm and self.wavelength_nm[-1] >= high_nm)
+
+    def to_payload(self) -> dict:
+        """Plain data for the session's block."""
+        return {
+            "source_name": self.source_name, "sha256": self.sha256, "imported_at": self.imported_at,
+            "wavelength_nm": [float(v) for v in self.wavelength_nm], "response": [float(v) for v in self.response],
+        }
+
+    @staticmethod
+    def from_payload(raw: object) -> CameraResponse:
+        """Read the block's ``camera_response`` (raises ``PassbandError`` for one that is not a curve)."""
+        if not isinstance(raw, dict):
+            raise PassbandError("The session's camera response is not a curve.")
+        try:
+            out = CameraResponse(
+                np.array(raw["wavelength_nm"], dtype=np.float64), np.array(raw["response"], dtype=np.float64),
+                str(raw.get("source_name", "")), str(raw.get("sha256", "")), str(raw.get("imported_at", "")),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise PassbandError("The session's camera response could not be read.") from exc
+        out.validate()
+        return out
+
+
 @dataclass(frozen=True, eq=False)
 class RowProfile:
     """The derived band of one row: ``weights`` are over the whole pixel axis (zero outside the window), area-normalised in nm."""
@@ -151,6 +219,9 @@ class RowProfile:
     peak_counts: float
     weights: np.ndarray | None
     moments: np.ndarray  # float64 [MAX_ORDER + 1]: central moments mu_0 .. mu_MAX_ORDER about the centroid
+    centroid_flat_nm: float = float("nan")  # the centre without the camera response (equal to ``centroid_nm`` when there is none)
+    energy_mean_ev: float = float("nan")  # the band's mean photon energy (eV), for the Voigt fit (which works in energy)
+    energy_sigma_ev: float = float("nan")  # and its standard deviation (eV)
 
 
 _POINT = np.zeros(MAX_ORDER + 1)
@@ -163,9 +234,10 @@ def point_moments() -> np.ndarray:
     return POINT_MOMENTS.copy()
 
 
-def row_profile(pixel_nm: np.ndarray, counts: np.ndarray, dark: np.ndarray | None, set_nm: float) -> RowProfile:
+def row_profile(pixel_nm: np.ndarray, counts: np.ndarray, dark: np.ndarray | None, set_nm: float, response: CameraResponse | None = None) -> RowProfile:
     """The band of one row: dark removed, baseline from the window's two ends, samples under ``NOISE_SIGMAS`` noise set to zero, then the area-normalised weights,
-    centroid, standard deviation, FWHM and central moments. A row that is too weak, or centred too far from its setting, is not usable (``why`` says why)."""
+    centroid, standard deviation, FWHM and central moments. A row that is too weak, or centred too far from its setting, is not usable (``why`` says why).
+    With a camera *response* the band is weighted by it before it is normalised (``centroid_flat_nm`` of the result is the centre without it, to show its effect)."""
     pixel_nm = np.asarray(pixel_nm, dtype=np.float64)
     y = np.asarray(counts, dtype=np.float64)
     if dark is not None:
@@ -187,16 +259,23 @@ def row_profile(pixel_nm: np.ndarray, counts: np.ndarray, dark: np.ndarray | Non
     d_lam = np.gradient(lam)  # the pixel width in nm: pixels are not exactly evenly spaced
     w = s * d_lam
     total = float(w.sum())
+    centroid_flat = float(np.sum(lam * w) / total)
+    if abs(centroid_flat - set_nm) > MAX_CENTRE_ERROR_NM:
+        return RowProfile(False, f"the band is centred {centroid_flat - set_nm:+.1f} nm from its setting", np.nan, np.nan, np.nan, peak, None, point_moments())
+    if response is not None:
+        w = w * response.evaluate(lam)
+        total = float(w.sum())
     centroid = float(np.sum(lam * w) / total)
-    if abs(centroid - set_nm) > MAX_CENTRE_ERROR_NM:
-        return RowProfile(False, f"the band is centred {centroid - set_nm:+.1f} nm from its setting", np.nan, np.nan, np.nan, peak, None, point_moments())
     w = w / total
     dx = lam - centroid
     moments = np.array([float(np.sum(w * dx**i)) for i in range(MAX_ORDER + 1)])
     sigma = float(np.sqrt(max(moments[2], 0.0)))
     weights = np.zeros(pixel_nm.size)
     weights[inside] = w
-    return RowProfile(True, "", centroid, sigma, _fwhm(lam, s), peak, weights, moments)
+    energy = HC_EV_NM / lam
+    e_mean = float(np.sum(w * energy))
+    e_sigma = float(np.sqrt(max(np.sum(w * (energy - e_mean) ** 2), 0.0)))
+    return RowProfile(True, "", centroid, sigma, _fwhm(lam, s if response is None else s * response.evaluate(lam)), peak, weights, moments, centroid_flat, e_mean, e_sigma)
 
 
 def _fwhm(lam: np.ndarray, s: np.ndarray) -> float:
@@ -231,30 +310,50 @@ class Passbands:
     temperature_c: float | None = None
     source_name: str = ""
     illumination: str = ""
+    centroid_flat_nm: np.ndarray = field(default_factory=lambda: np.zeros(0))  # [K] the centres without the camera response
+    camera: str = ""  # the camera response's source name ('' = the camera is taken as flat)
+    camera_sha256: str = ""
+    energy_mean_ev: np.ndarray = field(default_factory=lambda: np.zeros(0))  # [K] the bands' mean photon energy (eV)
+    energy_sigma_ev: np.ndarray = field(default_factory=lambda: np.zeros(0))  # [K] and its standard deviation (eV)
+
+    def camera_shift_nm(self) -> np.ndarray:
+        """``centroid - centroid without the camera response`` of the usable rows: what the camera response does to the band centres (zeros without one)."""
+        return (self.centroid_nm - self.centroid_flat_nm)[self.usable] if self.centroid_flat_nm.size == self.centroid_nm.size else np.zeros(int(self.usable.sum()))
 
     def shift_nm(self) -> np.ndarray:
         """``centroid - set`` of the usable rows."""
         return (self.centroid_nm - self.set_nm)[self.usable]
 
 
-def derive(table: PassbandTable) -> Passbands:
-    """The bands of every row of *table* (``row_profile`` per row)."""
+def derive(table: PassbandTable, response: CameraResponse | None = None) -> Passbands:
+    """The bands of every row of *table* (``row_profile`` per row), weighted by the camera *response* when there is one (which must cover the sweep's set wavelengths)."""
     table.validate()
+    if response is not None:
+        response.validate()
+        if not response.covers(float(table.set_nm.min()), float(table.set_nm.max())):
+            raise PassbandError(
+                f"The camera response covers {response.wavelength_nm[0]:g}-{response.wavelength_nm[-1]:g} nm; the sweep goes from {table.set_nm.min():g} to {table.set_nm.max():g} nm."
+            )
     n = table.n_rows
     centroid = np.full(n, np.nan)
+    centroid_flat = np.full(n, np.nan)
+    e_mean = np.full(n, np.nan)
+    e_sigma = np.full(n, np.nan)
     sigma = np.full(n, np.nan)
     fwhm = np.full(n, np.nan)
     moments = np.tile(POINT_MOMENTS, (n, 1))
     usable = np.zeros(n, dtype=bool)
     why: list[str] = []
     for k in range(n):
-        p = row_profile(table.pixel_nm, table.counts[k], table.dark, float(table.set_nm[k]))
-        usable[k], centroid[k], sigma[k], fwhm[k] = p.usable, p.centroid_nm, p.sigma_nm, p.fwhm_nm
+        p = row_profile(table.pixel_nm, table.counts[k], table.dark, float(table.set_nm[k]), response)
+        usable[k], centroid[k], sigma[k], fwhm[k], centroid_flat[k] = p.usable, p.centroid_nm, p.sigma_nm, p.fwhm_nm, p.centroid_flat_nm
+        e_mean[k], e_sigma[k] = p.energy_mean_ev, p.energy_sigma_ev
         if p.usable:
             moments[k] = p.moments
         why.append(p.why)
     return Passbands(
-        np.asarray(table.set_nm, dtype=np.float64), centroid, sigma, fwhm, moments, usable, tuple(why), table.sha256, table.mean_temperature_c, table.source_name, table.illumination
+        np.asarray(table.set_nm, dtype=np.float64), centroid, sigma, fwhm, moments, usable, tuple(why), table.sha256, table.mean_temperature_c, table.source_name, table.illumination,
+        centroid_flat, "" if response is None else response.source_name, "" if response is None else response.sha256, e_mean, e_sigma,
     )
 
 
@@ -271,6 +370,9 @@ class CorrectionAxis:
     covered: np.ndarray
     key: str
     info: dict = field(default_factory=dict)
+    band: np.ndarray | None = None
+    """``[wavelength, 3]`` for the full profile: each point's band as ``(sigma_nm, mean photon energy eV, energy std eV)``, the numbers the Gaussian and Voigt fits average over (a point with no
+    band: ``(0, hc / x, 0)``, a band of zero width); None otherwise."""
     """What the correction was, as plain data for the record beside an exported table (mode, the table's name, checksum, light source and temperature, how many points have a band)."""
 
     @property
@@ -314,15 +416,21 @@ def correction_axis(passbands: Passbands | None, wavelengths_nm, mode: str) -> C
     x = wl.copy()
     x[covered] = passbands.centroid_nm[rows[covered]]
     moments = None
+    band = None
     if mode == "profile":
         moments = np.tile(POINT_MOMENTS, (wl.size, 1))
         moments[covered] = passbands.moments[rows[covered]]
-    key = f"{mode}:{passbands.sha256[:16]}:v{PASSBAND_ALGORITHM_VERSION}"
+        band = np.stack([np.zeros(wl.size), HC_EV_NM / x, np.zeros(wl.size)], axis=1)
+        band[covered, 0] = passbands.sigma_nm[rows[covered]]
+        band[covered, 1] = passbands.energy_mean_ev[rows[covered]]
+        band[covered, 2] = passbands.energy_sigma_ev[rows[covered]]
+    key = f"{mode}:{passbands.sha256[:16]}:{passbands.camera_sha256[:16] or 'flat'}:v{PASSBAND_ALGORITHM_VERSION}"
     info = {
         "mode": mode, "table": passbands.source_name, "sha256": passbands.sha256, "illumination": passbands.illumination, "filter_temperature_c": passbands.temperature_c,
         "points_with_a_band": int(covered.sum()), "points": int(wl.size), "algorithm_version": PASSBAND_ALGORITHM_VERSION,
+        "camera_response": passbands.camera or None, "camera_response_sha256": passbands.camera_sha256 or None,
     }
-    return CorrectionAxis(mode, x, moments, covered, key, info)
+    return CorrectionAxis(mode, x, moments, covered, key, info, band)
 
 
 def passband_vander(x_nm: np.ndarray, moments: np.ndarray, degree: int, middle: float, half: float) -> np.ndarray:
@@ -360,7 +468,13 @@ def describe(passbands: Passbands, wavelengths_nm=None) -> dict[str, object]:
         "fwhm_min_nm": float(np.nanmin(passbands.fwhm_nm[ok])) if ok.any() else float("nan"),
         "fwhm_max_nm": float(np.nanmax(passbands.fwhm_nm[ok])) if ok.any() else float("nan"),
         "unusable": [(float(passbands.set_nm[k]), passbands.why[k]) for k in np.flatnonzero(~ok)],
+        "camera": passbands.camera or None,
     }
+    if passbands.camera:
+        cam = passbands.camera_shift_nm()
+        out["camera_shift_mean_nm"] = float(cam.mean()) if cam.size else float("nan")
+        out["camera_shift_min_nm"] = float(cam.min()) if cam.size else float("nan")
+        out["camera_shift_max_nm"] = float(cam.max()) if cam.size else float("nan")
     if wavelengths_nm is not None:
         rows = match_rows(passbands, wavelengths_nm)
         out["scan_points"] = int(rows.size)

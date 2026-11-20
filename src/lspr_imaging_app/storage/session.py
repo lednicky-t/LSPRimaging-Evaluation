@@ -129,7 +129,9 @@ from ..domain.roi_shapes import NO_BORDER, Border, Circle, MaskShape, Rectangle,
 logger = logging.getLogger(__name__)
 
 SESSION_SCHEMA_NAME = "lspri_rewrite_session"
-SESSION_SCHEMA_VERSION = "1.13"
+SESSION_SCHEMA_VERSION = "1.14"
+# 1.14 (2026-11-20): the "spectral_correction" block may also hold "camera_response" - the camera's relative spectral sensitivity ({"source_name", "sha256", "imported_at",
+# "wavelength_nm": [...], "response": [...]}, analysis/spectral_passband.py ``CameraResponse``) - and may then have no table ("file"). A 1.13 block has neither and loads with a flat camera.
 # 1.13 (2026-11-20): optional "spectral_correction" block - the spectral correction of the LCTF passbands (selection/spectral_correction_module.py,
 # analysis/spectral_passband.py): {"mode": "none" | "centroid" | "profile", "file": the table's HDF5 file inside the session folder, "sha256" of the imported sweep,
 # "source_name", "illumination" (free text), "imported_at"}. The rows themselves are in spectral_correction/spectral_correction.h5 (schema lspri_spectral_correction 1.0),
@@ -936,8 +938,8 @@ def load_session(
 
 
 def _decode_spectral_block(raw: object) -> dict | None:
-    """Lenient like the RI block: anything but a dict with a file name is dropped (the rest of the session still loads)."""
-    if isinstance(raw, dict) and isinstance(raw.get("file"), str) and raw["file"]:
+    """Lenient like the RI block: anything but a dict with a file name or a camera response is dropped (the rest of the session still loads)."""
+    if isinstance(raw, dict) and ((isinstance(raw.get("file"), str) and raw["file"]) or isinstance(raw.get("camera_response"), dict)):
         return dict(raw)
     if raw is not None:
         logger.warning("The session's spectral_correction block could not be read; it was left out")

@@ -110,6 +110,7 @@ def prepare_spectra(
     mean = stored.values[_primary_method(stored)]
     wavelengths = stored.abscissa_nm()  # under a spectral correction: where the light of each point really is (the nominal wavelengths without one)
     band_moments = stored.passband_moments()  # the full profile's bands (None otherwise)
+    band_widths = stored.band_widths()
     metric = request.metric
     rows: dict[int, int] = {}
     for row, stored_id in enumerate(stored.roi_ids):
@@ -131,7 +132,7 @@ def prepare_spectra(
         if not usable.any():
             out.append(RoiSpectrum(roi_id, empty, empty, empty, n_missing=n_missing, note=why_no_reference.get(roi_id) or "No wavelength has a value for this ROI."))
             continue
-        spectrum = formula_spectrum(wavelengths[usable], sample[usable], reference[usable], request.formula_key, passband=None if band_moments is None else band_moments[usable])
+        spectrum = formula_spectrum(wavelengths[usable], sample[usable], reference[usable], request.formula_key, passband=None if band_moments is None else band_moments[usable], band=None if band_widths is None else band_widths[usable])
         errors = formula_errors(
             spectrum.sample_values, spectrum.reference_values,
             standard_error(stored.std[cube_row, row, :, SAMPLE][usable], n_sample[usable]),
@@ -205,25 +206,31 @@ def _batch_solved(jobs: list[SpectrumFitJob], metric: MetricSettings) -> dict[in
     the coefficients are those of a one-row call."""
     from .fit_window import spectrum_window
     from .gaussian_fit import solve_gaussian
-    from .query import _windowed
+    from .query import _window_index
     from .voigt_fit import solve_voigt
 
     method = str(metric.fit_method).strip().lower()
     if method not in ("gaussian", "voigt") or metric.uses_template or len(jobs) < 2:
         return {}
-    solve, min_points = (solve_gaussian, 4) if method == "gaussian" else (solve_voigt, 5)
-    groups: dict[bytes, tuple[np.ndarray, list[int], list[np.ndarray]]] = {}
+    min_points = 4 if method == "gaussian" else 5
+    groups: dict[bytes, tuple[np.ndarray, list[int], list[np.ndarray], np.ndarray | None]] = {}
     for i, job in enumerate(jobs):
         wl_min, wl_max = spectrum_window(job.spectrum.wavelengths_nm, job.spectrum.values, metric)
-        x, y = _windowed(job.spectrum.wavelengths_nm, job.spectrum.values, wl_min, wl_max)
+        wl_all = np.asarray(job.spectrum.wavelengths_nm, dtype=np.float64)
+        index = _window_index(wl_all, job.spectrum.values, wl_min, wl_max)
+        x, y = wl_all[index], np.asarray(job.spectrum.values, dtype=np.float64)[index]
+        widths = None if job.spectrum.band is None else np.asarray(job.spectrum.band, dtype=np.float64)[index]  # the bands of the points the fit sees
         if x.size < min_points:
             continue  # the per-spectrum path gives its "too few points" result
-        entry = groups.setdefault(x.tobytes(), (x, [], []))
+        entry = groups.setdefault(x.tobytes() + (b"" if widths is None else widths.tobytes()), (x, [], [], widths))
         entry[1].append(i)
         entry[2].append(y)
     solved: dict[int, np.ndarray | None] = {}
-    for x, indices, rows in groups.values():
-        params, ok = solve(x, np.vstack(rows))
+    for x, indices, rows, widths in groups.values():
+        if method == "gaussian":
+            params, ok = solve_gaussian(x, np.vstack(rows), band_sigma=None if widths is None else widths[:, 0])
+        else:
+            params, ok = solve_voigt(x, np.vstack(rows), band=None if widths is None else (widths[:, 1], widths[:, 2]))
         for k, i in enumerate(indices):
             solved[i] = params[k] if ok[k] else None
     return solved

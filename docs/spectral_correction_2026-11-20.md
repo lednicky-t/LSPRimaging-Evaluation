@@ -12,10 +12,11 @@ acts on spectrum -> fit -> metric only, which the app recomputes live. A new ses
 
 - Store the measured spectra as a **session copy of the raw rows** (HDF5 file in the session folder; centroids and widths are derived on load, never stored).
 - Loaded through **File -> Import -> Spectral Correction...** (the probe's `spectral_sweep_*.csv` as it is, optionally with its `dark_spectrum_*.csv`), like the metadata and the refractive indices.
-- **Polynomial first** for Full profile; Gaussian and Voigt later. Template shift, Response shape and "No fit" read as Centroid (the "i" text says so).
+- **Polynomial first** for Full profile; **Gaussian and Voigt built later the same day, as the closed-form (analytic) band approximation** (maintainer's choice, 2026-11-20, after seeing the accuracy). Template shift,
+  Response shape and "No fit" read as Centroid (the "i" text says so).
 - **The pick-up** sits in the Spectra ribbon before the Formula; an **"i" icon** at the end of the ribbon carries the explanation and the live state, like the Image panel's.
 - **Temperature is not handled yet**: first a temperature sweep has to be measured (see "Temperature: to do"). Name: "spectral correction" (not "chromatic correction": that already means the per-wavelength image alignment).
-- The spectrometer is taken as calibrated and flat; so is the camera (a slot for its response curve is reserved).
+- The spectrometer is taken as calibrated and flat. The camera is flat too, unless a **camera response** is imported (File -> Import -> Camera Response..., built later the same day, see below).
 
 ## The maths
 
@@ -44,6 +45,10 @@ Point `k` is the sample's spectrum `f` averaged over the weight `w_k(lambda)` of
 - **Simulation** (cubic absorbance through the real bands, `test_lspri_spectral_passband.py`): the worst absolute peak-position error over polynomial orders 3-5 is 0.51 nm with the
   nominal axis (it depends on the order: a higher order follows the scatter of the centres), 0.17 nm with the centroid axis (steady, but the `sigma^2/2 f''` term is left; sigma^2 grows
   twenty-fold from blue to red), 0.03 nm with the full profile.
+- **Gaussian and Voigt on the real Bulk scan** (24 ROIs x 314 cubes, with the a2A3840 camera response; the bands as Gaussian in nm for the Gaussian fit and in energy for the Voigt fit): Gaussian fit, baseline position -0.25 nm
+  (Centroid) / -0.29 nm (Full profile), the 7.98 nm event shift -1.3 % / -1.4 %, noise unchanged (0.062 nm), no gaps, same speed as before (0.03 ms per cube and ROI); Voigt fit, position -0.29 / -0.32 nm, event shift
+  -1.1 % / -1.2 %, noise unchanged, about twice as slow with the full profile (0.04 -> 0.08 ms for the maximum, 0.11 -> 0.21 ms for the top-20 % centroid). One spectrum (ROI 1, cube 100, Gaussian fit): the underlying
+  peak is 0.7 % taller (0.3409 -> 0.3432) and 0.2 nm narrower (FWHM 106.5 -> 106.3 nm): small, because a 109 nm peak is broad against 4-15 nm bands.
 - **Real scan** (04_Bulk_sensitivity, 24 ROIs x 314 cubes, 10 nm step, all 26 wavelengths on the table's 5 nm grid; *illustrative*: the table was measured another day, possibly with
   another lamp): default metric (polynomial 3rd order, centroid of the top 20 %): baseline position -0.24 nm (Centroid) / -0.20 nm (Full profile); the event shift (7.7 nm) changes by
   -0.04 nm (-0.55 %) / +0.02 nm (+0.21 %); noise per ROI unchanged (0.054 nm), SNR unchanged. Other settings: shift changes of -0.5 to -1.4 %, position -0.23 to -0.29 nm.
@@ -58,11 +63,13 @@ Point `k` is the sample's spectrum `f` averaged over the weight `w_k(lambda)` of
 | Reading the probe's sweep, the session's HDF5 file (pure) | `analysis/passband_store.py` |
 | `StoredScan.spectral`, `abscissa_nm()`, `passband_moments()` | `analysis/scan_store.py` |
 | The display's scan carries the correction (`set_spectral_correction`, `stored()`) | `analysis/scan_results.py` |
-| One-spectrum fit (`fit_polynomial(moments=)`, `FormulaSpectrum.passband`) | `analysis/query.py` |
-| Batch fit (`TraceInput.passband`, `_polynomial_group`), order check (`loo_rms_all_orders(moments=)`) | `analysis/trace_fit.py`, `analysis/order_quality.py` |
+| One-spectrum fit (`fit_polynomial(moments=)`, `fit_gaussian(band=)`, `fit_voigt(band=)`, `FormulaSpectrum.passband` / `.band`) | `analysis/query.py` |
+| Gaussian / Voigt solvers with the band average (`solve_gaussian(band_sigma=)`, `solve_voigt(band=)`, exact derivatives, no band = the original code path, bit-identical) | `analysis/gaussian_fit.py`, `analysis/voigt_fit.py` |
+| Batch fit (`TraceInput.passband` / `.band`, `_polynomial_group`, `_gaussian_group`, `_voigt_group`), order check (`loo_rms_all_orders(moments=)`), the Spectra panel's batch solve (`scan_view._batch_solved`) | `analysis/trace_fit.py`, `analysis/order_quality.py`, `analysis/scan_view.py` |
 | Spectra and Sensorgram entry points | `analysis/scan_view.py`, `analysis/scan_trace.py` (`trace_input`, `trace_key`) |
 | Owner: table, mode, import thread, session block | `selection/spectral_correction_module.py` |
-| Session block, schema 1.13 | `storage/session.py` |
+| Session block, schema 1.13 (+ `camera_response`: 1.14) | `storage/session.py` |
+| Camera response: the curve, its weighting of the bands, the import, the report | `analysis/spectral_passband.py` (`CameraResponse`, `row_profile(response=)`, `derive(table, response)`), `analysis/passband_store.py` (`parse_camera_response`), `selection/spectral_correction_module.py` (`import_camera_response`, `remove_camera_response`, `camera_report`), `panels/file_menu.py` |
 | File -> Import -> Spectral Correction... | `panels/file_menu.py` |
 | The pick-up, the "i" text | `panels/spectra/correction_group.py`, `panels/spectra/pick_menu.py` (`correction_picture`) |
 | Tests | `tests/unit/test_lspri_spectral_passband.py`, `tests/integration/test_lspri_spectral_correction.py` |
@@ -75,6 +82,8 @@ plan matching); only the spectrum builders read `abscissa_nm()`. Nothing is adde
 
 **Session block** (schema 1.13, additive; written only when a table was imported; a 1.12 file loads with no correction):
 `"spectral_correction": {"mode", "file": "spectral_correction/spectral_correction.h5", "sha256", "source_name", "illumination", "imported_at"}`.
+Schema 1.14 (2026-11-20, later): the block may also hold `"camera_response": {"source_name", "sha256", "imported_at", "wavelength_nm": [...], "response": [...]}` (about 200 points: small enough to
+live in the JSON) and then needs no table (`"file"` absent): the camera can be imported before the lamp. A 1.13 block has none and loads with a flat camera.
 
 **`<session>/spectral_correction/spectral_correction.h5`** (schema `lspri_spectral_correction` 1.0; every HDF5 rule attribute: `schema_name`, `schema_version`, `app_name`, `app_version`,
 `created_at_utc`, plus `source_name`, `sha256`, `illumination`, `imported_at`):
@@ -102,20 +111,32 @@ nearest temperature moved to the interpolated centre (blending two shifted bands
 
 ### Other open points
 
-- **Camera response** (looked into 2026-11-20). A slope `s` of lamp x camera response moves the true centre by `sigma^2 s`. The slot is reserved (`detector_response`); the import is not built.
-  *Which camera:* the old acquisition software (`LSPR-LCTF_v3.00`) drives a monochrome **IDS uEye** through `pyueye` (12-bit mode) and its default image size of 960 x 600 is exactly a 1920 x 1200
-  sensor binned 2 x 2, which fits the **IDS UI-3160CP-M-GL Rev. 2.1** of the acquisition notes (onsemi NOIP1SN2000A / PYTHON 2000, 1920 x 1200, 4.8 um, global shutter). **Not confirmed by the
-  maintainer**; the camera is not recorded in the datasets (`metaData.txt` has binning and size only; `devices.ini` has an empty Camera section).
-  *The curve:* `camera_response/ids_ui-3160cp-m-gl_rev2.1_qe_digitized.csv`, digitized by script from IDS's plot of the sensor's monochrome QE (peak 54.7 % at 550 nm, 51 % at 650 nm, 46 % at 700 nm,
-  28 % at 800 nm; about +-1.5 % absolute; sensor only: no lens, no cover glass, **no IR-cut filter**: IDS's manual says an IR-cut filter at 650 nm is fitted "if used in the camera model", and
-  whether this camera has one was not found; it would make the red end much steeper). Slope of ln QE: +0.0025 /nm at 450 nm, +0.0010 at 600 nm, -0.0032 at 700 nm.
-  *Effect on the August bands* (weighting each band by this curve): the centres move by -0.08 nm at 670 nm and -0.18 nm at 720 nm, and by at most 0.03 nm below 650 nm (mean over the sweep -0.03 nm). So
-  it matters only at the red end; the microscope optics (objective, dichroics) have their own slope, which is not in any table.
+- **Camera response** (looked into 2026-11-20; **import built the same day**: File -> Import -> Camera Response... / Remove Camera Response). A slope `s` of lamp x camera response moves the true centre by `sigma^2 s`.
+  *How it works:* the curve (`CameraResponse`: wavelength and a relative response, any scale, normalised to 1 at its maximum, linear between points, the nearest end value outside) weights every measured band
+  before it is normalised, `w_k ~ S_k(lambda) R(lambda)`, so the centroid, the width and the moments all follow. It must cover the sweep's set wavelengths (else the import says so). It is independent of the lamp
+  table and kept in the session block; importing or removing one re-derives the bands (~50 ms, on a thread); the display's scan is a new object only when a correction is on (`ScanResultsModule` compares
+  table, camera and mode); the `i` text and the import report say how far the camera moves the band centres (`Passbands.centroid_flat_nm` keeps the centres without it). Exports record its name and checksum.
+  *Measured on the real Bulk scan with the a2A3840 response:* the camera moves the band centres at the scan's wavelengths by +0.03 nm (blue) to -0.18 nm (720 nm); in the default metric (polynomial 3rd order, centroid
+  of the top 20 %) the baseline position changes by -0.04 nm and the 7.7 nm event shift by -0.08 %; with the maximum, -0.01 nm and -0.09 %.
+  *Which camera.* The acquisition notes (`docs/architecture/general/lspri_acq_build_log.md`, `spikes/lspri_acq_phase0/docs/camera_backend_and_throughput_findings.md`) name three real cameras:
+  **Basler ace 2 a2A3840-45umBAS** (Sony IMX334, 3840 x 2160, 2.0 um, rolling shutter) = the maintainer's call as the *primary* camera of LSPRi acquisition; **Basler ace acA5472-17um** (Sony IMX183, 5472 x 3648,
+  2.4 um); IDS UI-3160CP-M-GL Rev. 2.1 (onsemi PYTHON 2000, 1920 x 1200, 4.8 um, global shutter; the old `LSPR-LCTF_v3.00` software drives an IDS uEye, so it is the older camera). The camera is not recorded
+  in any dataset. **Confirmed by the maintainer (2026-11-20): the datasets use the Basler a2A3840-45umBAS** (the 3840 camera, 8.3 MP). That means the legacy `BinningH=4` of the 2025 dataset (1300 x 900 image) is a code of the
+  old software and not a four-fold binning (four-fold binning of this sensor would give 960 x 540); the app only stores the value and never calculates with it.
+  *The curves* (`camera_response/`, all three digitized or read from the manufacturers' published graphics; relative shapes, sensor only: no lens, **IR-cut filter unknown** for all): Basler a2A3840-45umBAS
+  `basler_a2A3840-45umBAS_imx334_relative_response.csv` (read exactly from Basler's vector graphic, 412-997 nm, 3 nm sampling, peak 1.0 near 523 nm); Basler acA5472-17um
+  `basler_acA5472-17um_imx183_relative_response.csv` (vector graphic, 401-1000 nm, peak near 530 nm); IDS `ids_ui-3160cp-m-gl_rev2.1_qe_digitized.csv` (QE in %, digitized from a raster plot, +-1.5 %).
+  *Effect on the August bands* (weight each band by the curve; smoothing the curve's 3 nm ripple changes nothing): a2A3840: +0.03 nm below 520 nm, -0.02 at 520-620, -0.06 at 620-680, -0.11 to -0.13 at 700-720
+  (extremes -0.18 .. +0.07); acA5472: -0.06 at 620-680, -0.26 at 700-720 (extremes -0.31); IDS: -0.19 at 700-720. So the camera matters only at the red end, by a tenth to a third of a nm; the microscope optics
+  (objective, dichroics) have their own slope, which is not in any table.
   **The table is only right for the lamp it was measured with**: the import asks for a free-text light source and keeps it. Maintainer's plan (2026-11-20): measure every lamp once and assume it does not
   change over time (so a lamp's table could later be kept once and offered to every dataset made with that lamp; today it is imported into each session). Whether the August sweep used the LED of the
   LSPRi runs: not known (maintainer, 2026-11-20).
-- **Gaussian and Voigt** read Centroid under Full profile. Wanted next (maintainer, 2026-11-20: polynomial, Gaussian and Voigt are the fits that matter; template, response and no fit may stay Centroid).
-  The Voigt fit works in photon energy (eV), so the band must be taken to energy first; the solvers also need a numerical band average (a speed check).
+- **Gaussian and Voigt Full profile: built, as an approximation** (see "Gaussian and Voigt" in the maths above and below). Template, response and no fit read Centroid (maintainer, 2026-11-20: polynomial, Gaussian and Voigt
+  are the fits that matter). *Why an approximation:* the real bands are far from Gaussian (kurtosis median 11, range 3-243; skew -1.7 to +12), so a Gaussian peak averaged over a band is not exactly the wider Gaussian of the closed form.
+  Measured on the August sweep, the largest |exact - closed form| for a Gaussian peak: 0.026 % of its height at FWHM 141 nm, 0.13 % at 82 nm, 0.6 % at 47 nm, **2 % at 28 nm**; the Bulk data's peaks are 109 nm wide (about 0.07 %).
+  An exact band average needs about 30 non-uniform nodes per band (equal-weight quantile nodes plateau at 0.5-0.9 % even at 32 nodes, because of the wings) or a mixture of 3-4 Gaussians per band, and would make these fits
+  roughly 5-30 times slower; not built. Revisit if narrow peaks (FWHM < 50 nm) are ever measured.
 - **Absorbance averaging** (second pass, above); **step diagnostics** and **ROI position tuning** still read the nominal axis (`step_diagnostics.py`, `roi_tuning_run.py`).
 - **Sweep step.** The table has 5 nm spacing; a scan at other wavelengths has those points uncovered (said in the "i" text). A finer sweep is needed for such scans.
 - **Session carry** (the OME-Zarr export with its Session button) does not carry the table: the exported dataset starts without one.

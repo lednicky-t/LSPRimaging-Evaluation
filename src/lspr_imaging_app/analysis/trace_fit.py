@@ -66,6 +66,9 @@ class TraceInput:
     usable: np.ndarray
     scanned: np.ndarray
     cube_indices: np.ndarray | None = None
+    band: np.ndarray | None = None
+    """``[wavelength, 3]`` ``(sigma_nm, mean photon energy eV, energy std eV)`` of each wavelength's band (``CorrectionAxis.band``), aligned with ``wavelengths``, for the full-profile correction of the
+    Gaussian and Voigt fits; None otherwise."""
     passband: np.ndarray | None = None
     """``[wavelength, order + 1]`` central moments of each wavelength's measured LCTF band (``spectral_passband``), aligned with ``wavelengths``, for the full-profile
     spectral correction; None = no correction or the centroid one (``wavelengths`` then already are the bands' centres of gravity). Only the polynomial fit reads it."""
@@ -108,7 +111,7 @@ def traces_from_inputs(
     min_points = 1 if method == "none" else 2  # read off the points, one point still has a maximum (and a "centroid": itself)
     per_cube = False  # every method is batched (the "no fit" metric too since 2026-11-02: it was one cube at a time, 2 s for 160 ROIs)
     template_here = 0.0  # seconds of the template shift in this call (not part of the preparation)
-    pending: dict[bytes, list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]]] = {}  # wavelengths (+ band moments) -> (cube addresses, x, rows of values, moments)
+    pending: dict[bytes, list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]]] = {}  # wavelengths (+ bands) -> (cube addresses, x, rows of values, moments, band widths)
     for i, data in enumerate(inputs):
         wanted = data.scanned & data.usable.any(axis=1)
         if not wanted.any():
@@ -132,6 +135,7 @@ def traces_from_inputs(
         order = np.argsort(wl, kind="stable")  # the points of every cube are fitted in wavelength order, as _windowed sorts them
         wl, values, valid = wl[order], values[:, order], valid[:, order]
         moments_sorted = None if data.passband is None else np.asarray(data.passband, dtype=np.float64)[order]  # the band of each point travels with it
+        widths_sorted = None if data.band is None else np.asarray(data.band, dtype=np.float64)[order]
         valid = restrict_to_window(wl, values, valid, metric)  # the fit window: a fixed range, or each cube's own (fit_window.py)
         wanted_cubes = np.flatnonzero(wanted)
         patterns, inverse = row_patterns(valid[wanted_cubes])  # cubes with the same usable wavelengths fit together
@@ -141,8 +145,9 @@ def traces_from_inputs(
             if x.size < min_points:
                 continue  # too few points: no fit, no metric (a gap)
             moments = None if moments_sorted is None else moments_sorted[pattern]
-            key = x.tobytes() + (b"" if moments is None else moments.tobytes())  # the same wavelengths with other bands are not one least-squares problem
-            pending.setdefault(key, []).append((offsets[i] + cubes, x, values[np.ix_(cubes, np.flatnonzero(pattern))], moments))
+            widths = None if widths_sorted is None else widths_sorted[pattern]
+            key = x.tobytes() + (b"" if moments is None else moments.tobytes()) + (b"" if widths is None else widths.tobytes())  # the same wavelengths with other bands are not one least-squares problem
+            pending.setdefault(key, []).append((offsets[i] + cubes, x, values[np.ix_(cubes, np.flatnonzero(pattern))], moments, widths))
     t_fit = clock()
     t_ms["prep_ms"] += (t_fit - t_start - per_cube_here - template_here) * 1e3
     t_ms["per_cube_ms"] += per_cube_here * 1e3
@@ -154,8 +159,10 @@ def traces_from_inputs(
         rows = np.concatenate([item[2] for item in items])
         for start in range(0, rows.shape[0], BATCH_ROWS):
             here = address[start : start + BATCH_ROWS]
-            if group_fit is _polynomial_group:  # the only fit that reads the bands of the points (full-profile spectral correction)
+            if group_fit is _polynomial_group:  # the fits that read the bands of the points (full-profile spectral correction)
                 result = _polynomial_group(x, rows[start : start + BATCH_ROWS], metric, items[0][3])
+            elif group_fit is _gaussian_group or group_fit is _voigt_group:
+                result = group_fit(x, rows[start : start + BATCH_ROWS], metric, items[0][4])
             else:
                 result = group_fit(x, rows[start : start + BATCH_ROWS], metric)
             t_ms["batches"] += 1
@@ -216,7 +223,8 @@ def _fill_per_cube(
         if not usable.any():
             continue
         passband = None if data.passband is None else np.asarray(data.passband, dtype=np.float64)[usable]
-        spectrum = formula_spectrum(wavelengths[usable], data.sample[cube][usable], data.reference[cube][usable], formula_key, passband=passband)
+        widths = None if data.band is None else np.asarray(data.band, dtype=np.float64)[usable]
+        spectrum = formula_spectrum(wavelengths[usable], data.sample[cube][usable], data.reference[cube][usable], formula_key, passband=passband, band=widths)
         try:
             _fit, x, _y = fit_and_metric(spectrum, metric, gaussian_fast_first=gaussian_fast_first, template=template)
         except _FIT_ERRORS:
@@ -225,7 +233,7 @@ def _fill_per_cube(
             out[cube] = x
 
 
-def _gaussian_group(x: np.ndarray, y: np.ndarray, metric: MetricSettings) -> tuple[np.ndarray, np.ndarray] | None:
+def _gaussian_group(x: np.ndarray, y: np.ndarray, metric: MetricSettings, band: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray] | None:
     """The Gaussian fit of every row of ``y`` against the shared ``x`` (``gaussian_fit.solve_gaussian``) and its metric, as ``query.fit_gaussian`` +
     ``metric_from_fit`` read it: the centre clipped to the window, or the centroid of the curve sampled at ``max(400, n)`` points. Same return as
     ``_polynomial_group``; a row that did not converge is not ``good`` and is fitted by scipy afterwards."""
@@ -235,7 +243,7 @@ def _gaussian_group(x: np.ndarray, y: np.ndarray, metric: MetricSettings) -> tup
     x_min, x_max = float(x[0]), float(x[-1])
     if not x_max > x_min:
         return None
-    params, converged = solve_gaussian(x, y)
+    params, converged = solve_gaussian(x, y, band_sigma=None if band is None else band[:, 0])
     good = converged
     found = np.full(n_spectra, np.nan)
     key = str(metric.metric_key).strip().lower()
@@ -261,7 +269,7 @@ def _gaussian_group(x: np.ndarray, y: np.ndarray, metric: MetricSettings) -> tup
     return good, found
 
 
-def _voigt_group(x: np.ndarray, y: np.ndarray, metric: MetricSettings) -> tuple[np.ndarray, np.ndarray] | None:
+def _voigt_group(x: np.ndarray, y: np.ndarray, metric: MetricSettings, band: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray] | None:
     """The Voigt fit of every row (``voigt_fit.solve_voigt``) and its metric, as ``query.fit_voigt`` + ``metric_from_fit`` read it: the centre's
     wavelength clipped to the window, or the centroid of the curve sampled at ``max(400, n)`` wavelengths. A row that did not converge is not
     ``good`` and goes to scipy afterwards (the per-cube path with ``gaussian_fast_first=False``)."""
@@ -274,7 +282,7 @@ def _voigt_group(x: np.ndarray, y: np.ndarray, metric: MetricSettings) -> tuple[
     x_min, x_max = float(x[0]), float(x[-1])
     if not x_max > x_min:
         return None
-    params, converged = solve_voigt(x, y)
+    params, converged = solve_voigt(x, y, band=None if band is None else (band[:, 1], band[:, 2]))
     found = np.full(n_spectra, np.nan)
     key = str(metric.metric_key).strip().lower()
     if not converged.any():
