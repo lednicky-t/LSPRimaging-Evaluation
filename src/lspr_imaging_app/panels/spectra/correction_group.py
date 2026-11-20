@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from html import escape
 
-from PyQt6.QtCore import QObject, QSize
+from PyQt6.QtCore import QObject
 from PyQt6.QtWidgets import QToolButton, QWidget
 
 from lspr_ui import get_active_theme, load_tabler_icon
@@ -23,7 +23,8 @@ from ...analysis.scan_results import ScanResultsModule
 from ...analysis.settings_module import AnalysisSettingsModule
 from ...analysis.spectral_passband import MODE_LABELS, MODES, Passbands, describe
 from ...selection.spectral_correction_module import SpectralCorrectionModule
-from ..ribbon_icon_size import BUTTON_SIZE, ICON_SIZE
+from ..icon_button_style import style_general_icon_button
+from ..ribbon_icon_size import ICON_SIZE
 from .pick_menu import PickMenu, correction_picture
 
 CHOICE_TIPS = {
@@ -147,9 +148,7 @@ class CorrectionControls(QObject):
         self.pick.setToolTip("Where each point of a spectrum is drawn and fitted: at the commanded wavelength, at the centre of its measured filter band, or with the band's averaging modelled.")
 
         self.info = QToolButton(parent)
-        self.info.setAutoRaise(True)
-        self.info.setFixedSize(BUTTON_SIZE, BUTTON_SIZE)
-        self.info.setIconSize(QSize(ICON_SIZE, ICON_SIZE))
+        style_general_icon_button(self.info)  # the ribbons' flat icon-button look (no frame, no hover chrome), like the Image panel's "i"
 
         self.pick.currentIndexChanged.connect(self._on_pick)
         spectral.changed.connect(self.refresh)

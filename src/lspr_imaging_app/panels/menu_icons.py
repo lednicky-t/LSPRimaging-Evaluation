@@ -168,6 +168,8 @@ ICONS: dict[str, str | Callable[[], QIcon]] = {
     "session": "device-floppy",
     "new": "plus",
     "import": "file-import",
+    "import_spectral": "color-filter",  # File -> Import -> Spectral Correction (the filter's measured passbands)
+    "import_camera": "camera",  # File -> Import -> Camera Response
     "export": "file-export",
     "dataset_manager": "database",
     "exit": "door-exit",

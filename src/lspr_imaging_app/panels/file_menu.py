@@ -132,14 +132,14 @@ class FileMenu(QObject):
         )
         self.import_ri_action.triggered.connect(self.import_refractive_indices)
         self.import_ri_action.setVisible(experiment_plan is not None)
-        self.import_spectral_action = give_persistent_icon(import_menu.addAction("Spectral Correction..."), "import")
+        self.import_spectral_action = give_persistent_icon(import_menu.addAction("Spectral Correction..."), "import_spectral")
         self.import_spectral_action.setToolTip(
             "The measured passbands of the tunable filter: a spectral sweep written by the illumination probe (spectral_sweep_*.csv; its dark-spectrum file can be picked "
             "with it). Copied into the session. Nothing changes until you pick Centroid or Full profile in the Spectra panel."
         )
         self.import_spectral_action.triggered.connect(self.import_spectral_correction)
         self.import_spectral_action.setVisible(spectral is not None)
-        self.import_camera_action = give_persistent_icon(import_menu.addAction("Camera Response..."), "import")
+        self.import_camera_action = give_persistent_icon(import_menu.addAction("Camera Response..."), "import_camera")
         self.import_camera_action.setToolTip(
             "A camera's relative spectral sensitivity (wavelength in nm and response, one pair per line; # lines are comments; quantum efficiency in per cent or a relative response: only the shape "
             "is used), for instance from the manufacturer. It weights the measured filter bands. Copied into the session."

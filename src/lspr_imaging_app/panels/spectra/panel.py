@@ -383,7 +383,7 @@ class SpectraPanel(QWidget):
         self._ribbon_drawer = rolled_ribbon(self._ribbon, "Show the spectra controls.", self)
         controls = QHBoxLayout()
         controls.setContentsMargins(4, 2, 6, 2)
-        controls.addWidget(self._ribbon_drawer)
+        controls.addWidget(self._ribbon_drawer, 1)  # the drawer takes the room, so the "i" stands free at the right end, as in the Image panel's bar
         if self._correction is not None:  # the "i" icon, like the Image panel's: it rolls up with the ribbon
             controls.addWidget(self._correction.info)
             self._ribbon_drawer.expanded_changed.connect(self._correction.info.setVisible)

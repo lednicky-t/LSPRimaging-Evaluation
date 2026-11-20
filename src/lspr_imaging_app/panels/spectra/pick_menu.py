@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import lru_cache
 
 from PyQt6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap, QTextDocument
@@ -101,6 +102,7 @@ def _canvas() -> tuple[QPixmap, QPainter]:
     return pixmap, painter
 
 
+_SHIFT = 2.0  # correction pictures: how far the filter's real bands sit from where it was told to be (a drawing, not a measured number)
 _DOTS = ((2.5, 16.5), (6.5, 11.5), (10.0, 5.5), (13.5, 10.5), (17.5, 16.0))  # a peak-shaped scatter of measured points
 
 
@@ -310,42 +312,55 @@ def range_picture(kind: str) -> PictureFor:
     return draw
 
 
+@lru_cache(maxsize=1)
+def _bell_samples() -> tuple[tuple[float, float], ...]:
+    path = _bell_path()
+    return tuple((p.x(), p.y()) for p in (path.pointAtPercent(i / 200) for i in range(201)))
+
+
+def _bell_y(x: float) -> float:
+    """Height of the drawn bell (`_bell_path`) at ``x``: lets a dot sit exactly on the curve."""
+    return min(_bell_samples(), key=lambda point: abs(point[0] - x))[1]
+
+
 def correction_picture(kind: str) -> PictureFor:
-    """The spectral correction modes. ``none``: dots on a bell, ticks under them at even spacing (the commanded wavelengths); ``centroid``: the dots moved sideways off those ticks
-    (short arrows from tick to dot: the real centres of the bands); ``profile``: the dots sit a little under a taller bell, each with a bar under it (the band it averages over)."""
+    """The spectral correction modes, one idea each. The filter is told to sit at the evenly spaced ticks; its bands really sit a little to the right (``_SHIFT``), and a point's
+    height belongs to where its band really is. ``none``: the dots are drawn straight above the ticks, so they sit *beside* the bell (a wrong x); ``centroid``: the dots are moved
+    onto the bell, a gold arrow from each tick to its dot; ``profile``: the fit is the taller, narrower curve and each dot is a band average, a gold bar through it (its band)."""
 
     def draw(color: str) -> QPixmap:
         pixmap, painter = _canvas()
         ink = QColor(color)
         marker = QColor(get_active_theme().accent_gold)
-        ticks = (2.5, 6.25, 10.0, 13.75, 17.5)  # even spacing: where the filter was told to be
-        shift = (0.0, 1.6, -1.2, 1.4, 0.0) if kind != "none" else (0.0,) * 5  # where its bands really are
+        ticks = (1.5, 5.25, 9.0, 12.75, 16.5)  # even spacing: where the filter was told to be
+        centres = tuple(x + _SHIFT for x in ticks)  # where its bands really are
+        heights = tuple(_bell_y(x) for x in centres)  # the measured height belongs to the real centre
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(QPen(ink, 1.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         if kind == "profile":
-            taller = QPainterPath(QPointF(1.5, 14.0))  # the underlying curve: higher and narrower than the dots show
-            taller.cubicTo(6.5, 14.0, 7.5, 1.5, 10.0, 1.5)
-            taller.cubicTo(12.5, 1.5, 13.0, 14.0, 18.5, 14.0)
+            taller = QPainterPath(QPointF(1.5, 17.0))  # the curve under the averaging: higher and narrower than the dots
+            taller.cubicTo(7.5, 17.0, 8.0, 1.5, 10.0, 1.5)
+            taller.cubicTo(12.0, 1.5, 12.5, 17.0, 18.5, 17.0)
             painter.drawPath(taller)
         else:
             painter.drawPath(_bell_path())
         painter.setPen(QPen(ink, 1.0))
         for x in ticks:
-            painter.drawLine(QPointF(x, 18.6), QPointF(x, 19.8))
+            painter.drawLine(QPointF(x, 19.0), QPointF(x, 20.0))
         if kind == "centroid":
             painter.setPen(QPen(marker, 1.1, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-            for x, d in zip(ticks, shift):
-                if d:
-                    painter.drawLine(QPointF(x, 18.0), QPointF(x + d, 18.0))
+            for x, c in zip(ticks, centres):
+                painter.drawLine(QPointF(x, 18.4), QPointF(c, 18.4))
+                painter.drawLine(QPointF(c, 18.4), QPointF(c - 0.9, 17.7))
+                painter.drawLine(QPointF(c, 18.4), QPointF(c - 0.9, 19.1))
         if kind == "profile":
-            painter.setPen(QPen(marker, 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
-            for x, d in zip(ticks, shift):
-                painter.drawLine(QPointF(x + d - 1.5, 18.0), QPointF(x + d + 1.5, 18.0))
+            painter.setPen(QPen(marker, 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
+            for c, y in zip(centres, heights):
+                painter.drawLine(QPointF(c - 1.6, y), QPointF(c + 1.6, y))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(ink)
-        rows = (16.5, 11.5, 5.5, 10.5, 16.0) if kind != "profile" else (16.8, 12.6, 7.0, 11.6, 16.4)
-        for x, d, y in zip(ticks, shift, rows):
-            painter.drawEllipse(QPointF(x + d, y), 1.4, 1.4)
+        for x, c, y in zip(ticks, centres, heights):
+            painter.drawEllipse(QPointF(x if kind == "none" else c, y), 1.3, 1.3)
         painter.end()
         return pixmap
 
