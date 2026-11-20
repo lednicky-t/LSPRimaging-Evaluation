@@ -527,7 +527,7 @@ files and the cell hash for nothing).
 **Decisions (maintainer, answers to the questions of 2026-11-19).**
 1. **Rim pair -> linked pair:** the rim's pixels become a **pixel map**, a new reference ROI linked to the sample (a frozen copy of the rim as it is at the reference wavelength: it
    no longer follows the sample, as decision 4 above says; a map moves by whole pixels on its own, "Moving a pixel map"). One new reference per sample, however many blobs the rim has. Only for a sample that
-   has a rim and no links. The sample's own rim is **kept, dormant** (the link wins, decision 2 above; Unlink or deleting the new reference brings the rim back). One undo step.
+   has a rim and no links. ~~The sample's own rim is kept, dormant~~ **Changed the same day (maintainer): the sample becomes a rim-less ROI**, see "Turn rim off" below. One undo step.
 2. **Pixel map -> rim pair:** a map that is a sample has a rim like any shape (`Border(gap, thickness)`, the shared default 4 + 4 px unless it has its own). New command **Add rim**
    (a free reference or a rim-less sample becomes a sample with a rim; one undo step). Gap and thickness are editable in the table: **the same two columns for every shape**, Offset and Thickness (maintainer, later the same day: they replaced the
    circle's ring-diameter columns d_r / D_r instead of being added; see "Offset and Thickness columns" below).
@@ -556,7 +556,7 @@ files and the cell hash for nothing).
   (the whole-map band had dropped every pixel near a neighbouring blob), never a pixel lost; also **3-5 x faster** to build (31-71 ms against 206-292 ms: a small distance map per blob instead of one
   for the whole bounding box). Tests: `tests/unit/test_lspri_pixel_map_rim.py` (9, brute force with `cdist`; the whole-map mutation fails 2).
 - **R2 toolbox** (`RoiToolbox.rims_to_references(sample_ids, image_shape)`, `rim_refusal`, `add_rim`, `can_add_rim`): the rim's pixels at the reference wavelength (identity affine, the sample's own pixels
-  left out) become one pixel-map reference ROI per sample, linked; the sample's own rim is kept (dormant); one undo step; refusals (a reference, already linked, no rim, rim outside the image)
+  left out) become one pixel-map reference ROI per sample, linked; (the sample's own rim was kept dormant at first, since changed: "Turn rim off" below); one undo step; refusals (a reference, already linked, no rim, rim outside the image)
   change nothing. `add_rim`: an unused reference becomes a sample, a sample with its rim off gets the shared default (4 + 4 px); one undo step (batch). **Measured, the conversion's numbers**
   (1200 x 1000 sloped noisy frame, noise sigma 6 counts, reference-mean SEM 0.3): at the reference wavelength **identical** (0 pixels differ, circle and rectangle); under the golden set's chromatic
   affine (shift ~2.5 px, scale 0.4 %) about 3 % of the rim's pixels differ (circle D 20: 13 out, 12 in of 405; rectangle 24 x 12: 23 and 23 of 436), under a ~10 px shift 7-10 % (the map is warped
@@ -571,6 +571,27 @@ files and the cell hash for nothing).
   `SHAPE_FIELDS`) is unchanged. Tests: `test_lspri_roi_table_type_column.py` (13, pictograms painted into an image and read back).
 - **R5 wording**: "ring" and "border" became "rim" in everything the user reads (labels, tool tips, status and error messages, undo labels, the shortcut table); code identifiers (`Border`, `ring_radii`,
   `border` in the session file, `scan.h5` `layout_json`) are unchanged on purpose: a rename there would change saved files and cell hashes for nothing.
+
+**Turn rim off, and the cube the conversion reads (2026-11-19, later; maintainer's report and decisions; tested headless, UNSEEN BY EYE).**
+- **The bug.** A sample dragged on any cube after the first is stored as a *timeline change* ("from this cube on"), not in the ROI's base position. `rims_to_references` rasterised the base position, so the new
+  reference landed where the sample used to be, and the sample kept its own rim besides (dormant) and the link. Reproduced: base (40, 50), moved on cube 5 to (120, 100): the reference was centred at (40, 50).
+  Fix: `rims_to_references(..., cube=)` reads `resolved_at(roi, cube)`; the Image panel passes the cube on screen (`RoiCreation.rim_to_reference`). The new reference has no timeline: it holds on every cube.
+- **`RoiToolbox.turn_rim_off(ids)`** (right-click ROI menu, "Turn rim off"; icon = the ROI tab's ring crossed out): the sample becomes a rim-less ROI. Only `Border.enabled` changes: the shape (circle, rectangle, pixel
+  map) is untouched and **gap and thickness are kept** (`roi_shapes.border_switched_off / _on`; a ROI that followed the shared default keeps the default's numbers as they were). `add_rim` is its inverse and
+  brings the same rim back (the shared default size only for a rim that never had a size, `NO_BORDER`). Offered for any sample whose rim is on, linked or not, so it also clears the dormant rim of a sample
+  that was linked by hand. Nothing to change = no undo step. **No format change**: the session already stores gap, thickness and the switch together, in the base geometry and in every timeline change.
+- **"Turn rim into linked reference" now ends with the sample rim-less** (one undo step: new reference, link, rim off). The linked reference is the only reference the sample has; unlinking leaves it with none until
+  Add rim.
+- **Scope (maintainer): the rim's size follows the scope rules (persistent / individual at the cube, like any geometry edit); the on / off switch is for every cube** (`RoiToolbox._switch_rims` writes the base geometry and
+  every timeline change in one step; `_rim_states` reads them all). So a ROI is "with rim" or "rim-less", never one on some cubes and the other on the rest, and the Type column, the overlay and the pairing never
+  disagree with the cube on screen.
+- **Rescans (maintainer: ROIs work independently of their links; only what changed is scanned again).** The scan stores every ROI on its own and pairs afterwards, so a conversion makes stale only the ROIs whose own pixels
+  change: **the converted sample** (it reads no rim any more; its cell key holds the rim) **and the new reference** (never scanned). Every other ROI keeps its cell key; undo restores every key.
+  Test: `OnlyWhatChangedIsScannedAgainTest`. **Measured limit (existing, not new):** the cell key of a ROI also holds the *whole row digest* of every neighbour whose sample disc its own rim can touch, ring flag
+  included. On a lattice where rims reach neighbouring discs (circles of 20 px, rim 4 + 4 px, pitch 28 px) turning one rim off makes its 4 direct neighbours stale too (5 of 35 ROIs); at pitch 40 and 60 px only
+  the ROI itself (1 of 35). The neighbours' pixels do not change (they exclude the *sample discs* of the others, which a rim switch leaves alone), so those rescans are needless. A fix (only the neighbour's sample-disc
+  part into the key) would change every stored cell hash of a packed lattice: it needs the `restamp` recognition or a one-time rescan, so it is a decision for the maintainer, not part of this change.
+- Tests: `tests/unit/test_lspri_rim_pairs.py` (28: the cube bug, every cube, undo, save / load, scan keys), `tests/integration/test_lspri_roi_phase3_ui.py` (46: the menu, the panel path on cube 1).
 
 **Offset and Thickness columns (BUILT 2026-11-19, maintainer: "the rim columns should be the same for rectangle, circle and map, thus offset from edge and thickness of band/rim"; UNSEEN BY EYE).**
 - **Headers are short: `d` (offset) and `w` (thickness)** (maintainer, same day; `COLUMN_TITLES`; the header tool tips spell them out, like D_s / W / H). Model columns 5 and 6 (`rows.COLUMN_RIM_OFFSET`, `COLUMN_RIM_THICKNESS`, were the circle's `COLUMN_RING_IN` / `COLUMN_RING_OUT`, the ring's inner and outer *diameters* d_r / D_r) now show the rim's

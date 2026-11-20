@@ -129,6 +129,26 @@ def effective_border(own: Border | None, default: Border) -> Border:
     return default if own is None else own
 
 
+def border_switched_off(own: Border | None, default: Border) -> Border | None:
+    """``own`` (``None`` = the shared default) with its on / off switch turned off, **gap and thickness kept** so `border_switched_on` brings the same rim back. ``own`` itself
+    (the same object) when it is off already."""
+    current = effective_border(own, default)
+    if not current.enabled:
+        return own
+    return Border(current.gap_px, current.thickness_px, enabled=False)
+
+
+def border_switched_on(own: Border | None, default: Border) -> Border | None:
+    """``own`` with its switch turned on: the numbers it kept while it was off, or the shared default's when it never had a rim of its own size (``NO_BORDER``, thickness 0).
+    ``own`` itself (the same object, so ``None`` stays "follow the default") when it is on already."""
+    current = effective_border(own, default)
+    if current.enabled:
+        return own
+    if float(current.thickness_px) > 0.0:
+        return Border(current.gap_px, current.thickness_px)
+    return Border(default.gap_px, default.thickness_px)
+
+
 def ring_radii(circle: Circle, border: Border) -> tuple[float, float]:
     """``(inner_radius, outer_radius)`` of a circle's border ring, in pixels: ``R + g`` (never below 0) and that plus the thickness. The one
     place the ring radii are computed, in this order, so every reader (scan, drawing, tables) gets the same float64 numbers."""

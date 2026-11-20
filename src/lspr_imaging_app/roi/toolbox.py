@@ -141,6 +141,8 @@ from ..domain.roi_shapes import (
     MaskShape,
     Rectangle,
     Shape,
+    border_switched_off,
+    border_switched_on,
     effective_border,
     remap_rectangle,
     ring_diameters,
@@ -643,26 +645,89 @@ class RoiToolbox(QObject):
 
     # -- command API: rim pair <-> linked pair (plan 2026-11-19, "Rim pairs, linked pairs, the Type column") ----------
 
+    # The rim's on / off switch belongs to the ROI, not to a cube (maintainer, 2026-11-19): a ROI is "with rim" or "rim-less" on every cube. A rim's *size* (offset, thickness) is
+    # a geometry edit and follows the scope rules like every other; the switch is read and written over every state the ROI has (its base geometry and each timeline change).
+
+    @staticmethod
+    def _rim_borders(roi: AreaRoi) -> list[Border | None]:
+        """The border of ``roi`` in every state it has: the base geometry, then each change of its timeline."""
+        borders = [roi.border]
+        if roi.timeline:
+            borders.extend(change.geometry.border for change in roi.timeline.changes())
+        return borders
+
+    def _rim_states(self, roi: AreaRoi) -> list[bool]:
+        """Whether the rim is on, in each state of ``roi`` (`_rim_borders`). Always one value per state; all equal unless an older file had them differ."""
+        default = self._detection_settings.default_border()
+        return [effective_border(border, default).enabled for border in self._rim_borders(roi)]
+
     def rim_refusal(self, roi_id: int) -> str | None:
         """Why ROI ``roi_id``'s rim cannot become a linked reference, or ``None`` when it can: only a sample that has a rim and no links has a *rim pair*."""
         roi = self._rois[int(roi_id)]
         if is_reference(roi):
             return f"ROI {roi.area_roi_id} is a reference: it has no rim of its own."
         if roi.reference_roi_ids:
-            return f"ROI {roi.area_roi_id} is already linked to reference ROIs: it measures against those, not against a rim."
-        if not effective_border(roi.border, self._detection_settings.default_border()).enabled:
+            return f"ROI {roi.area_roi_id} is already linked to reference ROIs: it measures against those, not against a rim (Turn rim off drops the rim it still has)."
+        if not any(self._rim_states(roi)):
             return f"ROI {roi.area_roi_id} has no rim."
         return None
 
+    def can_turn_rim_off(self, roi_id: int) -> bool:
+        """True when `turn_rim_off` would change ROI ``roi_id``: a sample (linked or not) whose rim is on."""
+        roi = self._rois[int(roi_id)]
+        return not is_reference(roi) and any(self._rim_states(roi))
+
+    @instrumented("RoiToolbox.turn_rim_off")
+    def turn_rim_off(self, roi_ids: Collection[int]) -> None:
+        """Switch the rim of each sample ROI in ``roi_ids`` off, so it is a rim-less ROI: its shape (circle, rectangle, pixel map) is untouched and **its rim's offset and
+        thickness are kept** (`add_rim` brings the same rim back). On every cube (the switch is the ROI's, not a cube's). One undo step; a ROI that `can_turn_rim_off` says
+        no to is left alone, and nothing to change pushes no step. Raises ``KeyError`` for an unknown id."""
+        targets = [roi for roi in self._require_rois(roi_ids) if self.can_turn_rim_off(roi.area_roi_id)]
+        if targets:
+            self._switch_rims(targets, on=False, label="Turn rim off" if len(targets) == 1 else f"Turn {len(targets)} rims off")
+
+    def _switch_rims(self, rois: Sequence[AreaRoi], *, on: bool, label: str) -> None:
+        """Turn the rim of every ROI in ``rois`` on or off in **every state** (`_rim_borders`), keeping its numbers (`roi_shapes.border_switched_on / _off`): one undo step, one
+        signal, nothing pushed when no state changes. Only the switch changes: shape, centre and the rim's offset and thickness stay."""
+        default = self._detection_settings.default_border()
+        switch = border_switched_on if on else border_switched_off
+
+        def switched(geometry: RoiGeometry) -> RoiGeometry:
+            border = switch(geometry.border, default)
+            return geometry if border is geometry.border else geometry._replace(border=border)  # (the helpers hand back the same object when there is nothing to switch)
+
+        def switched_change(change):
+            geometry = switched(change.geometry)
+            return change if geometry is change.geometry else replace(change, geometry=geometry)
+
+        states = []
+        for roi in rois:
+            base, timeline = base_geometry(roi), roi.timeline
+            new_base = switched(base)
+            new_timeline = timeline
+            changed = new_base is not base
+            if timeline:
+                persistent = tuple(switched_change(c) for c in timeline.persistent)
+                individual = tuple(switched_change(c) for c in timeline.individual)
+                if any(a is not b for a, b in zip(persistent + individual, timeline.persistent + timeline.individual)):
+                    new_timeline, changed = RoiTimeline(persistent, individual), True
+            if changed:
+                states.append((roi, (base, timeline), (new_base, new_timeline)))
+        self._write_states(states, label, "resized")
+
     @instrumented("RoiToolbox.rims_to_references")
-    def rims_to_references(self, sample_ids: Collection[int], image_shape: tuple[int, int]) -> tuple[int, ...]:
+    def rims_to_references(self, sample_ids: Collection[int], image_shape: tuple[int, int], *, cube: int | None = None) -> tuple[int, ...]:
         """Turn the rim of each sample ROI in ``sample_ids`` into a reference ROI of its own, linked to that sample: a *rim pair* becomes a *linked pair*. One undo step,
         one new ROI per sample (appended after the existing ROIs), the new ids returned in the ascending order of the samples' ids.
 
         The new reference is a **pixel map of the rim's pixels** at the reference wavelength (identity chromatic affine, the frame ``image_shape`` = (rows, columns) of the
         processed image the ROIs live in), a frozen copy: from now on it is a ROI like any other (it does not follow its sample when that is moved or resized; being a
-        map it moves by whole pixels: `_at_position`). The sample's own rim is **kept, dormant**: a link wins over it (`domain.roi_links.reference_source`), so unlinking, or
-        deleting the new reference, brings the rim back. All blobs of a rim form the one new ROI. The pixels of the sample itself are left out of it.
+        map it moves by whole pixels: `_at_position`). **The rim is where the sample is on cube ``cube``** (the one on screen; ``None``: the base geometry): a move made on a later cube
+        is a timeline change and not the base position (a rim taken from the base position landed where the sample used to be). The new ROI has no timeline, so it holds on every
+        cube. All blobs of a rim form the one new ROI. The pixels of the sample itself are left out of it.
+
+        The sample is then a **rim-less ROI** (`turn_rim_off`: the rim is switched off on every cube, its offset and thickness kept): it measures against the linked reference only,
+        and `add_rim` brings its rim back. (Scan side: see the test `test_only_the_converted_sample_and_the_new_reference_go_stale`.)
 
         Raises ``ValueError`` (the message is for the status line), before anything changes, for a ROI that is a reference, is linked already, has no rim, or whose rim
         has no pixel inside the image."""
@@ -675,8 +740,9 @@ class RoiToolbox(QObject):
             refusal = self.rim_refusal(roi.area_roi_id)
             if refusal:
                 raise ValueError(refusal)
-            rim = rasterize_reference(roi, (height, width), identity, default_border=default_border)
-            rim &= ~rasterize_sample(roi, (height, width), identity)  # the sample's own pixels are not its reference (a negative gap reaches inside it)
+            where = resolved_at(roi, cube)  # the sample as it is on the cube on screen (the ROI itself when it has no timeline)
+            rim = rasterize_reference(where, (height, width), identity, default_border=default_border)
+            rim &= ~rasterize_sample(where, (height, width), identity)  # the sample's own pixels are not its reference (a negative gap reaches inside it)
             regions = mask_regions(rim, together=True)
             if not regions:
                 raise ValueError(f"ROI {roi.area_roi_id}: its rim has no pixel inside the image.")
@@ -708,9 +774,14 @@ class RoiToolbox(QObject):
             self.geometry_changed.emit(RoiComputationalChange(roi_ids=tuple(sorted(new_ids)), reason="deleted"))
             self.links_changed.emit(RoiLinkChange(sample_ids=sample_set, reason="unlinked"))
 
-        apply()
         label = "Turn rim into linked reference" if len(pairs) == 1 else f"Turn {len(pairs)} rims into linked references"
-        undo_manager.push(FunctionCommand(label, undo_fn=revert, redo_fn=apply))
+        undo_manager.begin_batch(label)  # the new reference, the link and the sample's rim going off are one step for the user
+        try:
+            apply()
+            undo_manager.push(FunctionCommand(label, undo_fn=revert, redo_fn=apply))
+            self._switch_rims([roi for roi, _new_id in pairs], on=False, label="Turn rim off")
+        finally:
+            undo_manager.end_batch()
         return new_ids
 
     def can_add_rim(self, roi_id: int) -> bool:
@@ -718,27 +789,27 @@ class RoiToolbox(QObject):
         roi = self._rois[int(roi_id)]
         if is_reference(roi):
             return not samples_linked_to(self._rois.values(), roi.area_roi_id)
-        return not effective_border(roi.border, self._detection_settings.default_border()).enabled
+        return not all(self._rim_states(roi))
 
     @instrumented("RoiToolbox.add_rim")
     def add_rim(self, roi_ids: Collection[int]) -> None:
-        """Give each ROI in ``roi_ids`` a rim: an unused reference becomes a sample (it then measures against its rim), and a sample whose rim is switched off gets a rim of the
-        shared default size (gap and thickness from its shape's edge). Any shape; for a pixel map every blob gets its own. One undo step; a ROI that `can_add_rim` says no to is
-        left alone, and nothing to change pushes no step. Raises ``KeyError`` for an unknown id."""
+        """Give each ROI in ``roi_ids`` a rim: an unused reference becomes a sample (it then measures against its rim), and a sample whose rim is switched off gets its rim back **with
+        the offset and thickness it had** (`turn_rim_off` keeps them; the shared default size when it never had a rim of its own size). On every cube, like the switch it undoes. Any
+        shape; for a pixel map every blob gets its own. One undo step; a ROI that `can_add_rim` says no to is left alone, and nothing to change pushes no step. Raises ``KeyError`` for
+        an unknown id."""
         rois = self._require_rois(roi_ids)
         targets = [roi for roi in rois if self.can_add_rim(roi.area_roi_id)]
         if not targets:
             return
-        default = self._detection_settings.default_border()
         needs_role = [roi.area_roi_id for roi in targets if is_reference(roi)]
-        needs_rim = {roi.area_roi_id: Border(default.gap_px, default.thickness_px) for roi in targets if not effective_border(roi.border, default).enabled}
+        needs_rim = [roi for roi in targets if not all(self._rim_states(roi))]
         label = "Add rim" if len(targets) == 1 else f"Add rim to {len(targets)} ROIs"
         undo_manager.begin_batch(label)  # the role and the rim are one step for the user
         try:
             if needs_role:
                 self.set_roi_role(needs_role, ROLE_SAMPLE)
             if needs_rim:
-                self.set_borders(needs_rim)
+                self._switch_rims(needs_rim, on=True, label="Add rim")
         finally:
             undo_manager.end_batch()
 

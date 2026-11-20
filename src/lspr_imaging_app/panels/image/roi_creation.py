@@ -174,6 +174,20 @@ class RoiCreation(QObject):
         """Some selected ROI is a sample with a rim and no links: its rim can become a linked reference."""
         return any(self._toolbox.rim_refusal(i) is None for i in self._known(roi_ids))
 
+    def can_turn_rim_off(self, roi_ids) -> bool:
+        """Some selected ROI is a sample whose rim is on (linked or not)."""
+        return any(self._toolbox.can_turn_rim_off(i) for i in self._known(roi_ids))
+
+    def turn_rim_off(self, roi_ids) -> None:
+        """Switch the rim of the selected samples off (`RoiToolbox.turn_rim_off`): they become rim-less ROIs, their rim's numbers kept for Add rim."""
+        ids = [i for i in self._known(roi_ids) if self._toolbox.can_turn_rim_off(i)]
+
+        def command() -> str:
+            self._toolbox.turn_rim_off(ids)
+            return f"Turned the rim off on {len(ids)} ROI{'' if len(ids) == 1 else 's'} (Add rim brings it back with the same size)."
+
+        self._run("Turn rim off", command)
+
     def _known(self, roi_ids) -> list[int]:
         have = {roi.area_roi_id for roi in self._toolbox.rois()}
         return [int(i) for i in roi_ids if int(i) in have]
@@ -199,9 +213,13 @@ class RoiCreation(QObject):
                 raise ValueError("there is no image on screen to take the rim's pixels from.")
             if not ids:
                 raise ValueError(self._toolbox.rim_refusal(known[0]) if known else "no ROI is selected.")
-            new_ids = self._toolbox.rims_to_references(ids, (int(shape[0]), int(shape[1])))
+            # the rim is taken where the sample is on the cube on screen: a move made on a later cube is not in the sample's base position
+            new_ids = self._toolbox.rims_to_references(ids, (int(shape[0]), int(shape[1])), cube=int(self._selection.current_cube()))
             left_out = len(known) - len(ids)
-            text = f"Turned {len(ids)} rim{'' if len(ids) == 1 else 's'} into linked reference ROI{'' if len(ids) == 1 else 's'} {', '.join(str(i) for i in new_ids)}."
+            text = (
+                f"Turned {len(ids)} rim{'' if len(ids) == 1 else 's'} into linked reference ROI{'' if len(ids) == 1 else 's'} {', '.join(str(i) for i in new_ids)}; "
+                f"the sample{'' if len(ids) == 1 else 's'} ha{'s' if len(ids) == 1 else 've'} no rim of {'its' if len(ids) == 1 else 'their'} own now."
+            )
             return text + (f" {left_out} selected ROI{'' if left_out == 1 else 's'} left out (a reference, already linked, or without a rim)." if left_out else "")
 
         self._run("Turn rim into linked reference", command)

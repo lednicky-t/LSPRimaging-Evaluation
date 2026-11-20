@@ -59,6 +59,13 @@ def _reference_ring() -> QIcon:
     return ring_icon(True, ink, ink)  # the ROI tab's reference ring
 
 
+def _rim_off() -> QIcon:
+    from .image.roi_icons import ring_icon
+
+    ink = get_active_theme().text_primary
+    return ring_icon(False, ink, ink)  # the ROI tab's ring, crossed out
+
+
 def _sample_with_rim() -> QIcon:
     from .image.roi_icons import display_icon
 
@@ -125,6 +132,7 @@ ICONS: dict[str, str | Callable[[], QIcon]] = {
     "link": "link",
     "unlink": "link-off",
     "add_rim": _sample_with_rim,  # "Add rim": the ROI measures against a rim of its own
+    "turn_rim_off": _rim_off,  # "Turn rim off": the ring crossed out, as the ROI tab's ring toggle shows "off"
     "rim_to_reference": "link",  # "Turn rim into linked reference": the rim becomes a reference ROI, linked
     "group": "group-rois",
     "ungroup": "ungroup-rois",
