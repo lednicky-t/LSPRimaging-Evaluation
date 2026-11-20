@@ -36,6 +36,7 @@ from .fit_window import spectrum_window
 from .gaussian_fit import solve_gaussian
 from .metric_range import curve_base, range_centroid
 from .settings import MetricSettings
+from .spectral_passband import passband_vander
 from .template_shift import ReferenceTemplate, fit_template_shift, fitted_curve
 
 FORMULA_KEYS: tuple[str, ...] = ("absorbance", "ratio", "relative_change", "mod_absorbance")
@@ -65,6 +66,9 @@ class FormulaSpectrum:
     sample_values: np.ndarray
     reference_values: np.ndarray
     formula_key: str = "absorbance"
+    passband: np.ndarray | None = None
+    """``[point, order + 1]`` central moments of each point's measured LCTF band (``spectral_passband``), aligned with ``wavelengths_nm``, when the spectral
+    correction is the full profile; None otherwise. Only the polynomial fit reads it (the design matrix of the passband-averaged points)."""
 
 
 @dataclass(slots=True)
@@ -114,6 +118,7 @@ def formula_spectrum(
     sample_values,
     reference_values,
     formula_key: str,
+    passband: np.ndarray | None = None,
 ) -> FormulaSpectrum:
     """Layer 2: one ROI's stored pairs -> that ROI's own spectrum.
 
@@ -132,7 +137,22 @@ def formula_spectrum(
         sample_values=sample,
         reference_values=reference,
         formula_key=str(formula_key).strip().lower(),
+        passband=None if passband is None else np.asarray(passband, dtype=np.float64),
     )
+
+
+def _window_index(x: np.ndarray, y: np.ndarray, wl_min: float | None, wl_max: float | None) -> np.ndarray:
+    """The positions (into the arrays given) of the finite points within [wl_min, wl_max], in wavelength order. ``_windowed`` and the passband fit both use it,
+    so the points a fit sees and the passband rows that belong to them are chosen by one piece of code."""
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    keep = np.isfinite(x) & np.isfinite(y)
+    if wl_min is not None:
+        keep &= x >= float(wl_min)
+    if wl_max is not None:
+        keep &= x <= float(wl_max)
+    index = np.flatnonzero(keep)
+    return index[np.argsort(x[index])]
 
 
 def _windowed(x: np.ndarray, y: np.ndarray, wl_min: float | None, wl_max: float | None):
@@ -143,16 +163,21 @@ def _windowed(x: np.ndarray, y: np.ndarray, wl_min: float | None, wl_max: float 
     one re-implemented this same block."""
     x = np.asarray(x, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
-    valid = np.isfinite(x) & np.isfinite(y)
-    x, y = x[valid], y[valid]
-    if wl_min is not None:
-        keep = x >= float(wl_min)
-        x, y = x[keep], y[keep]
-    if wl_max is not None:
-        keep = x <= float(wl_max)
-        x, y = x[keep], y[keep]
-    order = np.argsort(x)
-    return x[order], y[order]
+    index = _window_index(x, y, wl_min, wl_max)
+    return x[index], y[index]
+
+
+def _passband_polynomial(x: np.ndarray, y: np.ndarray, moments: np.ndarray, degree: int) -> np.polynomial.Polynomial:
+    """The polynomial of *degree* whose passband-averaged values at the points *x* (the bands' centres of gravity, ascending) fit *y* best in the least-squares sense
+    (``spectral_passband`` module docstring). The same steps as ``Polynomial.fit`` (scaled variable on [-1, 1], columns scaled to unit norm, the same ``rcond``) with
+    the Vandermonde matrix replaced by ``passband_vander``; with bands of zero width the two give the same polynomial to rounding."""
+    x_min, x_max = float(x[0]), float(x[-1])
+    half, middle = (x_max - x_min) / 2.0, (x_max + x_min) / 2.0
+    design = passband_vander(x, moments, degree, middle, half)
+    scale = np.sqrt(np.sum(design * design, axis=0))
+    scale[scale == 0.0] = 1.0
+    solution = np.linalg.lstsq(design / scale, y, rcond=x.size * np.finfo(np.float64).eps)[0]
+    return np.polynomial.Polynomial(solution / scale, domain=[x_min, x_max], window=[-1.0, 1.0]).convert()
 
 
 def fit_polynomial(
@@ -162,8 +187,17 @@ def fit_polynomial(
     wl_min: float | None = None,
     wl_max: float | None = None,
     sample_count: int = 400,
+    moments: np.ndarray | None = None,
 ) -> FitResult:
-    x, y = _windowed(wavelengths_nm, values, wl_min, wl_max)
+    """A polynomial fitted through the points (inside the window). ``moments`` (``[point, order + 1]``, aligned with the points): the central moments of each
+    point's measured passband, for the full-profile spectral correction; the polynomial then is the *underlying* curve, and the points are its passband averages."""
+    if moments is None:
+        x, y = _windowed(wavelengths_nm, values, wl_min, wl_max)
+        passbands = None
+    else:
+        x_all = np.asarray(wavelengths_nm, dtype=np.float64)
+        index = _window_index(x_all, values, wl_min, wl_max)
+        x, y, passbands = x_all[index], np.asarray(values, dtype=np.float64)[index], np.asarray(moments, dtype=np.float64)[index]
     if x.size < 2:
         return FitResult(x.copy(), y.copy())
 
@@ -178,7 +212,10 @@ def fit_polynomial(
     # keeps enough residual points for the fit to average out noise instead
     # of chasing it.
     effective_order = min(max(int(poly_order), 1), max(int(x.size) // 2, 1))
-    polynomial = np.polynomial.Polynomial.fit(x, y, effective_order).convert()
+    if passbands is not None and float(x[-1]) > float(x[0]):
+        polynomial = _passband_polynomial(x, y, passbands, effective_order)
+    else:
+        polynomial = np.polynomial.Polynomial.fit(x, y, effective_order).convert()
     x_min, x_max = float(np.min(x)), float(np.max(x))
 
     if x_max <= x_min:
@@ -391,7 +428,7 @@ def fit_spectrum(
         return fit_voigt(spectrum.wavelengths_nm, spectrum.values, wl_min=wl_min, wl_max=wl_max, fast_first=gaussian_fast_first, solved=solved)
     return fit_polynomial(
         spectrum.wavelengths_nm, spectrum.values,
-        poly_order=poly_order, wl_min=wl_min, wl_max=wl_max,
+        poly_order=poly_order, wl_min=wl_min, wl_max=wl_max, moments=spectrum.passband,
     )
 
 

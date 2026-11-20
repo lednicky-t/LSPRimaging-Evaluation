@@ -113,6 +113,7 @@ def trace_key(stored: StoredScan, formula_key: str, metric: MetricSettings, grou
     return (
         id(stored), str(formula_key), metric.fit_method, int(metric.poly_order), metric.window_key(), metric.metric_key, metric.metric_range_key(),
         metric.template_key(), metric.response_key(), response_groups(groups) if metric.uses_response else (),
+        getattr(getattr(stored, "spectral", None), "key", "none"),  # the spectral correction (a plain stand-in for a scan in a test has none)
     )
 
 
@@ -123,7 +124,7 @@ def response_calibration(stored: StoredScan, formula_key: str, metric: MetricSet
         raise ResponseError("The response shape needs its signal cubes: set them in the Spectra panel (Fit menu).")
     cubes = np.asarray(stored.cube_indices, dtype=np.int64)
     values = _scan_values(stored, formula_key)
-    wl = np.asarray(stored.wavelength_nm, dtype=np.float64)
+    wl = stored.abscissa_nm()  # the spectral correction's x values (the nominal wavelengths without one)
     order = np.argsort(wl, kind="stable")
     base = (cubes >= base_range[0]) & (cubes <= base_range[1])
     signal = (cubes >= signal_range[0]) & (cubes <= signal_range[1])
@@ -144,7 +145,7 @@ def _scan_values(stored: StoredScan, formula_key: str) -> np.ndarray:
 def response_traces(stored: StoredScan, formula_key: str, metric: MetricSettings, groups: Sequence[Sequence[int]] = ()) -> dict[int, np.ndarray]:
     """The response-shape trace of every ROI of the scan, ``{roi id: float64 [cube]}`` (first row of an id, as `trace_input`)."""
     calibration = response_calibration(stored, formula_key, metric, groups)
-    wl = np.asarray(stored.wavelength_nm, dtype=np.float64)
+    wl = stored.abscissa_nm()
     order = np.argsort(wl, kind="stable")
     traces = readout(calibration, _scan_values(stored, formula_key)[..., order])
     out: dict[int, np.ndarray] = {}
@@ -162,8 +163,8 @@ def trace_input(stored: StoredScan, roi_id: int) -> TraceInput | None:
     sample, reference = mean[:, row, :, SAMPLE], mean[:, row, :, REFERENCE]
     usable = np.isfinite(sample) & np.isfinite(reference) & (stored.n_valid[:, row, :, SAMPLE] > 0) & (stored.n_valid[:, row, :, REFERENCE] > 0)
     return TraceInput(
-        np.asarray(stored.wavelength_nm, dtype=np.float64), sample, reference, usable, stored.cell_hash[:, row] != 0,
-        np.asarray(stored.cube_indices, dtype=np.int64),
+        stored.abscissa_nm(), sample, reference, usable, stored.cell_hash[:, row] != 0,
+        np.asarray(stored.cube_indices, dtype=np.int64), stored.passband_moments(),
     )
 
 

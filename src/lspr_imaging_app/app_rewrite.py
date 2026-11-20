@@ -67,6 +67,7 @@ from .image_tools.mask_scope import MaskScope
 from .image_tools.chromatic_auto_task import TASK_ID as CHROMATIC_TASK_ID, ChromaticAutoDetect
 from .image_tools.mask.mask_pointers import MaskPointersModule
 from .selection.experiment_plan_module import ExperimentPlanModule
+from .selection.spectral_correction_module import SpectralCorrectionModule
 from .image_tools.mask_auto_task import TASK_ID as AUTO_MASK_TASK_ID
 from .image_tools.mask_export_task import TASK_ID as MASK_EXPORT_TASK_ID
 from .panels.feature_map_task import TASK_ID as FEATURE_MAP_TASK_ID
@@ -409,6 +410,7 @@ def capture_session(
     frame_roles: FrameRolesModule | None = None,
     mask_pointers: MaskPointersModule | None = None,
     experiment_plan: ExperimentPlanModule | None = None,
+    spectral: SpectralCorrectionModule | None = None,
 ) -> SessionState:
     """Read every module's current state into a plain, Qt-free
     :class:`SessionState` (2026-09-23).
@@ -444,6 +446,7 @@ def capture_session(
         **({} if frame_roles is None else {"frame_roles": frame_roles.state()}),
         **({} if mask_pointers is None else {"mask_pointers": mask_pointers.state()}),
         **({} if experiment_plan is None else {"plan_edits": experiment_plan.state(), "refractive_index": experiment_plan.ri_table()}),
+        **({} if spectral is None else {"spectral_correction": spectral.state()}),
     )
 
 
@@ -459,6 +462,7 @@ def apply_session(
     frame_roles: FrameRolesModule | None = None,
     mask_pointers: MaskPointersModule | None = None,
     experiment_plan: ExperimentPlanModule | None = None,
+    spectral: SpectralCorrectionModule | None = None,
 ) -> None:
     """Push a loaded :class:`SessionState` into every module.
 
@@ -485,6 +489,8 @@ def apply_session(
     if experiment_plan is not None:
         experiment_plan.restore_state(state.plan_edits)
         experiment_plan.restore_ri_table(state.refractive_index)
+    if spectral is not None:
+        spectral.restore_state(state.spectral_correction)  # reads its table back on a thread; the display has no correction until it is there
 
     selection.set_cube(state.selected_cube)
     selection.set_wavelength(state.selected_wavelength)
@@ -540,6 +546,7 @@ def _build_session_autosave(
     frame_roles: FrameRolesModule | None = None,
     mask_pointers: MaskPointersModule | None = None,
     experiment_plan: ExperimentPlanModule | None = None,
+    spectral: SpectralCorrectionModule | None = None,
 ) -> SessionAutosave:
     """Build the debounce, and wire every module's own change signal to
     ``schedule()`` it (2026-09-23).
@@ -564,7 +571,7 @@ def _build_session_autosave(
     autosave = SessionAutosave(
         capture=lambda: capture_session(
             geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings, frame_roles,
-            mask_pointers, experiment_plan,
+            mask_pointers, experiment_plan, spectral,
         ),
         naming=_cached_frame_naming(dataset),
     )
@@ -590,6 +597,8 @@ def _build_session_autosave(
     if experiment_plan is not None:
         signals.append(experiment_plan.steps_changed)  # a dragged boundary, a retyped note, a colour: part of the session
         signals.append(experiment_plan.ri_changed)  # an imported RI table (RIs.txt) is part of the session too
+    if spectral is not None:
+        signals.append(spectral.changed)  # the spectral-correction table and the mode are part of the session
     for signal in signals:
         signal.connect(autosave.schedule)
 
@@ -610,6 +619,7 @@ def _wire_session_coordinator(
     mask_pointers: MaskPointersModule | None = None,
     session_load: SessionLoadTask | None = None,
     experiment_plan: ExperimentPlanModule | None = None,
+    spectral: SpectralCorrectionModule | None = None,
 ) -> None:
     """Restore into every module whenever the *active session* changes -
     on a dataset load, an explicit session switch, or a new session's
@@ -641,10 +651,12 @@ def _wire_session_coordinator(
         # Restoring emits from every module it touches; without the
         # `suspended()` guard the restore would schedule a save of what was
         # just loaded/reset.
+        if spectral is not None:
+            spectral.set_root(root)  # before the restore: its table is read from (and an import written into) this session's folder
         with autosave.suspended():
             apply_session(
                 state or SessionState(), geometry, mask, chromatic, background,
-                roi_toolbox, selection, analysis_settings, frame_roles, mask_pointers, experiment_plan,
+                roi_toolbox, selection, analysis_settings, frame_roles, mask_pointers, experiment_plan, spectral,
             )
 
     def restore(root: Path | None) -> None:
@@ -730,6 +742,7 @@ class _Modules:
     reference_auto: ReferenceAutoFind
     frame_roles: FrameRolesModule
     experiment_plan: ExperimentPlanModule
+    spectral: SpectralCorrectionModule  # the measured LCTF passbands and the spectral correction mode (a session value)
     cube_display: CubeDisplayModule
     highlight_range: HighlightRangeModule
     area_selection: AreaSelectionModule
@@ -797,6 +810,7 @@ def _build_modules() -> _Modules:
     reference_frame = ReferenceFrameModule()
     frame_roles = FrameRolesModule(dataset, reference_frame)
     experiment_plan = ExperimentPlanModule(dataset)  # the measured steps with the user's edits on top; the edits are part of the session
+    spectral = SpectralCorrectionModule()  # the measured LCTF passbands and the correction mode; part of the session (its table is a file in the session folder)
     highlight_range = HighlightRangeModule()
     # The pointers a Mask-tab scan finds (cosmetic: never a mask, never a recompute); part of the session.
     mask_pointers = MaskPointersModule()
@@ -825,13 +839,13 @@ def _build_modules() -> _Modules:
     # ImageDataset.home).
     session_autosave = _build_session_autosave(
         dataset, geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings, frame_roles,
-        mask_pointers, experiment_plan,
+        mask_pointers, experiment_plan, spectral,
     )
     session_load = SessionLoadTask()
     _wire_session_coordinator(
         session_coordinator, session_autosave,
         geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings, frame_roles,
-        mask_pointers, session_load, experiment_plan,
+        mask_pointers, session_load, experiment_plan, spectral,
     )
     dataset.dataset_loaded.connect(lambda ds: session_coordinator.bind_dataset(ds.home))
 
@@ -858,6 +872,10 @@ def _build_modules() -> _Modules:
     )
     analysis_live = AnalysisLiveModule()  # Live / Paused: the Spectra and Sensorgram plots and the out-of-date check stop recomputing while paused
     analysis_live.live_changed.connect(lambda live: scan_results.set_paused(not live))
+    # The spectral correction (2026-11-20): the scan the display sees carries it; a changed table or mode makes that a different object (`results_changed`: every panel redraws, every cache of
+    # fitted traces is dropped). Nothing is scanned and the scan file is never touched.
+    spectral.changed.connect(lambda: scan_results.set_spectral_correction(spectral.passbands(), spectral.mode()))
+    spectral.set_wavelength_source(lambda: None if scan_results.stored() is None else scan_results.stored().wavelength_nm)
     dataset.dataset_loaded.connect(lambda _dataset: analysis_scan.invalidate())
     dataset.dataset_cleared.connect(analysis_scan.invalidate)
     session_coordinator.active_session_changed.connect(lambda _root: analysis_scan.invalidate())
@@ -872,6 +890,7 @@ def _build_modules() -> _Modules:
     if app is not None:  # the thread must be stopped where the application ends, not in a widget's destructor (sip crash-on-close)
         app.aboutToQuit.connect(analysis_scan.shutdown)
         app.aboutToQuit.connect(scan_results.shutdown)
+        app.aboutToQuit.connect(spectral.shutdown)
         app.aboutToQuit.connect(roi_tuning.task.shutdown)
     dataset.export_finished.connect(session_carry.start)
     dataset.export_failed.connect(lambda _message: session_carry.discard())
@@ -900,6 +919,7 @@ def _build_modules() -> _Modules:
         reference_auto=ReferenceAutoFind(dataset, selection, reference_frame, frame_roles),
         frame_roles=frame_roles,
         experiment_plan=experiment_plan,
+        spectral=spectral,
         cube_display=cube_display,
         trace_store=trace_store, sensorgram_axis=sensorgram_axis, step_table=step_table, data_checks=data_checks, image_motion=image_motion,
         signal_map=SignalMapModule(step_table, roi_toolbox, experiment_plan),
@@ -1060,7 +1080,7 @@ def _wire_file_menu(file_menu: QMenu, window: QMainWindow, m: _Modules, ui_state
         m.dataset, m.selection, m.session_coordinator, cube_display=m.cube_display, ui_state=ui_state, parent=window,
         experiment_plan=m.experiment_plan,
     )
-    actions = FileMenu(file_menu, window, m.dataset, m.session_coordinator, manager, experiment_plan=m.experiment_plan)
+    actions = FileMenu(file_menu, window, m.dataset, m.session_coordinator, manager, experiment_plan=m.experiment_plan, spectral=m.spectral)
     _apply_ri_settings(m, actions, float(read(ui_state, RI_WAVELENGTH_NM)), int(read(ui_state, RI_AGE_WARNING_DAYS)))
     return actions
 
@@ -1500,6 +1520,7 @@ def _build_status_bar(
     # message on the bar's left side; the task indicator above is permanent, on the
     # right, so neither covers the other.
     file_actions.status_message.connect(status_bar.showMessage)
+    m.spectral.notice.connect(lambda message: status_bar.showMessage(message, 15000))
     m.experiment_plan.ri_notice.connect(lambda message: status_bar.showMessage(message, 15000))  # RIs.txt imported / changed (15 s: easy to miss)
     m.roi_geometry_sync.status_changed.connect(status_bar.showMessage)
     roi_table_panel.status_message.connect(status_bar.showMessage)
@@ -2033,7 +2054,7 @@ def build_main_window(
     )
     roi_table_panel.restore_ui_state(ui_state)
     image_panel.roi_edit_running.connect(roi_table_panel.set_edit_running)  # no table rebuild in the middle of a ROI drag (2026-11-19)
-    spectra_panel = SpectraPanel(m.scan_results, m.roi_toolbox, m.selection, m.analysis_settings, live=m.analysis_live)
+    spectra_panel = SpectraPanel(m.scan_results, m.roi_toolbox, m.selection, m.analysis_settings, live=m.analysis_live, spectral=m.spectral)
     spectra_panel.restore_ui_state(ui_state)
     sensorgram_panel = SensorgramPanel(
         m.scan_results, m.roi_toolbox, m.dataset, m.selection, m.analysis_settings, m.cube_display, image_busy=image_panel.render_pending,

@@ -331,6 +331,15 @@ A new session starts with the polynomial (3rd order), **centroid of the top 20 %
 the full shift (record `snr_methods_comparison_2026-11-06.md`). Before: maximum, no metric range. A saved session fills the keys it lacks from the **old** defaults (`settings.LEGACY_METRIC_DEFAULTS`,
 used by `storage/session.py`), so a session saved before a key existed gives the numbers it always gave.
 
+## 8c. Spectral correction (built 2026-11-20), `analysis/spectral_passband.py`
+
+Steps 2-5 above place each point at its commanded wavelength and treat it as a point sample. The tunable filter passes a band instead (FWHM 4 nm at 420 nm to 15 nm at 700 nm) whose centre is off
+its setting by -0.2 nm on average with 0.4 nm scatter (the real August 2026 sweep). With a table of the measured bands (File -> Import -> Spectral Correction...) the Spectra ribbon's first group picks:
+**None** (as above), **Centroid** (x = the band's centre of gravity: the first-order error vanishes there; the `sigma^2/2 f''` term stays) or **Full profile** (the polynomial fit is fitted through the band
+averages: the Vandermonde matrix is replaced by `B_km = integral w_k t^m`, same cost; the curve and its maximum / centroid are the underlying spectrum). Gaussian, Voigt, template, response and "no fit" read
+Centroid under Full profile. The scan is untouched; everything is recomputed live; the default is None. The measured effect on the real Bulk scan: baseline position -0.2 to -0.3 nm, event shift -1.4 to +0.2 %,
+noise unchanged. Maths, formats, limits (temperature, lamp, camera, absorbance averaging) and what is not built: `spectral_correction_2026-11-20.md`.
+
 ## 9. Where to look when a number looks wrong
 
 - A spectrum looks wrong: formula (section 1), then `n_valid` / masks in the scan.
@@ -349,4 +358,5 @@ used by `storage/session.py`), so a session saved before a key existed gives the
 - A template-shift trace drifts slowly while the peak does not: look at the tilt (section 7.5, `trace_fit.template_diagnostics`); a baseline that tilts by 0.001 A moves it by 0.1 nm.
 - A response-shape value reads more nm than the template shift: expected when the change also has an amplitude part (section 8a: shift-equivalent nm). Its values moved although only another ROI
   of the group changed: expected (the weights are learned per group).
+- A peak position changed by a few tenths of a nm, or its width / height changed, after nothing else: the spectral correction mode (Spectra ribbon, first group): None = the commanded wavelengths; check the "i" text for what is in force and whether the table covers every wavelength.
 - Something looks systematically off (a noisy step, drift, outlier ROIs): the data-quality checks, `analysis/step_diagnostics.py` (and `image_motion.py` for image drift).

@@ -6,7 +6,7 @@
       -----
       Session                      >  New Session / (one radio entry per session: the checked one is active)
       -----
-      Import                       >  Experiment Plan / Metadata...  /  Refractive Indices... (2026-11-12)
+      Import                       >  Experiment Plan / Metadata...  /  Refractive Indices... (2026-11-12)  /  Spectral Correction... (2026-11-20)
       Export                       >  Acquisition Metadata (JSON)...
       -----
       Dataset Manager...             Ctrl+I
@@ -31,13 +31,14 @@ from pathlib import Path
 
 from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtGui import QAction, QActionGroup
-from PyQt6.QtWidgets import QFileDialog, QMainWindow, QMenu, QMessageBox
+from PyQt6.QtWidgets import QFileDialog, QInputDialog, QMainWindow, QMenu, QMessageBox
 
 from ..dataset import DatasetModule
 from ..dataset.io import DatasetLoadChoice, resolve_remembered_dataset_choice, save_dataset_choice, summarize_dataset_candidate
 from ..dataset.model import ImageDataset
 from ..plan.refractive_index import RiFileError, step_numbers_text
 from ..selection.experiment_plan_module import ExperimentPlanModule
+from ..selection.spectral_correction_module import SpectralCorrectionModule, import_report
 from ..shortcuts import bind_action
 from ..storage.session_coordinator import SessionCoordinator
 from ..storage.session_index import SessionRecord
@@ -50,6 +51,16 @@ from .menu_icons import give_persistent_icon
 logger = logging.getLogger(__name__)
 
 _FORMAT_LABELS = {"image_stack": "TIFF image stack", "ome_zarr": "OME-Zarr"}
+
+
+def _sweep_file_kind(path: Path) -> str:
+    """"sweep" (the probe's spectral sweep: header starts with requested_nm), "dark" (wavelength_nm,intensity) or "" (anything else): read from the header line, not the name."""
+    try:
+        with open(path, encoding="utf-8-sig") as handle:
+            first = handle.readline().split(",", 1)[0].strip().lower()
+    except (OSError, UnicodeDecodeError):
+        return ""
+    return {"requested_nm": "sweep", "wavelength_nm": "dark"}.get(first, "")
 
 
 def _describe_candidate(candidate: ImageDataset) -> str:
@@ -78,6 +89,7 @@ class FileMenu(QObject):
         manager: DatasetManagerDialog,
         *,
         experiment_plan: ExperimentPlanModule | None = None,
+        spectral: SpectralCorrectionModule | None = None,
     ) -> None:
         super().__init__(window)
         self._window = window
@@ -85,6 +97,7 @@ class FileMenu(QObject):
         self._sessions = sessions
         self._manager = manager
         self._plan = experiment_plan
+        self._spectral = spectral
 
         self.open_action = give_persistent_icon(menu.addAction("Open Dataset..."), "open_dataset")
         bind_action(self.open_action, "file.open_dataset")
@@ -119,6 +132,15 @@ class FileMenu(QObject):
         )
         self.import_ri_action.triggered.connect(self.import_refractive_indices)
         self.import_ri_action.setVisible(experiment_plan is not None)
+        self.import_spectral_action = give_persistent_icon(import_menu.addAction("Spectral Correction..."), "import")
+        self.import_spectral_action.setToolTip(
+            "The measured passbands of the tunable filter: a spectral sweep written by the illumination probe (spectral_sweep_*.csv; its dark-spectrum file can be picked "
+            "with it). Copied into the session. Nothing changes until you pick Centroid or Full profile in the Spectra panel."
+        )
+        self.import_spectral_action.triggered.connect(self.import_spectral_correction)
+        self.import_spectral_action.setVisible(spectral is not None)
+        if spectral is not None:
+            spectral.import_finished.connect(self._on_spectral_imported)
         export_menu = give_persistent_icon(menu.addMenu("Export"), "export")
         self.export_metadata_action = give_persistent_icon(export_menu.addAction("Acquisition Metadata (JSON)..."), "export")
         self.export_metadata_action.triggered.connect(self.export_metadata)
@@ -253,6 +275,67 @@ class FileMenu(QObject):
         QMessageBox.information(self._window, "Refractive indices imported", "\n".join(lines))
         self.status_message.emit(f"Refractive indices imported from {table.source_name}.")
 
+    def import_spectral_correction(self) -> None:
+        """Pick the probe's sweep file (and its dark-spectrum file, if it is a separate one), say which lamp it was measured with, and import it (the module reads it on a thread)."""
+        if self._spectral is None:
+            return
+        start = self._dataset.dataset_home()
+        path_texts, _ = QFileDialog.getOpenFileNames(
+            self._window, "Import spectral correction (spectral sweep, and its dark spectrum if separate)", str(start) if start is not None else "", "Spectral sweep (*.csv);;All files (*)"
+        )
+        if not path_texts:
+            return
+        sweep, dark = None, None
+        for text in path_texts:
+            kind = _sweep_file_kind(Path(text))
+            if kind == "sweep" and sweep is None:
+                sweep = Path(text)
+            elif kind == "dark" and dark is None:
+                dark = Path(text)
+            else:
+                QMessageBox.critical(
+                    self._window, "Spectral correction not imported",
+                    f"{Path(text).name}: pick one spectral sweep (its header starts with requested_nm) and, if it has no DARK row, its dark-spectrum file (wavelength_nm,intensity). "
+                    "One sweep per import: a temperature series is not supported yet.",
+                )
+                return
+        if sweep is None:
+            QMessageBox.critical(self._window, "Spectral correction not imported", "None of the files is a spectral sweep (its header should start with requested_nm).")
+            return
+        previous = self._spectral.table()
+        if previous is not None:
+            answer = QMessageBox.question(
+                self._window, "Replace the spectral-correction table?",
+                f"This session already has a spectral-correction table ({previous.source_name}, light source: {previous.illumination or 'not given'}).\n\n"
+                f"Importing {sweep.name} replaces it. The old table is kept in the session folder as spectral_correction.previous.h5. The mode you picked stays, so the numbers shown change.\n\nImport anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        lamp, accepted = QInputDialog.getText(
+            self._window, "Light source of the sweep",
+            "Which light source was this sweep measured with?\n(Kept with the table. The correction is only right for the lamp, filter and temperature it was measured with.)",
+            text=previous.illumination if previous is not None else "",
+        )
+        if not accepted:
+            return
+        self.status_message.emit(f"Importing {sweep.name} ...")
+        self._spectral.import_sweep(sweep, dark, lamp)
+
+    def _on_spectral_imported(self, table: object, error: str) -> None:
+        if self._spectral is None:
+            return
+        if error or table is None:
+            QMessageBox.critical(self._window, "Spectral correction not imported", error or "The file could not be read.")
+            return
+        passbands = self._spectral.passbands()
+        if passbands is None:
+            return
+        QMessageBox.information(
+            self._window, "Spectral correction imported", import_report(table, passbands, self._spectral.scan_wavelengths(), self._spectral.mode())
+        )
+        self.status_message.emit(f"Spectral correction imported from {table.source_name}.")
+
     def export_metadata(self) -> None:
         path = export_metadata_dialog(self._window, self._dataset)
         if path is not None:
@@ -286,7 +369,7 @@ class FileMenu(QObject):
 
     def _sync_enabled(self) -> None:
         loaded = self._dataset.dataset_home() is not None
-        for action in (self.show_folder_action, self.import_plan_action, self.import_ri_action, self.export_metadata_action):
+        for action in (self.show_folder_action, self.import_plan_action, self.import_ri_action, self.import_spectral_action, self.export_metadata_action):
             action.setEnabled(loaded)
 
     @property

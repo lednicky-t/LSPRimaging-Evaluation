@@ -35,7 +35,8 @@ import numpy as np
 from ..progress import Cancelled
 from .fit_window import restrict_to_window
 from .settings import MetricSettings
-from .trace_fit import TraceInput, formula_arrays
+from .spectral_passband import passband_vander
+from .trace_fit import TraceInput, formula_arrays, sorted_band_moments
 
 MAX_ORDER = 13
 TOLERANCE = 1.25
@@ -91,9 +92,10 @@ class OrderQuality:
         return int((row == GOOD).sum()) + over + under, over, under
 
 
-def loo_rms_all_orders(x: np.ndarray, y: np.ndarray, max_order: int = MAX_ORDER) -> np.ndarray:
+def loo_rms_all_orders(x: np.ndarray, y: np.ndarray, max_order: int = MAX_ORDER, moments: np.ndarray | None = None) -> np.ndarray:
     """Leave-one-out RMS error of the polynomial fits of orders 1..``max_order`` (capped at ``len(x) // 2``) to each column of ``y`` (``[points, spectra]``) at the shared wavelengths ``x``.
-    Returns ``[max_order, spectra]``, NaN for an order above the cap. The closed form from the hat matrix (module docstring)."""
+    Returns ``[max_order, spectra]``, NaN for an order above the cap. The closed form from the hat matrix (module docstring). ``moments`` (``[points, order + 1]``): the central moments
+    of each point's measured band (full-profile spectral correction): the design matrix is then the passband one, the same model the fit uses."""
     x = np.asarray(x, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
     n, count = y.shape
@@ -102,7 +104,8 @@ def loo_rms_all_orders(x: np.ndarray, y: np.ndarray, max_order: int = MAX_ORDER)
     if top < 1 or not x[-1] > x[0]:
         return out
     t = (2.0 * x - x[0] - x[-1]) / (x[-1] - x[0])
-    q, _ = np.linalg.qr(np.polynomial.polynomial.polyvander(t, top))  # [n, top + 1]: column j and the ones before it span the polynomials up to order j
+    design = np.polynomial.polynomial.polyvander(t, top) if moments is None else passband_vander(x, moments, top, (x[0] + x[-1]) / 2.0, (x[-1] - x[0]) / 2.0)
+    q, _ = np.linalg.qr(design)  # [n, top + 1]: column j and the ones before it span the polynomials up to order j
     coef = q.T @ y  # [top + 1, spectra]
     fitted = np.cumsum(q[:, :, None] * coef[None, :, :], axis=1)  # [n, top + 1, spectra]: the fit of each order
     leverage = np.cumsum(q * q, axis=1)  # [n, top + 1]: h_ii of each order
@@ -119,6 +122,7 @@ def _roi_errors(data: TraceInput, formula_key: str, metric: MetricSettings) -> t
     n_cube = data.sample.shape[0]
     loo = np.full((MAX_ORDER, n_cube), np.nan)
     wl, values, valid, wanted = formula_arrays(data, formula_key)
+    band_moments = sorted_band_moments(data)
     if wl.size == 0 or not wanted.any():
         return loo, wanted
     valid = restrict_to_window(wl, values, valid, metric)  # the points the fit would see
@@ -130,7 +134,7 @@ def _roi_errors(data: TraceInput, formula_key: str, metric: MetricSettings) -> t
         index = np.flatnonzero(pattern)
         if index.size < 2:
             continue
-        loo[:, here] = loo_rms_all_orders(wl[index], values[np.ix_(here, index)].T)
+        loo[:, here] = loo_rms_all_orders(wl[index], values[np.ix_(here, index)].T, moments=None if band_moments is None else band_moments[index])
     return loo, wanted
 
 

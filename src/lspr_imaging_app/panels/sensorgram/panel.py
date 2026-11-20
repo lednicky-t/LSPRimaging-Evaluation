@@ -928,6 +928,7 @@ class SensorgramPanel(QWidget):
             "x_axis": label,
             "roi_ids": [int(r) for r in request.roi_ids],
             "settings": {"formula": request.formula_key, "metric": asdict(request.metric), "statistics": asdict(request.statistics)},
+            "spectral_correction": job.stored.spectral_info(),  # the scan the lines were computed from carries its correction
             "lines": [
                 {
                     "label": s.label, "key": s.key, "members": [int(m) for m in s.member_ids], "baseline_nm": s.baseline,

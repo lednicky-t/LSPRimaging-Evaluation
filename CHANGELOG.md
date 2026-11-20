@@ -9,6 +9,8 @@ This project follows a simple release log so format and workflow changes stay vi
 - Help -> Keyboard shortcuts: one table now both binds every shortcut and builds the list, so the list cannot drift from the keys that really work (2026-10-30; `docs/keyboard_shortcut_registry_design_2026-10-30.md`). Key matching is now exact: a few unusual modifier combinations that used to trigger a command no longer do (listed in the design doc, section 8).
 - Help -> About: the version, how to cite the software (with a copy button) and its license. OME-Zarr exports now record how to cite the software that wrote them in their `lspr` attributes (`software`: name, version, DOI, citation line), so the acknowledgement travels with the data (2026-11-02; `NOTICE.md` of the Suite).
 
+- Spectral correction: import the measured passbands of the tunable filter (File -> Import -> Spectral Correction..., the illumination probe's spectral sweep) and pick None, Centroid or Full profile in the first group of the Spectra ribbon; the "i" icon next to the ribbon explains the maths and what is in force. Nothing changes until you pick a mode; the scan and the images are never touched. Full profile is built for the polynomial fit; temperature is not handled yet (2026-11-20; `docs/spectral_correction_2026-11-20.md`). Sessions are saved as schema 1.13.
+
 ### Fixed
 
 - Edit -> Undo/Redo no longer tries to refresh itself after its window has been closed (2026-10-30).

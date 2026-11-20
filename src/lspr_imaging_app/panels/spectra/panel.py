@@ -77,6 +77,7 @@ from ...analysis.trace_pool import TracePool
 from ...applog import timed
 from ...roi import RoiToolbox
 from ...selection import SelectionModule
+from ...selection.spectral_correction_module import SpectralCorrectionModule
 from ...storage.ui_state_keys import SPECTRA_LINE_STYLE, SPECTRA_RIBBON_OPEN, SPECTRA_X_UNIT, read
 from ..live_toggle import LiveToggle
 from ..ribbon_row import RibbonRow, rolled_ribbon
@@ -87,6 +88,7 @@ from ..plot_export_button import ExportData, PlotExportButton
 from ..ui_state import UiStateStore
 from ..visibility_gate import HiddenPanelGate
 from ..ribbon_fields import style_ribbon_number_field
+from .correction_group import CorrectionControls
 from .order_picker import OrderPicker
 from .pick_menu import PickMenu, equation_picture, fit_picture, metric_picture, range_picture, window_picture
 from .plot import LINE_STYLES, SpectraPlot
@@ -200,6 +202,7 @@ class SpectraPanel(QWidget):
         analysis_settings: AnalysisSettingsModule,
         parent: QWidget | None = None,
         live: AnalysisLiveModule | None = None,
+        spectral: SpectralCorrectionModule | None = None,
     ) -> None:
         super().__init__(parent)
         self._live = live if live is not None else AnalysisLiveModule(self)  # without an owner: always live
@@ -366,6 +369,10 @@ class SpectraPanel(QWidget):
         self._live_toggle.bind(self._live)
         self._ribbon = RibbonRow(self)
         self._ribbon.add_group("Live", self._live_toggle)
+        # Spectral correction (2026-11-20): first after Live, before the Formula: it decides where each point of the spectrum is (correction_group.py)
+        self._correction = None if spectral is None else CorrectionControls(spectral, self._scan, self._settings, self)
+        if self._correction is not None:
+            self._ribbon.add_group("Spectral correction", self._correction.pick)
         self._ribbon.add_group("Formula", self._formula)
         self._ribbon.add_group("Fit", self._fit, self._order, self._window_mode)
         self._ribbon.add_group("Metric", self._metric, self._metric_range)
@@ -377,6 +384,9 @@ class SpectraPanel(QWidget):
         controls = QHBoxLayout()
         controls.setContentsMargins(4, 2, 6, 2)
         controls.addWidget(self._ribbon_drawer)
+        if self._correction is not None:  # the "i" icon, like the Image panel's: it rolls up with the ribbon
+            controls.addWidget(self._correction.info)
+            self._ribbon_drawer.expanded_changed.connect(self._correction.info.setVisible)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
@@ -454,6 +464,8 @@ class SpectraPanel(QWidget):
         for pick in (self._formula, self._fit, self._order, self._metric, self._window_mode, self._metric_range):
             pick.refresh_theme()
         self._live_toggle.refresh_theme()
+        if self._correction is not None:
+            self._correction.refresh_theme()
         for toggle in (self._show_points, self._show_lines, self._error_box):
             toggle.refresh_theme()
         self._line_style.refresh_theme()
@@ -870,8 +882,13 @@ class SpectraPanel(QWidget):
             "out_of_date": current is False,
             "roi_ids": [int(r) for r in job.request.roi_ids],
             "settings": {"formula": job.request.formula_key, "metric": asdict(job.request.metric)},
+            "spectral_correction": self._shown_correction(),  # the x values are the commanded wavelengths or the bands' centres: the record says which
         }
         return ExportData({"spectra": table}, info)
+
+    def _shown_correction(self) -> dict:
+        stored = self._scan.stored()
+        return {"mode": "none"} if stored is None else stored.spectral_info()
 
     def _roi_colors(self, roi_ids: tuple[int, ...]) -> dict[int, str]:
         by_id = {roi.area_roi_id: roi for roi in self._roi_toolbox.rois()}

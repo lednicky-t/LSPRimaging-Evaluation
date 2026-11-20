@@ -30,6 +30,7 @@ import threading
 import time
 import copy
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
@@ -38,6 +39,7 @@ from ..applog.events import log_event
 from ..domain.roi_links import is_reference
 from ..domain.roi_model import AreaRoi
 from .reference_pairing import PairedScan, pair_scan
+from .spectral_passband import Passbands, correction_axis
 from .scan_fingerprint import cell_hashes
 from .scan_jobs import ScanSource, build_scan_plan, snapshot_source
 from .scan_store import ScanFileError, StoredScan, read_scan, stale_cube_indices
@@ -71,6 +73,9 @@ class ScanResultsModule(QObject):
         self._path: Path | None = None
         self._stored: StoredScan | None = None  # the file as it is: the staleness check compares with this
         self._paired: PairedScan | None = None  # what the display sees (see the module docstring); None until the first pairing of a loaded file is done
+        self._passbands: Passbands | None = None  # the spectral correction (2026-11-20, spectral_passband.py): the measured LCTF bands and the mode the user picked
+        self._spectral_mode = "none"
+        self._shown: tuple[StoredScan, str, StoredScan] | None = None  # (paired scan, correction key, what the display sees): kept so the same object is handed out until one of them changes
         self._pair_generation = 0  # bumped by every pairing request and every invalidate: a pairing from an older one is dropped
         self._publish_after_pairing = False  # a new file waits for its pairing before the panels and the check hear of it (kept across a pairing that is replaced)
         self._stale: frozenset[int] | None = None
@@ -97,8 +102,38 @@ class ScanResultsModule(QObject):
 
     def stored(self) -> StoredScan | None:
         """The scan as the display sees it: one row per sample ROI, each with its effective reference (module docstring). None: no scan, or the file
-        is still being read and paired."""
-        return self._paired.stored if self._paired is not None else None
+        is still being read and paired.
+
+        Under a spectral correction this is a copy of the paired scan that carries the correction (``StoredScan.spectral``); the arrays are shared. It is the same
+        object until the paired scan, the table or the mode changes, so the caches that key on its identity stay valid exactly that long."""
+        if self._paired is None:
+            return None
+        base = self._paired.stored
+        if self._passbands is None or self._spectral_mode == "none":
+            return base
+        axis = correction_axis(self._passbands, base.wavelength_nm, self._spectral_mode)
+        if self._shown is not None and self._shown[0] is base and self._shown[1] == axis.key:
+            return self._shown[2]
+        shown = replace(base, spectral=axis)
+        self._shown = (base, axis.key, shown)  # holds `base`, so its identity cannot be reused while this is cached
+        return shown
+
+    def set_spectral_correction(self, passbands: Passbands | None, mode: str) -> None:
+        """The spectral correction the display applies: the derived bands (None: no table) and the mode (``spectral_passband.MODES``). A change that alters what ``stored()``
+        returns publishes ``results_changed`` (every panel redraws and every cache of fitted traces is dropped); nothing is scanned and the file is untouched."""
+        mode = str(mode).strip().lower()
+
+        def in_force(bands: Passbands | None, picked: str) -> tuple[str, str]:  # what the display would show: no correction at all is one state whatever the table
+            return ("", "none") if bands is None or picked == "none" else (bands.sha256, picked)
+
+        before = in_force(self._passbands, self._spectral_mode)
+        self._passbands, self._spectral_mode = passbands, mode
+        if before != in_force(passbands, mode) and self._paired is not None:
+            self.results_changed.emit()
+
+    def spectral_correction(self) -> tuple[Passbands | None, str]:
+        """The bands and the mode as set (what the Spectra panel's "i" text describes)."""
+        return self._passbands, self._spectral_mode
 
     def reference_note(self, roi_id: int) -> str:
         """Why a sample ROI has no reference numbers ("No reference: ..."; a linked reference that is not in the file yet), or ''."""

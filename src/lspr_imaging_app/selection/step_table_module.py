@@ -587,6 +587,7 @@ class StepTableModule(QObject):
         return {
             "x_axis": self._axis.label_and_x()[0],
             "settings": {"formula": detection.formula_key, "metric": asdict(self._settings.metric_settings()), "statistics": asdict(self._settings.statistics_settings())},
+            "spectral_correction": {"mode": "none"} if self._scan.stored() is None else self._scan.stored().spectral_info(),
             "steps": [
                 {"order": s.order, "title": c.title, "note": s.label, "start_unix_ms": s.start_unix_ms, "end_unix_ms": s.end_unix_ms, "roles": list(s.roles)}
                 for s, c in zip(self._plan.steps(), self.columns())

@@ -310,6 +310,48 @@ def range_picture(kind: str) -> PictureFor:
     return draw
 
 
+def correction_picture(kind: str) -> PictureFor:
+    """The spectral correction modes. ``none``: dots on a bell, ticks under them at even spacing (the commanded wavelengths); ``centroid``: the dots moved sideways off those ticks
+    (short arrows from tick to dot: the real centres of the bands); ``profile``: the dots sit a little under a taller bell, each with a bar under it (the band it averages over)."""
+
+    def draw(color: str) -> QPixmap:
+        pixmap, painter = _canvas()
+        ink = QColor(color)
+        marker = QColor(get_active_theme().accent_gold)
+        ticks = (2.5, 6.25, 10.0, 13.75, 17.5)  # even spacing: where the filter was told to be
+        shift = (0.0, 1.6, -1.2, 1.4, 0.0) if kind != "none" else (0.0,) * 5  # where its bands really are
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(ink, 1.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        if kind == "profile":
+            taller = QPainterPath(QPointF(1.5, 14.0))  # the underlying curve: higher and narrower than the dots show
+            taller.cubicTo(6.5, 14.0, 7.5, 1.5, 10.0, 1.5)
+            taller.cubicTo(12.5, 1.5, 13.0, 14.0, 18.5, 14.0)
+            painter.drawPath(taller)
+        else:
+            painter.drawPath(_bell_path())
+        painter.setPen(QPen(ink, 1.0))
+        for x in ticks:
+            painter.drawLine(QPointF(x, 18.6), QPointF(x, 19.8))
+        if kind == "centroid":
+            painter.setPen(QPen(marker, 1.1, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            for x, d in zip(ticks, shift):
+                if d:
+                    painter.drawLine(QPointF(x, 18.0), QPointF(x + d, 18.0))
+        if kind == "profile":
+            painter.setPen(QPen(marker, 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
+            for x, d in zip(ticks, shift):
+                painter.drawLine(QPointF(x + d - 1.5, 18.0), QPointF(x + d + 1.5, 18.0))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(ink)
+        rows = (16.5, 11.5, 5.5, 10.5, 16.0) if kind != "profile" else (16.8, 12.6, 7.0, 11.6, 16.4)
+        for x, d, y in zip(ticks, shift, rows):
+            painter.drawEllipse(QPointF(x + d, y), 1.4, 1.4)
+        painter.end()
+        return pixmap
+
+    return draw
+
+
 # -- the control -------------------------------------------------------------------------------------------------------------------
 
 
@@ -509,4 +551,4 @@ class PickMenu(QToolButton):
         super().setToolTip(f"{self._base_tip}\n{current}".strip())
 
 
-__all__ = ["PickMenu", "equation_picture", "fit_picture", "metric_picture", "ordinal_picture", "ordinal_suffix", "range_picture", "window_picture"]
+__all__ = ["PickMenu", "correction_picture", "equation_picture", "fit_picture", "metric_picture", "ordinal_picture", "ordinal_suffix", "range_picture", "window_picture"]

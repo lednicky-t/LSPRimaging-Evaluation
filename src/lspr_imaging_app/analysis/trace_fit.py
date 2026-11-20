@@ -44,6 +44,7 @@ from .gaussian_fit import solve_gaussian
 from .metric_range import range_centroid
 from .query import fit_and_metric, formula_spectrum, formula_values
 from .settings import MetricSettings
+from .spectral_passband import passband_vander
 from .template_shift import ReferenceTemplate, TemplateFit, build_template, fit_template_shift, response_law
 
 _FIT_ERRORS = (RuntimeError, ValueError, FloatingPointError, np.linalg.LinAlgError)
@@ -65,6 +66,9 @@ class TraceInput:
     usable: np.ndarray
     scanned: np.ndarray
     cube_indices: np.ndarray | None = None
+    passband: np.ndarray | None = None
+    """``[wavelength, order + 1]`` central moments of each wavelength's measured LCTF band (``spectral_passband``), aligned with ``wavelengths``, for the full-profile
+    spectral correction; None = no correction or the centroid one (``wavelengths`` then already are the bands' centres of gravity). Only the polynomial fit reads it."""
 
 
 BATCH_ROWS = 2000
@@ -104,7 +108,7 @@ def traces_from_inputs(
     min_points = 1 if method == "none" else 2  # read off the points, one point still has a maximum (and a "centroid": itself)
     per_cube = False  # every method is batched (the "no fit" metric too since 2026-11-02: it was one cube at a time, 2 s for 160 ROIs)
     template_here = 0.0  # seconds of the template shift in this call (not part of the preparation)
-    pending: dict[bytes, list[tuple[np.ndarray, np.ndarray, np.ndarray]]] = {}  # wavelengths -> (cube addresses, x, rows of values)
+    pending: dict[bytes, list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]]] = {}  # wavelengths (+ band moments) -> (cube addresses, x, rows of values, moments)
     for i, data in enumerate(inputs):
         wanted = data.scanned & data.usable.any(axis=1)
         if not wanted.any():
@@ -127,6 +131,7 @@ def traces_from_inputs(
         valid &= np.isfinite(wl)[None, :]
         order = np.argsort(wl, kind="stable")  # the points of every cube are fitted in wavelength order, as _windowed sorts them
         wl, values, valid = wl[order], values[:, order], valid[:, order]
+        moments_sorted = None if data.passband is None else np.asarray(data.passband, dtype=np.float64)[order]  # the band of each point travels with it
         valid = restrict_to_window(wl, values, valid, metric)  # the fit window: a fixed range, or each cube's own (fit_window.py)
         wanted_cubes = np.flatnonzero(wanted)
         patterns, inverse = row_patterns(valid[wanted_cubes])  # cubes with the same usable wavelengths fit together
@@ -135,7 +140,9 @@ def traces_from_inputs(
             x = wl[pattern]
             if x.size < min_points:
                 continue  # too few points: no fit, no metric (a gap)
-            pending.setdefault(x.tobytes(), []).append((offsets[i] + cubes, x, values[np.ix_(cubes, np.flatnonzero(pattern))]))
+            moments = None if moments_sorted is None else moments_sorted[pattern]
+            key = x.tobytes() + (b"" if moments is None else moments.tobytes())  # the same wavelengths with other bands are not one least-squares problem
+            pending.setdefault(key, []).append((offsets[i] + cubes, x, values[np.ix_(cubes, np.flatnonzero(pattern))], moments))
     t_fit = clock()
     t_ms["prep_ms"] += (t_fit - t_start - per_cube_here - template_here) * 1e3
     t_ms["per_cube_ms"] += per_cube_here * 1e3
@@ -147,7 +154,10 @@ def traces_from_inputs(
         rows = np.concatenate([item[2] for item in items])
         for start in range(0, rows.shape[0], BATCH_ROWS):
             here = address[start : start + BATCH_ROWS]
-            result = group_fit(x, rows[start : start + BATCH_ROWS], metric)
+            if group_fit is _polynomial_group:  # the only fit that reads the bands of the points (full-profile spectral correction)
+                result = _polynomial_group(x, rows[start : start + BATCH_ROWS], metric, items[0][3])
+            else:
+                result = group_fit(x, rows[start : start + BATCH_ROWS], metric)
             t_ms["batches"] += 1
             if result is None:
                 redo.append(here)
@@ -205,7 +215,8 @@ def _fill_per_cube(
         usable = data.usable[cube]
         if not usable.any():
             continue
-        spectrum = formula_spectrum(wavelengths[usable], data.sample[cube][usable], data.reference[cube][usable], formula_key)
+        passband = None if data.passband is None else np.asarray(data.passband, dtype=np.float64)[usable]
+        spectrum = formula_spectrum(wavelengths[usable], data.sample[cube][usable], data.reference[cube][usable], formula_key, passband=passband)
         try:
             _fit, x, _y = fit_and_metric(spectrum, metric, gaussian_fast_first=gaussian_fast_first, template=template)
         except _FIT_ERRORS:
@@ -329,8 +340,10 @@ def trapezoid_weights(grid: np.ndarray) -> np.ndarray:
     return np.stack([weights, weights * grid], axis=1)
 
 
-def _polynomial_group(x: np.ndarray, y: np.ndarray, metric: MetricSettings) -> tuple[np.ndarray, np.ndarray] | None:
-    """Fit ``y[c]`` (one row per cube) against the shared ``x`` (ascending, >= 2 points) and read off the metric.
+def _polynomial_group(x: np.ndarray, y: np.ndarray, metric: MetricSettings, moments: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray] | None:
+    """Fit ``y[c]`` (one row per cube) against the shared ``x`` (ascending, >= 2 points) and read off the metric. ``moments`` (``[point, order + 1]``): the central moments
+    of each point's measured band for the full-profile spectral correction (``spectral_passband``); the Vandermonde matrix is then the passband one and the polynomial
+    is the underlying curve, as in ``query.fit_polynomial``.
 
     Returns ``(good, found)``: per cube, whether the batch result can be trusted and the metric wavelength (NaN: this cube has no metric).
     None: the whole group must be done cube by cube."""
@@ -341,7 +354,7 @@ def _polynomial_group(x: np.ndarray, y: np.ndarray, metric: MetricSettings) -> t
     degree = min(max(int(metric.poly_order), 1), max(n // 2, 1))  # capped at half the point count (see query.fit_polynomial)
     half, middle = (x_max - x_min) / 2.0, (x_max + x_min) / 2.0
     t = (x - middle) / half
-    vander = np.polynomial.polynomial.polyvander(t, degree)
+    vander = np.polynomial.polynomial.polyvander(t, degree) if moments is None else passband_vander(x, moments, degree, middle, half)
     column_scale = np.sqrt(np.sum(vander * vander, axis=0))
     try:
         solution = np.linalg.lstsq(vander / column_scale, y.T, rcond=n * np.finfo(np.float64).eps)[0]
@@ -433,6 +446,16 @@ def formula_arrays(data: TraceInput, formula_key: str) -> tuple[np.ndarray, np.n
     wanted = data.scanned & data.usable[:, keep].any(axis=1)
     valid = data.usable[:, keep] & np.isfinite(values) & wanted[:, None]
     return wl[keep], values, valid, wanted
+
+
+def sorted_band_moments(data: TraceInput) -> np.ndarray | None:
+    """The bands' central moments of ``data`` in the order ``formula_arrays`` returns its wavelengths (ascending, non-finite dropped), or None without a full-profile correction."""
+    if data.passband is None:
+        return None
+    wl = np.asarray(data.wavelengths, dtype=np.float64)
+    keep = np.flatnonzero(np.isfinite(wl))
+    keep = keep[np.argsort(wl[keep], kind="stable")]
+    return np.asarray(data.passband, dtype=np.float64)[keep]
 
 
 def _reference_cubes(data: TraceInput, metric: MetricSettings, wanted: np.ndarray) -> np.ndarray:

@@ -125,6 +125,7 @@ Layout, ribbons, preferences, and what runs on the GUI thread.
 - [`scrolling_ribbons_plan_2026-10-24.md`](scrolling_ribbons_plan_2026-10-24.md): Panels narrower than their control rows: scrolling ribbons (analysis, 2026-10-24)
 - [`preferences_dialog_2026-10-19.md`](preferences_dialog_2026-10-19.md): Edit -> Preferences (2026-10-19)
 - [`refractive_indices_2026-11-12.md`](refractive_indices_2026-11-12.md): RIs.txt import, one RI per solution, session schema 1.7 (2026-11-12)
+- [`spectral_correction_2026-11-20.md`](spectral_correction_2026-11-20.md): the measured LCTF passbands: None / Centroid / Full profile, the maths, import, session schema 1.13, measurements, temperature to do (2026-11-20)
 - [`workflow_panel_retired_2026-11-11.md`](workflow_panel_retired_2026-11-11.md): Workflow panel removed; File menu + Dataset Manager (2026-11-11)
 - [`menu_icons_2026-11-19.md`](menu_icons_2026-11-19.md): Icons in every menu from one table (`panels/menu_icons.py`), Ctrl+G / Ctrl+Shift+G for Group / Ungroup, the "Rectangle size..." entry removed (2026-11-19)
 - [`keyboard_shortcut_registry_design_2026-10-30.md`](keyboard_shortcut_registry_design_2026-10-30.md): Keyboard shortcut registry: one table that binds the keys and builds the list (2026-10-30) *(built 2026-10-30)*

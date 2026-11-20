@@ -58,6 +58,7 @@ from .frame_reduce import RoiSet
 from .scan_arrays import ScanArrays
 from .scan_fingerprint import recipe_digest, recipe_json, recipe_of, stamped_by_previous_formula
 from .scan_jobs import WAVELENGTH_KEY_DECIMALS, ScanPlan
+from .spectral_passband import CorrectionAxis
 
 logger = logging.getLogger(__name__)
 
@@ -98,10 +99,32 @@ class StoredScan:
     layout_id: np.ndarray
     recipes: dict[int, str] = field(default_factory=dict)
     layouts: dict[int, str] = field(default_factory=dict)
+    spectral: CorrectionAxis | None = None
+    """The spectral correction the display applies (2026-11-20, ``spectral_passband.py``): None = none, the nominal wavelengths. Never read from the file: ``ScanResultsModule``
+    puts it on the display's copy, so a changed correction is a different object (every cache that keys on the object's identity misses) and the file's own object, which the
+    staleness check compares with, is untouched. ``wavelength_nm`` stays the nominal axis (hashes, plan matching); only the spectrum builders read ``abscissa_nm``."""
 
     def computed(self) -> np.ndarray:
         """bool [cube, roi]: the cell was written completely."""
         return self.cell_hash != 0
+
+    def abscissa_nm(self) -> np.ndarray:
+        """The x value of each wavelength of the scan for a spectrum: the nominal wavelength, or the centre of gravity of its measured band under a spectral correction."""
+        if self.spectral is None:
+            return np.asarray(self.wavelength_nm, dtype=np.float64)
+        return self.spectral.x_nm
+
+    def passband_moments(self) -> np.ndarray | None:
+        """``[wavelength, order + 1]`` central moments of each band when the correction is the full profile, else None."""
+        return None if self.spectral is None else self.spectral.moments
+
+    def spectral_info(self) -> dict:
+        """The spectral correction as plain data for the record beside an exported table (``{"mode": "none"}`` without one)."""
+        return {"mode": "none"} if self.spectral is None else dict(self.spectral.info)
+
+    def spectral_key(self) -> str:
+        """Part of every cache key: what the spectral correction is (``none`` when there is none)."""
+        return "none" if self.spectral is None else self.spectral.key
 
 
 def _shape_json(shape) -> dict:

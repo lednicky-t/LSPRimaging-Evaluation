@@ -129,7 +129,11 @@ from ..domain.roi_shapes import NO_BORDER, Border, Circle, MaskShape, Rectangle,
 logger = logging.getLogger(__name__)
 
 SESSION_SCHEMA_NAME = "lspri_rewrite_session"
-SESSION_SCHEMA_VERSION = "1.12"
+SESSION_SCHEMA_VERSION = "1.13"
+# 1.13 (2026-11-20): optional "spectral_correction" block - the spectral correction of the LCTF passbands (selection/spectral_correction_module.py,
+# analysis/spectral_passband.py): {"mode": "none" | "centroid" | "profile", "file": the table's HDF5 file inside the session folder, "sha256" of the imported sweep,
+# "source_name", "illumination" (free text), "imported_at"}. The rows themselves are in spectral_correction/spectral_correction.h5 (schema lspri_spectral_correction 1.0),
+# not in this file. Written only when a table was imported; a 1.12 file has none and loads with no correction, an older build ignores the block.
 # 1.12 (2026-11-18): a ROI no longer has loose "sample_diameter_px" / "sample_geometry_type" / "sample_mask" / "reference_*" fields. It has "shape" ({"kind": "circle",
 # "diameter_px"} | {"kind": "rectangle", "width_px", "height_px", "angle_deg"} | {"kind": "mask", "mask": ...}) and, only when it has one of its own, "border" ({"gap_px",
 # "thickness_px", "enabled"}: the built-in reference region, measured from the shape's edge; absent = follow the shared default), domain/roi_shapes.py. The timeline's entries
@@ -519,6 +523,7 @@ class SessionState:
     mask_pointers: MaskPointersState = field(default_factory=MaskPointersState)
     plan_edits: PlanEditsState = field(default_factory=PlanEditsState)
     refractive_index: RiTable | None = None  # the imported RIs.txt (None: none imported)
+    spectral_correction: dict | None = None  # the "spectral_correction" block as plain data (schema 1.13); None: no table
     mask_versions: dict[MaskChange, int] = field(default_factory=dict)
     """Only filled by `load_session`: which file version each mask change was read from, for
     `SessionWriter.seed`. Not part of the saved format, and empty in a state captured from the modules (it says
@@ -813,6 +818,7 @@ def prepare_session(state: SessionState, naming: FrameNamingScheme) -> PreparedS
         "frames": asdict(state.frame_roles),
         "plan": state.plan_edits.to_payload(),
         **({} if state.refractive_index is None else {"refractive_index": state.refractive_index.to_payload()}),
+        **({} if state.spectral_correction is None else {"spectral_correction": dict(state.spectral_correction)}),
         "mask_pointers": None,  # filled in by `SessionWriter.write` from `PreparedSession.mask_pointers`
         "selection": {
             "cube_index": int(state.selected_cube),
@@ -925,7 +931,17 @@ def load_session(
         mask_pointers=mask_pointers_from_payload(payload.get("mask_pointers")),
         plan_edits=PlanEditsState.from_payload(payload.get("plan")),
         refractive_index=_decode_ri_table(payload.get("refractive_index")),
+        spectral_correction=_decode_spectral_block(payload.get("spectral_correction")),
     )
+
+
+def _decode_spectral_block(raw: object) -> dict | None:
+    """Lenient like the RI block: anything but a dict with a file name is dropped (the rest of the session still loads)."""
+    if isinstance(raw, dict) and isinstance(raw.get("file"), str) and raw["file"]:
+        return dict(raw)
+    if raw is not None:
+        logger.warning("The session's spectral_correction block could not be read; it was left out")
+    return None
 
 
 def _decode_ri_table(raw: object) -> RiTable | None:

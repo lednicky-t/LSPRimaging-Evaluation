@@ -108,7 +108,8 @@ def prepare_spectra(
     except ValueError:
         return [RoiSpectrum(r, empty, empty, empty, note="This cube is not in the scan file.") for r in request.roi_ids]
     mean = stored.values[_primary_method(stored)]
-    wavelengths = np.asarray(stored.wavelength_nm, dtype=np.float64)
+    wavelengths = stored.abscissa_nm()  # under a spectral correction: where the light of each point really is (the nominal wavelengths without one)
+    band_moments = stored.passband_moments()  # the full profile's bands (None otherwise)
     metric = request.metric
     rows: dict[int, int] = {}
     for row, stored_id in enumerate(stored.roi_ids):
@@ -130,7 +131,7 @@ def prepare_spectra(
         if not usable.any():
             out.append(RoiSpectrum(roi_id, empty, empty, empty, n_missing=n_missing, note=why_no_reference.get(roi_id) or "No wavelength has a value for this ROI."))
             continue
-        spectrum = formula_spectrum(wavelengths[usable], sample[usable], reference[usable], request.formula_key)
+        spectrum = formula_spectrum(wavelengths[usable], sample[usable], reference[usable], request.formula_key, passband=None if band_moments is None else band_moments[usable])
         errors = formula_errors(
             spectrum.sample_values, spectrum.reference_values,
             standard_error(stored.std[cube_row, row, :, SAMPLE][usable], n_sample[usable]),
