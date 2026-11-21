@@ -199,20 +199,22 @@ def area_selection_to_raw(
     mask edits are authored in (see `histogram_highlight_mask_to_raw`, which
     does the actual coordinate mapping).
 
-    That mapping scatters each processed pixel onto its nearest raw pixel, so
-    under rotation a few raw pixels inside the region are never hit and would
-    be left as 1-pixel holes. A 3x3 binary closing fills them. Precision limit,
-    stated plainly: the region's edge in raw space is accurate to about one
-    pixel under rotation (exact with no rotation). Raw pixels the processed
-    image does not show (cropped away) are never editable."""
-    from scipy.ndimage import binary_closing
+    **The selection is copied as it is, with no morphology** (maintainer,
+    2026-11-21): without a rotation, flip or crop the result is exactly the
+    region, pixel for pixel, including the outermost row and columns. (Until
+    2026-11-21 a 3x3 binary closing followed. It filled the 1-pixel gaps of
+    the scatter below, but scipy's erosion counts everything outside the
+    array as empty, so it also stripped the 1-pixel border of every
+    selection that touched the image edge: the bottom row could never be
+    masked.) Closing a mask is something the user does with the Close tool.
 
-    raw = histogram_highlight_mask_to_raw(
-        region.astype(np.float32), 0.5, None, raw_shape, geometry_settings
-    )
-    if not raw.any():
-        return raw
-    return binary_closing(raw, structure=np.ones((3, 3), dtype=bool))
+    Under a rotation the mapping scatters each processed pixel onto its
+    nearest raw pixel, so a few raw pixels inside the region are never hit and
+    stay as isolated 1-pixel gaps (measured on a solid selection: 0.1 % of its
+    area at 1.5 degrees, 2.5 % at 10 degrees). The region's edge in raw space
+    is also accurate to about one pixel there. Raw pixels the processed image
+    does not show (cropped away) are never editable."""
+    return histogram_highlight_mask_to_raw(region.astype(np.float32), 0.5, None, raw_shape, geometry_settings)
 
 
 def estimate_background_image(
