@@ -9,7 +9,8 @@ mode, because the End row only applies to the wavelengths mode.
 - **End**: two exclusive icons, a cube (the show stays in its cube) and a stack
   (the whole dataset). Greyed out unless the mode is "every wavelength", where the end is
   always the last cube.
-- **Skip**: two toggles, ignored frames (eye-off) and the dark background frame (moon).
+- **Skip**: two toggles, ignored frames (eye-off) and the dark background frame (moon). They rule the show, Previous / Next and, since
+  2026-11-21, scrolling the Cube and wavelength sliders by hand (`slider_skip.py`).
 - **Repeat**: a repeat-arrows toggle.
 
 An active icon takes the accent colour, like the Ignore / Dark icons in
@@ -41,8 +42,10 @@ class SlideshowSettingsPanel(QWidget):
         self._end_cube =self._button(True, "End of the show = the last frame of the cube it is in.")
         self._end_dataset = self._button(True, "End of the show = the last frame of the dataset.")
         self._repeat = self._button(True, "Repeat: start again at the beginning instead of stopping.")
-        self._skip_ignored = self._button(True, "Skip ignored frames: leave them out of the show.")
-        self._skip_dark = self._button(True, "Skip the dark background frame (LED off): leave it out of the show.")
+        self._skip_ignored = self._button(True, "Skip ignored frames: leave them out of the show and out of the Cube / wavelength sliders' scrolling.")
+        self._skip_dark = self._button(
+            True, "Skip the dark background frame (LED off): leave it out of the show and out of the Cube / wavelength sliders' scrolling."
+        )
         self._calm_histogram = self._button(
             True,
             "Calm histogram: update the Histogram at most once a second while playing "

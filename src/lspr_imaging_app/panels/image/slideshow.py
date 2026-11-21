@@ -25,7 +25,8 @@ Settings (``SlideshowSettings``):
   the end is always the last cube.
 
 Ignored frames and dark frames can each be left out (``skip_ignored``, default on;
-``skip_dark``, default off: the dark frame is a real image).
+``skip_dark``, default off: the dark frame is a real image). The same two settings also rule scrolling the Cube and wavelength
+sliders by hand (2026-11-21, ``slider_skip.py``).
 
 **Mask states** (``MODE_MASK_STATES``, 2026-10-16) work the same way over the marks of the Mask row under the Cube slider.
 **Events** (``MODE_EVENTS``, 2026-10-17): the same over the cubes with a pointer of the Mask-tab scan that is not dismissed.
@@ -278,11 +279,15 @@ class SlideshowController(QObject):
             int(self._selection.current_cube()), float(self._selection.current_wavelength())
         )
 
-    def _is_skipped(self, cube: int, wavelength: float) -> bool:
+    def is_skipped(self, cube: int, wavelength: float) -> bool:
+        """Whether the show leaves this frame out, by the Skip settings as they are now. The Cube and wavelength sliders ask the same
+        question when they are scrolled by hand (`slider_skip.py`, 2026-11-21), so one setting rules both."""
         if self._roles is None:
             return False
         role = self._roles.role_of(cube, wavelength)
         return (role == ROLE_IGNORED and self._settings.skip_ignored) or (role == ROLE_DARK and self._settings.skip_dark)
+
+    _is_skipped = is_skipped  # the name the stepping code below was written with
 
     def play(self) -> None:
         """Start from the current frame; from the end of the range, start over."""

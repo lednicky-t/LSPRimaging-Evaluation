@@ -25,6 +25,7 @@ from .data_axis_slider import DataAxisSlider
 from .paint_census import PaintCensus
 from .play_repaint import PlayRepaint
 from .slider_marks import SliderMarks
+from .slider_skip import cube_index_filter, wavelength_index_filter
 from .render import RenderResult
 from .mark_colors import cube_color, wavelength_color
 from .mask_rows import MaskRows
@@ -195,6 +196,10 @@ def build_navigation_bar(panel: ImagePanel) -> None:
     panel._slideshow = SlideshowController(
         panel._dataset, panel._selection, panel._frame_roles, panel, state_cubes=panel._state_cubes_for_mode
     )
+    # The slideshow's Skip settings rule scrolling the sliders by hand too (2026-11-21): a drag, the wheel and the keys leave out the
+    # ignored / dark frames; a click on a mark of the ROI or Mask row still lands exactly where it was asked.
+    panel._cube_slider.set_index_filter(cube_index_filter(panel._dataset, panel._selection, panel._slideshow))
+    panel._wavelength_slider.set_index_filter(wavelength_index_filter(panel._dataset, panel._selection, panel._slideshow))
     panel._slider_ribbon.set_roi_row(True, False)  # the defaults; `restore_ui_state` puts back what was saved
     panel._slider_ribbon.roi_row_toggled.connect(panel._slider_marks.on_roi_row_toggled)
     panel._slider_ribbon.roi_selected_only_toggled.connect(panel._slider_marks.on_roi_selected_only_toggled)

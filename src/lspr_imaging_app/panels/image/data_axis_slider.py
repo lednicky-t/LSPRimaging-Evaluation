@@ -54,6 +54,7 @@ from PyQt6.QtWidgets import QAbstractSlider, QMenu, QSlider, QWidget
 from lspr_ui import get_active_theme
 
 from ..menu_icons import give_icon
+from .slider_skip import IndexFilter
 
 # Room for half of the widest first/last tick label (e.g. "0:00") so it isn't clipped.
 SIDE_INSET = 14.0
@@ -317,6 +318,8 @@ class DataAxisSlider(QSlider):
     def __init__(self, orientation: Qt.Orientation = Qt.Orientation.Horizontal, parent: QWidget | None = None) -> None:
         super().__init__(orientation, parent)
         self._edge_wheel = 0  # wheel angle units turned against an end of the slider, not yet worth a step (touchpads)
+        self._index_filter: IndexFilter | None = None  # `set_index_filter`
+        self.actionTriggered.connect(self._filter_user_action)
         self._tick_values: list[float] = []
         self._major_labels: dict[int, str] = {}
         self._cached_tick_indices: frozenset[int] | None = None
@@ -334,6 +337,39 @@ class DataAxisSlider(QSlider):
         self._window = AxisWindow(self)
         self._window.changed.connect(self.update)
         self.setFixedHeight(32)
+
+    # -- positions the owner leaves out (2026-11-21, `slider_skip.py`) ------------------------------------------------
+
+    def set_index_filter(self, index_filter: IndexFilter | None) -> None:
+        """Let the owner rule which positions this slider's own gestures may land on (the frames the slideshow skips). The filter gets
+        ``(requested, current, first, last, absolute)`` and returns the index to use; ``absolute`` is a press or drag on the track, not a
+        step. Only the slider's gestures are filtered: `setValue` from code lands where it is told (a click on a mark of the ROI
+        row, "Go to reference"). The widget still knows nothing about cubes or wavelengths."""
+        self._index_filter = index_filter
+
+    def _filtered(self, requested: int, *, absolute: bool) -> int:
+        if self._index_filter is None:
+            return requested
+        return int(self._index_filter(int(requested), self.value(), self.minimum(), self.maximum(), absolute))
+
+    def _filter_user_action(self, _action: int) -> None:
+        """The wheel, the arrow / page keys and Home / End reach here with the handle's new position already asked for (`sliderPosition`)
+        and the value not yet changed: replace the position, and Qt goes on to set the value from it."""
+        if self._index_filter is None:
+            return
+        asked = self.sliderPosition()
+        allowed = self._filtered(asked, absolute=False)
+        if allowed != asked:
+            self.setSliderPosition(allowed)
+
+    def _step_is_blocked(self, direction: int) -> bool:
+        """Whether one step in ``direction`` cannot move the handle: it is at that end of the slider, or the filter leaves nothing
+        allowed on the way. Turning the wheel on against such a step asks the owner to go on past it (`edge_step_requested`)."""
+        value = self.value()
+        at_end = value >= self.maximum() if direction > 0 else value <= self.minimum()
+        if at_end:
+            return True
+        return self._index_filter is not None and self._filtered(value + direction, absolute=False) == value
 
     # -- zoom ------------------------------------------------------------------------------------------
 
@@ -672,7 +708,7 @@ class DataAxisSlider(QSlider):
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         if event.button() == Qt.MouseButton.LeftButton and self.isEnabled():
             self._window.hold(self)  # the axis stands still under the pointer until the button is up
-            self.setValue(self._index_from_x(event.position().x()))
+            self.setValue(self._filtered(self._index_from_x(event.position().x()), absolute=True))
             event.accept()
             return
         if event.button() == Qt.MouseButton.MiddleButton and self.isEnabled():  # a drag with it pans the zoomed axis
@@ -684,7 +720,7 @@ class DataAxisSlider(QSlider):
 
     def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
         if event.buttons() & Qt.MouseButton.LeftButton and self.isEnabled():
-            self.setValue(self._index_from_x(event.position().x()))
+            self.setValue(self._filtered(self._index_from_x(event.position().x()), absolute=True))
             event.accept()
             return
         if event.buttons() & Qt.MouseButton.MiddleButton and self._window.drag_pan(event.position().x(), self.width()):
@@ -731,8 +767,8 @@ class DataAxisSlider(QSlider):
         if event.modifiers() != Qt.KeyboardModifier.NoModifier or not delta:
             return False
         direction = 1 if delta > 0 else -1  # up = higher value, as QSlider's own wheel
-        at_end = self.value() >= self.maximum() if direction > 0 else self.value() <= self.minimum()
-        if not at_end:
+        if not self._step_is_blocked(direction):  # at the end, or (with a filter) nothing allowed lies that way
+            # (2026-11-21: with Skip on, the last allowed frame is an end even when skipped ticks follow it)
             self._edge_wheel = 0
             return False
         if self._edge_wheel * direction < 0:  # turned the other way since: start counting again
