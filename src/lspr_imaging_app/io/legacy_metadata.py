@@ -77,7 +77,10 @@ def _find_case_insensitive(folder: Path, name: str) -> Path | None:
         return direct
     lowered = name.lower()
     for entry in folder.iterdir():
-        if entry.is_file() and entry.name.lower() == lowered:
+        # Compare the name first: `is_file()` asks the disk about each entry, and a TIFF stack folder holds tens of thousands of
+        # them (71,685 files on a slow drive took ~26 ms each, an hour per name, 2026-11-20). A name that does not match never
+        # needs the question.
+        if entry.name.lower() == lowered and entry.is_file():
             return entry
     return None
 

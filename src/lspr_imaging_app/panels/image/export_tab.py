@@ -71,6 +71,7 @@ from ...storage.ui_state_keys import EXPORT_SHARD, read
 from ..ribbon_fields import style_ribbon_number_field
 from ..ribbon_group import labeled_icon_group, ribbon_separator
 from ..ui_state import UiStateStore
+from . import export_preflight
 from .chunk_style_picker import ChunkStylePicker, style_icon
 from .export_roi_layout import ExportRoiLayout, gather_export_roi_layout
 from .general_group import ICON_SIZE, style_general_icon_button
@@ -635,6 +636,8 @@ class ExportTab(QWidget):
         )
         if not parent_dir:
             return
+        if not self._check_layout_for_drive(Path(parent_dir)):  # before the folder name: it says which layout the export uses
+            return
         destination = Path(parent_dir) / self._build_export_folder_name(home)
         layout, _roi_layout = self.current_layout()
         frame = self._current_frame()
@@ -657,6 +660,35 @@ class ExportTab(QWidget):
             self._report(f"Export: {exc}")
             return
         self._set_exporting(True)
+
+    def _check_layout_for_drive(self, parent_dir: Path) -> bool:
+        """The check before a long export (2026-11-20, `export_preflight.py`): will it fit on the chosen drive, is its file layout
+        slow there? A dialog appears only when there is something to say. False = the user cancelled. The Cube answer is put on
+        the Shard control, so what is exported is what the control says."""
+        shape = self._export_shape()
+        if shape is None or self._image_dtype is None:
+            return True
+        frame = self._current_frame()
+        height, width = (frame.height, frame.width) if frame is not None else shape
+        layout, _roi_layout = self.current_layout()
+        pre = export_preflight.assess(
+            parent_dir,
+            n_cubes=len(self._dataset_module.spectral_cubes()),
+            n_wavelengths=len(self._dataset_module.wavelengths()),
+            height=int(height), width=int(width), itemsize=int(self._image_dtype.itemsize),
+            chunk_h=layout.chunk_h, chunk_w=layout.chunk_w,
+            shard_mode=self._shard_button.mode(), compressed=self._compression_button.isChecked(),
+        )
+        if pre is None or not pre.needs_dialog:
+            return True
+        choice = export_preflight.ask(self, pre)
+        if choice is None:
+            self._report("Export cancelled at the layout check.")
+            return False
+        if choice != self._shard_button.mode():
+            self._shard_button.set_mode(choice)
+            self._report(f"Shard set to Cube for this drive: {pre.cube.files:,} files instead of {pre.current.files:,}.")
+        return True
 
     def _prepare_session_carry(self, frame: cp.ExportFrame | None) -> bool:
         """Remember the session as it is now, if it is to go with this export. The transform is what the export itself applies:

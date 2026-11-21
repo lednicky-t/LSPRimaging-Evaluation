@@ -42,7 +42,7 @@ from lspr_io import is_imaging_measurement_file, read_imaging_acquisition_metada
 # yet (not named in sketch §10 - flag this when revisiting).
 from lspr_imaging_app.domain.exclusions import ImageExclusionRule, is_excluded
 from lspr_imaging_app.io.image_naming import IMAGE_PATTERN
-from lspr_imaging_app.io.legacy_metadata import find_and_import_legacy_metadata, find_legacy_metadata_files
+from lspr_imaging_app.io.legacy_metadata import find_legacy_metadata_files, import_legacy_imaging_metadata
 from lspr_imaging_app.io.metadata_import import import_metadata_files
 from lspr_imaging_app.io.pump_plan import attach_pump_plan, find_pump_plan_csv
 from lspr_imaging_app.storage.workspace import (
@@ -62,6 +62,7 @@ from lspr_imaging_app.image_tools.geometry.transform import (
 
 from lspr_imaging_app.applog.events import emit_timing, log_event
 from ..export_stats import ExportStats
+from ..progress import ProgressCallback, StageProgress
 from .model import ImageDataset, ImageKey, ImageRecord, compact_dataset_image_timings, rehydrated_acquisition_metadata
 from .ome_metadata import (
     build_axes,
@@ -143,17 +144,26 @@ def experimental_data_dir(dataset_folder: Path) -> Path:
     return dataset_folder / EXPERIMENTAL_DATA_DIRNAME
 
 
-def load_acquisition_metadata(dataset_folder: Path) -> ImagingAcquisitionMetadata | None:
+def _no_step(_fraction: float, _message: str) -> None:
+    return None
+
+
+def load_acquisition_metadata(dataset_folder: Path, *, step: ProgressCallback | None = None) -> ImagingAcquisitionMetadata | None:
     """`_load_acquisition_metadata_sources` plus the experiment steps (`metadata.plan`): a plan that came with the
     metadata (a sidecar saved by this version) is kept when it already has its device settings. Otherwise the
     pump-plan CSV found near the dataset (`find_pump_plan_csv`) is joined to the measured steps, and without one the
     steps are built from the measured notes alone. A plan file that cannot be read is logged and skipped, the metadata
-    still loads. Nothing is written here; the sidecar picks the plan up the next time the metadata is saved."""
-    metadata = _load_acquisition_metadata_sources(dataset_folder)
+    still loads. Nothing is written here; the sidecar picks the plan up the next time the metadata is saved.
+
+    `step(fraction, message)`, when given, is told which search or read is starting (fraction of this function, 0..1), so a
+    slow disk shows where the time goes. It is also the caller's cancellation checkpoint: it may raise `progress.Cancelled`."""
+    say = step or _no_step
+    metadata = _load_acquisition_metadata_sources(dataset_folder, say)
     if metadata is None:
         return None
     if metadata.plan is not None and metadata.plan.source_file is not None:
         return metadata
+    say(0.9, "looking for the pump-plan file")
     plan_csv = find_pump_plan_csv(dataset_folder)
     try:
         metadata, notes = attach_pump_plan(metadata, plan_csv)
@@ -165,7 +175,7 @@ def load_acquisition_metadata(dataset_folder: Path) -> ImagingAcquisitionMetadat
     return metadata
 
 
-def _load_acquisition_metadata_sources(dataset_folder: Path) -> ImagingAcquisitionMetadata | None:
+def _load_acquisition_metadata_sources(dataset_folder: Path, say: ProgressCallback = _no_step) -> ImagingAcquisitionMetadata | None:
     """Load whatever camera/illumination/cube-timing metadata is available
     for `dataset_folder`, checking sources in order:
 
@@ -186,6 +196,7 @@ def _load_acquisition_metadata_sources(dataset_folder: Path) -> ImagingAcquisiti
     5. None - most datasets (including every OME-Zarr export made before
        this existed) have none of the above, which is not an error.
     """
+    say(0.0, "looking for saved metadata")
     sidecar_path = acquisition_metadata_sidecar_path(dataset_folder)
     if sidecar_path.exists():
         try:
@@ -202,12 +213,20 @@ def _load_acquisition_metadata_sources(dataset_folder: Path) -> ImagingAcquisiti
             except ValueError:
                 pass  # nothing recognized in there - fall through to the other sources
 
+    say(0.2, "looking for a measurement file (.h5) near the images")
     native_path = find_native_imaging_measurement_file(dataset_folder)
     if native_path is not None:
+        say(0.4, f"reading {native_path.name}")
         metadata = read_imaging_acquisition_metadata(native_path)
         if metadata is not None:
             return metadata
-    return find_and_import_legacy_metadata(dataset_folder)
+    say(0.4, "searching for metaData.txt and measureing_times.csv near the images")
+    legacy_pair = find_legacy_metadata_files(dataset_folder)
+    if legacy_pair is None:
+        return None
+    csv_path, txt_path = legacy_pair
+    say(0.6, f"reading {csv_path.name} ({csv_path.stat().st_size / 1e6:.1f} MB) from {csv_path.parent.name}")
+    return import_legacy_imaging_metadata(csv_path, txt_path)
 
 
 def _has_tiff_stack(folder: Path) -> bool:
@@ -373,10 +392,33 @@ def resolve_remembered_dataset_choice(choice: DatasetLoadChoice) -> ImageDataset
     return None
 
 
-def load_dataset(folder: Path) -> ImageDataset | DatasetLoadChoice:
+_LOAD_STAGE_WEIGHTS = {"images": 1.7, "metadata": 1.3}
+"""Shares of the load's progress bar, from the measured times of the 71,685-image LED_V2 dataset on a warm disk
+(finding the images 1.7 s, reading the metadata 1.3 s; 2026-11-20). A cold or slow disk changes the split, not the order."""
+
+
+def _found_message(candidates: list[ImageDataset]) -> str:
+    if len(candidates) > 1:
+        return f"found {len(candidates)} datasets to choose from"
+    only = candidates[0]
+    return f"found {len(only.records):,} images in {only.folder.name}"
+
+
+def load_dataset(
+    folder: Path,
+    *,
+    progress: ProgressCallback | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> ImageDataset | DatasetLoadChoice:
     """Load `folder` as an `ImageDataset`, auto-detecting the format and
     searching one level deep for it if `folder` doesn't directly hold one
     (see `discover_dataset_candidates`).
+
+    `progress(fraction, message)` and `cancelled()` (both optional) follow the project's heavy-work rule
+    (`progress.py`): the message says which step is under way ("looking for images in ...", "searching for
+    metaData.txt ...", "reading measureing_times.csv ..."), and `cancelled()` is checked at every report, so a
+    cancel ends the load at the next step by raising `progress.Cancelled`. A single directory listing cannot be
+    interrupted, so a cancel waits for the one that is running.
 
     Returns a `DatasetLoadChoice` instead of a single `ImageDataset` when
     more than one candidate is found (e.g. a TIFF-stack subfolder *and* an
@@ -395,12 +437,16 @@ def load_dataset(folder: Path) -> ImageDataset | DatasetLoadChoice:
     lands next to those metadata files instead of inside a discovered
     TIFF/OME-Zarr subfolder.
     """
+    stages = StageProgress(_LOAD_STAGE_WEIGHTS, progress, cancelled)
+    stages("images", 0.0, f"looking for images in {folder.name}")
     candidates = discover_dataset_candidates(folder)
     if not candidates:
         raise FileNotFoundError(
             f"No TIFF image stack or OME-Zarr dataset found in {folder} or its immediate subfolders."
         )
-    metadata = load_acquisition_metadata(folder)
+    stages("images", 1.0, _found_message(candidates))
+    metadata = load_acquisition_metadata(folder, step=lambda fraction, message: stages("metadata", fraction, message))
+    stages("metadata", 1.0, "acquisition metadata read" if metadata is not None else "no acquisition metadata found")
     if len(candidates) > 1:
         return DatasetLoadChoice(parent_folder=folder, candidates=candidates, acquisition_metadata=metadata)
     dataset = candidates[0]
@@ -1279,6 +1325,12 @@ def _export_ome_zarr_dataset_to_path(
                 planes_written += images
                 result = future.result()
                 shard_bytes_written += int(result.bytes_written)
+                if export_stats is not None:
+                    # As results arrive, not only at the end: a cancelled export keeps its numbers (the log's `dataset.export_stages`).
+                    export_stats.planes, export_stats.bytes_written = planes_written, shard_bytes_written
+                    export_stats.add_stage_seconds(
+                        result.read_s, result.compress_s, getattr(result, "mkdir_s", 0.0), result.write_s
+                    )
                 with progress_lock:
                     completed_units = min(total_units, completed_units + result.n_inner)
                 off_step_planes += int(getattr(result, "off_step_planes", 0))

@@ -29,6 +29,36 @@ class ExportStats:
     (a job too short to tune). Empty: not recorded."""
     seconds: float = 0.0
     """Wall time of the whole export, from start to the last file."""
+    read_s: float = 0.0
+    encode_s: float = 0.0
+    folder_s: float = 0.0
+    write_s: float = 0.0
+    """Where the workers' time went (2026-11-20), each summed over every worker and every shard so far: reading + decoding + rotating the
+    source, encoding the chunks, making the shard's folders, writing the file. Filled as results arrive, so a cancelled export has
+    them too. Worker seconds, not wall seconds: with 7 workers they add up to about 7 x the wall time."""
+
+    def add_stage_seconds(self, read_s: float, encode_s: float, folder_s: float, write_s: float) -> None:
+        self.read_s += float(read_s)
+        self.encode_s += float(encode_s)
+        self.folder_s += float(folder_s)
+        self.write_s += float(write_s)
+
+    def stage_ms_per_image(self) -> dict[str, float]:
+        """Mean worker milliseconds per image for each stage; empty before anything was written."""
+        if self.planes <= 0 or (self.read_s + self.encode_s + self.folder_s + self.write_s) <= 0:
+            return {}
+        scale = 1000.0 / self.planes
+        return {"read_ms": self.read_s * scale, "encode_ms": self.encode_s * scale, "folders_ms": self.folder_s * scale, "write_ms": self.write_s * scale}
+
+    def stage_line(self) -> str:
+        """"Worker time per image: reading + rotating 352 ms, encoding 2 ms, making folders 1,516 ms, writing 49 ms." ("" when unknown)."""
+        stages = self.stage_ms_per_image()
+        if not stages:
+            return ""
+        return (
+            f"Worker time per image: reading + rotating {stages['read_ms']:,.0f} ms, encoding {stages['encode_ms']:,.0f} ms, "
+            f"making folders {stages['folders_ms']:,.0f} ms, writing {stages['write_ms']:,.0f} ms."
+        )
 
     @property
     def uncompressed_bytes(self) -> int:
@@ -56,7 +86,7 @@ class ExportStats:
         return text
 
     def describe(self) -> str:
-        """Two lines for the "open the exported dataset?" box."""
+        """Two lines for the "open the exported dataset?" box, and a third with the stage times when they are known."""
         first = f"Export took {format_duration(self.seconds)}"
         if self.planes and self.seconds > 0:
             rate = self.planes_per_second
@@ -68,11 +98,12 @@ class ExportStats:
         if self.workers > 0 and self.worker_mode:
             first += f" Used {self.workers} worker{'s' if self.workers != 1 else ''} ({self.worker_mode})."
         if self.bytes_written > 0 and self.uncompressed_bytes > 0:
-            return (
+            first = (
                 f"{first}\nWrote {format_bytes(self.bytes_written)} to disk, {100 * self.size_ratio:.0f} % of the "
                 f"{format_bytes(self.uncompressed_bytes)} uncompressed."
             )
-        return first
+        stage_line = self.stage_line()
+        return f"{first}\n{stage_line}" if stage_line else first
 
 
 def format_duration(seconds: float) -> str:

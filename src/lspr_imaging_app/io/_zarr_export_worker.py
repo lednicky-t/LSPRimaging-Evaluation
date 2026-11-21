@@ -156,6 +156,7 @@ class ShardWriteResult:
     compress_s: float     # Blosc tile encode (pure CPU)
     write_s: float         # shard file write
     off_step_planes: int = 0  # planes rounded to whole counts because their source was not on `value_step`
+    mkdir_s: float = 0.0   # making the shard's folders (2026-11-20: 79 % of an export to an exFAT USB drive; not part of write_s)
 
 
 def _load_image(path_str: str) -> np.ndarray:
@@ -308,7 +309,9 @@ def write_shard(spec: ShardWriteSpec) -> ShardWriteResult:
     index_bytes = index.tobytes()
 
     shard_path = Path(spec.shard_path)
+    _t0 = time.perf_counter()
     shard_path.parent.mkdir(parents=True, exist_ok=True)
+    mkdir_s = time.perf_counter() - _t0
     _t0 = time.perf_counter()
     with shard_path.open("wb") as f:
         for buf in all_bufs:
@@ -320,5 +323,5 @@ def write_shard(spec: ShardWriteSpec) -> ShardWriteResult:
     bytes_written = byte_offset + len(index_bytes) + 4
     return ShardWriteResult(
         n_inner=n_inner, bytes_written=bytes_written,
-        read_s=read_s, compress_s=compress_s, write_s=write_s, off_step_planes=off_step_planes,
+        read_s=read_s, compress_s=compress_s, write_s=write_s, off_step_planes=off_step_planes, mkdir_s=mkdir_s,
     )

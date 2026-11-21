@@ -71,7 +71,7 @@ from .selection.spectral_correction_module import SpectralCorrectionModule
 from .image_tools.mask_auto_task import TASK_ID as AUTO_MASK_TASK_ID
 from .image_tools.mask_export_task import TASK_ID as MASK_EXPORT_TASK_ID
 from .panels.feature_map_task import TASK_ID as FEATURE_MAP_TASK_ID
-from .dataset.module import EXPORT_TASK_ID as ZARR_EXPORT_TASK_ID
+from .dataset.module import EXPORT_TASK_ID as ZARR_EXPORT_TASK_ID, LOAD_TASK_ID as DATASET_LOAD_TASK_ID
 from .image_tools.mask_scan_task import TASK_ID as SCAN_TASK_ID, TransientScanTask
 from .roi.array_task import TASK_ID as ARRAY_TASK_ID
 from .panels.image.chromatic_tab import ChromaticUiValues
@@ -1479,7 +1479,7 @@ def _build_status_bar(
     image_panel.feature_map.task_finished.connect(task_indicator.finish)
     image_panel.array_action.task_progress.connect(task_indicator.report)
     image_panel.array_action.task_finished.connect(task_indicator.finish)
-    m.dataset.task_progress.connect(task_indicator.report)  # OME-Zarr export (Image panel, Export tab)
+    m.dataset.task_progress.connect(task_indicator.report)  # OME-Zarr export (Image panel, Export tab) and "Open dataset" (which step of the load)
     m.dataset.task_finished.connect(task_indicator.finish)
     m.session_carry.task_progress.connect(task_indicator.report)  # the session that goes with that export
     m.session_carry.task_finished.connect(task_indicator.finish)
@@ -1503,6 +1503,7 @@ def _build_status_bar(
         ROI_TABLE_TASK_ID: roi_table_panel.cancel,
         SESSION_LOAD_TASK_ID: m.session_load.cancel,
         ZARR_EXPORT_TASK_ID: m.dataset.cancel_export,
+        DATASET_LOAD_TASK_ID: m.dataset.cancel_load,  # ends at the load's next step
         SESSION_CARRY_TASK_ID: m.session_carry.cancel,
         CHROMATIC_TASK_ID: m.chromatic_auto.cancel,
         SCAN_TASK_ID: m.transient_scan.cancel,

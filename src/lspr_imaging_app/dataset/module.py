@@ -78,6 +78,7 @@ from ..diagnostics import instrumented
 from ..storage.workspace import save_acquisition_metadata_sidecar
 from ..export_stats import ExportStats
 from ..plane_reader import load_image_array_uncached
+from ..progress import Cancelled
 from .io import (
     dataset_record_map,
     DatasetLoadChoice,
@@ -104,6 +105,8 @@ logger = logging.getLogger(__name__)
 
 EXPORT_TASK_ID = "zarr_export"
 EXPORT_TASK_LABEL = "Export to OME-Zarr"
+LOAD_TASK_ID = "dataset_load"
+LOAD_TASK_LABEL = "Open dataset"
 
 
 @dataclass(frozen=True)
@@ -549,6 +552,9 @@ class DatasetModule(QObject):
           the chosen one itself.
         - `dataset_load_failed` - the folder doesn't exist, holds no
           recognizable dataset, or any other error.
+        - none of these when the user cancels (`cancel_load`); the status bar's
+          "Open dataset" task (`task_progress` / `task_finished`, 2026-11-20)
+          then ends as "cancelled".
 
         Raises `RuntimeError` if a load is already in flight - matches
         `AnalysisWorker.submit`'s own "only one task at a time" contract,
@@ -566,20 +572,41 @@ class DatasetModule(QObject):
         exactly this reason - reused here rather than duplicated."""
         if self._worker.is_running():
             raise RuntimeError("A dataset is already loading.")
+        cancel_event = self._worker.cancel_event
 
         def task() -> None:
+            # The status bar's task indicator (CLAUDE.md "Heavy work reports progress"): which step is under way, so a slow
+            # disk shows where the time goes instead of a silent wait (2026-11-20: a 71,685-file folder looked frozen).
+            def report(fraction: float, message: str) -> None:
+                self.task_progress.emit(LOAD_TASK_ID, LOAD_TASK_LABEL, fraction, message)
+
+            report(0.0, f"starting ({folder.name})")
             try:
                 with timed(logger, "dataset.scan", logging.INFO, folder=folder.name):
-                    result = load_dataset(folder)
+                    # Not `throttled`: about ten reports per load, and the last one before a slow step must not be dropped.
+                    result = load_dataset(folder, progress=report, cancelled=cancel_event.is_set)
+            except Cancelled:
+                self.task_finished.emit(LOAD_TASK_ID, "cancelled", "")
+                return
             except Exception as exc:  # noqa: BLE001 - reported via signal, not re-raised
+                self.task_finished.emit(LOAD_TASK_ID, "failed", str(exc))
                 self.dataset_load_failed.emit(str(exc))
                 return
             if isinstance(result, DatasetLoadChoice):
+                self.task_finished.emit(LOAD_TASK_ID, "completed", f"found {len(result.candidates)} datasets - choose one")
                 self.dataset_choice_needed.emit(result)
             else:
+                self.task_finished.emit(LOAD_TASK_ID, "completed", f"{len(result.records):,} images")
                 self.load_dataset(result)
 
         self._worker.submit(task)
+
+    def cancel_load(self) -> None:
+        """Ask a running `load_dataset_from_folder` to stop (the status bar's Cancel). It ends at the load's next step
+        (`io.load_dataset` checks at every progress report), finishes the "Open dataset" task as cancelled, and emits neither
+        `dataset_loaded` nor `dataset_load_failed`. Does nothing when no load is running."""
+        if self._worker.is_running():
+            self._worker.cancel()
 
     @instrumented("DatasetModule.export_to_ome_zarr")
     def export_to_ome_zarr(self, destination: Path, **kwargs: object) -> None:
@@ -619,6 +646,19 @@ class DatasetModule(QObject):
             self.task_progress.emit(EXPORT_TASK_ID, EXPORT_TASK_LABEL, 0.0, "Starting export...")
             stats = ExportStats()
             started = time.perf_counter()
+
+            def log_stages(outcome: str) -> None:
+                """Where the workers' time went (2026-11-20), for every export that wrote something, also a cancelled or failed one:
+                the log of a run nobody let finish is the only record of why it was slow."""
+                seconds = time.perf_counter() - started
+                if stats.planes > 0:
+                    log_event(
+                        logger, "dataset.export_stages", logging.INFO, outcome=outcome, seconds=round(seconds, 1), planes=stats.planes,
+                        planes_per_s=round(stats.planes / seconds, 2) if seconds > 0 else 0.0,
+                        shard_mode=kwargs.get("shard_mode"), compression=bool(kwargs.get("compression_enabled")),
+                        **{key: round(value, 1) for key, value in stats.stage_ms_per_image().items()},
+                    )
+
             try:
                 result = export_ome_zarr_dataset(
                     dataset,
@@ -629,6 +669,7 @@ class DatasetModule(QObject):
                     **kwargs,
                 )
             except Exception as exc:  # reported via signal, not re-raised
+                log_stages("cancelled" if cancel_event.is_set() else "failed")
                 if cancel_event.is_set():
                     self.task_finished.emit(EXPORT_TASK_ID, "cancelled", "")
                 else:
@@ -641,6 +682,7 @@ class DatasetModule(QObject):
                 logger, "dataset.export_done", logging.INFO, seconds=round(stats.seconds, 1), planes=stats.planes,
                 mb_written=round(stats.bytes_written / 1e6, 1), planes_per_s=round(stats.planes_per_second, 1), workers=stats.workers, worker_mode=stats.worker_mode,
             )
+            log_stages("completed")
             self.export_stats_ready.emit(stats)
             self.task_finished.emit(EXPORT_TASK_ID, "completed", f"written to {Path(result).name} in {stats.headline()}")
             self.export_finished.emit(result)
