@@ -201,6 +201,13 @@ BINDINGS: tuple[Binding, ...] = (
         gesture="Right-click", scope=_VIEW,
     ),
     Binding(
+        "mouse.toolbar.view_menu", "Mouse: image view",
+        "Open the menu of a View button (in the View tab, below it; in the column right of the image, when Edit -> Preferences puts the View controls "
+        "there, beside it): colour and transparency of the histogram highlight, mask, sample ROIs and reference rims, the label places and size, the "
+        "landmarks' every-wavelength switch, the group-label strip, the scale bar's pixels / micrometers and colour, the Display range's numbers. A left click on those buttons shows or hides the overlay",
+        gesture="Right-click", scope=_VIEW,
+    ),
+    Binding(
         "mouse.view.tool_adjust", "Mouse: image view",
         "Draw: set the brush size (sideways, right = bigger). Threshold, Local contrast: set the threshold (sideways, right = a bigger region) "
         "and the sigma (up = bigger), with the tool armed",

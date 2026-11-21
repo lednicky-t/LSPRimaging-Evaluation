@@ -17,11 +17,12 @@ from ..ribbon_icon_size import BUTTON_SIZE, ICON_SIZE  # also what the other rib
 __all__ = ["BUTTON_SIZE", "ICON_SIZE", "mirror_icon_button", "style_general_icon_button"]
 
 
-def mirror_icon_button(source: QToolButton, parent: QWidget) -> QToolButton:
+def mirror_icon_button(source: QToolButton, parent: QWidget, *, tip_suffix: str = "") -> QToolButton:
     """A second button that follows *source* (checked state, icon, tooltip,
     enabled) and forwards its clicks to it, so the same control can sit on
     two ribbon tabs. Call the returned button's `sync()` after *source*
-    changes its look (icon/tooltip/enabled are not signals)."""
+    changes its look (icon/tooltip/enabled are not signals). `tip_suffix` is
+    added to the source's tooltip (the View tab's note on the right-click)."""
     mirror = QToolButton(parent)
     mirror.setCheckable(source.isCheckable())
 
@@ -33,7 +34,7 @@ def mirror_icon_button(source: QToolButton, parent: QWidget) -> QToolButton:
         finally:
             mirror.blockSignals(blocked)
         mirror.setIcon(source.icon())
-        mirror.setToolTip(source.toolTip())
+        mirror.setToolTip(source.toolTip() + tip_suffix)
         mirror.setEnabled(source.isEnabled())
 
     mirror.clicked.connect(lambda _checked=False: source.click())

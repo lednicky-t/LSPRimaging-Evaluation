@@ -28,6 +28,7 @@ from .canvas_tools import style_bar_icon_button
 from .general_group import style_general_icon_button
 from .mask_tab import MaskTab
 from .roi_tab import RoiTab
+from .view_placement import ViewPlacement
 from .view_tab import ViewTab
 from .analysis_tab import AnalysisTab
 from .tuning_tab import TuningTab
@@ -117,7 +118,7 @@ def build_roi_tab(panel: ImagePanel) -> QWidget:
 
 def build_view_tab(panel: ImagePanel) -> QWidget:
     """Moved out of `ImagePanel._build_view_tab` (2026-11-15). On the panel it
-    creates: `_view_tab`
+    creates: `_view_tab`, `_view_placement` (2026-11-21: the tab's page and the side ribbon, `view_placement.py`)
     reads: `_background_tab`, `_chromatic_tab`, `_dataset`, `_geometry`, `_highlight_tint`, `_mask_tab`, `_mask_tint`, `_roi_tab`,
     `_scale_bar_item`, `_tints`
     calls its methods: none
@@ -136,7 +137,9 @@ def build_view_tab(panel: ImagePanel) -> QWidget:
     panel._view_tab.roi_overlay_changed.connect(panel._on_roi_overlay_changed)
     panel._view_tab.scale_bar_color_changed.connect(panel._on_scale_bar_color_changed)
     panel._view_tab.display_range_changed.connect(panel._on_display_range_edited)
-    return panel._view_tab
+    panel._view_placement = ViewPlacement(panel._view_tab, panel)
+    panel._view_placement.changed.connect(panel.view_placement_changed)
+    return panel._view_placement.host  # the page of the ribbon's View tab; the controls move to the side ribbon when Preferences says so
 
 
 def build_chromatic_and_background_tabs(panel: ImagePanel) -> None:
@@ -218,6 +221,7 @@ def build_top_bar(panel: ImagePanel, view_content: QWidget, image_tools_content:
         restored = VIEW_TAB if panel._initial_ribbon_category == "Histogram" else panel._initial_ribbon_category
         panel._tool_ribbon.set_category(restored)  # before the connect: restoring is not a user change
     panel._tool_ribbon.category_changed.connect(panel.ribbon_category_changed)
+    panel._view_placement.bind_tool_ribbon(panel._tool_ribbon)  # its View tab goes while the controls are in the side ribbon
     # The Mask tab's edit preview is drawn only while that tab is the open one.
     edit_preview = panel._mask_tab.edit_preview
     edit_preview.set_tab_active(panel._tool_ribbon.current_category() == MASK_TAB)

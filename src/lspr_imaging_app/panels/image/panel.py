@@ -178,6 +178,7 @@ from ...storage.ui_state_keys import (
     IMAGE_OVERLAY_CACHE_MB,
     IMAGE_ROI_LABELS,
     IMAGE_SCALE_BAR_COLOR,
+    IMAGE_VIEW_PLACEMENT,
     MASK_ROWS_VISIBLE,
     ROI_OVERLAY_KEYS,
     ROI_ROW_SELECTED_ONLY,
@@ -283,6 +284,7 @@ class ImagePanel(QWidget):
     # Label of the ribbon tab now shown ("Image tools"/"Mask"/"Histogram"/"ROIs") -
     # lets the Histogram plot honour the area selection only while its own tab is open.
     ribbon_category_changed = pyqtSignal(str)
+    view_placement_changed = pyqtSignal(str)  # the View controls moved between the ribbon's tab and the side ribbon ("tab" / "right"; `view_placement.py`)
     # The Chromatic tab's popover values, after a run that used them succeeded (app settings persist them).
     chromatic_settings_applied = pyqtSignal(object)  # ChromaticUiValues
     # A tint overlay's look changed ("mask" or "highlight", new `OverlayStyle`); app settings persist it.
@@ -519,6 +521,7 @@ class ImagePanel(QWidget):
         env_mb = environment_budget_mb()  # LSPR_OVERLAY_CACHE_MB, if set, wins over the saved choice for this run
         cache_mb = env_mb if env_mb is not None else int(read(store, IMAGE_OVERLAY_CACHE_MB))
         self._roi_overlay.layers.set_budget_bytes(int(max(cache_mb, 0) * 1024 * 1024))
+        self._view_placement.set_where(str(read(store, IMAGE_VIEW_PLACEMENT)))  # before the store is kept below: a restore saves nothing
         if read(store, IMAGE_GPU_DRAWING) is True:  # off unless turned on in Preferences (default off since 2026-11-11, gpu_view.py)
             apply_gpu_drawing(self._view, True)
         self._restore_slideshow_settings(store)
@@ -661,6 +664,7 @@ class ImagePanel(QWidget):
         canvas_row.setSpacing(0)
         canvas_row.addWidget(self._selection_tools.toolbar)
         canvas_row.addWidget(self._view, 1)
+        canvas_row.addWidget(self._view_placement.ribbon)  # the View controls' own column, shown only when Preferences puts them there (2026-11-21)
         canvas_column = QVBoxLayout()
         canvas_column.setContentsMargins(0, 0, 0, 0)
         canvas_column.setSpacing(0)
@@ -841,7 +845,7 @@ class ImagePanel(QWidget):
             self._measure_controls.refresh_theme(get_active_theme())
         if hasattr(self, "_cursor_overlay"):
             self._cursor_overlay.refresh_theme(get_active_theme())
-        for tab in ("_mask_tab", "_roi_tab", "_view_tab"):
+        for tab in ("_mask_tab", "_roi_tab", "_view_tab", "_view_placement"):
             if hasattr(self, tab):
                 getattr(self, tab).refresh_theme()
         if hasattr(self, "_tool_ribbon"):
@@ -875,6 +879,21 @@ class ImagePanel(QWidget):
 
     def active_ribbon_category(self) -> str:
         return self._tool_ribbon.current_category()
+
+    def view_controls_open(self) -> bool:
+        """The View controls are in front of the person: the ribbon's View tab is the open one, or they sit in the side ribbon (always in view)."""
+        return self._view_placement.view_controls_open()
+
+    @property
+    def view_placement(self) -> str:
+        """Where the View controls are: "tab" (the ribbon's View tab) or "right" (the side ribbon right of the image)."""
+        return self._view_placement.where()
+
+    def set_view_placement(self, where: str) -> None:
+        """Preferences: put the View controls in the ribbon's View tab or in the side ribbon (at once; remembered)."""
+        self._view_placement.set_where(where)
+        if self._roi_overlay_store is not None:
+            self._roi_overlay_store.set(IMAGE_VIEW_PLACEMENT.key, self._view_placement.where())
 
     def _refresh_controls_bar_theme(self) -> None:
         """No border (2026-09-30, maintainer request - reverses the subtle

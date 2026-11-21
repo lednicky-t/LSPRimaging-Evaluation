@@ -1,4 +1,7 @@
-"""Image panel ribbon, "View" tab: the "Masks" pick-up menu (2026-10-23, maintainer request).
+"""**Unused since 2026-11-21** (the View tab now shows the histogram highlight and the mask as two icons, each its own switch, with a right-click menu
+for the colour and transparency: `view_tab.py`, `right_click_menu.py`). Kept until the maintainer agrees to delete it.
+
+Image panel ribbon, "View" tab: the "Masks" pick-up menu (2026-10-23, maintainer request).
 
 One icon button (the mask icon) that opens a small panel with one row per tint drawn over the image:
 Histogram (the highlighted intensity range) and Mask (the ignore mask), each with its show / hide toggle,

@@ -1,5 +1,6 @@
-"""The three View-tab icons for the canvas scale bar (2026-10-06): show/hide,
-px <-> µm units, and colour. Show/hide and units live in `GeometryModule`
+"""The three View-tab controls for the canvas scale bar (2026-10-06): show/hide,
+px <-> µm units, and colour. Since 2026-11-22 the show/hide icon is the scale bar's switch (a left click) and the units and the colour
+are in the menu of its right-click (`take_toggle`; `view_tab.py`). Show/hide and units live in `GeometryModule`
 (`set_scale_bar_visible` / `set_display_units`, saved with the session); the
 colour is plain UI state, owned by `ImagePanel`. See `scale_bar_overlay.py`."""
 
@@ -61,6 +62,20 @@ class ScaleBarControls(QWidget):
         """Show or hide the scale bar, exactly as a click on the toggle does (the View tab's All buttons)."""
         self._toggle.setChecked(bool(shown))
 
+    @property
+    def toggle_button(self) -> QToolButton:
+        return self._toggle
+
+    @property
+    def units_button(self) -> QToolButton:
+        return self._units
+
+    def take_toggle(self) -> QToolButton:
+        """Hand the show / hide button to the caller, which puts it in its own layout (the View tab shows it as the scale bar's icon and keeps
+        the units and the colour in a menu on its right-click, 2026-11-22). It is the same button: it keeps reporting through this control."""
+        self.layout().removeWidget(self._toggle)
+        return self._toggle
+
     def sync(self, *_args: object) -> None:
         """Follow the geometry settings (also after a session restore)."""
         settings = self._geometry.settings()
@@ -76,7 +91,10 @@ class ScaleBarControls(QWidget):
             load_tabler_icon("ruler-measure", color=theme.accent_blue if shown else theme.text_muted,
                              size=ICON_SIZE * 2, stroke_width=2.1)
         )
-        self._toggle.setToolTip("Scale bar shown (click to hide)" if shown else "Scale bar hidden (click to show)")
+        self._toggle.setToolTip(
+            ("Scale bar shown (click to hide)" if shown else "Scale bar hidden (click to show)")
+            + "\nRight-click: pixels or micrometers, and the colour."
+        )
         self._units.setText("µm" if um else "px")
         self._units.setEnabled(can_um)
         self._units.setToolTip(

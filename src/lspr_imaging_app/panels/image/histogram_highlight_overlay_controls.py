@@ -105,6 +105,16 @@ class HistogramHighlightOverlayControls(QWidget):
         """Whether the highlight tint is switched on (the toggle's checked state)."""
         return self._toggle_button.isChecked()
 
+    @property
+    def toggle_button(self) -> QToolButton:
+        return self._toggle_button
+
+    def take_toggle(self) -> QToolButton:
+        """Hand the show / hide button to the caller, which puts it in its own layout (the View tab shows it as the overlay's icon and keeps the
+        colour and transparency in a menu on its right-click, 2026-11-21). It is the same button: it keeps reporting through this control."""
+        self.layout().removeWidget(self._toggle_button)
+        return self._toggle_button
+
     def set_visible(self, shown: bool) -> None:
         """Show or hide, exactly as a click on the toggle does: the change is reported (the View tab's All buttons)."""
         self._toggle_button.setChecked(bool(shown))

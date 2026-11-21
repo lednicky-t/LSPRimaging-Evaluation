@@ -19,12 +19,15 @@ Every part says what it is in its tooltip. The drawing is `group_label_overlay.p
 Holds only the controls; `ImagePanel` applies `settings()` to the overlay on every `changed`. Every control
 is remembered across restarts (`bind_ui_state`, same keys and values as when the choices were drop-downs). The
 View tab carries a second instance, kept equal to this one with `sync_from` (see `view_tab.py`).
+
+**`click_toggles` (2026-11-21, the View tab's instance):** the icon itself is the show / hide switch (a left click), and the strip, without its
+own toggle, opens on a right-click (`popup_menu`; `view_tab.py` attaches the opener). The ROIs tab's instance keeps the click-to-open menu.
 """
 
 from __future__ import annotations
 
 from PyQt6.QtCore import QRectF, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFontMetrics, QIcon, QPainter, QPixmap
+from PyQt6.QtGui import QColor, QFontMetrics, QIcon, QPainter, QPixmap, QTransform
 from PyQt6.QtWidgets import QAbstractSpinBox, QHBoxLayout, QMenu, QSpinBox, QToolButton, QWidget, QWidgetAction
 
 from lspr_ui import GuiTheme, get_active_theme, load_tabler_icon
@@ -75,6 +78,9 @@ def label_menu_icon(color: str) -> QIcon:
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     label_size = round(_RENDER_SIZE * 0.72)
     label = load_tabler_icon("label-important", color=color, size=label_size, stroke_width=2.1).pixmap(label_size, label_size)
+    # Flipped top to bottom (2026-11-22): the tag's hole, where a string would tie on, is now at the lower left, next to the dots,
+    # so the label reads as coming out of the group.
+    label = label.transformed(QTransform().scale(1, -1))
     painter.drawPixmap((_RENDER_SIZE - label_size) // 2, round(_RENDER_SIZE * 0.028), label)
     painter.setPen(Qt.PenStyle.NoPen)
     painter.setBrush(QColor(color))
@@ -94,10 +100,12 @@ def _ordinal_for(value: str, picked: bool, theme: GuiTheme) -> QIcon:
 class GroupLabelMenu(QToolButton):
     changed = pyqtSignal()
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, *, click_toggles: bool = False) -> None:
         super().__init__(parent)
         style_general_icon_button(self)
-        self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._click_toggles = bool(click_toggles)
+        if not self._click_toggles:
+            self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
 
         panel = QWidget(self)
         self.show_button = QToolButton(panel)
@@ -136,7 +144,13 @@ class GroupLabelMenu(QToolButton):
         action = QWidgetAction(self._menu)
         action.setDefaultWidget(panel)
         self._menu.addAction(action)
-        self.setMenu(self._menu)
+        if self._click_toggles:
+            # The icon is the switch; the strip loses its own switch (and the line after it) and waits for a right-click.
+            self.show_button.setVisible(False)
+            self._separators[0].setVisible(False)
+            self.clicked.connect(lambda _checked=False: self.show_button.toggle())
+        else:
+            self.setMenu(self._menu)
 
         self.show_button.toggled.connect(self._on_changed)
         self.position.value_changed.connect(self._on_changed)
@@ -145,6 +159,11 @@ class GroupLabelMenu(QToolButton):
         self.box.valueChanged.connect(self._on_changed)
         self.min_size.valueChanged.connect(self._on_changed)
         self.refresh_theme()
+
+    @property
+    def popup_menu(self) -> QMenu:
+        """The strip's menu (the button's own `menu()` is empty in `click_toggles` mode: the View tab opens this one on a right-click)."""
+        return self._menu
 
     def _fit_spin_widths(self) -> None:
         """Both number boxes just wide enough for the widest value they can show (300 %, 14 pt), then fixed so
@@ -212,7 +231,13 @@ class GroupLabelMenu(QToolButton):
         theme = get_active_theme()
         on = self.show_button.isChecked()
         self.setIcon(label_menu_icon(theme.accent_blue if on else theme.text_dim))
-        self.setToolTip("Group labels: show or hide, which ROI, where, text angle and size." + ("" if on else " (hidden)"))
+        if self._click_toggles:
+            self.setToolTip(
+                ("Group labels shown (click to hide)" if on else "Group labels hidden (click to show)")
+                + ".\nRight-click: which ROI, where, text angle and size."
+            )
+        else:
+            self.setToolTip("Group labels: show or hide, which ROI, where, text angle and size." + ("" if on else " (hidden)"))
         self.show_button.setIcon(
             load_tabler_icon(
                 "label-important" if on else "label-off",

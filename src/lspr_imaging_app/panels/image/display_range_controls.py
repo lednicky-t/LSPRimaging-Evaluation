@@ -139,6 +139,21 @@ class DisplayRangeControls(QWidget):
 
     # -- state ----------------------------------------------------------------------
 
+    @property
+    def toggle_button(self) -> QToolButton:
+        """The AR / MR switch."""
+        return self._toggle
+
+    @property
+    def more_button(self) -> QToolButton:
+        """The "..." button that opens the numbers."""
+        return self._more
+
+    @property
+    def range_menu(self) -> QMenu:
+        """The numbers' pop-up (the side ribbon opens it from either button, `view_ribbon.py`)."""
+        return self._menu
+
     def insert_leading(self, button: QWidget, index: int = 0) -> None:
         """Put ``button`` at ``index``, before the range icons (the View tab's cursor toggle and area picker);
         it is reparented here."""

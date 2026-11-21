@@ -25,6 +25,7 @@ from lspr_ui import get_active_theme
 from .ribbon_icon_size import BUTTON_SIZE
 
 _GROUP_LABEL_FONT_SIZE_PX = 9
+_WIDGET_SIZE_MAX = 16777215  # QWIDGETSIZE_MAX: "no maximum"
 
 
 class RibbonSeparator(QFrame):
@@ -45,17 +46,34 @@ class RibbonSeparator(QFrame):
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         self.setStyleSheet(f"color: {get_active_theme().control_border};")  # a theme switch restyles it, as before
         self._top_offset = top_offset
+        self._horizontal = False
 
     def line_span(self) -> tuple[int, int]:
         """``(top, bottom)`` of the drawn line in this widget's coordinates."""
         return self._top_offset, self._top_offset + BUTTON_SIZE
 
+    def set_horizontal(self, horizontal: bool) -> None:
+        """The divider of a *column* of icons (the View side ribbon, 2026-11-21): a 1 px line, a little narrower than an icon button, instead of
+        the row's vertical one. The same widget either way, so a row's layout keeps its items."""
+        self._horizontal = bool(horizontal)
+        if self._horizontal:
+            self.setFixedSize(BUTTON_SIZE - 6, 1)
+        else:
+            self.setMinimumSize(0, 0)
+            self.setMaximumSize(_WIDGET_SIZE_MAX, _WIDGET_SIZE_MAX)
+            self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        self.updateGeometry()
+        self.update()
+
     def paintEvent(self, event) -> None:  # type: ignore[override]
-        top, bottom = self.line_span()
         painter = QPainter(self)
         painter.setPen(QPen(self.palette().color(QPalette.ColorRole.WindowText), 1))
-        x = self.width() // 2
-        painter.drawLine(x, top, x, bottom - 1)
+        if self._horizontal:
+            painter.drawLine(0, 0, self.width() - 1, 0)
+        else:
+            top, bottom = self.line_span()
+            x = self.width() // 2
+            painter.drawLine(x, top, x, bottom - 1)
         painter.end()
 
 
