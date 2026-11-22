@@ -129,7 +129,10 @@ from ..domain.roi_shapes import NO_BORDER, Border, Circle, MaskShape, Rectangle,
 logger = logging.getLogger(__name__)
 
 SESSION_SCHEMA_NAME = "lspri_rewrite_session"
-SESSION_SCHEMA_VERSION = "1.15"
+SESSION_SCHEMA_VERSION = "1.16"
+# 1.16 (2026-11-22): optional top-level "plot_line_order" block - the stacking order the user set by hand in the Sensorgram, LbL and S_bulk plots: {"sensorgram": [names], "lbl": [names],
+# "bulk": [names]}, first = in front (selection/plot_line_order_module.py). Written only when some plot has a list, so a session that never used it is written exactly as before; a 1.15
+# file has none and loads with every plot at its own order (migration: none needed, the block is additive). An older build ignores the block. Display only: no number depends on it.
 # 1.15 (2026-11-22): the "plan" block may also hold "lbl" - the layer-by-layer series: {"start": a step reference, "period": steps per cycle} (plan/state.py ``LblSeries``).
 # Written only when a series is set; a 1.14 file has none and loads with no series, an older build ignores the key.
 # 1.14 (2026-11-20): the "spectral_correction" block may also hold "camera_response" - the camera's relative spectral sensitivity ({"source_name", "sha256", "imported_at",
@@ -528,6 +531,7 @@ class SessionState:
     plan_edits: PlanEditsState = field(default_factory=PlanEditsState)
     refractive_index: RiTable | None = None  # the imported RIs.txt (None: none imported)
     spectral_correction: dict | None = None  # the "spectral_correction" block as plain data (schema 1.13); None: no table
+    plot_line_order: dict | None = None  # the "plot_line_order" block as plain data (schema 1.16): {plot: [names]}, first = in front; None: none set
     mask_versions: dict[MaskChange, int] = field(default_factory=dict)
     """Only filled by `load_session`: which file version each mask change was read from, for
     `SessionWriter.seed`. Not part of the saved format, and empty in a state captured from the modules (it says
@@ -823,6 +827,7 @@ def prepare_session(state: SessionState, naming: FrameNamingScheme) -> PreparedS
         "plan": state.plan_edits.to_payload(),
         **({} if state.refractive_index is None else {"refractive_index": state.refractive_index.to_payload()}),
         **({} if state.spectral_correction is None else {"spectral_correction": dict(state.spectral_correction)}),
+        **({} if not state.plot_line_order else {"plot_line_order": {plot: list(names) for plot, names in state.plot_line_order.items()}}),
         "mask_pointers": None,  # filled in by `SessionWriter.write` from `PreparedSession.mask_pointers`
         "selection": {
             "cube_index": int(state.selected_cube),
@@ -936,7 +941,15 @@ def load_session(
         plan_edits=PlanEditsState.from_payload(payload.get("plan")),
         refractive_index=_decode_ri_table(payload.get("refractive_index")),
         spectral_correction=_decode_spectral_block(payload.get("spectral_correction")),
+        plot_line_order=_decode_line_order(payload.get("plot_line_order")),
     )
+
+
+def _decode_line_order(raw: object) -> dict | None:
+    """Lenient like the other optional blocks: a plot whose list is not a list of names is dropped (the module says so when it restores), the rest of the session still loads."""
+    if not isinstance(raw, dict):
+        return None
+    return {str(plot): list(names) for plot, names in raw.items() if isinstance(names, list) and all(isinstance(k, str) for k in names)} or None
 
 
 def _decode_spectral_block(raw: object) -> dict | None:

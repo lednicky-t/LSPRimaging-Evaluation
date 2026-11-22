@@ -92,6 +92,7 @@ from ...applog import timed
 from ...dataset import DatasetModule
 from ...image_tools.mask.module import MaskModule
 from ...selection.experiment_plan_module import ExperimentPlanModule
+from ...selection.plot_line_order_module import PLOT_SENSORGRAM, PlotLineOrderModule
 from ...roi import RoiToolbox
 from ...selection import CubeDisplayModule, SelectionModule
 from ...selection.cube_display_module import MODE_CUBE, MODE_TIME
@@ -126,6 +127,7 @@ from .mask_marks_toggle import MaskMarksToggle
 from .stale_marks_toggle import StaleMarksToggle
 from .stat_icons import band_picture, center_picture, display_picture, smoothing_picture, spikes_icon, subtract_icon, within_steps_icon
 from .text_link import TextSizeLink
+from .line_order_dialog import LineRow
 from .view_controls import SensorgramViewControls
 from .step_overlays import StepOverlays
 from .plot import SensorgramPlot
@@ -209,6 +211,7 @@ class SensorgramPanel(QWidget):
         experiment_plan: ExperimentPlanModule | None = None,
         trace_store: TraceStore | None = None,
         axis: SensorgramAxis | None = None,
+        line_order: PlotLineOrderModule | None = None,
     ) -> None:
         """`image_busy`: True while the Image panel has a frame in flight; a computation then waits for it (`ImageFirst`). `trace_in_process`: the
         fits run in a helper process (`TracePool`), so they never compete with the window for the interpreter lock; False computes them in the worker
@@ -285,6 +288,7 @@ class SensorgramPanel(QWidget):
         self._stale_toggle = StaleMarksToggle(self)
         self._stale_toggle.setChecked(True)  # on by default: out-of-date results are never hidden unless the user says so
         self._view_controls = SensorgramViewControls(self)  # the View tab's band / anchors toggles, points & lines and legend menus (2026-11-13)
+        self._view_controls.look.attach_line_order(line_order, PLOT_SENSORGRAM, "Sensorgram", self.line_rows)  # the Draw order's Manual list is the session's (2026-11-22)
         self._band_visible = True  # the baseline selector: the controls hold the truth, these copies follow their signals
         self._band_color = QColor(DEFAULT_COLOR)
         self._band_alpha = DEFAULT_ALPHA
@@ -395,6 +399,7 @@ class SensorgramPanel(QWidget):
         self._mask_toggle.toggled.connect(lambda _on: self._draw_last())
         self._stale_toggle.toggled.connect(lambda _on: self._draw_last())
         self._view_controls.settings_changed.connect(self._on_view_changed)
+        self._plot.plan_bar().selection_changed.connect(lambda _indices: self._sync_order_step())  # the Legend menu's "At step" order reads the step selected on the bar
         self._plot.baseline_window_changed.connect(self._on_baseline_dragged)
         self._plot.y_label_double_clicked.connect(self._on_y_label_double_clicked)
         self._plot.x_label_double_clicked.connect(self._on_x_label_double_clicked)
@@ -442,7 +447,23 @@ class SensorgramPanel(QWidget):
     def _on_view_changed(self) -> None:
         """An option of the View tab changed (or was restored): the plot takes it and the last result is drawn again. Nothing is recomputed."""
         self._plot.set_view(self._view_controls.settings())
+        self._sync_order_step(redraw=False)
         self._draw_last()
+
+    def line_rows(self) -> list[LineRow]:
+        """The lines drawn now as the Line order table lists them (the Draw order's Manual mode), in the plot's own order."""
+        if self._last is None:
+            return []
+        return [LineRow(s.key, s.label, s.color) for s in self._last[1]]
+
+    def _sync_order_step(self, redraw: bool = True) -> None:
+        """The Legend menu's "At step" order reads the one step selected on the plan bar (none, or several: no step, and the menu says so). When the lines' stacking follows the legend
+        (Draw order: Legend) a new step also changes which line lies in front, so the last result is drawn again (`redraw`; the callers that draw next pass False)."""
+        selected = self._plot.plan_bar().selected_indices()
+        restack = self._plot.set_order_step(int(selected[0]) if len(selected) == 1 else None)
+        self._view_controls.look.set_order_note(self._plot.legend_order_note())
+        if restack and redraw:
+            self._draw_last()
 
     def restore_ui_state(self, store: UiStateStore) -> None:
         store.bind(MASK_MARKS_KEY, self._mask_toggle)
@@ -880,6 +901,7 @@ class SensorgramPanel(QWidget):
         if self._gate.defer() or self._last is None:
             return
         job, series = self._last
+        self._sync_order_step(redraw=False)  # before the lines are drawn: the legend rows are put in order as they are written
         self._view_controls.set_line_count(len(series))  # the Points toggle shows itself off while more lines are drawn than the Dot limit (it reports no change)
         stale = self._stale_mask(job.stored)
         label, x_axis = self._x_axis()
@@ -895,6 +917,7 @@ class SensorgramPanel(QWidget):
         self._plot.set_axis_labels(label, y_label)
         anchors_method = stats.baseline_method == METHOD_ANCHORS
         drift_shown = anchors_method or uses_anchor_steps(stats)  # a curve through anchors: anchor points, or the Range method's marked steps
+        self._plot.set_manual_order(self._view_controls.look.manual_order())  # which line lies over which: the Draw order (Auto / Legend / Manual)
         self._plot.show_series(  # the toggle hides the marks, never the points
             series, stale if self._stale_toggle.isChecked() else None, self._mask_marks(job.stored, series),
             baseline_curves=drift_shown and not stats.baseline_enabled and self._plot.view().show_anchors,  # absolute traces: the dashed curve is what Subtract would take off (View tab: it can be hidden)
@@ -903,6 +926,8 @@ class SensorgramPanel(QWidget):
             anchor_dots=("subtracted" if stats.baseline_enabled else "absolute") if anchors_method and self._plot.view().show_anchors else None,  # View tab: the squares can be hidden
         )
         self._stale_toggle.set_note(self._stale_note(stale))
+        self._view_controls.look.lines_changed()  # an open Line order table follows the lines
+        self._view_controls.look.set_order_note(self._plot.legend_order_note())  # now that the lines (and their step values) are there
         uncorrected = next((s.baseline_note for s in series if s.baseline_note), "") if drift_shown else ""
         self._drift.set_fit_summary(drift_summary(series) if drift_shown else [], uncorrected)
         self._plot.set_anchors_needed(self._drift.points_needed() if anchors_method else 0)  # the number beside the edit mode's cross-hair

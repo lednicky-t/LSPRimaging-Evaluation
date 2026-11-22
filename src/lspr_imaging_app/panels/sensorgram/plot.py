@@ -16,6 +16,7 @@ over a step (`open_plan_text_editor`). The plot decides nothing about them: ``pl
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 
 import numpy as np
@@ -40,7 +41,17 @@ from .plan_text_editor import StepTextEditor
 from .play_repaint import PlayCursorRepaint
 from .stats_table import LegendRows, StepStatsItem
 from .curve_smoothing import smooth_line, smooth_run
+from .draw_order import DRAW_AUTO, DRAW_LEGEND, back_to_front, roughness
+from .legend_order import SORT_VALUE, VALUE_MEAN, order_rows
 from .view_settings import DEFAULT_DOTS_MAX_LINES, LEGEND_HIDE, LEGEND_SHOW, LINE_SPLINE, SensorgramViewSettings, legend_text
+
+
+def _finite_mean(values: np.ndarray) -> float:
+    """The mean of the finite values of a line (NaN when it has none): the number the legend's Value order uses for "Mean"."""
+    finite = np.asarray(values, dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    return float(finite.mean()) if finite.size else math.nan
+
 
 MAX_LEGEND_SERIES = 6  # up to this many lines always have a legend
 MAX_LEGEND_ENTRIES = 24  # more lines carry no names at all (a legend of a hundred ROIs is a wall of text)
@@ -63,6 +74,7 @@ _READOUT_GAP = 0  # pixels between the bottom edge of the "Baseline [start, end]
 LINE_WIDTH = 1.0  # px, antialiased. Qt paints only 1 px lines fast: 160 lines x 400 cubes took 140 ms at 1.5 px, 30 ms at 1 px antialiased (2026-11-02)
 DOTS_MAX_LINES = DEFAULT_DOTS_MAX_LINES  # a dot on every point only up to this many lines until the View tab's Dot limit says otherwise (with more they merge into the lines and cost ~1 s per redraw at 160 ROIs)
 _Z_BAND, _Z_LINE, _Z_DOTS, _Z_RINGS, _Z_MARKS = -10.0, 0.0, 1.0, 2.0, 3.0  # bands behind the lines, rings and mask marks over the dots
+_Z_SPREAD = 0.9  # the lines' own stacking (the Draw order): the line at rank r of n adds _Z_SPREAD * r / n to the z of each kind of item, so a kind's z stays inside its unit band
 _ANCHOR_DRAG_TIME_S, _ANCHOR_MOVE_PX = 60.0, 12  # anchor edit: a press is a click unless the mouse moves more than 12 px (held time does not matter)
 
 
@@ -191,6 +203,11 @@ class SensorgramPlot(QWidget):
         self._item.showGrid(x=True, y=True, alpha=0.15)
         self._legend: pg.LegendItem | None = None
         self._legend_placed_by_table = False  # the step statistics table moved the legend (so it is put back when the table goes)
+        self._legend_items: list[tuple[pg.PlotCurveItem, str]] = []  # every line's (marker, text), in the lines' order
+        self._legend_series: list[Series] = []
+        self._legend_rank: list[int] = []  # the line shown by the legend's k-th row (the Legend menu's order); the lines' own order when the order is Group, ascending
+        self._order_step: int | None = None  # the plan step the "At step" order reads (the one selected on the bar)
+        self._manual_order: tuple[str, ...] = ()  # the Draw order's Manual list (the session's, `PlotLineOrderModule`), first = in front
         self._view = SensorgramViewSettings()  # how the lines, band, dots, anchors and legend are drawn (the View tab); `set_view`
         self._pool = PlotItemPool(self._item)
         self._axis_cursor = AxisCursor(self._item, cube_color(), self)
@@ -335,6 +352,7 @@ class SensorgramPlot(QWidget):
     def set_view(self, view: SensorgramViewSettings) -> None:
         """How the next draw looks (the View tab's options). It changes nothing that is on screen: the panel redraws the last result after calling it."""
         self._view = view.sanitized()
+        self._axis_cursor.set_hidden(not self._view.show_cursor)  # the View tab's Cursor toggle: the cube cursor keeps its place and is drawn or not
 
     def view(self) -> SensorgramViewSettings:
         return self._view
@@ -363,6 +381,10 @@ class SensorgramPlot(QWidget):
         pool = self._pool
         pool.begin()
         self._svg_parts: list[SvgPart] = []  # names for a layered SVG export (svg_layers.py): one per drawn item
+        legend_slots: list[tuple[pg.PlotCurveItem, str] | None] = [None] * len(series)  # (marker, text) of every line by its own index; `_rebuild_legend` puts them in the legend in the order asked for
+        legend_rank = self._legend_ranking(series)  # the legend's row order, used by the stacking and by the legend itself
+        stack = self._stacking(series, legend_rank)  # the lines in the order they are drawn: the one at the back first (the Draw order)
+        count = max(len(series), 1)
         view = self._view
         # The legend names up to MAX_LEGEND_ENTRIES lines; "show" (the View tab) names them all, however many: the maintainer's choice overrides the guard against walls of text.
         named = view.legend_mode == LEGEND_SHOW or len(series) <= MAX_LEGEND_ENTRIES
@@ -382,7 +404,9 @@ class SensorgramPlot(QWidget):
             self._legend.clear()
         dots = len(series) <= view.dots_max_lines and view.show_points
         spline = view.line_style == LINE_SPLINE
-        for s in series:
+        for rank, line_index in enumerate(stack):
+            s = series[line_index]
+            dz = _Z_SPREAD * rank / count  # this line's place in the stack
             color = QColor(s.color)
             finite = np.isfinite(s.y) & np.isfinite(s.x)
             line_x, line_y = smooth_line(s.x, s.y) if spline else (s.x, s.y)  # the dots, marks and statistics stay on the measured points; only the line between them is smoothed
@@ -390,7 +414,7 @@ class SensorgramPlot(QWidget):
                 line_x, line_y = s.x, s.y  # nothing finite to smooth
             # A hidden line keeps its (invisible) item: it still gives the view its extent, which the dots, drawn out of the auto-range, do not.
             pen = _line_pen(color, view.line_width) if view.show_lines else _INVISIBLE_PEN
-            line = pool.take("line", lambda: pg.PlotCurveItem(antialias=True), z=_Z_LINE)
+            line = pool.take("line", lambda: pg.PlotCurveItem(antialias=True), z=_Z_LINE + dz)
             if finite.all():  # no gap to keep: one polyline, and pyqtgraph need not look for NaN again
                 line.setData(line_x, line_y, pen=pen, connect="all", skipFiniteCheck=True, name=s.label if named else None)
             else:  # a NaN stays a gap in the line
@@ -400,21 +424,21 @@ class SensorgramPlot(QWidget):
             if named:
                 # the legend's marker is the line's colour even when the line is hidden: a sample that is not in the plot and has the real pen
                 sample = line if view.show_lines else pg.PlotCurveItem(pen=_line_pen(color, view.line_width))
-                self._legend.addItem(sample, legend_text(s.label, s.short_label, view.legend_counts))
+                legend_slots[line_index] = (sample, legend_text(s.label, s.short_label, view.legend_counts))
             if baseline_curves and s.baseline_curve is not None:
-                dashed = pool.take("baseline_curve", lambda: pg.PlotCurveItem(antialias=True), ignore_bounds=True, z=_Z_LINE - 0.5)
+                dashed = pool.take("baseline_curve", lambda: pg.PlotCurveItem(antialias=True), ignore_bounds=True, z=_Z_LINE - 0.5 + dz)
                 pen = _line_pen(color, view.line_width)
                 pen.setStyle(Qt.PenStyle.DashLine)
                 dashed.setData(s.x, s.baseline_curve, pen=pen, connect="finite", skipFiniteCheck=False)
                 self._svg_parts.append(SvgPart("Baseline curves", s.label, dashed))
             if anchor_dots is not None and s.anchor_x is not None and s.anchor_y is not None and s.anchor_x.size:
                 ay = s.anchor_y if anchor_dots == "absolute" or s.anchor_base is None else s.anchor_y - s.anchor_base
-                squares = pool.take("anchor_dots", lambda: pg.ScatterPlotItem(), ignore_bounds=True, z=_Z_MARKS)
+                squares = pool.take("anchor_dots", lambda: pg.ScatterPlotItem(), ignore_bounds=True, z=_Z_MARKS + dz)
                 squares.setData(s.anchor_x, ay, symbol="s", size=9, brush=None, pen=pg.mkPen(color, width=1.8))
                 self._svg_parts.append(SvgPart("Baseline anchors", s.label, squares))
             if dots and finite.any():
                 # Out of the auto-range: the dots sit on the line's points (same bounds), and a dot item would also widen the range by its radius.
-                dot_item = pool.take("dots", lambda: pg.ScatterPlotItem(), ignore_bounds=True, z=_Z_DOTS)
+                dot_item = pool.take("dots", lambda: pg.ScatterPlotItem(), ignore_bounds=True, z=_Z_DOTS + dz)
                 dot_item.setData(s.x[finite], s.y[finite], symbol="o", size=view.point_size, brush=pg.mkBrush(color), pen=None)
                 self._svg_parts.append(SvgPart("Points", s.label, dot_item))
             if view.show_band and s.band_low is not None and s.band_high is not None:
@@ -431,14 +455,14 @@ class SensorgramPlot(QWidget):
                     high.setData(band_x, high_y)
                     # The fill's own bounding rectangle reaches far outside the band (the y range of an average ran from -32 to 641 nm for peaks near 595 nm),
                     # so it stays out of the auto-range; the two invisible edge curves, which are only data, give the band's real extent.
-                    fill = pool.take("band_fill", lambda: pg.FillBetweenItem(low, high), ignore_bounds=True, z=_Z_BAND)  # noqa: B023 (called at once)
+                    fill = pool.take("band_fill", lambda: pg.FillBetweenItem(low, high), ignore_bounds=True, z=_Z_BAND + dz)  # noqa: B023 (called at once)
                     fill.setCurves(low, high)
                     fill.setBrush(pg.mkBrush(brush))
                     self._svg_parts += [SvgPart("Bands", s.label, fill), SvgPart("Bands", f"{s.label} (edges)", low), SvgPart("Bands", f"{s.label} (edges)", high)]
             if stale is not None and stale.any():
                 mask = np.asarray(stale, dtype=bool) & finite
                 if mask.any():
-                    hollow = pool.take("stale", lambda: pg.ScatterPlotItem(), z=_Z_RINGS)
+                    hollow = pool.take("stale", lambda: pg.ScatterPlotItem(), z=_Z_RINGS + dz)
                     hollow.setData(s.x[mask], s.y[mask], symbol="d", size=10, brush=None, pen=pg.mkPen(STALE_COLOR, width=1.5))
                     self._svg_parts.append(SvgPart("Out-of-date marks", s.label, hollow))
             marks = None if mask_marks is None else mask_marks.get(s.key)
@@ -446,18 +470,87 @@ class SensorgramPlot(QWidget):
                 for flags, symbol, size in ((marks[0], "t2", 11), (marks[1], "o", 13)):
                     on = np.asarray(flags, dtype=bool) & finite
                     if on.any():
-                        mark = pool.take(f"mark:{symbol}", lambda: pg.ScatterPlotItem(), z=_Z_MARKS)
+                        mark = pool.take(f"mark:{symbol}", lambda: pg.ScatterPlotItem(), z=_Z_MARKS + dz)
                         mark.setData(s.x[on], s.y[on], symbol=symbol, size=size, brush=None, pen=pg.mkPen(MASK_COLOR, width=1.8))
                         kind = "persistent mask" if symbol == "t2" else "individual mask"
                         self._svg_parts.append(SvgPart("Mask marks", f"{s.label} ({kind})", mark))
         pool.end()
+        self._rebuild_legend(series, [slot for slot in legend_slots if slot is not None], legend_rank)
+        if not self._view_kept:  # the user's own zoom stays over a redraw (a recompute, another selection); `reset_view` brings the full view back
+            self._item.getViewBox().autoRange()
+            self._apply_room()
+
+    # -- the order of the legend's rows (2026-11-22, `legend_order.py`) -----------------------------------------------------------
+
+    def _rebuild_legend(self, series: Sequence[Series], items: list[tuple[pg.PlotCurveItem, str]], rank: list[int] | None = None) -> None:
+        """Write the legend's rows in the order the Legend menu asks for, then fit and place it (and, with it, the step table: its rows are the legend's rows). Only the rows move: the
+        lines, their colours and every number stay. `items` are the lines' own (marker, text) in the lines' order; `self._legend_rank[k]` is the line the legend's k-th row shows, so the
+        table can find the row of line i (`_legend_rows`)."""
+        self._legend_items, self._legend_series = items, list(series)
+        legend = self._legend
+        self._legend_rank = list(range(len(items)))
+        if legend is not None:
+            legend.clear()
+            self._style_legend()
+            if items:
+                self._legend_rank = self._legend_ranking(series) if rank is None else rank
+                for position in self._legend_rank:
+                    legend.addItem(*items[position])
         self._stats.update()  # new legend entries: new rows for the (cached) table
         self._tighten_legend()
         self._fit_legend(len(series))
         self._place_legend()
-        if not self._view_kept:  # the user's own zoom stays over a redraw (a recompute, another selection); `reset_view` brings the full view back
-            self._item.getViewBox().autoRange()
-            self._apply_room()
+
+    def _legend_ranking(self, series: Sequence[Series]) -> list[int]:
+        """The lines' indices in the order of the legend's rows (the Legend menu's Order), first row first."""
+        names = [s.short_label or s.label for s in series]
+        return order_rows(names, self._order_values(series), self._view.legend_order())
+
+    def set_manual_order(self, keys: Sequence[str]) -> None:
+        """The Draw order's Manual list (line keys, first = in front). It changes nothing on screen by itself: the panel redraws."""
+        self._manual_order = tuple(keys)
+
+    def _stacking(self, series: Sequence[Series], legend_rank: list[int]) -> list[int]:
+        """The lines' indices in the order they are drawn, the one at the back first (`draw_order.py`: Auto = the smoothest in front, Legend = the legend's first row in front, Manual = the table's
+        first row in front). Only the stacking: the lines, the legend and the table keep their own order."""
+        mode = self._view.draw_mode
+        keys = [s.key for s in series]
+        rough = [roughness(s.y) for s in series] if mode == DRAW_AUTO else ()
+        return back_to_front(keys, mode, legend_order=legend_rank, roughness_of=rough, manual=self._manual_order)
+
+    def _order_values(self, series: Sequence[Series]) -> list[float] | None:
+        """The number each line is ordered by under "Value" (None: the order does not read one, or has no step to read it at)."""
+        order = self._view.legend_order()
+        if order.key != SORT_VALUE:
+            return None
+        if order.value == VALUE_MEAN:
+            return [_finite_mean(s.y) for s in series]
+        step = self._order_step
+        if step is None:
+            return None
+        return [float(s.step_values.mean[step]) if s.step_values is not None and 0 <= step < len(s.step_values.mean) else math.nan for s in series]
+
+    def set_order_step(self, index: int | None) -> bool:
+        """The step the "At step" order reads (the plan bar's one selected step, None: not exactly one); the legend rows are put in order again at once when that order is on.
+        Returns True when the lines' stacking follows the legend too (Draw order: Legend) and so needs a redraw: the owner does it."""
+        if index == self._order_step:
+            return False
+        self._order_step = index
+        if not self._view.legend_order().needs_step():
+            return False
+        if self._legend is not None and self._legend_items:
+            self._rebuild_legend(self._legend_series, self._legend_items)
+        return self._view.draw_mode == DRAW_LEGEND
+
+    def legend_order_note(self) -> str:
+        """What the Legend menu should say about the order ("" = nothing): that a step has to be picked on the plan bar, or which one is used."""
+        if not self._view.legend_order().needs_step():
+            return ""
+        if self._order_step is None:
+            return "Select exactly one step on the plan bar: the order reads the value at that step."
+        if not any(s.step_values is not None for s in self._legend_series):
+            return "No step values yet: the plan has no steps, or the lines are not computed."
+        return f"Order by the value at step {self._order_step + 1} (selected on the plan bar)."
 
     def _style_legend(self) -> None:
         """The View tab's legend options: the text size (new entries take it when they are added), the space between rows (the step table's rows follow the legend's
@@ -603,7 +696,13 @@ class SensorgramPlot(QWidget):
             return None
         legend.layout.activate()
         right = None if self._legend_hidden() else float(legend.sceneBoundingRect().right())  # a hidden legend leaves the whole width to the numbers
-        return LegendRows(tuple(float(label.sceneBoundingRect().center().y()) for _sample, label in legend.items), right)
+        centers = [float(label.sceneBoundingRect().center().y()) for _sample, label in legend.items]
+        if len(centers) == len(self._legend_rank):  # the rows may be in another order than the lines: the table asks for them in the lines' order
+            in_line_order = [0.0] * len(centers)
+            for row, line in enumerate(self._legend_rank):
+                in_line_order[line] = centers[row]
+            centers = in_line_order
+        return LegendRows(tuple(centers), right)
 
     def _bar_height_px(self, position: str) -> float:
         """Pixels the plan bar takes along the edge `position` (0 when it is hidden, full-height, or on the other edge)."""

@@ -98,6 +98,7 @@ class AxisCursor(QObject):
     def __init__(self, plot_item: pg.PlotItem, color: str, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._x: float | None = None  # where the owner last put the cursor
+        self._hidden = False  # the plot's "show the cursor" switch is off: the cursor keeps its place and is not drawn
         self._line = pg.InfiniteLine(
             angle=90, movable=True, pen=pg.mkPen(150, 150, 150, 160, style=Qt.PenStyle.DashLine),
             hoverPen=pg.mkPen(220, 220, 220, 230, width=2, style=Qt.PenStyle.DashLine),
@@ -125,12 +126,21 @@ class AxisCursor(QObject):
 
     def set_x(self, x: float | None) -> None:
         """Put the cursor at `x` (data units), or hide it (None or not finite)."""
-        shown = x is not None and x == x and abs(x) != float("inf")
-        self._x = float(x) if shown else None
+        valid = x is not None and x == x and abs(x) != float("inf")
+        self._x = float(x) if valid else None
+        self._apply()
+
+    def set_hidden(self, hidden: bool) -> None:
+        """Switch the cursor's drawing off or on (the plot's "Cursor" toggle). Its place is kept, so it comes back where it was."""
+        self._hidden = bool(hidden)
+        self._apply()
+
+    def _apply(self) -> None:
+        shown = self._x is not None and not self._hidden
         self._line.setVisible(shown)
-        self._handle.set_x(self._x)
-        if shown:
-            self._line.setValue(float(x))
+        self._handle.set_x(self._x if shown else None)
+        if self._x is not None:
+            self._line.setValue(self._x)
 
     def x(self) -> float | None:
         return self._x

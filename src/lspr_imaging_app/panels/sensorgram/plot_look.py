@@ -19,19 +19,23 @@ remembered (CLAUDE.md "Remembering UI state") once `restore_ui_state` was called
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 
 from PyQt6.QtCore import QObject, Qt, pyqtSignal
-from PyQt6.QtWidgets import QCheckBox, QDoubleSpinBox, QSpinBox, QToolButton, QWidget
+from PyQt6.QtWidgets import QCheckBox, QDoubleSpinBox, QLabel, QSpinBox, QToolButton, QWidget
 
 from lspr_ui import get_active_theme, load_tabler_icon
 
 from ..ribbon_fields import style_ribbon_number_field
 from ..spectra.pick_menu import PickMenu
 from ..spectra.view_menu import IconToggle
+from ...selection.plot_line_order_module import PlotLineOrderModule
 from ..ui_state import UiStateStore
 from .group_menu import GroupMenuButton, icon_choice_buttons, segment_stylesheet, segmented_buttons, widgets_row
+from .draw_order import DRAW_AUTO, DRAW_LEGEND, DRAW_MANUAL, DRAW_MODES
+from .legend_order import SORT_GROUP, SORT_KEYS, SORT_NAME, SORT_VALUE, VALUE_MEAN, VALUE_SOURCES, VALUE_STEP
+from .line_order_dialog import LineOrderDialog, LineRow
 from .line_icons import joint_picture, lines_toggle_icon, points_lines_icon, points_toggle_icon
 from .plot import MAX_LEGEND_ENTRIES, MAX_LEGEND_SERIES
 from .points_toggle import PointsToggle
@@ -110,6 +114,37 @@ LEGEND_OVER_BAR_TIP = (
     "is on the other edge."
 )
 LEGEND_COUNTS_TIP = "Write the number of ROIs after the name of a group or an average: \"Group A (n=12)\" instead of \"Group A\". A line of one ROI is always \"ROI 5\"."
+SORT_LABELS = {SORT_GROUP: "Group", SORT_NAME: "Name", SORT_VALUE: "Value"}
+SORT_TIPS = {
+    SORT_GROUP: "Group: the order the lines come in (a group's number, a ROI's id). This is the order the legend always had.",
+    SORT_NAME: "Name: alphabetical by the line's name, numbers read as numbers (ROI 2 before ROI 10).",
+    SORT_VALUE: "Value: by a number of the line, chosen under \"Value of\". A line without that number is always last.",
+}
+SORT_DIRECTION_TIP = "Direction of the order: arrow up = ascending (first to last, smallest first), arrow down = descending. Only the legend rows (and the Sensorgram's step table rows with them) move."
+VALUE_LABELS = {VALUE_MEAN: "Mean", VALUE_STEP: "At step"}
+VALUE_TIPS = {
+    VALUE_MEAN: "Mean: the mean of the line over the whole plot, as it is drawn (the Sensorgram: all its cubes; the LbL plot: its cycles; the S_bulk plot: its steps).",
+    VALUE_STEP: (
+        "At step: the line's value at one step. Sensorgram: the step selected on the plan bar (select exactly one). LbL and S_bulk plots: the cycle or step the cursor stands on "
+        "(drag the cursor, it jumps from one to the next)."
+    ),
+}
+DRAW_LABELS = {DRAW_AUTO: "Auto", DRAW_LEGEND: "Legend", DRAW_MANUAL: "Manual"}
+DRAW_TIPS = {
+    DRAW_AUTO: (
+        "Auto: the smoothest line in front, the noisiest at the back, so a smooth line is not scribbled over. Roughness = the median absolute second difference of the line's points "
+        "(a ramp or a slow drift is smooth, jitter is rough). Lines equally rough keep their own order, the later one in front."
+    ),
+    DRAW_LEGEND: "Legend: the stacking follows the legend rows (the Order row of the Legend menu): the first row is in front, the last at the back.",
+    DRAW_MANUAL: "Manual: your own order, set in the Line order table (the Order... button). The first row of the table is in front. A new line goes in front.",
+}
+DRAW_TIP = "Draw order: which line lies over which where lines overlap. Display only, no number changes."
+DRAW_EDIT_TIP = "Open the Line order table: the lines of this plot in rows (colour and name), the first row in front. Drag rows, or use To top / Up / Down / To bottom (also in the right-click menu)."
+DRAW_EDIT_OFF_TIP = "The table is used when the Draw order is Manual."
+CURSOR_TIP = (
+    "Show or hide the cursor. Sensorgram: the cube cursor. LbL and S_bulk plots: the step cursor that picks the step of \"At step\"; it is drawn only while the order reads the value at a step. "
+    "Hiding it does not change the step the order uses."
+)
 RESET_TIP = "Put these options back to what the plot always did."
 
 UNCERTAINTY_TIP = "Uncertainty: show or hide the bars or band of the points, what they show (SEM or SD) and how they are drawn."
@@ -190,6 +225,11 @@ class PlotLookKeys:
     legend_spacing: str
     legend_counts: str
     legend_over_bar: str
+    legend_sort: str
+    legend_descending: str
+    legend_value: str
+    show_cursor: str
+    draw_mode: str
 
     @staticmethod
     def with_prefix(prefix: str) -> PlotLookKeys:
@@ -198,6 +238,7 @@ class PlotLookKeys:
             points=f"{prefix}_points", lines=f"{prefix}_lines", point_size=f"{prefix}_point_size", dots_limit=f"{prefix}_dots_limit", line_width=f"{prefix}_line_width",
             line_style=f"{prefix}_line_style", legend_mode=f"{prefix}_legend_mode", legend_text=f"{prefix}_legend_text_pt", legend_spacing=f"{prefix}_legend_spacing",
             legend_counts=f"{prefix}_legend_counts", legend_over_bar=f"{prefix}_legend_over_bar",
+            legend_sort=f"{prefix}_legend_sort", legend_descending=f"{prefix}_legend_descending", legend_value=f"{prefix}_legend_value", show_cursor=f"{prefix}_show_cursor", draw_mode=f"{prefix}_draw_mode",
         )
 
 
@@ -215,6 +256,15 @@ def _spin(parent: QWidget, name: str, low: int, high: int, value: int, suffix: s
 def tabler(name: str):
     """The picture of a Tabler icon in a theme colour, for a `GroupMenuButton`."""
     return lambda color: load_tabler_icon(name, color=color, size=24)
+
+
+def direction_icon(descending: bool, _off_color: str, on_color: str):
+    """The order's direction: an arrow up (ascending) or down (descending), always in the accent colour (both are a choice, neither is "off")."""
+    return load_tabler_icon("arrow-down" if descending else "arrow-up", color=on_color, size=24)
+
+
+def cursor_icon(on: bool, off_color: str, on_color: str):
+    return load_tabler_icon("crosshair", color=on_color if on else off_color, size=24)
 
 
 def reset_button(parent: QWidget, name: str, slot: Callable[[], None]) -> QToolButton:
@@ -302,11 +352,26 @@ class PlotLookControls(QObject):
         self.line_width.setKeyboardTracking(False)
         style_holder, self._style_group, self._style_buttons = icon_choice_buttons(parent, LINE_STYLES, LINE_STYLE_PICTURES, LINE_STYLE_TIPS, f"{object_prefix}_line_style")
         self.set_line_style(d.line_style)
+        draw_holder, self._draw_group, self._draw_buttons = segmented_buttons(parent, DRAW_MODES, DRAW_LABELS, DRAW_TIPS, f"{object_prefix}_draw")
+        press(self._draw_buttons, d.draw_mode)
+        draw_holder.setToolTip(DRAW_TIP)
+        self.edit_order_button = QToolButton(parent)
+        self.edit_order_button.setObjectName(f"{object_prefix}_draw_edit")
+        self.edit_order_button.setText("Order...")
+        self.edit_order_button.setToolTip(DRAW_EDIT_TIP)
+        self.edit_order_button.clicked.connect(lambda _checked=False: self.open_line_order())
+        self._line_order: PlotLineOrderModule | None = None
+        self._plot_id = ""
+        self._plot_title = ""
+        self._line_source: Callable[[], Sequence[LineRow]] | None = None
+        self._order_dialog: LineOrderDialog | None = None
+        self._parent_widget = parent
         self._lines_reset = reset_button(parent, f"{object_prefix}_lines_reset", self.reset_lines)
         rows = [("Points", widgets_row(parent, self.show_points, self.point_size))]
         if self.dots_limit is not None:
             rows.append(("Dot limit", self.dots_limit))
         rows.append(("Lines", widgets_row(parent, self.show_lines, self.line_width)))
+        rows.append(("Draw order", widgets_row(parent, draw_holder, self.edit_order_button)))
         if joined:
             rows.append(("Joined", style_holder))
         else:
@@ -326,13 +391,35 @@ class PlotLookControls(QObject):
         self.legend_over_bar.setObjectName(f"{object_prefix}_legend_over_bar")
         self.legend_over_bar.setChecked(d.legend_over_bar)
         self.legend_over_bar.setToolTip(LEGEND_OVER_BAR_TIP)
+        # -- the order of the rows (legend_order.py): Group / Name / Value + a direction arrow; "Value of" only while Value is picked; the cursor toggle; a note when the order has no number
+        sort_holder, self._sort_group, self._sort_buttons = segmented_buttons(parent, SORT_KEYS, SORT_LABELS, SORT_TIPS, f"{object_prefix}_legend_sort")
+        self.sort_descending = IconToggle(direction_icon, SORT_DIRECTION_TIP, parent)
+        self.sort_descending.setObjectName(f"{object_prefix}_legend_descending")
+        value_holder, self._value_group, self._value_buttons = segmented_buttons(parent, VALUE_SOURCES, VALUE_LABELS, VALUE_TIPS, f"{object_prefix}_legend_value")
+        self.show_cursor = IconToggle(cursor_icon, CURSOR_TIP, parent)
+        self.show_cursor.setObjectName(f"{object_prefix}_show_cursor")
+        self.show_cursor.setChecked(d.show_cursor)
+        self.order_note = QLabel("", parent)
+        self.order_note.setObjectName(f"{object_prefix}_legend_order_note")
+        self.order_note.setWordWrap(True)
+        self.order_note.setMaximumWidth(260)
+        self.press_sort(d.legend_sort)
+        self.sort_descending.setChecked(d.legend_descending)
+        press(self._value_buttons, d.legend_value)
         self._legend_reset = reset_button(parent, f"{object_prefix}_legend_reset", self.reset_legend)
-        legend_rows = [("Legend", modes_holder), ("Text", self.legend_text), ("Row gap", self.legend_spacing), ("ROI count", self.legend_counts)]
+        order_row = widgets_row(parent, sort_holder, self.sort_descending)
+        legend_rows = [
+            ("Legend", modes_holder), ("Text", self.legend_text), ("Row gap", self.legend_spacing), ("ROI count", self.legend_counts),
+            ("Order", order_row), ("Value of", value_holder), ("Cursor", self.show_cursor), ("", self.order_note),
+        ]
         if legend_position:
             legend_rows.append(("Position", self.legend_over_bar))
         else:
             self.legend_over_bar.hide()
         self.legend_menu = GroupMenuButton(tabler("list-details"), LEGEND_TIP if legend_position else LEGEND_TIP_PLAIN, legend_rows, parent, footer=self._legend_reset)
+        self._value_holder = value_holder
+        self._sync_order_rows()
+        self.set_order_note("")
 
         style_ribbon_number_field(self.point_size, f"{POINT_SIZE_RANGE[1]} px")
         if self.dots_limit is not None:
@@ -343,11 +430,16 @@ class PlotLookControls(QObject):
         signals = [
             self.show_points.toggled, self.show_lines.toggled, self.point_size.valueChanged, self.line_width.valueChanged, self._style_group.buttonClicked,
             self.legend_text.valueChanged, self.legend_spacing.valueChanged, self.legend_counts.toggled, self._mode_group.buttonClicked, self.legend_over_bar.toggled,
+            self._sort_group.buttonClicked, self.sort_descending.toggled, self._value_group.buttonClicked, self.show_cursor.toggled,
+            self._draw_group.buttonClicked,
         ]
         if self.dots_limit is not None:
             signals.append(self.dots_limit.valueChanged)
         for signal in signals:
             signal.connect(self._changed)
+        self._sort_group.buttonClicked.connect(lambda _button: self._sync_order_rows())
+        self._draw_group.buttonClicked.connect(lambda _button: self._sync_draw_edit())
+        self._sync_draw_edit()
         self.refresh_theme()
 
     # -- values ---------------------------------------------------------------------------------------------------------------
@@ -362,7 +454,66 @@ class PlotLookControls(QObject):
             legend_mode=self.legend_mode(), legend_text_pt=self.legend_text.value(), legend_spacing_px=self.legend_spacing.value(),
             legend_counts=self.legend_counts.isChecked(),
             legend_over_bar=self.legend_over_bar.isChecked() if self._has_position else self._defaults.legend_over_bar,
+            legend_sort=pressed(self._sort_buttons) or SORT_GROUP, legend_descending=self.sort_descending.isChecked(),
+            legend_value=pressed(self._value_buttons) or VALUE_MEAN, show_cursor=self.show_cursor.isChecked(),
+            draw_mode=pressed(self._draw_buttons) or DRAW_LEGEND,
         ).sanitized()
+
+    # -- the draw order's table (Manual) ----------------------------------------------------------------------------------------
+
+    def attach_line_order(self, module: PlotLineOrderModule | None, plot_id: str, title: str, source: Callable[[], Sequence[LineRow]]) -> None:
+        """Connect this plot to the session's manual stacking list (`module`, key `plot_id`) and to what it draws (`source`: the lines now, in the plot's own order). A change of the list
+        reports as a change of the look, so the plot redraws through the way it already does. Without a module (a plot with no session) the table is not offered."""
+        self._line_order, self._plot_id, self._plot_title, self._line_source = module, plot_id, title, source
+        if module is not None:
+            module.changed.connect(self._line_order_changed)
+        self._sync_draw_edit()
+
+    def _line_order_changed(self, plot: str) -> None:
+        """The session's manual list of this plot changed (a bound method, so the connection ends with this object)."""
+        if plot == self._plot_id:
+            self._changed()
+
+    def manual_order(self) -> tuple[str, ...]:
+        """The plot's manual list, first = in front (empty: none set, or no session)."""
+        return () if self._line_order is None else self._line_order.order(self._plot_id)
+
+    def lines_changed(self) -> None:
+        """The plot drew other lines: the open Line order table follows them."""
+        if self._order_dialog is not None and self._order_dialog.isVisible():
+            self._order_dialog.refresh()
+
+    def open_line_order(self) -> None:
+        """Show the Line order table of this plot (made once, then shown again)."""
+        if self._line_order is None or self._line_source is None:
+            return
+        if self._order_dialog is None:
+            self._order_dialog = LineOrderDialog(self._parent_widget, self._plot_title, self._line_source, self._line_order, self._plot_id, mode_now=lambda: self.settings().draw_mode)
+        self._order_dialog.refresh()
+        self._order_dialog.show()
+        self._order_dialog.raise_()
+        self._order_dialog.activateWindow()
+
+    def _sync_draw_edit(self) -> None:
+        """The Order... button works while the mode is Manual (and the plot has a session list); the table follows the mode in its hint."""
+        manual = pressed(self._draw_buttons) == DRAW_MANUAL
+        self.edit_order_button.setEnabled(manual and self._line_order is not None)
+        self.edit_order_button.setToolTip(DRAW_EDIT_TIP if manual else f"{DRAW_EDIT_TIP}\n\n{DRAW_EDIT_OFF_TIP}")
+        if self._order_dialog is not None:
+            self._order_dialog.refresh()
+
+    def press_sort(self, key: str) -> None:
+        """Press the button of the order's key without reporting it (an unknown key is ignored)."""
+        press(self._sort_buttons, key)
+
+    def _sync_order_rows(self) -> None:
+        """"Value of" means something only while the order is Value: it is shown then."""
+        self.legend_menu.set_row_visible(self._value_holder, pressed(self._sort_buttons) == SORT_VALUE)
+
+    def set_order_note(self, text: str) -> None:
+        """Say why the order cannot read its number now ("Select one step on the plan bar"); "" hides the note. Reports no change."""
+        self.order_note.setText(text)
+        self.legend_menu.set_row_visible(self.order_note, bool(text))
 
     def legend_mode(self) -> str:
         return pressed(self._mode_buttons) or LEGEND_AUTO
@@ -418,8 +569,10 @@ class PlotLookControls(QObject):
                 self.dots_limit.setValue(d.dots_max_lines)
             self.line_width.setValue(d.line_width)
             self.set_line_style(d.line_style)
+            press(self._draw_buttons, d.draw_mode)
 
         self._set_quietly(put_back)
+        self._sync_draw_edit()
 
     def reset_legend(self) -> None:
         d = self._defaults
@@ -430,8 +583,13 @@ class PlotLookControls(QObject):
             self.legend_spacing.setValue(d.legend_spacing_px)
             self.legend_counts.setChecked(d.legend_counts)
             self.legend_over_bar.setChecked(d.legend_over_bar)
+            self.press_sort(d.legend_sort)
+            self.sort_descending.setChecked(d.legend_descending)
+            press(self._value_buttons, d.legend_value)
+            self.show_cursor.setChecked(d.show_cursor)
 
         self._set_quietly(put_back)
+        self._sync_order_rows()
 
     def _set_quietly(self, change) -> None:
         self._syncing = True
@@ -451,10 +609,12 @@ class PlotLookControls(QObject):
         theme = get_active_theme()
         self.show_points.refresh_theme()
         self.show_lines.refresh_theme()
+        self.sort_descending.refresh_theme()
+        self.show_cursor.refresh_theme()
         self.lines_menu.refresh_theme()
         self.legend_menu.refresh_theme()
         segment = segment_stylesheet()
-        for button in self._mode_buttons.values():
+        for button in (*self._mode_buttons.values(), *self._sort_buttons.values(), *self._value_buttons.values(), *self._draw_buttons.values()):
             button.setStyleSheet(segment)
         for button in self._style_buttons.values():  # picture buttons: they style and recolour themselves
             button.refresh_theme()
@@ -471,6 +631,7 @@ class PlotLookControls(QObject):
             pairs = [
                 (k.points, self.show_points), (k.lines, self.show_lines), (k.point_size, self.point_size), (k.line_width, self.line_width),
                 (k.legend_text, self.legend_text), (k.legend_spacing, self.legend_spacing), (k.legend_counts, self.legend_counts),
+                (k.legend_descending, self.sort_descending), (k.show_cursor, self.show_cursor),
             ]
             if self._has_position:
                 pairs.append((k.legend_over_bar, self.legend_over_bar))
@@ -480,10 +641,18 @@ class PlotLookControls(QObject):
                 store.bind(key, widget)
             _restore_choice(store, k.legend_mode, self._mode_buttons)
             _restore_choice(store, k.line_style, self._style_buttons)
+            _restore_choice(store, k.legend_sort, self._sort_buttons)
+            _restore_choice(store, k.legend_value, self._value_buttons)
+            _restore_choice(store, k.draw_mode, self._draw_buttons)
         finally:
             self._syncing = False
+        self._sync_order_rows()
+        self._sync_draw_edit()
         _remember_choice(store, k.legend_mode, self._mode_buttons)
         _remember_choice(store, k.line_style, self._style_buttons)
+        _remember_choice(store, k.legend_sort, self._sort_buttons)
+        _remember_choice(store, k.legend_value, self._value_buttons)
+        _remember_choice(store, k.draw_mode, self._draw_buttons)
         if report:
             self.settings_changed.emit()  # whatever was restored is what the plot should show
 

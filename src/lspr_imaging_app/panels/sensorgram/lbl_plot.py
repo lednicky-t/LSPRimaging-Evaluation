@@ -44,7 +44,22 @@ from ..ui_state import UiStateStore
 from .bulk_plot import MAX_LINES, BulkLine, _separator
 from .curve_smoothing import smooth_run
 from ..spectra.pick_menu import PickMenu
-from .plot_window_draw import PlotAreaButton, add_band, add_legend_entry, legend_name, make_legend, style_legend
+from .draw_order import roughness
+from .plot_window_draw import (
+    LegendEntry,
+    PlotAreaButton,
+    StepCursor,
+    add_band,
+    cursor_value_at,
+    fill_legend,
+    legend_name,
+    make_legend,
+    mean_of,
+    rows_of,
+    stack_lines,
+    style_legend,
+)
+from ...selection.plot_line_order_module import PLOT_LBL, PlotLineOrderModule
 from .view_settings import LINE_SPLINE, UNCERTAINTY_BAND, SensorgramViewSettings, UncertaintyLook
 from .plot_look import LINES_SENSORGRAM, WINDOW_LOOK_DEFAULTS, PlotLookControls, PlotLookKeys, UncertaintyControls, UncertaintyKeys, lines_pick_menu, restore_pick
 from .window_look_icons import accumulated_picture, cycle_picture
@@ -54,6 +69,7 @@ SHIFT_CYCLE = "cycle"
 GEOMETRY_KEY = "sensorgram/lbl_plot_geometry"
 LINES_KEY = "sensorgram/lbl_plot_lines"
 SHIFT_KEY = "sensorgram/lbl_plot_shift"
+CURSOR_KEY = "sensorgram/lbl_plot_cursor"  # the cycle the cursor stands on
 SHIFT_LABELS = {SHIFT_ACCUMULATED: "Accumulated", SHIFT_CYCLE: "Per cycle"}
 SHIFT_PICTURES = {SHIFT_ACCUMULATED: accumulated_picture(), SHIFT_CYCLE: cycle_picture()}
 SHIFT_TIPS = {
@@ -81,7 +97,7 @@ class LblPlotWindow(QWidget):
     lines_mode_changed = pyqtSignal(str)
     closed = pyqtSignal()
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, line_order: PlotLineOrderModule | None = None) -> None:
         super().__init__(parent, Qt.WindowType.Window)
         self.setWindowTitle("LbL series")
         self.resize(640, 440)
@@ -94,6 +110,8 @@ class LblPlotWindow(QWidget):
         self._y_label = "Step mean (nm)"
         self._note = ""
         self._drawn: list[tuple[BulkLine, list[LblPoint]]] = []
+        self._last_entries: list[LegendEntry] = []  # the lines drawn now: the Line order table's rows
+        self.look.attach_line_order(line_order, PLOT_LBL, "LbL series", lambda: rows_of(self._last_entries))  # the Manual draw order's list is the session's
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 8, 8, 8)
@@ -119,6 +137,8 @@ class LblPlotWindow(QWidget):
         self._plot = pg.PlotWidget(parent=self)
         self._plot.showGrid(x=True, y=True, alpha=0.15)
         self._legend = make_legend(self._plot.getPlotItem())
+        self._cursor = StepCursor(self._plot.getPlotItem(), CURSOR_KEY, self)  # the cycle the legend's "Value at step" order reads (jumps from cycle to cycle)
+        self._cursor.moved.connect(self._look_changed)
         outer.addWidget(self._plot, 1)
         self.calculate_button = PlotAreaButton("Calculate groups", self._plot)  # in the plot area, not the row: the plot is empty exactly when it is needed
         self.calculate_button.setToolTip("The groups' step numbers are not calculated yet (or out of date): calculate them, as the ROI table's refresh button does.")
@@ -174,10 +194,14 @@ class LblPlotWindow(QWidget):
     def redraw(self) -> None:
         item = self._plot.getPlotItem()
         item.clear()
+        self._cursor.readd()  # `clear()` took its line out of the plot
         self._legend.clear()
         self._drawn = []
         view, unc = self.look.settings(), self.uncertainty.settings()
         style_legend(self._legend, view)
+        self._cursor.set_steps([float(k) for k in range(len(self._steps))])
+        entries: list[LegendEntry] = []
+        groups: dict[int, list] = {}  # entry index -> the plot items of that line (for the draw order)
         mode = self.shift_mode()
         unit = self._unit()
         item.setLabel("bottom", "Cycle (bilayers; 0 = the start step)")
@@ -195,10 +219,31 @@ class LblPlotWindow(QWidget):
             points = lbl_points(line.numbers, refs, unc.kind) if refs else []
             self._drawn.append((line, points))
             suffix = "" if line.current else " (out of date)"
-            self._draw_line(item, line, points, mode, view, unc, suffix)
+            first = len(item.items)
+            entry = self._draw_line(item, line, points, mode, view, unc, suffix, index=len(entries))
+            if entry is not None:
+                entries.append(entry)
+                groups[entry.index] = list(item.items[first:])
+        self._apply_order(entries, view, groups)
         self.status.setText(" ".join(notes))
 
-    def _draw_line(self, item, line: BulkLine, points: list[LblPoint], mode: str, view: SensorgramViewSettings, unc: UncertaintyLook, suffix: str) -> None:
+    def _apply_order(self, entries: list[LegendEntry], view: SensorgramViewSettings, groups: dict[int, list]) -> None:
+        """The legend rows in the order the Legend menu asks for, which line lies over which (the Draw order), and the step cursor (drawn only while the order reads the value at a step)."""
+        order = view.legend_order()
+        step = self._cursor.x()
+        fill_legend(self._legend, entries, view, step_known=step is not None)
+        stack_lines(groups, entries, view, self.look.manual_order(), step_known=step is not None)
+        self._last_entries = entries
+        self.look.lines_changed()  # an open Line order table follows the lines
+        self._cursor.show(bool(view.show_cursor and order.needs_step() and step is not None))
+        note = ""
+        if order.needs_step():
+            note = f"Order by the value at cycle {step:g}. Drag the cursor to change it." if step is not None else "No cycles yet: there is no step to read a value at."
+        self.look.set_order_note(note)
+
+    def _draw_line(
+        self, item, line: BulkLine, points: list[LblPoint], mode: str, view: SensorgramViewSettings, unc: UncertaintyLook, suffix: str, *, index: int
+    ) -> LegendEntry | None:
         """One line: the points joined, with the uncertainty of the shift as bars or a band. Cycle 0 has no per-cycle value (it has no cycle before it) and is left out of that view."""
         xs, ys, errs, tips = [], [], [], []
         kind = unc.kind.upper()
@@ -212,10 +257,13 @@ class LblPlotWindow(QWidget):
             errs.append(u if math.isfinite(u) else 0.0)
             tips.append(f"cycle {p.cycle} (step {step.order}, {step.name}): {value:.3f}" + (f" ± {u:.3f} ({kind})" if math.isfinite(u) else ""))
         if not xs:
-            return
+            return None
         x, y, e = np.array(xs), np.array(ys), np.array(errs)
         spline = view.line_style == LINE_SPLINE
-        add_legend_entry(self._legend, line.color, view.line_width, legend_name(line.label, line.short_label, view) + suffix)
+        entry = LegendEntry(
+            index, line.short_label or line.label, legend_name(line.label, line.short_label, view) + suffix, line.color, view.line_width,
+            mean=mean_of(ys), at_cursor=cursor_value_at(xs, ys, self._cursor.x()), key=line.short_label or line.label, rough=roughness(ys),
+        )
         if view.show_lines:
             line_x, line_y = smooth_run(x, y) if spline else (x, y)
             item.addItem(pg.PlotCurveItem(line_x, line_y, pen=pg.mkPen(line.color, width=view.line_width), antialias=True))
@@ -230,6 +278,7 @@ class LblPlotWindow(QWidget):
                     x=x, y=y, size=view.point_size, pen=pg.mkPen(line.color, width=1.6), brush=pg.mkBrush(line.color), data=tips, hoverable=True, tip=lambda x, y, data: data,
                 )
             )
+        return entry
 
     # -- export ---------------------------------------------------------------------------------------------------------------------
 
@@ -259,6 +308,7 @@ class LblPlotWindow(QWidget):
             axis.setPen(pg.mkPen(theme.text_muted))
             axis.setTextPen(pg.mkPen(theme.text_muted))
         self.export_button.refresh_theme()
+        self._cursor.refresh_theme()
         self.look.refresh_theme()
         self.uncertainty.refresh_theme()
         self._lines_pick.refresh_theme()
@@ -270,6 +320,7 @@ class LblPlotWindow(QWidget):
         self._store = store
         self.look.restore_ui_state(store)
         self.uncertainty.restore_ui_state(store)
+        self._cursor.restore_ui_state(store)
         restore_pick(store, LINES_KEY, self._lines_pick)
         restore_pick(store, SHIFT_KEY, self._shift_pick)
         geometry = store.get(GEOMETRY_KEY)

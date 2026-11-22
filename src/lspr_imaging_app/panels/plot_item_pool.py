@@ -32,6 +32,8 @@ class PlotItemPool:
         free = self._free.get(kind)
         if free:
             item = free.pop(0)  # oldest first: the stacking order between items of a kind stays the order they were made in
+            if z is not None and item.zValue() != z:  # a caller that stacks its items (the Sensorgram's Draw order) gives each take its own z
+                item.setZValue(z)
         else:
             item = factory()
             if z is not None:

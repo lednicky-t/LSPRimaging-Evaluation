@@ -47,6 +47,8 @@ SENSORGRAM_LOOK_KEYS = PlotLookKeys(
     points="sensorgram/view_points", lines="sensorgram/view_lines", point_size="sensorgram/view_point_size", dots_limit="sensorgram/view_dots_limit",
     line_width="sensorgram/view_line_width", line_style=SENSORGRAM_LINE_STYLE.key, legend_mode=SENSORGRAM_LEGEND_MODE.key, legend_text="sensorgram/view_legend_text_pt",
     legend_spacing="sensorgram/view_legend_spacing", legend_counts="sensorgram/view_legend_counts", legend_over_bar="sensorgram/view_legend_over_bar",
+    legend_sort="sensorgram/view_legend_sort", legend_descending="sensorgram/view_legend_descending", legend_value="sensorgram/view_legend_value", show_cursor="sensorgram/view_cursor",
+    draw_mode="sensorgram/view_draw_mode",
 )
 
 BAND_TIP = (

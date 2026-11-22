@@ -38,12 +38,27 @@ from ...analysis.export_tables import Table
 from ...analysis.step_table import BulkPoint, RowNumbers, bulk_values
 from ..plot_export_button import ExportData, PlotExportButton
 from ..ui_state import UiStateStore
-from .plot_window_draw import PlotAreaButton, add_band, add_legend_entry, legend_name, make_legend, style_legend
+from ...selection.plot_line_order_module import PLOT_BULK, PlotLineOrderModule
+from .plot_window_draw import (
+    LegendEntry,
+    PlotAreaButton,
+    StepCursor,
+    add_band,
+    fill_legend,
+    legend_name,
+    make_legend,
+    median_abs_residual,
+    mean_of,
+    rows_of,
+    stack_lines,
+    style_legend,
+)
 from .view_settings import UNCERTAINTY_BAND, UNCERTAINTY_SD, SensorgramViewSettings, UncertaintyLook
 from .plot_look import LINES_SENSORGRAM, WINDOW_LOOK_DEFAULTS, PlotLookControls, PlotLookKeys, UncertaintyControls, UncertaintyKeys, lines_pick_menu, restore_pick
 
 GEOMETRY_KEY = "sensorgram/bulk_plot_geometry"
 LINES_KEY = "sensorgram/bulk_plot_lines"
+CURSOR_KEY = "sensorgram/bulk_plot_cursor"  # the refractive index of the step the cursor stands on
 MAX_LINES = 12  # more lines than this make an unreadable plot; the rest are named in the status line
 _BAND_POINTS = 60
 
@@ -94,7 +109,7 @@ class BulkPlotWindow(QWidget):
     lines_mode_changed = pyqtSignal(str)
     closed = pyqtSignal()
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, line_order: PlotLineOrderModule | None = None) -> None:
         super().__init__(parent, Qt.WindowType.Window)
         self.setWindowTitle("Bulk sensitivity")
         self.resize(600, 440)
@@ -110,6 +125,8 @@ class BulkPlotWindow(QWidget):
         self._wavelength_nm: float | None = None
         self._note = ""
         self._fits: list[tuple[BulkLine, object]] = []
+        self._last_entries: list[LegendEntry] = []  # the lines drawn now: the Line order table's rows
+        self.look.attach_line_order(line_order, PLOT_BULK, "S_bulk", lambda: rows_of(self._last_entries))  # the Manual draw order's list is the session's
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 8, 8, 8)
@@ -128,6 +145,8 @@ class BulkPlotWindow(QWidget):
         self._plot = pg.PlotWidget(parent=self)
         self._plot.showGrid(x=True, y=True, alpha=0.15)
         self._legend = make_legend(self._plot.getPlotItem())
+        self._cursor = StepCursor(self._plot.getPlotItem(), CURSOR_KEY, self)  # the step (its refractive index) the legend's "Value at step" order reads
+        self._cursor.moved.connect(self._look_changed)
         outer.addWidget(self._plot, 1)
         self.calculate_button = PlotAreaButton("Calculate groups", self._plot)  # in the plot area, not the row: the plot is empty exactly when it is needed
         self.calculate_button.setToolTip("The groups' step numbers are not calculated yet (or out of date): calculate them, as the ROI table's refresh button does.")
@@ -173,10 +192,14 @@ class BulkPlotWindow(QWidget):
     def redraw(self) -> None:
         item = self._plot.getPlotItem()
         item.clear()
+        self._cursor.readd()  # `clear()` took its line out of the plot
         self._legend.clear()
         self._fits = []
         view, unc = self.look.settings(), self.uncertainty.settings()
         style_legend(self._legend, view)
+        self._cursor.set_steps([s.ri for s in self._steps])  # a step is a place the cursor can stand on: its refractive index
+        entries: list[LegendEntry] = []
+        groups: dict[int, list] = {}  # entry index -> the plot items of that line (for the draw order)
         theme = get_active_theme()
         unit = self._y_label.split("(")[-1].rstrip(")") if "(" in self._y_label else ""
         wl = f", at {self._wavelength_nm:g} nm" if self._wavelength_nm else ""
@@ -199,6 +222,7 @@ class BulkPlotWindow(QWidget):
                 self._plot.setXRange(*span, padding=0.04)
                 self._x_range = span
         for line in shown:
+            first, drawn_before = len(item.items), len(entries)
             values = bulk_values(line.numbers, points, self._weighting) if points else None
             fit = None if values is None else values.fit_sem
             self._fits.append((line, values))
@@ -217,12 +241,53 @@ class BulkPlotWindow(QWidget):
                         item.addItem(pg.FillBetweenItem(upper, lower, brush=fill))
                 chi = f", χ²red {fit.chi2_red:.2f}" if math.isfinite(fit.chi2_red) else ""
                 name = f"{legend_name(line.label, line.short_label, view)}: S_bulk = {fit.slope:.1f} ± {fit.u:.1f} {unit}/RIU{chi}" + ("" if line.current else " (out of date)")
-                add_legend_entry(self._legend, line.color, view.line_width, name)
+                entries.append(
+                    LegendEntry(
+                        len(entries), line.short_label or line.label, name, line.color, view.line_width, mean=self._mean_of(line, None), at_cursor=self._mean_of(line, self._cursor.x()),
+                        key=line.short_label or line.label, rough=self._scatter_of(line, fit),
+                    )
+                )
                 if view.show_lines:
                     item.addItem(pg.PlotCurveItem(xs, ys, pen=pg.mkPen(line.color, width=view.line_width), antialias=True))
             elif fit is not None and fit.reason:
                 notes.append(f"{line.label}: {fit.reason}.")
+            if len(entries) > drawn_before:
+                groups[entries[-1].index] = list(item.items[first:])
+        self._apply_order(entries, view, groups)
         self.status.setText(" ".join(notes))
+
+    def _mean_of(self, line: BulkLine, ri: float | None) -> float:
+        """A line's number for the legend's Value order: the mean of its step means over every step drawn (`ri` None), or at the steps whose refractive index is `ri` (the cursor's:
+        steps of the same solution share one; their means are averaged). NaN when there are none."""
+        values = []
+        for step in self._steps:
+            if step.ref not in line.numbers.refs or (ri is not None and step.ri != ri):
+                continue
+            values.append(line.numbers.value_at(step.ref).mean)
+        return mean_of(values)
+
+    def _scatter_of(self, line: BulkLine, fit) -> float:
+        """How far a line's step means sit from its own fitted line (the median absolute residual): what "rough" means for the Auto draw order of this plot."""
+        pairs = [(step.ri, line.numbers.value_at(step.ref).mean) for step in self._steps if step.ref in line.numbers.refs]
+        return median_abs_residual(pairs, fit.slope, fit.intercept)
+
+    def _apply_order(self, entries: list[LegendEntry], view: SensorgramViewSettings, groups: dict[int, list]) -> None:
+        """The legend rows in the order the Legend menu asks for, which line lies over which (the Draw order), and the step cursor (drawn only while the order reads the value at a step)."""
+        order = view.legend_order()
+        ri = self._cursor.x()
+        fill_legend(self._legend, entries, view, step_known=ri is not None)
+        stack_lines(groups, entries, view, self.look.manual_order(), step_known=ri is not None)
+        self._last_entries = entries
+        self.look.lines_changed()  # an open Line order table follows the lines
+        self._cursor.show(bool(view.show_cursor and order.needs_step() and ri is not None))
+        note = ""
+        if order.needs_step():
+            if ri is None:
+                note = "No step has a refractive index yet: there is no step to read a value at."
+            else:
+                names = ", ".join(str(s.order) for s in self._steps if s.ri == ri)
+                note = f"Order by the value at RI {ri:.5f} (step {names}; steps with the same RI are averaged). Drag the cursor to change it."
+        self.look.set_order_note(note)
 
     def _draw_points(self, item, line: BulkLine, view: SensorgramViewSettings, unc: UncertaintyLook, theme) -> None:
         """Uncertainty and points: filled for the steps in the set, hollow for the others that have an RI. The vertical bar (or the band along the points) is the step mean's SEM or the
@@ -309,6 +374,7 @@ class BulkPlotWindow(QWidget):
             axis.setPen(pg.mkPen(theme.text_muted))
             axis.setTextPen(pg.mkPen(theme.text_muted))
         self.export_button.refresh_theme()
+        self._cursor.refresh_theme()
         self.look.refresh_theme()
         self.uncertainty.refresh_theme()
         self._lines_pick.refresh_theme()
@@ -319,6 +385,7 @@ class BulkPlotWindow(QWidget):
         self._store = store
         self.look.restore_ui_state(store)
         self.uncertainty.restore_ui_state(store)
+        self._cursor.restore_ui_state(store)
         restore_pick(store, LINES_KEY, self._lines_pick)
         geometry = store.get(GEOMETRY_KEY)
         if isinstance(geometry, str) and geometry:

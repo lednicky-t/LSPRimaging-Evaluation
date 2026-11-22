@@ -67,6 +67,7 @@ from .image_tools.mask_scope import MaskScope
 from .image_tools.chromatic_auto_task import TASK_ID as CHROMATIC_TASK_ID, ChromaticAutoDetect
 from .image_tools.mask.mask_pointers import MaskPointersModule
 from .selection.experiment_plan_module import ExperimentPlanModule
+from .selection.plot_line_order_module import PlotLineOrderModule
 from .selection.spectral_correction_module import SpectralCorrectionModule
 from .image_tools.mask_auto_task import TASK_ID as AUTO_MASK_TASK_ID
 from .image_tools.mask_export_task import TASK_ID as MASK_EXPORT_TASK_ID
@@ -414,6 +415,7 @@ def capture_session(
     mask_pointers: MaskPointersModule | None = None,
     experiment_plan: ExperimentPlanModule | None = None,
     spectral: SpectralCorrectionModule | None = None,
+    line_order: PlotLineOrderModule | None = None,
 ) -> SessionState:
     """Read every module's current state into a plain, Qt-free
     :class:`SessionState` (2026-09-23).
@@ -450,6 +452,7 @@ def capture_session(
         **({} if mask_pointers is None else {"mask_pointers": mask_pointers.state()}),
         **({} if experiment_plan is None else {"plan_edits": experiment_plan.state(), "refractive_index": experiment_plan.ri_table()}),
         **({} if spectral is None else {"spectral_correction": spectral.state()}),
+        **({} if line_order is None else {"plot_line_order": line_order.state()}),
     )
 
 
@@ -466,6 +469,7 @@ def apply_session(
     mask_pointers: MaskPointersModule | None = None,
     experiment_plan: ExperimentPlanModule | None = None,
     spectral: SpectralCorrectionModule | None = None,
+    line_order: PlotLineOrderModule | None = None,
 ) -> None:
     """Push a loaded :class:`SessionState` into every module.
 
@@ -494,6 +498,8 @@ def apply_session(
         experiment_plan.restore_ri_table(state.refractive_index)
     if spectral is not None:
         spectral.restore_state(state.spectral_correction)  # reads its table back on a thread; the display has no correction until it is there
+    if line_order is not None:
+        line_order.restore_state(state.plot_line_order)  # the plots' manual stacking order (schema 1.16); a blank session has none
 
     selection.set_cube(state.selected_cube)
     selection.set_wavelength(state.selected_wavelength)
@@ -550,6 +556,7 @@ def _build_session_autosave(
     mask_pointers: MaskPointersModule | None = None,
     experiment_plan: ExperimentPlanModule | None = None,
     spectral: SpectralCorrectionModule | None = None,
+    line_order: PlotLineOrderModule | None = None,
 ) -> SessionAutosave:
     """Build the debounce, and wire every module's own change signal to
     ``schedule()`` it (2026-09-23).
@@ -574,7 +581,7 @@ def _build_session_autosave(
     autosave = SessionAutosave(
         capture=lambda: capture_session(
             geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings, frame_roles,
-            mask_pointers, experiment_plan, spectral,
+            mask_pointers, experiment_plan, spectral, line_order,
         ),
         naming=_cached_frame_naming(dataset),
     )
@@ -602,6 +609,8 @@ def _build_session_autosave(
         signals.append(experiment_plan.ri_changed)  # an imported RI table (RIs.txt) is part of the session too
     if spectral is not None:
         signals.append(spectral.changed)  # the spectral-correction table and the mode are part of the session
+    if line_order is not None:
+        signals.append(line_order.changed)  # the plots' manual stacking order is part of the session
     for signal in signals:
         signal.connect(autosave.schedule)
 
@@ -623,6 +632,7 @@ def _wire_session_coordinator(
     session_load: SessionLoadTask | None = None,
     experiment_plan: ExperimentPlanModule | None = None,
     spectral: SpectralCorrectionModule | None = None,
+    line_order: PlotLineOrderModule | None = None,
 ) -> None:
     """Restore into every module whenever the *active session* changes -
     on a dataset load, an explicit session switch, or a new session's
@@ -659,7 +669,7 @@ def _wire_session_coordinator(
         with autosave.suspended():
             apply_session(
                 state or SessionState(), geometry, mask, chromatic, background,
-                roi_toolbox, selection, analysis_settings, frame_roles, mask_pointers, experiment_plan, spectral,
+                roi_toolbox, selection, analysis_settings, frame_roles, mask_pointers, experiment_plan, spectral, line_order,
             )
 
     def restore(root: Path | None) -> None:
@@ -746,6 +756,7 @@ class _Modules:
     frame_roles: FrameRolesModule
     experiment_plan: ExperimentPlanModule
     spectral: SpectralCorrectionModule  # the measured LCTF passbands and the spectral correction mode (a session value)
+    line_order: PlotLineOrderModule  # the plots' manual stacking order of the lines (a session value, schema 1.16)
     cube_display: CubeDisplayModule
     highlight_range: HighlightRangeModule
     area_selection: AreaSelectionModule
@@ -814,6 +825,7 @@ def _build_modules() -> _Modules:
     frame_roles = FrameRolesModule(dataset, reference_frame)
     experiment_plan = ExperimentPlanModule(dataset)  # the measured steps with the user's edits on top; the edits are part of the session
     spectral = SpectralCorrectionModule()  # the measured LCTF passbands and the correction mode; part of the session (its table is a file in the session folder)
+    line_order = PlotLineOrderModule()  # which line lies over which in the Sensorgram / LbL / S_bulk plots, set by hand; part of the session
     highlight_range = HighlightRangeModule()
     # The pointers a Mask-tab scan finds (cosmetic: never a mask, never a recompute); part of the session.
     mask_pointers = MaskPointersModule()
@@ -842,13 +854,13 @@ def _build_modules() -> _Modules:
     # ImageDataset.home).
     session_autosave = _build_session_autosave(
         dataset, geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings, frame_roles,
-        mask_pointers, experiment_plan, spectral,
+        mask_pointers, experiment_plan, spectral, line_order,
     )
     session_load = SessionLoadTask()
     _wire_session_coordinator(
         session_coordinator, session_autosave,
         geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings, frame_roles,
-        mask_pointers, session_load, experiment_plan, spectral,
+        mask_pointers, session_load, experiment_plan, spectral, line_order,
     )
     dataset.dataset_loaded.connect(lambda ds: session_coordinator.bind_dataset(ds.home))
 
@@ -858,7 +870,7 @@ def _build_modules() -> _Modules:
     session_carry = SessionCarry(
         capture=lambda: capture_session(
             geometry, mask, chromatic, background, roi_toolbox, selection, analysis_settings, frame_roles, mask_pointers,
-            experiment_plan,
+            experiment_plan, line_order=line_order,
         ),
         naming=_cached_frame_naming(dataset),
         source=lambda: (dataset.dataset_home(), session_coordinator.active_session_id()),
@@ -923,6 +935,7 @@ def _build_modules() -> _Modules:
         frame_roles=frame_roles,
         experiment_plan=experiment_plan,
         spectral=spectral,
+        line_order=line_order,
         cube_display=cube_display,
         trace_store=trace_store, sensorgram_axis=sensorgram_axis, step_table=step_table, data_checks=data_checks, image_motion=image_motion,
         signal_map=SignalMapModule(step_table, roi_toolbox, experiment_plan),
@@ -1593,7 +1606,7 @@ def _wire_bulk_plot(m, window: QMainWindow, sensorgram_panel: SensorgramPanel, u
     from .panels.sensorgram.bulk_plot import LINES_SENSORGRAM, BulkLine, BulkPlotWindow, PlotStep, lines_from_series
     from .plan.refractive_index import solution_of
 
-    plot = BulkPlotWindow(window)
+    plot = BulkPlotWindow(window, line_order=m.line_order)
     plot.restore_ui_state(ui_state)
     plot.export_button.set_context(*export_context_args)
     overlays, controls, plan, table = sensorgram_panel.bulk_overlays(), sensorgram_panel.bulk_controls(), m.experiment_plan, m.step_table
@@ -1666,7 +1679,7 @@ def _wire_lbl_plot(m, window: QMainWindow, sensorgram_panel: SensorgramPanel, ui
     from .panels.sensorgram.lbl_plot import LINES_SENSORGRAM, LblPlotWindow, LblStep
     from .plan.refractive_index import solution_of
 
-    plot = LblPlotWindow(window)
+    plot = LblPlotWindow(window, line_order=m.line_order)
     plot.restore_ui_state(ui_state)
     plot.export_button.set_context(*export_context_args)
     overlays, controls, plan, table = sensorgram_panel.bulk_overlays(), sensorgram_panel.lbl_controls(), m.experiment_plan, m.step_table
@@ -2124,7 +2137,7 @@ def build_main_window(
     spectra_panel.restore_ui_state(ui_state)
     sensorgram_panel = SensorgramPanel(
         m.scan_results, m.roi_toolbox, m.dataset, m.selection, m.analysis_settings, m.cube_display, image_busy=image_panel.render_pending,
-        live=m.analysis_live, mask=m.mask, experiment_plan=m.experiment_plan, trace_store=m.trace_store, axis=m.sensorgram_axis,
+        live=m.analysis_live, mask=m.mask, experiment_plan=m.experiment_plan, trace_store=m.trace_store, axis=m.sensorgram_axis, line_order=m.line_order,
     )
     sensorgram_panel.restore_ui_state(ui_state)
     # During Play the Sensorgram cursor marks the frame on screen and moves first, so image and cursor reach the screen in one repaint.
