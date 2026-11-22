@@ -12,7 +12,7 @@ Validation / errors: none (three fixed layers).
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QPoint, QSize, Qt
+from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtGui import QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import QHBoxLayout, QMenu, QToolButton, QToolTip, QVBoxLayout, QWidget, QWidgetAction
 
@@ -22,6 +22,7 @@ from ..ribbon_icon_size import ICON_SIZE
 from ..ui_state import UiStateStore
 from .layers import IMAGE, LAYER_NAMES, LAYERS, ROI, ImageLayers
 from .roi_icons import display_icon
+from .side_rails import LEFT, beside_point, tooltip_point, valid_side
 from .wheel_tool_button import WheelToolButton
 
 _RENDER_SIZE = ICON_SIZE * 2
@@ -124,6 +125,7 @@ class LayersButton(WheelToolButton):
     def __init__(self, layers: ImageLayers, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._layers = layers
+        self._side = LEFT  # the side of the image the toolbar stands on (`set_side`)
         self.form = LayersForm(layers, self)
         self.menu = QMenu(self)
         action = QWidgetAction(self.menu)
@@ -139,14 +141,20 @@ class LayersButton(WheelToolButton):
         """Remember the Image layer's eye and the active layer (the toolbar's `bind_ui_state` calls this)."""
         self._layers.bind_ui_state(store)
 
+    def set_side(self, side: str) -> None:
+        """The side of the image the toolbar stands on (`SelectionToolbar.set_side`): the pop-up and the tool tip open over the image."""
+        self._side = valid_side(side, self._side)
+
     def show_menu(self) -> None:
         self.form.refresh()
-        self.menu.popup(self.mapToGlobal(QPoint(self.width(), 0)))
+        self.menu.ensurePolished()
+        self.menu.popup(self.mapToGlobal(beside_point(self, self._side, self.menu.sizeHint().width())))
 
     def _on_wheel(self, steps: int) -> None:
         layer = self._layers.cycle(steps)
         hidden = "" if self._layers.is_visible(layer) else " (hidden)"
-        QToolTip.showText(self.mapToGlobal(QPoint(self.width(), 0)), f"Active layer: {LAYER_NAMES[layer]}{hidden}", self)
+        text = f"Active layer: {LAYER_NAMES[layer]}{hidden}"
+        QToolTip.showText(tooltip_point(self, self._side, text), text, self)
 
     def refresh(self, theme: GuiTheme | None = None) -> None:
         theme = theme or get_active_theme()

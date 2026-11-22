@@ -113,6 +113,10 @@ ICONS: dict[str, str | Callable[[], QIcon]] = {
     "go_to": "current-location",  # "Go to this cube", "Go to reference"
     "expand": "chevron-down",
     "collapse": "chevron-up",
+    "hide_ribbon": "eye-off",  # the grip of a side ribbon (`panels/image/side_rails.py`): roll it up / down, dock it on the other side
+    "show_ribbon": "eye",
+    "move_left": "chevron-left",
+    "move_right": "chevron-right",
     "move": "sort-ascending-numbers",  # the Move submenus: the order (and numbers) change
     "move_top": "arrow-bar-to-up",
     "move_up": "arrow-up",

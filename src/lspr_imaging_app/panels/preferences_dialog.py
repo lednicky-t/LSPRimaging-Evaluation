@@ -36,7 +36,6 @@ from PyQt6.QtWidgets import (
 
 from ..display_options import RESOLUTION_FULL, RESOLUTION_STANDARD, ResolutionSizes, format_size
 from .image.overlay_cache import BUDGET_CHOICES_MB, DEFAULT_BUDGET_MB, ENV_BUDGET_MB
-from .image.view_placement import RIGHT, TAB
 
 
 @dataclass(frozen=True)
@@ -57,8 +56,6 @@ class Preferences:
     4K screen, but softer; `display_options.py`). Saved here, applied at the next start."""
     perf: PerfPreferences = DEFAULT_PERF_PREFERENCES
     """Parallel work (export, scans): standard, tune automatically or a fixed number of workers; cores kept free; low priority."""
-    view_placement: str = TAB
-    """Where the Image panel's View controls sit: "tab" (the ribbon's View tab) or "right" (a column of icon buttons right of the image; `image/view_ribbon.py`)."""
 
 
 DEFAULT_PREFERENCES = Preferences()
@@ -96,19 +93,6 @@ class PreferencesDialog(QDialog):
         self.reopen_check.setToolTip("When the app starts, load the dataset that was open when it was last closed.")
         general_layout = QVBoxLayout(general)
         general_layout.addWidget(self.reopen_check)
-
-        layout_box = QGroupBox("Image panel", self)
-        self.view_placement_combo = QComboBox(layout_box)
-        self.view_placement_combo.addItem("In the ribbon, on the View tab", TAB)
-        self.view_placement_combo.addItem("On the right of the image, as a column of buttons", RIGHT)
-        self.view_placement_combo.setToolTip(
-            "Where the display options of the Image panel sit (show / hide and colours of the overlays, display range, scale bar, ...). "
-            "On the View tab: the last tab of the ribbon above the image. On the right: the same buttons in a column right of the image, "
-            "like the selection toolbar on its left; right-click a button there to open its menu. Takes effect at once; every control "
-            "keeps its state when it moves."
-        )
-        layout_form = QFormLayout(layout_box)
-        layout_form.addRow("View controls:", self.view_placement_combo)
 
         refractive = QGroupBox("Refractive indices (RIs.txt)", self)
         self.ri_wavelength_spin = QDoubleSpinBox(refractive)
@@ -263,7 +247,6 @@ class PreferencesDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.addWidget(general)
-        layout.addWidget(layout_box)
         layout.addWidget(refractive)
         layout.addWidget(memory)
         layout.addWidget(parallel)
@@ -281,7 +264,6 @@ class PreferencesDialog(QDialog):
             gpu_drawing=self.gpu_check.isChecked(),
             screen_resolution=str(self.resolution_combo.currentData()),
             perf=self._perf_values(),
-            view_placement=str(self.view_placement_combo.currentData()),
         )
 
     def _perf_values(self) -> PerfPreferences:
@@ -306,7 +288,6 @@ class PreferencesDialog(QDialog):
 
     def _show(self, preferences: Preferences) -> None:
         self.reopen_check.setChecked(preferences.reopen_last_dataset)
-        self.view_placement_combo.setCurrentIndex(max(self.view_placement_combo.findData(preferences.view_placement), 0))
         self.ri_wavelength_spin.setValue(float(preferences.ri_wavelength_nm))
         self.ri_age_spin.setValue(int(preferences.ri_age_warning_days))
         index = self.cache_combo.findData(int(preferences.overlay_cache_mb))

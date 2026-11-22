@@ -130,7 +130,7 @@ Layout, ribbons, preferences, and what runs on the GUI thread.
 - [`dataset_open_hang_and_status_2026-11-20.md`](dataset_open_hang_and_status_2026-11-20.md): picking the `images` folder hung an hour (`is_file()` per entry, 26 ms each); fixed, plus the "Open dataset" status-bar steps and Cancel (2026-11-20)
 - [`spectral_correction_2026-11-20.md`](spectral_correction_2026-11-20.md): the measured LCTF passbands: None / Centroid / Full profile, the maths, import, session schema 1.13, measurements, temperature to do (2026-11-20)
 - [`workflow_panel_retired_2026-11-11.md`](workflow_panel_retired_2026-11-11.md): Workflow panel removed; File menu + Dataset Manager (2026-11-11)
-- [`view_side_ribbon_2026-11-21.md`](view_side_ribbon_2026-11-21.md): The View controls in a column right of the image (Preferences -> View controls), right-click menus, the Histogram rule left open (2026-11-21)
+- [`view_side_ribbon_2026-11-21.md`](view_side_ribbon_2026-11-21.md): The View controls as a column beside the image, right-click menus, order of the groups, the chunk icon; **2026-11-22: the View tab and the Preferences choice are gone, both side ribbons are rails (dock on either side, roll up)**
 - [`menu_icons_2026-11-19.md`](menu_icons_2026-11-19.md): Icons in every menu from one table (`panels/menu_icons.py`), Ctrl+G / Ctrl+Shift+G for Group / Ungroup, the "Rectangle size..." entry removed (2026-11-19)
 - [`keyboard_shortcut_registry_design_2026-10-30.md`](keyboard_shortcut_registry_design_2026-10-30.md): Keyboard shortcut registry: one table that binds the keys and builds the list (2026-10-30) *(built 2026-10-30)*
 - [`startup_gui_thread_audit_2026-10-24.md`](startup_gui_thread_audit_2026-10-24.md): Startup: what runs on the GUI thread (2026-10-24)

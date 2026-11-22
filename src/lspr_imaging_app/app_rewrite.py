@@ -2243,7 +2243,6 @@ def _wire_preferences(
             gpu_drawing=image_panel.gpu_drawing,
             screen_resolution=str(read(ui_state, DISPLAY_RESOLUTION)),  # the saved choice (applied at the next start)
             perf=get_runtime().preferences,
-            view_placement=image_panel.view_placement,
         )
 
     def apply(old: Preferences, new: Preferences) -> None:
@@ -2259,9 +2258,6 @@ def _wire_preferences(
         if new.overlay_cache_mb != old.overlay_cache_mb:
             image_panel.set_overlay_cache_mb(new.overlay_cache_mb)
             changed.append("overlay_cache_mb")
-        if new.view_placement != old.view_placement:
-            image_panel.set_view_placement(new.view_placement)  # at once; the controls keep their state
-            changed.append("view_placement")
         restart_reasons: list[str] = []  # what only a new start completes: one box for all of them
         if new.gpu_drawing != old.gpu_drawing:
             image_panel.set_gpu_drawing(new.gpu_drawing)  # stays off (WARNING in the log) where OpenGL is not available

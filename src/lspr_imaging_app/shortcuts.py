@@ -202,10 +202,27 @@ BINDINGS: tuple[Binding, ...] = (
     ),
     Binding(
         "mouse.toolbar.view_menu", "Mouse: image view",
-        "Open the menu of a View button (in the View tab, below it; in the column right of the image, when Edit -> Preferences puts the View controls "
-        "there, beside it): colour and transparency of the histogram highlight, mask, sample ROIs and reference rims, the label places and size, the "
+        "Open the menu of a button of the View ribbon (the column beside the image; the menu opens beside the button, over the image): colour and "
+        "transparency of the histogram highlight, mask, sample ROIs and reference rims, the label places and size, the "
         "landmarks' every-wavelength switch, the group-label strip, the scale bar's pixels / micrometers and colour, the Display range's numbers. A left click on those buttons shows or hides the overlay",
         gesture="Right-click", scope=_VIEW,
+    ),
+    Binding(
+        "mouse.rail.move", "Mouse: image view",
+        "Move a side ribbon (the selection toolbar or the View ribbon): drag its grip, the strip of three dots at its top, to the other half of the image; "
+        "a frame shows where it will dock. Both ribbons may be on the same side",
+        gesture="Drag the grip", scope=_VIEW,
+    ),
+    Binding(
+        "mouse.rail.roll", "Mouse: image view",
+        "Roll a side ribbon up, out of the way (only its handle is left; the View ribbon rolled up also stops the Histogram following the area selection), "
+        "and roll it down again",
+        gesture="Double-click the grip; click the handle", scope=_VIEW,
+    ),
+    Binding(
+        "mouse.rail.menu", "Mouse: image view",
+        "The same two commands as words: Hide / Show the ribbon, Move to the other side of the image",
+        gesture="Right-click the grip", scope=_VIEW,
     ),
     Binding(
         "mouse.view.tool_adjust", "Mouse: image view",

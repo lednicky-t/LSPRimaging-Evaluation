@@ -1,8 +1,9 @@
 """The Image panel's ribbon tabs and top bar, built (2026-11-15; moved out of `ImagePanel`: `_build_image_tools_tab`, `_build_mask_tab`,
 `_build_roi_tab`, `_build_view_tab`, `_build_chromatic_and_background_tabs`, `_build_top_bar`, about 200 lines).
 
-The tool ribbon's pages (Image tools, Mask, ROIs, View, Chromatic, Background, Analysis, Export) with the connections of their signals to the panel's
-handlers, and the top bar that holds the ribbon (its roll-up drawer, the cursor-readout icon, the "i" help icon).
+The tool ribbon's pages (Image tools, Mask, ROIs, Chromatic, Background, Analysis, Export) with the connections of their signals to the panel's
+handlers, and the top bar that holds the ribbon (its roll-up drawer, the cursor-readout icon, the "i" help icon). The View controls are not a page
+any more (2026-11-22): `build_view_tab` builds them as the View ribbon beside the image.
 
 **What this is, honestly:** the construction code moved as it was (`self` is `panel`): functions that reach into the panel's private fields, listed in each
 docstring. It is a first step; see `docs/image_panel_split_investigation_2026-11-15.md` for the next one.
@@ -28,12 +29,13 @@ from .canvas_tools import style_bar_icon_button
 from .general_group import style_general_icon_button
 from .mask_tab import MaskTab
 from .roi_tab import RoiTab
-from .view_placement import ViewPlacement
+from .side_rails import LEFT, RIGHT, SideRail, SideRails
+from .view_ribbon import ViewRibbon
 from .view_tab import ViewTab
 from .analysis_tab import AnalysisTab
 from .tuning_tab import TuningTab
 from .export_tab import ExportTab
-from .tool_ribbon import ROI_TAB, VIEW_TAB, ImageToolRibbon
+from .tool_ribbon import ROI_TAB, ImageToolRibbon
 from .panel_constants import (
     ANALYSIS_TAB,
     BACKGROUND_TAB,
@@ -116,17 +118,18 @@ def build_roi_tab(panel: ImagePanel) -> QWidget:
     return panel._roi_tab
 
 
-def build_view_tab(panel: ImagePanel) -> QWidget:
+def build_view_tab(panel: ImagePanel) -> None:
     """Moved out of `ImagePanel._build_view_tab` (2026-11-15). On the panel it
-    creates: `_view_tab`, `_view_placement` (2026-11-21: the tab's page and the side ribbon, `view_placement.py`)
-    reads: `_background_tab`, `_chromatic_tab`, `_dataset`, `_geometry`, `_highlight_tint`, `_mask_tab`, `_mask_tint`, `_roi_tab`,
+    creates: `_view_tab`, `_view_ribbon` (2026-11-22: the controls live only in the column beside the image, `view_ribbon.py`; the top
+    ribbon has no View tab any more)
+    reads: `_background_tab`, `_chromatic_tab`, `_dataset`, `_export_tab`, `_geometry`, `_highlight_tint`, `_mask_tab`, `_mask_tint`, `_roi_tab`,
     `_scale_bar_item`, `_tints`
     calls its methods: none
     """
     panel._view_tab = ViewTab(
         panel._geometry, panel._highlight_tint, panel._mask_tint, panel._mask_tab.overlay_controls,
         panel._chromatic_tab, panel._background_tab, panel._roi_tab, panel._scale_bar_item.color(),
-        panel._dataset, panel,
+        panel._dataset, panel._export_tab, panel,
     )
     panel._view_tab.highlight_visibility_changed.connect(panel._tints.on_highlight_visibility_changed)
     panel._view_tab.highlight_color_changed.connect(panel._tints.on_highlight_color_changed)
@@ -137,9 +140,7 @@ def build_view_tab(panel: ImagePanel) -> QWidget:
     panel._view_tab.roi_overlay_changed.connect(panel._on_roi_overlay_changed)
     panel._view_tab.scale_bar_color_changed.connect(panel._on_scale_bar_color_changed)
     panel._view_tab.display_range_changed.connect(panel._on_display_range_edited)
-    panel._view_placement = ViewPlacement(panel._view_tab, panel)
-    panel._view_placement.changed.connect(panel.view_placement_changed)
-    return panel._view_placement.host  # the page of the ribbon's View tab; the controls move to the side ribbon when Preferences says so
+    panel._view_ribbon = ViewRibbon(panel._view_tab, panel)  # put beside the image by `_build_toolbar_and_layout`
 
 
 def build_chromatic_and_background_tabs(panel: ImagePanel) -> None:
@@ -182,7 +183,7 @@ def build_chromatic_and_background_tabs(panel: ImagePanel) -> None:
     panel._export_tab.info_changed.connect(panel._on_export_info_changed)
 
 
-def build_top_bar(panel: ImagePanel, view_content: QWidget, image_tools_content: QWidget, mask_content: QWidget, roi_content: QWidget) -> None:
+def build_top_bar(panel: ImagePanel, image_tools_content: QWidget, mask_content: QWidget, roi_content: QWidget) -> None:
     """Moved out of `ImagePanel._build_top_bar` (2026-11-15). On the panel it
     creates: `_cursor_overlay`, `_tool_info`, `_tool_ribbon`, `_top_bar`, `_top_drawer`
     reads: `_active_tool`, `_analysis_tab`, `_background_tab`, `_chromatic_tab`, `_cursor_readout`, `_export_tab`,
@@ -210,18 +211,16 @@ def build_top_bar(panel: ImagePanel, view_content: QWidget, image_tools_content:
             # the Workflow panel (maintainer's plan for chromatic correction).
             (CHROMATIC_TAB, panel._chromatic_tab),
             (BACKGROUND_TAB, panel._background_tab),
-            (VIEW_TAB, view_content),
             (ANALYSIS_TAB, panel._analysis_tab),
             (EXPORT_TAB, panel._export_tab),
         ],
         panel,
     )
     if panel._initial_ribbon_category:
-        # "Histogram" was this tab's name before 2026-10-06 (settings saved then still say so).
-        restored = VIEW_TAB if panel._initial_ribbon_category == "Histogram" else panel._initial_ribbon_category
-        panel._tool_ribbon.set_category(restored)  # before the connect: restoring is not a user change
+        # A saved "View" (or "Histogram", its name before 2026-10-06) tab no longer exists (2026-11-22): `set_category` ignores an unknown name,
+        # so the first tab opens.
+        panel._tool_ribbon.set_category(panel._initial_ribbon_category)  # before the connect: restoring is not a user change
     panel._tool_ribbon.category_changed.connect(panel.ribbon_category_changed)
-    panel._view_placement.bind_tool_ribbon(panel._tool_ribbon)  # its View tab goes while the controls are in the side ribbon
     # The Mask tab's edit preview is drawn only while that tab is the open one.
     edit_preview = panel._mask_tab.edit_preview
     edit_preview.set_tab_active(panel._tool_ribbon.current_category() == MASK_TAB)
@@ -256,7 +255,7 @@ def build_top_bar(panel: ImagePanel, view_content: QWidget, image_tools_content:
     # shared look overrides the class's own default sizing (tuned for the Histogram's settings-gear button). Since 2026-10-03 it is a fixed-size ribbon icon:
     # its live text goes to the canvas corner, so the button never changes width.
     style_general_icon_button(panel._cursor_overlay.icon_label)
-    panel._view_tab.add_image_icon(panel._cursor_overlay.icon_label)  # first icon of the View tab's "Image" group (2026-10-23)
+    panel._view_tab.add_image_icon(panel._cursor_overlay.icon_label)  # first icon of the View tab's "Image" group (2026-10-23), the scale bar's icon next to it (2026-11-22)
 
     # The permanent "i" icon (2026-09-29; it replaced a text row that appeared only while a canvas tool was active): hovering it shows the active tool's controls
     # from `image_controls.py` (the single source of truth, so it cannot drift from what is wired), or the plain-image controls with no tool; always visible.
@@ -268,6 +267,30 @@ def build_top_bar(panel: ImagePanel, view_content: QWidget, image_tools_content:
     panel._refresh_tool_info(None)
     top_bar_layout.addWidget(panel._tool_info)
     panel._top_drawer.expanded_changed.connect(panel._tool_info.setVisible)  # rolled up: only the handle is left
+
+
+def build_side_rails(panel: ImagePanel) -> SideRails:
+    """The row under the top bar (2026-11-22): the pyqtgraph view with the selection toolbar and the View ribbon beside it, each a rail that can be
+    docked on either side of the image and rolled up (`side_rails.py`). On the panel it
+    creates: nothing (the caller keeps the row as `side_rails`)
+    reads: `_selection_tools`, `_view`, `_view_ribbon`, `_view_tab`, `view_controls_open_changed`
+    calls its methods: none
+    """
+    rails = SideRails(panel._view, panel)
+    toolbar = panel._selection_tools.toolbar
+    rails.add_rail(SideRail("selection", "Selection toolbar", toolbar, rails, side=LEFT, on_side=toolbar.set_side))
+    view = SideRail("view", "View ribbon", panel._view_ribbon, rails, side=RIGHT, on_side=panel._view_tab.set_side)
+    rails.add_rail(view)
+    view.expanded_changed.connect(panel.view_controls_open_changed)
+
+    def margins() -> None:
+        # No pyqtgraph margin between the selection toolbar and the image (maintainer, 2026-11-15), on whichever side it stands; 9 px at the other edge.
+        selection_left = rails.side_of("selection") == LEFT
+        panel._view.ci.setContentsMargins(0 if selection_left else 9, 9, 9 if selection_left else 0, 9)
+
+    rails.arranged.connect(margins)
+    margins()
+    return rails
 
 
 def _on_links_toggled(panel, shown: bool) -> None:

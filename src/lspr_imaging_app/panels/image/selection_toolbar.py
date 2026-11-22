@@ -47,7 +47,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from PyQt6.QtCore import QPoint, QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QIcon
 from PyQt6.QtWidgets import (
     QDoubleSpinBox,
@@ -84,6 +84,7 @@ from .selection_menu_icons import FILL_HOLES_ICON
 from .selection_palette import PAST, PRESENT
 from .selection_style import SelectionStyle
 from .selection_view_form import SelectionViewForm
+from .side_rails import LEFT, beside_point, tooltip_point, valid_side
 from .wheel_tool_button import WheelToolButton
 
 _VALUE_NEEDS_IMAGE = (
@@ -421,6 +422,7 @@ class SelectionToolbar(QFrame):
         layers_button: QToolButton | None = None,
     ) -> None:
         super().__init__(parent)
+        self._side = LEFT  # the side of the image the toolbar stands on (`set_side`)
         self._value_tool = value_tool
         self._layers_button = layers_button  # pinned under View (`layers_button.py`)
         self._value_allowed = True  # False while a layer other than Image is active: the select-by-value tools read image brightness
@@ -658,8 +660,16 @@ class SelectionToolbar(QFrame):
     def style(self) -> SelectionStyle:
         return self._style
 
+    def set_side(self, side: str) -> None:
+        """The side of the image the toolbar stands on (2026-11-22, it can be docked on either): its pop-ups and tool tips open over the image, to the
+        right of the toolbar on the left and to the left of it on the right (`side_rails.beside_point`)."""
+        self._side = valid_side(side, self._side)
+        if self._layers_button is not None and hasattr(self._layers_button, "set_side"):
+            self._layers_button.set_side(self._side)
+
     def _popup_beside(self, menu: QMenu, button: QToolButton) -> None:
-        menu.popup(button.mapToGlobal(QPoint(button.width(), 0)))
+        menu.ensurePolished()
+        menu.popup(button.mapToGlobal(beside_point(button, self._side, menu.sizeHint().width())))
 
     def show_view_menu(self) -> None:
         """Open the View pop-up beside its button (what a click on it does)."""
@@ -723,7 +733,7 @@ class SelectionToolbar(QFrame):
         """The wheel over the wand button: the previous / next method, said in a tool tip beside the button."""
         label = self.wand_form.cycle_method(steps)
         button = self._tool_buttons[AreaSelectionMode.WAND]
-        QToolTip.showText(button.mapToGlobal(QPoint(button.width(), 0)), f"Wand method: {label}", button)
+        QToolTip.showText(tooltip_point(button, self._side, f"Wand method: {label}"), f"Wand method: {label}", button)
 
     def _on_threshold_wheel(self, steps: int) -> None:
         """The wheel over the Threshold button: the other side (Brighter / Darker, wrapping round), said in a tool tip beside the button."""
@@ -731,13 +741,14 @@ class SelectionToolbar(QFrame):
             return
         label = self._value_tool.form.cycle_threshold_side(steps)
         button = self._tool_buttons[AreaSelectionMode.THRESHOLD]
-        QToolTip.showText(button.mapToGlobal(QPoint(button.width(), 0)), f"Threshold: {label}", button)
+        QToolTip.showText(tooltip_point(button, self._side, f"Threshold: {label}"), f"Threshold: {label}", button)
 
     def _on_mode_wheel(self, steps: int) -> None:
         """The wheel over the mode button: the previous / next combine mode (wrapping), said in a tool tip beside the button."""
         how = COMBINE_MODES[(COMBINE_MODES.index(self._selection.combine_mode()) + int(steps)) % len(COMBINE_MODES)]
         self._selection.set_combine_mode(how)
-        QToolTip.showText(self._mode_button.mapToGlobal(QPoint(self._mode_button.width(), 0)), f"Selection mode: {_MODE_LABELS[how]}", self._mode_button)
+        text = f"Selection mode: {_MODE_LABELS[how]}"
+        QToolTip.showText(tooltip_point(self._mode_button, self._side, text), text, self._mode_button)
 
     def _on_lock_clicked(self) -> None:
         """The Lock button asks for whichever of the two it shows; afterwards it goes back to its resting face."""
@@ -750,13 +761,16 @@ class SelectionToolbar(QFrame):
         """The wheel over the Lock button while a lock is on: flips it between Unlock and Lock (lock the selection inside the lock, which narrows
         it). Locking needs a selection; without one the tool tip says so and the button stays Unlock."""
         button = self._lock_button
-        where = button.mapToGlobal(QPoint(button.width(), 0))
+
+        def say(text: str) -> None:
+            QToolTip.showText(tooltip_point(button, self._side, text), text, button)
+
         if not self._selection.has_selection():
-            QToolTip.showText(where, "Lock inside the lock: make a selection first", button)
+            say("Lock inside the lock: make a selection first")
             return
         self._lock_inside = not self._lock_inside
         self._refresh()
-        QToolTip.showText(where, "Lock: the selection becomes the new, smaller lock" if self._lock_inside else "Unlock", button)
+        say("Lock: the selection becomes the new, smaller lock" if self._lock_inside else "Unlock")
 
     def show_held_mode(self, how: str | None) -> None:
         """A held Shift / Alt (or the keys a drag began with) make the next selection combine as *how*: the mode button shows that mode's

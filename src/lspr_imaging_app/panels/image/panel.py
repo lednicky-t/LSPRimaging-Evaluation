@@ -89,7 +89,6 @@ from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QMenu,
     QApplication,
-    QHBoxLayout,
     QVBoxLayout,
     QWidget,
     QWidgetAction,
@@ -149,6 +148,7 @@ from .ribbon_build import (
     build_image_tools_tab,
     build_mask_tab,
     build_roi_tab,
+    build_side_rails,
     build_top_bar,
     build_view_tab,
 )
@@ -178,7 +178,6 @@ from ...storage.ui_state_keys import (
     IMAGE_OVERLAY_CACHE_MB,
     IMAGE_ROI_LABELS,
     IMAGE_SCALE_BAR_COLOR,
-    IMAGE_VIEW_PLACEMENT,
     MASK_ROWS_VISIBLE,
     ROI_OVERLAY_KEYS,
     ROI_ROW_SELECTED_ONLY,
@@ -196,7 +195,7 @@ from .slideshow import (
     MODE_ROW_MARKS,
 )
 from .tool_escape import ToolEscape
-from .tool_ribbon import ROI_TAB, VIEW_TAB
+from .tool_ribbon import ROI_TAB
 from .panel_constants import (
     ANALYSIS_TAB,
     BACKGROUND_TAB,
@@ -218,10 +217,6 @@ _VIEW_RANGE_PERSIST_DEBOUNCE_MS = 600
 
 # The "i" icon's text per ribbon tab ("Image tools" and "ROIs" show the active tool's canvas controls instead).
 _TAB_INFO: dict[str, str] = {
-    VIEW_TAB: (
-        "View: display options only - show/hide, colour and transparency of the histogram-selection tint "
-        "and of the mask tint. Nothing here changes data or results."
-    ),
     "Mask": (
         "Mask: pixels to ignore (kept out of the background estimate and ROI sampling). "
         "State: edit scope (persistent / individual). Visibility: tint on/off, colour, transparency. "
@@ -284,7 +279,7 @@ class ImagePanel(QWidget):
     # Label of the ribbon tab now shown ("Image tools"/"Mask"/"Histogram"/"ROIs") -
     # lets the Histogram plot honour the area selection only while its own tab is open.
     ribbon_category_changed = pyqtSignal(str)
-    view_placement_changed = pyqtSignal(str)  # the View controls moved between the ribbon's tab and the side ribbon ("tab" / "right"; `view_placement.py`)
+    view_controls_open_changed = pyqtSignal(bool)  # the View ribbon was rolled down (True) or up (`side_rails.py`; the Histogram reads `view_controls_open`)
     # The Chromatic tab's popover values, after a run that used them succeeded (app settings persist them).
     chromatic_settings_applied = pyqtSignal(object)  # ChromaticUiValues
     # A tint overlay's look changed ("mask" or "highlight", new `OverlayStyle`); app settings persist it.
@@ -521,7 +516,7 @@ class ImagePanel(QWidget):
         env_mb = environment_budget_mb()  # LSPR_OVERLAY_CACHE_MB, if set, wins over the saved choice for this run
         cache_mb = env_mb if env_mb is not None else int(read(store, IMAGE_OVERLAY_CACHE_MB))
         self._roi_overlay.layers.set_budget_bytes(int(max(cache_mb, 0) * 1024 * 1024))
-        self._view_placement.set_where(str(read(store, IMAGE_VIEW_PLACEMENT)))  # before the store is kept below: a restore saves nothing
+        self.side_rails.bind_ui_state(store)  # the two side ribbons' sides and roll-ups; before the store is kept below: a restore saves nothing
         if read(store, IMAGE_GPU_DRAWING) is True:  # off unless turned on in Preferences (default off since 2026-11-11, gpu_view.py)
             apply_gpu_drawing(self._view, True)
         self._restore_slideshow_settings(store)
@@ -640,12 +635,11 @@ class ImagePanel(QWidget):
         build_chromatic_and_background_tabs(self)
         roi_content = build_roi_tab(self)  # before the View tab, which carries copies of its controls
         self._roi_tab.add_tuning(self._tuning_tab)  # ROI position tuning is the last section of the ROIs tab
-        view_content = build_view_tab(self)
-        build_top_bar(self, view_content, image_tools_content, mask_content, roi_content)
+        build_view_tab(self)  # not a tab since 2026-11-22: the View ribbon beside the image
+        build_top_bar(self, image_tools_content, mask_content, roi_content)
         build_navigation_bar(self)
 
         # The selection toolbar beside the image, its tools and their right-drag gestures (`selection_tools.py`).
-        self._view.ci.setContentsMargins(0, 9, 9, 9)  # no pyqtgraph margin between the toolbar and the image (2026-11-15)
         self.layers, self._image_cover = build_layers(self)  # Image / ROI / Ignore mask layers, the active one is what the wand reads (layers.py)
         display = self._roi_display
         self._selection_tools = SelectionTools(
@@ -658,18 +652,14 @@ class ImagePanel(QWidget):
             ),
         )
 
-        # Canvas column: top bar (built above), then the selection toolbar and the pyqtgraph view side by side.
-        canvas_row = QHBoxLayout()
-        canvas_row.setContentsMargins(0, 0, 0, 0)
-        canvas_row.setSpacing(0)
-        canvas_row.addWidget(self._selection_tools.toolbar)
-        canvas_row.addWidget(self._view, 1)
-        canvas_row.addWidget(self._view_placement.ribbon)  # the View controls' own column, shown only when Preferences puts them there (2026-11-21)
+        # Canvas column: top bar (built above), then the pyqtgraph view with the selection toolbar and the View ribbon beside it, each on the side
+        # of the image the person docked it on (`side_rails.py`; the toolbar on the left and the View ribbon on the right until moved).
+        self.side_rails = build_side_rails(self)
         canvas_column = QVBoxLayout()
         canvas_column.setContentsMargins(0, 0, 0, 0)
         canvas_column.setSpacing(0)
         canvas_column.addWidget(self._top_bar)
-        canvas_column.addLayout(canvas_row, 1)
+        canvas_column.addWidget(self.side_rails, 1)
 
         # The navigation bar sits below the canvas (2026-09-30, maintainer): `_refresh_controls_bar_theme` draws its border on the edge that touches the canvas.
         #
@@ -845,7 +835,7 @@ class ImagePanel(QWidget):
             self._measure_controls.refresh_theme(get_active_theme())
         if hasattr(self, "_cursor_overlay"):
             self._cursor_overlay.refresh_theme(get_active_theme())
-        for tab in ("_mask_tab", "_roi_tab", "_view_tab", "_view_placement"):
+        for tab in ("_mask_tab", "_roi_tab", "_view_tab", "_view_ribbon"):
             if hasattr(self, tab):
                 getattr(self, tab).refresh_theme()
         if hasattr(self, "_tool_ribbon"):
@@ -881,19 +871,9 @@ class ImagePanel(QWidget):
         return self._tool_ribbon.current_category()
 
     def view_controls_open(self) -> bool:
-        """The View controls are in front of the person: the ribbon's View tab is the open one, or they sit in the side ribbon (always in view)."""
-        return self._view_placement.view_controls_open()
-
-    @property
-    def view_placement(self) -> str:
-        """Where the View controls are: "tab" (the ribbon's View tab) or "right" (the side ribbon right of the image)."""
-        return self._view_placement.where()
-
-    def set_view_placement(self, where: str) -> None:
-        """Preferences: put the View controls in the ribbon's View tab or in the side ribbon (at once; remembered)."""
-        self._view_placement.set_where(where)
-        if self._roi_overlay_store is not None:
-            self._roi_overlay_store.set(IMAGE_VIEW_PLACEMENT.key, self._view_placement.where())
+        """The View controls are in front of the person: the View ribbon is rolled down (on either side of the image; 2026-11-22: it was "the View
+        tab is the open one" while the controls were a tab of the top ribbon)."""
+        return self.side_rails.rail("view").is_expanded()
 
     def _refresh_controls_bar_theme(self) -> None:
         """No border (2026-09-30, maintainer request - reverses the subtle

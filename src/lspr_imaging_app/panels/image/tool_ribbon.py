@@ -107,7 +107,6 @@ _CANVAS_TOOLS_ROW_HEIGHT = _BUTTON_SIZE + 2 * _BAR_MARGIN
 # one, is the point.
 _ROW_HEIGHT = max(_CANVAS_TOOLS_ROW_HEIGHT, _TRANSFORMS_ROW_HEIGHT, _CAPTIONED_GROUP_ROW_HEIGHT)
 ROI_TAB = "ROIs"  # the ROI tab: the canvas ROI gestures (rubber-band, right-drag move, right-click menu) are live only here
-VIEW_TAB = "View"  # the display-options tab (was "Histogram" until 2026-10-06); the Histogram plot keys off it
 _TAB_HEIGHT = 20
 _TAB_FONT_SIZE_PX = 11
 
@@ -187,7 +186,6 @@ class ImageToolRibbon(QWidget):
         self._pinned_separator: QFrame | None = None
         self._pinned_caption: QToolButton | None = None
         self._applied: set[str] = set()
-        self._hidden: set[str] = set()  # tabs taken away on purpose (`set_category_visible`)
         self._tooltips: dict[str, str] = {}
         self._theme = get_active_theme()
         if not categories:
@@ -289,30 +287,10 @@ class ImageToolRibbon(QWidget):
     def current_category(self) -> str:
         return self._category_names[self._stack.currentIndex()]
 
-    def set_category_visible(self, label: str, visible: bool) -> None:
-        """Show or hide the tab named `label` (2026-11-21: the View tab goes while its controls sit in the side ribbon, `view_placement.py`).
-        Hiding the open tab opens the first tab that is still shown (announced by `category_changed`, like a click on it); its page is kept,
-        so showing the tab again brings the same content back. An unknown label changes nothing."""
-        if label not in self._category_names:
-            return
-        index = self._category_names.index(label)
-        if visible:
-            self._hidden.discard(label)
-        else:
-            self._hidden.add(label)
-        self._tab_buttons[index].setVisible(visible)
-        if not visible and self._stack.currentIndex() == index:
-            for other, name in enumerate(self._category_names):
-                if name not in self._hidden:
-                    self._tab_buttons[other].setChecked(True)
-                    self._show_category(other)
-                    break
-
     def set_category(self, label: str) -> bool:
         """Show the tab named `label` (restoring the last session's tab).
-        An unknown label (a renamed or removed tab), or a hidden one, changes
-        nothing and returns False."""
-        if label not in self._category_names or label in self._hidden:
+        An unknown label (a renamed or removed tab) changes nothing and returns False."""
+        if label not in self._category_names:
             return False
         index = self._category_names.index(label)
         self._tab_buttons[index].setChecked(True)

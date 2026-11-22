@@ -14,7 +14,7 @@ The dialog holds the **app-wide** settings that belong to no panel: startup, lay
 | Arrange the panels when the Workflow stage changes | `AppSettings.auto_apply_preset_on_stage_change`, live on `LayoutPresetManager.auto_apply` | `wire_view_menu` reads `manager.auto_apply` |
 | ROI overlay cache size (Off / 128 / 256 / 512 / 1024 MB) | `ui_state` key `image/overlay_cache_mb` | `ImagePanel.set_overlay_cache_mb` (at once) |
 | Draw the image with the graphics card (**off by default since 2026-11-11**) | `ui_state` key `image/gpu_drawing` | `ImagePanel.set_gpu_drawing` (at once; switching it off is complete only after a restart) |
-| View controls: in the ribbon's View tab (default) or in a column right of the image (2026-11-21; `docs/view_side_ribbon_2026-11-21.md`) | `ui_state` key `image/view_placement` | `ImagePanel.set_view_placement` (at once) |
+| ~~View controls: in the ribbon's View tab or in a column right of the image~~ (2026-11-21; **removed 2026-11-22**: the View tab is gone, the controls are only the View ribbon beside the image, which is docked by its own grip; `docs/view_side_ribbon_2026-11-21.md`) | (the key `image/view_placement` may linger in an old settings file, unread) | |
 | Screen resolution (**restored 2026-11-12**; saved values `full` / `standard`, shown as real pixel sizes) | `ui_state` key `display/resolution` | **next start**: `display_options.apply_saved_resolution` sets Qt's `windows:dpiawareness=0` before the QApplication exists |
 
 "Screen resolution" and "Show the image in a window of its own" existed on 2026-11-11 and were removed that evening: a processor-drawn window at

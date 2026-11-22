@@ -237,11 +237,11 @@ class HistogramPanel(QWidget):
         self._image_panel.calm_histogram_changed.connect(self.set_calm)
         self._image_panel.image_cleared.connect(self._on_image_cleared)
         self._highlight_range.range_changed.connect(self._on_highlight_range_changed)
-        # Area selection (2026-10-03): the plot narrows to it, but only while
-        # the ribbon's "View" tab is the one open (maintainer's spec); the View controls in the side ribbon are always in view (2026-11-21).
+        # Area selection (2026-10-03): the plot narrows to it, but only while the View controls are in front of the person (maintainer's spec: the
+        # ribbon's "View" tab was the open one; since 2026-11-22 the View ribbon beside the image is rolled down).
         self._image_panel.area_selection().selection_changed.connect(self._schedule_redraw)
         self._image_panel.ribbon_category_changed.connect(self._schedule_redraw)
-        self._image_panel.view_placement_changed.connect(self._schedule_redraw)
+        self._image_panel.view_controls_open_changed.connect(lambda _open: self._schedule_redraw())
         self._image_panel.cursor_value_changed.connect(self._plot.set_value_tick)
         self._roi_toolbox.geometry_changed.connect(self._on_roi_geometry_changed)
         self._roi_masks.ready.connect(self._on_roi_masks_ready)
@@ -424,8 +424,8 @@ class HistogramPanel(QWidget):
 
     def _selection_region(self, image_shape: tuple[int, ...]) -> np.ndarray | None:
         """The canvas at `image_shape` (the lock if there is one, else the area selection: `AreaSelectionModule.canvas_mask`), or
-        `None` when there is none or the View controls are not in front of the person (the ribbon's View tab is not the open one; with the
-        View controls in the side ribbon they always are, 2026-11-21). A lock keeps the histogram on its area while
+        `None` when there is none or the View controls are not in front of the person (the View ribbon beside the image is rolled up, 2026-11-22;
+        it was "the ribbon's View tab is not the open one"). A lock keeps the histogram on its area while
         selections are made inside it (2026-11-15)."""
         if not self._image_panel.view_controls_open():
             return None

@@ -132,9 +132,17 @@ IMAGE_OVERLAY_CACHE_MB = UiKey("image/overlay_cache_mb", 256, int)  # Edit -> Pr
 # Edit -> Preferences: draw the image view with the graphics card (OpenGL viewport). Off by default since 2026-11-11 (faster Play at 4K:
 # docs/play_diagnosis_2026-11-11.md section 6d). The removed keys "display/resolution" and "image/own_window" may linger in old settings: unread.
 IMAGE_GPU_DRAWING = UiKey("image/gpu_drawing", False, bool)
-# Edit -> Preferences (2026-11-21): where the Image panel's View controls sit, "tab" (the ribbon's View tab, as always) or "right" (a column of
-# icon buttons right of the image, `panels/image/view_ribbon.py`). Anything else in a settings file falls back to "tab".
-IMAGE_VIEW_PLACEMENT = UiKey("image/view_placement", "tab", str)
+# The Image panel's two side ribbons (2026-11-22, `panels/image/side_rails.py`): which side of the image each stands on ("left" | "right"; anything else in a
+# settings file falls back to the default) and whether it is rolled down (True) or up. They replace "image/view_placement" (Edit -> Preferences, 2026-11-21;
+# the View tab of the top ribbon is gone): that key may linger in an old settings file, unread.
+IMAGE_SELECTION_RAIL_SIDE = UiKey("image/selection_rail_side", "left", str)
+IMAGE_SELECTION_RAIL_OPEN = UiKey("image/selection_rail_open", True, bool)
+IMAGE_VIEW_RAIL_SIDE = UiKey("image/view_rail_side", "right", str)
+IMAGE_VIEW_RAIL_OPEN = UiKey("image/view_rail_open", True, bool)
+RAIL_KEYS: dict[str, tuple[UiKey, UiKey]] = {  # the rail's key in `SideRails` -> (its side, its roll-up)
+    "selection": (IMAGE_SELECTION_RAIL_SIDE, IMAGE_SELECTION_RAIL_OPEN),
+    "view": (IMAGE_VIEW_RAIL_SIDE, IMAGE_VIEW_RAIL_OPEN),
+}
 # Edit -> Preferences, Refractive indices (2026-11-12, plan/refractive_index.py): the refractometer's measuring wavelength in nm, stamped on an RI table
 # when it is imported (0 = not given), and the age in days above which an RI measurement is shown in amber (maintainer: 7). Default wavelength: the lab's
 # refractometer, a Rudolph Research J357 with a 589.3 nm LED source (maintainer, 2026-11-12).
@@ -227,7 +235,7 @@ ARRAY_KEYS = {  # ROIs tab, "Array" group (panels/image/array_controls.py); leng
 HAND_WIRED_KEYS: tuple[UiKey, ...] = (
     HISTOGRAM_CURSOR_READOUT, HISTOGRAM_CURVE_STYLES, IMAGE_CURSOR_READOUT, IMAGE_MASK_EDIT_PREVIEW,
     IMAGE_SCALE_BAR_COLOR, IMAGE_ROI_LABELS, SELECTION_COMBINE_MODE, SELECTION_WAND_METHOD, IMAGE_LAYER_IMAGE_VISIBLE, IMAGE_ACTIVE_LAYER,
-    IMAGE_OVERLAY_CACHE_MB, IMAGE_GPU_DRAWING, IMAGE_VIEW_PLACEMENT, RI_WAVELENGTH_NM, RI_AGE_WARNING_DAYS, DISPLAY_RESOLUTION, PERF_MODE, PERF_MANUAL_WORKERS, PERF_RESERVED_CORES, PERF_LOW_PRIORITY, ANALYSIS_MODE,
+    IMAGE_OVERLAY_CACHE_MB, IMAGE_GPU_DRAWING, *(key for keys in RAIL_KEYS.values() for key in keys), RI_WAVELENGTH_NM, RI_AGE_WARNING_DAYS, DISPLAY_RESOLUTION, PERF_MODE, PERF_MANUAL_WORKERS, PERF_RESERVED_CORES, PERF_LOW_PRIORITY, ANALYSIS_MODE,
     *(key for keys_for_kind in ROI_OVERLAY_KEYS.values() for key in keys_for_kind.values()),
     *(key for keys_for_role in SELECTION_STYLE_KEYS.values() for key in keys_for_role.values()),
     CUBE_DISPLAY_MODE, MASK_SCOPE, ROI_SCOPE, ROI_ROW_VISIBLE, ROI_ROW_SELECTED_ONLY, MASK_ROWS_VISIBLE, EXPORT_SHARD,

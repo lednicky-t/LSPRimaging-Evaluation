@@ -17,7 +17,8 @@ Layout (one ribbon row):
   its pixels are this session's processed image, so ROI positions carry over 1:1.
 
 - **Chunk grid:** show the grid on the image (state on `DatasetModule.chunk_grid_preview`, drawn by `ImagePanel`;
-  this tab and the panel never read each other's state), chunk width x height in px, and the chunk-style menu
+  this tab and the panel never read each other's state; since 2026-11-22 the View tab's chunk icon also has this switch, in its right-click
+  menu: a copy of this button, `ViewTab`), chunk width x height in px, and the chunk-style menu
   (`chunk_style_picker.py`, 2026-10-21, replaced the Find best dialog: 1 ROI / column / row per chunk; a
   pick applies at once - width, height, grid position and the exact grid offsets of that
   `chunk_plan.suggest_layouts` entry, kept until the size is edited by hand; no scores or compression sample any
@@ -147,6 +148,8 @@ class ExportTab(QWidget):
     """See the module docstring. `info_changed` fires when the counts / warnings in `info_html` change."""
 
     info_changed = pyqtSignal()
+    chunk_grid_icon_refreshed = pyqtSignal()
+    """The grid button's icon was redrawn (on / off, theme): the View tab's copy of it (in the chunk icon's right-click menu) follows."""
 
     def __init__(
         self,
@@ -309,6 +312,11 @@ class ExportTab(QWidget):
         store.bind("export/skip_excluded", self._skip_excluded_button)
         store.bind("export/carry_session", self._carry_button)
 
+    @property
+    def chunk_grid_button(self) -> QToolButton:
+        """The switch that shows the export's chunk grid on the image. The View tab keeps a copy of it in the right-click menu of its chunk icon (2026-11-22)."""
+        return self._chunk_grid_button
+
     def info_html(self) -> str:
         """The "i" icon's text while this tab is open: what the tab does, then the current counts and warnings."""
         lines = [
@@ -408,6 +416,7 @@ class ExportTab(QWidget):
             )
             self._export_caption.setText("Export")
         self._export_button.setEnabled(self._exporting or self._has_dataset)
+        self.chunk_grid_icon_refreshed.emit()
 
     # -- dataset-driven state ---------------------------------------------------
 
