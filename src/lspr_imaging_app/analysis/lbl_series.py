@@ -18,6 +18,9 @@ A baseline subtracted from the line (the Sensorgram's Subtract) moves every mean
 every cube as independent; smoothing makes neighbouring cubes alike, so it is then a little too small (as `step_table.sem_of`). Accumulated shifts all share the start step's
 mean, so their errors are correlated (a common error in the start step moves every accumulated point together); the bars are each point's own uncertainty, not a joint one.
 Two means with a missing SEM give NaN, never a guessed uncertainty.
+
+**SD instead of SEM** (2026-11-22, `lbl_points(..., spread="sd")`): the plot can show how much the cubes spread *inside* each step instead of how well its mean is known. The same
+rule is used with the steps' SDs: ``sqrt(SD_a^2 + SD_b^2)``, the combined spread of the two steps. Only the ``*_u`` fields change; the mean, SEM and SD of each step are always both kept.
 """
 
 from __future__ import annotations
@@ -44,6 +47,7 @@ class LblPoint:
     accumulated_u: float
     cycle_shift: float
     cycle_shift_u: float
+    sd: float = NAN  # the step's SD (the spread of its cubes), whichever spread the ``*_u`` fields hold
 
 
 def _difference(a_mean: float, a_sem: float, b_mean: float, b_sem: float) -> tuple[float, float]:
@@ -55,18 +59,20 @@ def _difference(a_mean: float, a_sem: float, b_mean: float, b_sem: float) -> tup
     return a_mean - b_mean, math.hypot(a_sem, b_sem)
 
 
-def lbl_points(numbers: RowNumbers, refs: Sequence[object]) -> list[LblPoint]:
-    """The points of one line: `refs` are the LbL steps in cycle order (cycle 0 first), `numbers` the line's step numbers. A step the line has no number for gives NaNs."""
+def lbl_points(numbers: RowNumbers, refs: Sequence[object], spread: str = "sem") -> list[LblPoint]:
+    """The points of one line: `refs` are the LbL steps in cycle order (cycle 0 first), `numbers` the line's step numbers. A step the line has no number for gives NaNs.
+    `spread` ("sem" or "sd") is what the ``accumulated_u`` / ``cycle_shift_u`` fields combine."""
     values = [numbers.value_at(ref) for ref in refs]
+    errors = [v.sd if spread == "sd" else v.sem for v in values]
     points: list[LblPoint] = []
     for cycle, (ref, value) in enumerate(zip(refs, values)):
-        mean, sem = value.mean, value.sem
+        mean, sem = value.mean, errors[cycle]  # (`sem` is the chosen spread from here on)
         if cycle == 0:
             accumulated, accumulated_u = (0.0, 0.0) if math.isfinite(mean) else (NAN, NAN)  # zero by definition, with no uncertainty of its own
             step, step_u = NAN, NAN
         else:
             first, previous = values[0], values[cycle - 1]
-            accumulated, accumulated_u = _difference(mean, sem, first.mean, first.sem)
-            step, step_u = _difference(mean, sem, previous.mean, previous.sem)
-        points.append(LblPoint(cycle, ref, int(value.n), mean, sem, accumulated, accumulated_u, step, step_u))
+            accumulated, accumulated_u = _difference(mean, sem, first.mean, errors[0])
+            step, step_u = _difference(mean, sem, previous.mean, errors[cycle - 1])
+        points.append(LblPoint(cycle, ref, int(value.n), mean, value.sem, accumulated, accumulated_u, step, step_u, value.sd))
     return points

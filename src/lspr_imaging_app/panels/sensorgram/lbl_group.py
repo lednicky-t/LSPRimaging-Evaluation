@@ -12,7 +12,7 @@ Layout: one icon button that opens a pop-up (a `QWidgetAction` in a `QMenu`, lik
     Steps per cycle [ 6 ]
     Uses steps 1, 7, 13, 19  (cycles 0 to 3)
     ------------------------------
-    [ ] Show LbL plot
+    [chart icon] Show LbL plot       (grey = window closed, blue = open)
     [clear]
 
 Display only: the series lives in `ExperimentPlanModule`; this button reports ``start_requested(period)`` (the Use button), ``period_changed`` (the spin box, by the user only: a
@@ -22,15 +22,17 @@ value set from the session does not signal), ``clear_requested`` and ``plot_togg
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QObject, QSize, pyqtSignal
+from PyQt6.QtCore import Qt, QObject, QSize, pyqtSignal
 from PyQt6.QtGui import QIcon
-from PyQt6.QtWidgets import QCheckBox, QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QSpinBox, QToolButton, QVBoxLayout, QWidget, QWidgetAction
+from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QSpinBox, QToolButton, QVBoxLayout, QWidget, QWidgetAction
 
 from lspr_ui import get_active_theme, load_tabler_icon
 
 from ..icon_button_style import style_general_icon_button
+from ..spectra.view_menu import IconToggle
 from ..ribbon_icon_size import ICON_SIZE
 from ..ui_state import UiStateStore
+from .window_look_icons import show_plot_icon
 from .plan_icons import lbl_picture
 
 PERIOD_KEY = "sensorgram/lbl_period"
@@ -96,9 +98,8 @@ class LblControls(QObject):
         line.setFrameShape(QFrame.Shape.HLine)
         line.setFrameShadow(QFrame.Shadow.Sunken)
         outer.addWidget(line)
-        self.plot_toggle = QCheckBox("Show LbL plot", self._panel)
-        self.plot_toggle.setToolTip(PLOT_TIP)
-        outer.addWidget(self.plot_toggle)
+        self.plot_toggle = IconToggle(show_plot_icon, "Show LbL plot: " + PLOT_TIP, self._panel)  # a chart icon, grey while the window is closed, blue while it is open
+        outer.addWidget(self.plot_toggle, 0, Qt.AlignmentFlag.AlignLeft)
         buttons = QHBoxLayout()
         buttons.setContentsMargins(0, 0, 0, 0)
         self._clear = QToolButton(self._panel)
@@ -132,6 +133,7 @@ class LblControls(QObject):
         self.plot_toggle.blockSignals(True)
         self.plot_toggle.setChecked(shown)
         self.plot_toggle.blockSignals(False)
+        self.plot_toggle.refresh_theme()  # (the picture follows `toggled`, which was blocked)
 
     def set_available(self, available: bool) -> None:
         self._button.setEnabled(bool(available))
@@ -156,11 +158,12 @@ class LblControls(QObject):
 
     def refresh_theme(self) -> None:
         theme = get_active_theme()
+        self.plot_toggle.refresh_theme()
         style_general_icon_button(self._button)
         self._button.setIcon(QIcon(lbl_picture()(theme.text_primary)))
         style_general_icon_button(self._clear)
         self._clear.setIconSize(QSize(ICON_SIZE, ICON_SIZE))
-        self._clear.setIcon(load_tabler_icon("clear-all", color=theme.text_primary, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH))
+        self._clear.setIcon(load_tabler_icon("trash-x", color=theme.accent_red, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH))
 
     # -- remembered state -----------------------------------------------------------------------------------------------------
 

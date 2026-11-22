@@ -6,12 +6,11 @@ Main user actions (groups of the tab, left to right; each pop-up is a `GroupMenu
 - **Show** - four toggles: the shaded SD / SEM band of an average (`band`), the anchors and the baseline made from them (`anchors`: the hollow squares of the Anchor points
   method and the dashed baseline curve, which the Range method's anchor steps have too), and the two that were already here, the mask marks and the out-of-date marks (the panel
   owns those two and puts them in the group).
-- **Points & lines** - a pop-up (`lines_menu`): the dots (show / hide, size, and the Dot limit: dots are drawn only for up to that many lines), the lines (show / hide, width), how
-  the points are joined (Straight / Spline, two pictures, `line_icons.py`) and a "Reset to default". While more lines are drawn than the Dot limit the Points toggle shows itself off
-  (the remembered choice is kept) and a click on it asks whether to raise the limit (`points_toggle.py`).
-- **Legend** - a pop-up (`legend_menu`): Auto / Show / Hide, the text size (the size the Steps and Stats menus' chain buttons link to, `text_link.py`), the gap between its rows, whether a group's
-  name carries its number of ROIs ("Group A (n=12)"), whether it sits at the edge of the plot instead of just inside the plan bar, and a "Reset to default". The step table's rows line up with the
-  legend's rows, so the gap and the place move them too.
+- **Points & lines** and **Legend** - pop-ups (`lines_menu`, `legend_menu`) that are **`PlotLookControls`** (`plot_look.py`, 2026-11-22): the one definition of these menus, also used by the LbL and
+  S_bulk windows, each plot with its own values and remembered keys. Here they have the two extras only the Sensorgram needs: the Dot limit (dots are drawn only for up to that many lines;
+  while more lines are drawn the Points toggle shows itself off and a click asks whether to raise the limit, `points_toggle.py`) and the legend's "at the edge of the plot" (it places the legend
+  against the plan bar). The Legend's text size is the size the Steps and Stats menus' chain buttons link to (`text_link.py`); the step table's rows line up with the legend's rows, so the gap and the
+  place move them too. A new option of the points, lines or legend is added once, in `plot_look.py`, and every plot's menu has it.
 - **Steps**, **Evaluation** and **Stats** - the plan bar's, its evaluation markers' and the step table's own menus (`plan_group.py`, `stats_group.py`, the same kind of pop-up).
 
 Layout of a pop-up: a small grid, one caption and its control per row, the reset button under it (`group_menu.py`). Pictures of the Points & lines menu: `line_icons.py`.
@@ -21,59 +20,34 @@ Important states: the band toggle is greyed out unless the plot shows an average
 cost time (see their tool tips); 1 px and Straight, the defaults, are Qt's fast path.
 
 `settings()` returns the current values as one `SensorgramViewSettings`; `settings_changed` fires after any change. Every control is remembered (CLAUDE.md "Remembering UI
-state"): the spin boxes and toggles by `store.bind`, the legend mode and the line style by their rows in `storage/ui_state_keys.py`.
+state"): the keys are `SENSORGRAM_LOOK_KEYS` (the names the tab always used; the legend mode and the line style are rows in `storage/ui_state_keys.py`).
 """
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QObject, Qt, pyqtSignal
+from dataclasses import replace
+
+from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtGui import QIcon
-from PyQt6.QtWidgets import QCheckBox, QDoubleSpinBox, QSpinBox, QToolButton, QWidget
+from PyQt6.QtWidgets import QWidget
 
-from lspr_ui import get_active_theme, load_tabler_icon
+from lspr_ui import load_tabler_icon
 
-from ...storage.ui_state_keys import SENSORGRAM_LEGEND_MODE, SENSORGRAM_LINE_STYLE, read
-from ..ribbon_fields import style_ribbon_number_field
+from ...storage.ui_state_keys import SENSORGRAM_LEGEND_MODE, SENSORGRAM_LINE_STYLE
 from ..spectra.view_menu import IconToggle
 from ..ui_state import UiStateStore
-from .group_menu import GroupMenuButton, icon_choice_buttons, segment_stylesheet, segmented_buttons, widgets_row
-from .line_icons import joint_picture, lines_toggle_icon, points_lines_icon, points_toggle_icon
-from .plot import MAX_LEGEND_ENTRIES, MAX_LEGEND_SERIES
-from .points_toggle import PointsToggle, ask_to_raise_dots_limit
+from .plot_look import PlotLookControls, PlotLookKeys
+from .points_toggle import ask_to_raise_dots_limit
 from .stat_icons import band_icon
-from .view_settings import (
-    DEFAULT_DOTS_MAX_LINES,
-    DEFAULT_LEGEND_SPACING_PX,
-    DEFAULT_LEGEND_TEXT_PT,
-    DEFAULT_LINE_WIDTH,
-    DEFAULT_POINT_SIZE,
-    DOTS_MAX_LINES_RANGE,
-    LEGEND_AUTO,
-    LEGEND_HIDE,
-    LEGEND_MODES,
-    LEGEND_SHOW,
-    LEGEND_SPACING_RANGE,
-    LEGEND_TEXT_RANGE,
-    LINE_SPLINE,
-    LINE_STRAIGHT,
-    LINE_STYLES,
-    LINE_WIDTH_RANGE,
-    LINE_WIDTH_STEP,
-    POINT_SIZE_RANGE,
-    SensorgramViewSettings,
-)
+from .view_settings import SensorgramViewSettings
 
 BAND_KEY = "sensorgram/view_band"
 ANCHORS_KEY = "sensorgram/view_anchors"
-POINTS_KEY = "sensorgram/view_points"
-LINES_KEY = "sensorgram/view_lines"
-POINT_SIZE_KEY = "sensorgram/view_point_size"
-DOTS_LIMIT_KEY = "sensorgram/view_dots_limit"
-LINE_WIDTH_KEY = "sensorgram/view_line_width"
-LEGEND_TEXT_KEY = "sensorgram/view_legend_text_pt"
-LEGEND_SPACING_KEY = "sensorgram/view_legend_spacing"
-LEGEND_COUNTS_KEY = "sensorgram/view_legend_counts"
-LEGEND_OVER_BAR_KEY = "sensorgram/view_legend_over_bar"
+SENSORGRAM_LOOK_KEYS = PlotLookKeys(
+    points="sensorgram/view_points", lines="sensorgram/view_lines", point_size="sensorgram/view_point_size", dots_limit="sensorgram/view_dots_limit",
+    line_width="sensorgram/view_line_width", line_style=SENSORGRAM_LINE_STYLE.key, legend_mode=SENSORGRAM_LEGEND_MODE.key, legend_text="sensorgram/view_legend_text_pt",
+    legend_spacing="sensorgram/view_legend_spacing", legend_counts="sensorgram/view_legend_counts", legend_over_bar="sensorgram/view_legend_over_bar",
+)
 
 BAND_TIP = (
     "Show the shaded band around an average line: the standard deviation of the ROIs, or the standard error of the mean (choose which with the band pick-up on the Plot tab). "
@@ -86,72 +60,11 @@ ANCHORS_TIP = (
     "from the same anchors, and Subtract still takes it off."
 )
 ANCHORS_OFF_TIP = "There are no anchors or baseline curve to show: the baseline method is neither Anchor points nor Range with anchor steps marked (Plot tab)."
-LINES_TIP = "Points & lines: show or hide the dots and the lines, their size and width, how the points are joined (straight or a smooth spline), and a reset to the defaults."
-POINTS_TIP = (
-    "Show or hide the dots on the measured points. Dots are drawn only for up to the Dot limit (below) lines: with more they merge into the lines and every redraw would be slow. "
-    "While more lines are drawn than that, this button shows itself off and your choice is kept."
-)
-POINTS_CAPPED_NOTE = "Dots are not drawn now: {lines} lines are drawn and the Dot limit is {limit}. Click to see your options, or raise the Dot limit (Points & lines menu)."
-POINT_SIZE_TIP = "Size of the dots, in pixels."
-DOTS_LIMIT_TIP = (
-    f"Dots are drawn only for up to this many lines ({DEFAULT_DOTS_MAX_LINES} at first). With more lines the dots merge into the lines, and every redraw gets slower: 64,000 dots "
-    "(160 lines of 400 cubes) took about 1 second. Raise it if you want the dots anyway; the Points button shows itself off while more lines are drawn than this."
-)
-LINES_TOGGLE_TIP = "Show or hide the lines that join the points. Hidden lines still frame the view, and the legend keeps their colours."
-LINE_WIDTH_TIP = (
-    "Width of the lines, in pixels. 1 px is the fast one: a wider line makes every redraw slower with many ROIs (about 5 times slower at 1.5 px with 160 ROIs), a few ROIs "
-    "do not notice."
-)
-LINE_STYLE_PICTURES = {LINE_STRAIGHT: joint_picture("straight"), LINE_SPLINE: joint_picture("spline")}  # the same three dots joined straight and by a smooth curve (`line_icons.py`)
-LINE_STYLE_TIPS = {
-    LINE_STRAIGHT: "Straight: a straight segment between neighbouring points.",
-    LINE_SPLINE: (
-        "Spline: a smooth curve through every point (PCHIP, a cubic spline that never leaves the range of its two neighbours, so it invents no peaks between noisy points). "
-        "Drawing only: the dots and every number stay where they are, and a gap in the data stays a gap. Slower with many ROIs: a redraw takes about 3 times as long with 160 ROIs "
-        "(about 65 ms, then 200 ms), 20 ms more with 40, nothing you notice with a few."
-    ),
-}
-LEGEND_TIP = "Legend: when it is shown, its text size, the gap between its rows (the step table's rows follow them) and whether a group's name carries its number of ROIs."
-LEGEND_MODE_TIPS = {
-    LEGEND_AUTO: (
-        f"Auto: the legend names up to {MAX_LEGEND_ENTRIES} lines, and with more than {MAX_LEGEND_SERIES} it stays only while it takes at most half the height of the plot "
-        "(a legend of a hundred ROIs would cover it)."
-    ),
-    LEGEND_SHOW: "Show: always, however many lines there are. A long legend can cover the plot.",
-    LEGEND_HIDE: "Hide: never drawn. The step table still lines up as if it were there, so its rows stay where they are.",
-}
-LEGEND_MODE_LABELS = {LEGEND_AUTO: "Auto", LEGEND_SHOW: "Show", LEGEND_HIDE: "Hide"}
-LEGEND_TEXT_TIP = "Text size of the legend, in points."
-LEGEND_SPACING_TIP = "Space added between the legend's rows, in pixels (0 = as before; negative = closer). The step table's rows line up with the legend's, so they move with it."
-LEGEND_OVER_BAR_TIP = (
-    "Put the legend at the very edge of the plot, over the plan bar and the evaluation markers in it, instead of just inside the bar. The step table's rows line up with the "
-    "legend, so they go up with it (over the bar). Only when the step names are aligned to the data: with the names written inside the bar, the rows stay under the bar so they "
-    "never cover them. Without effect when the step stats table is off, when the bar fills the plot (a full bar takes no edge, and its names keep out of the rows) or when the bar "
-    "is on the other edge."
-)
-LEGEND_COUNTS_TIP ="Write the number of ROIs after the name of a group or an average: \"Group A (n=12)\" instead of \"Group A\". A line of one ROI is always \"ROI 5\"."
-RESET_TIP = "Put these options back to what the plot always did."
 
 
 def anchors_icon(on: bool, off_color: str, on_color: str) -> QIcon:
     """The anchor in the accent colour when the squares are shown; the crossed-out anchor, dimmed, when they are hidden (as the mask and clock toggles)."""
     return load_tabler_icon("anchor" if on else "anchor-off", color=on_color if on else off_color, size=24)
-
-
-def _tabler(name: str):
-    """The picture of a Tabler icon in a theme colour, for a `GroupMenuButton`."""
-    return lambda color: load_tabler_icon(name, color=color, size=24)
-
-
-def _spin(parent: QWidget, name: str, low: int, high: int, value: int, suffix: str, tip: str) -> QSpinBox:
-    box = QSpinBox(parent)
-    box.setObjectName(name)
-    box.setRange(low, high)
-    box.setValue(value)
-    box.setSuffix(suffix)
-    box.setToolTip(tip)
-    box.setKeyboardTracking(False)  # a value is taken when Enter is pressed or the field is left, not on every digit
-    return box
 
 
 class SensorgramViewControls(QObject):
@@ -160,7 +73,6 @@ class SensorgramViewControls(QObject):
     def __init__(self, parent: QWidget) -> None:
         super().__init__(parent)
         self._syncing = False
-        self._line_count = 0  # how many lines the plot draws now (told by the panel after each draw): the Points toggle shows itself off when it is above the Dot limit
         defaults = SensorgramViewSettings()
 
         self.band = IconToggle(band_icon, BAND_TIP, parent)
@@ -168,109 +80,43 @@ class SensorgramViewControls(QObject):
         self.anchors = IconToggle(anchors_icon, ANCHORS_TIP, parent)
         self.anchors.setChecked(defaults.show_anchors)
 
-        # -- Points & lines ----------------------------------------------------------------------------------------------------
-        self.show_points = PointsToggle(points_toggle_icon, POINTS_TIP, parent)
-        self.show_points.setChecked(defaults.show_points)
-        self.show_points.dots_requested.connect(self._dots_requested)
-        self.point_size = _spin(parent, "view_point_size", *POINT_SIZE_RANGE, DEFAULT_POINT_SIZE, " px", POINT_SIZE_TIP)
-        self.dots_limit = _spin(parent, "view_dots_limit", *DOTS_MAX_LINES_RANGE, DEFAULT_DOTS_MAX_LINES, " lines", DOTS_LIMIT_TIP)
-        self.dots_limit.valueChanged.connect(lambda _value: self._refresh_cap())
-        self.show_lines = IconToggle(lines_toggle_icon, LINES_TOGGLE_TIP, parent)
-        self.show_lines.setChecked(defaults.show_lines)
-        self.line_width = QDoubleSpinBox(parent)
-        self.line_width.setObjectName("view_line_width")
-        self.line_width.setDecimals(1)
-        self.line_width.setRange(*LINE_WIDTH_RANGE)
-        self.line_width.setSingleStep(LINE_WIDTH_STEP)
-        self.line_width.setValue(DEFAULT_LINE_WIDTH)
-        self.line_width.setSuffix(" px")
-        self.line_width.setToolTip(LINE_WIDTH_TIP)
-        self.line_width.setKeyboardTracking(False)
-        style_holder, self._style_group, self._style_buttons = icon_choice_buttons(parent, LINE_STYLES, LINE_STYLE_PICTURES, LINE_STYLE_TIPS, "view_line_style")
-        self._lines_reset = self._reset_button(parent, "view_lines_reset", self.reset_lines)
-        self.lines_menu = GroupMenuButton(
-            points_lines_icon, LINES_TIP,
-            (
-                ("Points", widgets_row(parent, self.show_points, self.point_size)), ("Dot limit", self.dots_limit),
-                ("Lines", widgets_row(parent, self.show_lines, self.line_width)), ("Joined", style_holder),
-            ),
-            parent, footer=self._lines_reset,
+        # Points & lines and Legend: the shared definition (`plot_look.py`), with the Sensorgram's Dot limit and legend position.
+        # (`ask_to_raise_dots_limit` is looked up here at the time of the click, so a test can replace it in this module.)
+        self.look = PlotLookControls(
+            parent, SENSORGRAM_LOOK_KEYS, defaults, dot_limit=True, legend_position=True, ask_to_raise=lambda widget, lines, limit: ask_to_raise_dots_limit(widget, lines, limit)
         )
-
-        # -- Legend -------------------------------------------------------------------------------------------------------------
-        modes_holder, self._mode_group, self._mode_buttons = segmented_buttons(parent, LEGEND_MODES, LEGEND_MODE_LABELS, LEGEND_MODE_TIPS, "view_legend")
-        self.legend_text = _spin(parent, "view_legend_text", *LEGEND_TEXT_RANGE, DEFAULT_LEGEND_TEXT_PT, " pt", LEGEND_TEXT_TIP)
-        self.legend_spacing = _spin(parent, "view_legend_spacing", *LEGEND_SPACING_RANGE, DEFAULT_LEGEND_SPACING_PX, " px", LEGEND_SPACING_TIP)
-        self.legend_counts = QCheckBox("(n=12)", parent)
-        self.legend_counts.setObjectName("view_legend_counts")
-        self.legend_counts.setChecked(defaults.legend_counts)
-        self.legend_counts.setToolTip(LEGEND_COUNTS_TIP)
-        self.legend_over_bar = QCheckBox("at the edge of the plot", parent)
-        self.legend_over_bar.setObjectName("view_legend_over_bar")
-        self.legend_over_bar.setChecked(defaults.legend_over_bar)
-        self.legend_over_bar.setToolTip(LEGEND_OVER_BAR_TIP)
-        self._legend_reset = self._reset_button(parent, "view_legend_reset", self.reset_legend)
-        self.legend_menu = GroupMenuButton(
-            _tabler("list-details"), LEGEND_TIP,
-            (
-                ("Legend", modes_holder), ("Text", self.legend_text), ("Row gap", self.legend_spacing), ("ROI count", self.legend_counts),
-                ("Position", self.legend_over_bar),
-            ),
-            parent, footer=self._legend_reset,
+        self.look.settings_changed.connect(self._changed)
+        self.lines_menu, self.legend_menu = self.look.lines_menu, self.look.legend_menu
+        # The controls the panel, the text link and the tests reach by name:
+        self.show_points, self.point_size, self.dots_limit = self.look.show_points, self.look.point_size, self.look.dots_limit
+        self.show_lines, self.line_width = self.look.show_lines, self.look.line_width
+        self.legend_text, self.legend_spacing, self.legend_counts, self.legend_over_bar = (
+            self.look.legend_text, self.look.legend_spacing, self.look.legend_counts, self.look.legend_over_bar,
         )
+        self._mode_buttons, self._style_buttons = self.look._mode_buttons, self.look._style_buttons
 
-        style_ribbon_number_field(self.point_size, f"{POINT_SIZE_RANGE[1]} px")
-        style_ribbon_number_field(self.dots_limit, f"{DOTS_MAX_LINES_RANGE[1]} lines")
-        style_ribbon_number_field(self.line_width, f"{LINE_WIDTH_RANGE[1]:.1f} px")
-        style_ribbon_number_field(self.legend_text, f"{LEGEND_TEXT_RANGE[1]} pt")
-        style_ribbon_number_field(self.legend_spacing, f"{LEGEND_SPACING_RANGE[0]} px")
-        for signal in (
-            self.band.toggled, self.anchors.toggled, self.show_points.toggled, self.show_lines.toggled, self.point_size.valueChanged, self.dots_limit.valueChanged, self.line_width.valueChanged,
-            self._style_group.buttonClicked, self.legend_text.valueChanged, self.legend_spacing.valueChanged, self.legend_counts.toggled, self._mode_group.buttonClicked,
-            self.legend_over_bar.toggled,
-        ):
+        for signal in (self.band.toggled, self.anchors.toggled):
             signal.connect(self._changed)
         self.refresh_theme()
-
-    # -- building -----------------------------------------------------------------------------------------------------------
-
-    @staticmethod
-    def _reset_button(parent: QWidget, name: str, slot) -> QToolButton:
-        button = QToolButton(parent)
-        button.setObjectName(name)
-        button.setText("Reset to default")
-        button.setToolTip(RESET_TIP)
-        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        button.setAutoRaise(True)
-        button.clicked.connect(lambda _checked=False: slot())
-        return button
 
     # -- the group ------------------------------------------------------------------------------------------------------------
 
     def settings(self) -> SensorgramViewSettings:
-        return SensorgramViewSettings(
-            show_band=self.band.isChecked(), show_anchors=self.anchors.isChecked(),
-            show_points=self.show_points.isChecked(), show_lines=self.show_lines.isChecked(),  # the choice: the toggle can only look off (`PointsToggle`), the plot applies the limit
-            point_size=self.point_size.value(), dots_max_lines=self.dots_limit.value(), line_width=float(self.line_width.value()), line_style=self.line_style(),
-            legend_mode=self.legend_mode(), legend_text_pt=self.legend_text.value(), legend_spacing_px=self.legend_spacing.value(),
-            legend_counts=self.legend_counts.isChecked(), legend_over_bar=self.legend_over_bar.isChecked(),
-        ).sanitized()
+        return replace(self.look.settings(), show_band=self.band.isChecked(), show_anchors=self.anchors.isChecked()).sanitized()
 
     def legend_mode(self) -> str:
-        return next((mode for mode, button in self._mode_buttons.items() if button.isChecked()), LEGEND_AUTO)
+        return self.look.legend_mode()
 
     def set_legend_mode(self, mode: str) -> None:
         """Press the button of `mode` without reporting it (an unknown mode is ignored)."""
-        if mode in self._mode_buttons:
-            self._mode_buttons[mode].setChecked(True)
+        self.look.set_legend_mode(mode)
 
     def line_style(self) -> str:
-        return next((style for style, button in self._style_buttons.items() if button.isChecked()), LINE_STRAIGHT)
+        return self.look.line_style()
 
     def set_line_style(self, style: str) -> None:
         """Press the button of `style` without reporting it (an unknown style is ignored)."""
-        if style in self._style_buttons:
-            self._style_buttons[style].setChecked(True)
+        self.look.set_line_style(style)
 
     def set_available(self, *, band: bool, anchors: bool) -> None:
         """Grey out a toggle that has nothing to act on now, and say why in its tool tip; it keeps its remembered position."""
@@ -281,94 +127,31 @@ class SensorgramViewControls(QObject):
 
     def set_line_count(self, count: int) -> None:
         """The panel says how many lines the plot draws now (after every draw): above the Dot limit the Points toggle shows itself off and says why. Reports no change."""
-        self._line_count = max(int(count), 0)
-        self._refresh_cap()
-
-    def _refresh_cap(self) -> None:
-        limit = self.dots_limit.value()
-        capped = self._line_count > limit
-        self.show_points.set_capped(capped, POINTS_CAPPED_NOTE.format(lines=self._line_count, limit=limit) if capped else "")
-
-    def _dots_requested(self) -> None:
-        """The user clicked the Points toggle while the Dot limit holds: say so, and raise the limit to the number of lines drawn if they agree (the toggle is then on, one change reported)."""
-        lines, limit = self._line_count, self.dots_limit.value()
-        if not ask_to_raise_dots_limit(self.show_points, lines, limit):
-            return
-
-        def raise_it() -> None:
-            self.show_points.setChecked(True)
-            self.dots_limit.setValue(max(lines, limit))
-
-        self._set_quietly(raise_it)
+        self.look.set_line_count(count)
 
     def reset_lines(self) -> None:
-        """The dots and the lines back to what the plot always did (one change reported, not one per control)."""
-        def put_back() -> None:
-            self.show_points.setChecked(True)
-            self.show_lines.setChecked(True)
-            self.point_size.setValue(DEFAULT_POINT_SIZE)
-            self.dots_limit.setValue(DEFAULT_DOTS_MAX_LINES)
-            self.line_width.setValue(DEFAULT_LINE_WIDTH)
-            self.set_line_style(LINE_STRAIGHT)
-
-        self._set_quietly(put_back)
+        self.look.reset_lines()
 
     def reset_legend(self) -> None:
-        def put_back() -> None:
-            self.set_legend_mode(LEGEND_AUTO)
-            self.legend_text.setValue(DEFAULT_LEGEND_TEXT_PT)
-            self.legend_spacing.setValue(DEFAULT_LEGEND_SPACING_PX)
-            self.legend_counts.setChecked(True)
-            self.legend_over_bar.setChecked(False)
-
-        self._set_quietly(put_back)
-
-    def _set_quietly(self, change) -> None:
-        self._syncing = True
-        try:
-            change()
-        finally:
-            self._syncing = False
-        self.settings_changed.emit()
+        self.look.reset_legend()
 
     def _changed(self, *_args: object) -> None:
         if not self._syncing:
             self.settings_changed.emit()
 
     def refresh_theme(self) -> None:
-        theme = get_active_theme()
         self.band.refresh_theme()
         self.anchors.refresh_theme()
-        self.show_points.refresh_theme()
-        self.show_lines.refresh_theme()
-        self.lines_menu.refresh_theme()
-        self.legend_menu.refresh_theme()
-        segment = segment_stylesheet()
-        for button in self._mode_buttons.values():
-            button.setStyleSheet(segment)
-        for button in self._style_buttons.values():  # picture buttons: they style and recolour themselves
-            button.refresh_theme()
-        for button in (self._lines_reset, self._legend_reset):
-            button.setIcon(load_tabler_icon("refresh", color=theme.text_primary, size=18))
+        self.look.refresh_theme()
 
     # -- remembered state -------------------------------------------------------------------------------------------------------
 
     def restore_ui_state(self, store: UiStateStore) -> None:
         self._syncing = True
         try:
-            for key, widget in (
-                (BAND_KEY, self.band), (ANCHORS_KEY, self.anchors), (POINTS_KEY, self.show_points), (LINES_KEY, self.show_lines),
-                (POINT_SIZE_KEY, self.point_size), (DOTS_LIMIT_KEY, self.dots_limit), (LINE_WIDTH_KEY, self.line_width),
-                (LEGEND_TEXT_KEY, self.legend_text), (LEGEND_SPACING_KEY, self.legend_spacing), (LEGEND_COUNTS_KEY, self.legend_counts),
-                (LEGEND_OVER_BAR_KEY, self.legend_over_bar),
-            ):
-                store.bind(key, widget)
-            self.set_legend_mode(str(read(store, SENSORGRAM_LEGEND_MODE)))
-            self.set_line_style(str(read(store, SENSORGRAM_LINE_STYLE)))
+            store.bind(BAND_KEY, self.band)
+            store.bind(ANCHORS_KEY, self.anchors)
+            self.look.restore_ui_state(store, report=False)
         finally:
             self._syncing = False
-        # `toggled`, not `buttonClicked`: a reset presses a button in code, and that must be remembered too
-        for row_key, buttons in ((SENSORGRAM_LEGEND_MODE, self._mode_buttons), (SENSORGRAM_LINE_STYLE, self._style_buttons)):
-            for choice, button in buttons.items():
-                button.toggled.connect(lambda on, picked=choice, key=row_key: store.set(key.key, picked) if on else None)
         self.settings_changed.emit()  # whatever was restored is what the plot should show

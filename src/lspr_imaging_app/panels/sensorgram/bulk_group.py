@@ -23,15 +23,17 @@ from collections.abc import Sequence
 
 from PyQt6.QtCore import QObject, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QIcon
-from PyQt6.QtWidgets import QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QMenu, QPushButton, QToolButton, QVBoxLayout, QWidget, QWidgetAction
+from PyQt6.QtWidgets import QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QMenu, QPushButton, QToolButton, QVBoxLayout, QWidget, QWidgetAction
 
 from lspr_ui import get_active_theme, load_tabler_icon
 
 from ...analysis.bulk_sensitivity import WEIGHT_EQUAL, WEIGHT_INVERSE_VARIANCE
 from ...storage.ui_state_keys import SENSORGRAM_BULK_WEIGHTING, read
 from ..icon_button_style import style_general_icon_button
+from ..spectra.view_menu import IconToggle
 from ..ribbon_icon_size import ICON_SIZE
 from ..ui_state import UiStateStore
+from .window_look_icons import show_plot_icon
 from .plan_icons import bulk_picture
 
 TITLE_HTML = "Step for S<sub>bulk</sub>"
@@ -112,9 +114,8 @@ class BulkControls(QObject):
         self._ri_link.setToolTip(RI_LINK_TIP)
         self._ri_link.clicked.connect(lambda _checked=False: self._open_ri())
         outer.addWidget(self._ri_link, 0, Qt.AlignmentFlag.AlignLeft)
-        self.plot_toggle = QCheckBox("Show S_bulk plot", self._panel)  # a check box draws plain text: no subscript here
-        self.plot_toggle.setToolTip(PLOT_TIP)
-        outer.addWidget(self.plot_toggle)
+        self.plot_toggle = IconToggle(show_plot_icon, "Show S_bulk plot: " + PLOT_TIP, self._panel)  # a chart icon, grey while the window is closed, blue while it is open
+        outer.addWidget(self.plot_toggle, 0, Qt.AlignmentFlag.AlignLeft)
         buttons = QHBoxLayout()
         buttons.setContentsMargins(0, 0, 0, 0)
         buttons.setSpacing(2)
@@ -159,6 +160,7 @@ class BulkControls(QObject):
         self.plot_toggle.blockSignals(True)
         self.plot_toggle.setChecked(shown)
         self.plot_toggle.blockSignals(False)
+        self.plot_toggle.refresh_theme()  # (the picture follows `toggled`, which was blocked)
 
     def set_available(self, available: bool) -> None:
         self._button.setEnabled(bool(available))
@@ -189,13 +191,16 @@ class BulkControls(QObject):
 
     def refresh_theme(self) -> None:
         theme = get_active_theme()
+        self.plot_toggle.refresh_theme()
         style_general_icon_button(self._button)
         self._button.setIcon(QIcon(bulk_picture()(theme.text_primary)))
         self._ri_link.setStyleSheet(f"QPushButton {{ color: {theme.accent_blue}; border: none; text-decoration: underline; padding: 2px 0; }}")
-        for button, name in ((self._add, "plus"), (self._remove, "minus"), (self._clear, "clear-all")):
+        for button, name, color in (
+            (self._add, "plus", theme.text_primary), (self._remove, "minus", theme.text_primary), (self._clear, "trash", theme.text_muted),  # minus takes the picked steps out, the grey trash empties the set
+        ):
             style_general_icon_button(button)
             button.setIconSize(QSize(ICON_SIZE, ICON_SIZE))
-            button.setIcon(load_tabler_icon(name, color=theme.text_primary, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH))
+            button.setIcon(load_tabler_icon(name, color=color, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH))
 
     # -- remembered state -----------------------------------------------------------------------------------------------------
 

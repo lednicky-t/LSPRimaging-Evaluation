@@ -66,6 +66,29 @@ class SensorgramViewSettings:
         )
 
 
+UNCERTAINTY_SEM, UNCERTAINTY_SD = "sem", "sd"  # what the bars / band of the LbL and S_bulk plots show: the standard error of a step's mean, or the spread (SD) of the cubes in it
+UNCERTAINTY_KINDS = (UNCERTAINTY_SEM, UNCERTAINTY_SD)
+UNCERTAINTY_BARS, UNCERTAINTY_BAND = "bars", "band"  # drawn as a bar at each point, or as a shaded band along the points
+UNCERTAINTY_STYLES = (UNCERTAINTY_BARS, UNCERTAINTY_BAND)
+
+
+@dataclass(frozen=True)
+class UncertaintyLook:
+    """How the plot windows (LbL series, S_bulk) draw the uncertainty of their points (2026-11-22). Shared by both windows; display only (the numbers are all in the plot's own
+    data: the bars take whichever of SEM / SD is asked for)."""
+
+    show: bool = True
+    kind: str = UNCERTAINTY_SEM
+    style: str = UNCERTAINTY_BARS
+
+    def sanitized(self) -> UncertaintyLook:
+        return UncertaintyLook(
+            show=bool(self.show),
+            kind=self.kind if self.kind in UNCERTAINTY_KINDS else UNCERTAINTY_SEM,
+            style=self.style if self.style in UNCERTAINTY_STYLES else UNCERTAINTY_BARS,
+        )
+
+
 def _clamp(value, low, high):
     return min(max(value, low), high)
 

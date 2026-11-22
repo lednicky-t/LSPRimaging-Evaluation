@@ -189,6 +189,9 @@ SENSORGRAM_BULK_WEIGHTING = UiKey("sensorgram/bulk_weighting", "inverse_variance
 SENSORGRAM_STATS_POSITION = UiKey("sensorgram/stats_position", "top", str)  # "top" | "bottom": the edge of the plot the step statistics table sits on
 SENSORGRAM_LINE_STYLE = UiKey("sensorgram/line_style", "straight", str)  # "straight" | "spline": how the plot joins the points (View tab, Points & lines)
 SENSORGRAM_LEGEND_MODE = UiKey("sensorgram/legend_mode", "auto", str)  # "auto" | "show" | "hide": the plot's legend (View tab; auto = named up to 24 lines, kept while it fits)
+PLOTS_UNCERTAINTY_SHOW = UiKey("plots/uncertainty_show", True, bool)  # the LbL and S_bulk plot windows: draw the uncertainty of the points (bars or band)
+PLOTS_UNCERTAINTY_KIND = UiKey("plots/uncertainty_kind", "sem", str)  # "sem" | "sd": the step mean's standard error, or the SD of the cubes in the step
+PLOTS_UNCERTAINTY_STYLE = UiKey("plots/uncertainty_style", "bars", str)  # "bars" | "band"
 SENSORGRAM_CHECKS_PAIR = UiKey("sensorgram/checks_pair", None, int)  # the evaluation pair the data checks compare (None: the first complete one)
 SLIDESHOW_SPEED =UiKey("image/slideshow_speed", 1, int)  # 1, 2, 5 or 10 (x)
 SLIDESHOW_MODE = UiKey("image/slideshow_mode", "all", str)  # "all" | "one_wavelength" | "roi_states" | "mask_states" | "events"
