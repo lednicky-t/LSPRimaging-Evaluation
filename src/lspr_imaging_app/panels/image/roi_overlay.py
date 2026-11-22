@@ -222,13 +222,13 @@ class RoiOverlay:
         self.sample_circles = SampleCirclesItem(SAMPLE_WIDTH)
         plot.addItem(self.sample_circles)
         self.sample_circles.set_style(self.sample.alpha, self.sample.alpha)
-        self.sample_circles.setVisible(self.sample.visible)
+        self.sample_circles.setVisible(self._roi_part_visible())
         # Mask ROIs (variable-length outlines) and the border of a mask: painted paths, see `shape_paths_item.py`. Empty for circles and rectangles.
         self._mask_outlines = MaskOutlines()
         self.mask_samples = ShapePathsItem(SAMPLE_WIDTH)
         plot.addItem(self.mask_samples)
         self.mask_samples.set_style(self.sample.alpha, self.sample.alpha)
-        self.mask_samples.setVisible(self.sample.visible)
+        self.mask_samples.setVisible(self._roi_part_visible())
         self.reference_curve = add_curve(plot, DEFAULT_REFERENCE_COLOR, width=REFERENCE_WIDTH)
         self.reference_fill = add_fill(plot, self.reference_curve)
         self.reference_fill.setPath(QPainterPath())
@@ -244,11 +244,11 @@ class RoiOverlay:
         self.selection_curve = add_curve(plot, SELECTED_COLOR, width=SELECTED_WIDTH)
         self.mask_selection = ShapePathsItem(SELECTED_WIDTH, filled=False)
         plot.addItem(self.mask_selection)
-        self.mask_selection.setVisible(self.sample.visible)
+        self.mask_selection.setVisible(self._roi_part_visible())
         # The handles of the selected rectangles (drag an edge or corner to resize, the knob to turn): `rectangle_handles_item.py`.
         self.rect_handles = RectangleHandlesItem()
         plot.addItem(self.rect_handles)
-        self.rect_handles.setVisible(self.sample.visible)
+        self.rect_handles.setVisible(self._roi_part_visible())
         self.label_item: RoiLabelItem | None = None
         self.group_label_item: GroupLabelItem | None = None
         self.group_labels = GroupLabelSettings()
@@ -259,6 +259,10 @@ class RoiOverlay:
             self.layers.adopt_data(item)  # in the stacking order they were created in (the fill sits under its curve)
         self._sample_drawn = False  # does the sample / reference part currently hold geometry? (a hidden part is not computed)
         self._reference_drawn = False
+
+    def _roi_part_visible(self) -> bool:
+        """The sample / reference-ROI items are shown when either switch is on; `draw` puts in them only the ROIs whose own switch is on."""
+        return bool(self.sample.visible or self.reference.visible)
 
     def attach_labels(self) -> None:
         """Create the label item. A separate step, called where the panel used to
@@ -318,12 +322,12 @@ class RoiOverlay:
         (they are the same circles). Does not redraw."""
         self.layers.invalidate()
         self.sample_circles.set_style(self.sample.alpha, self.sample.alpha)
-        self.sample_circles.setVisible(self.sample.visible)
+        self.sample_circles.setVisible(self._roi_part_visible())
         self.mask_samples.set_style(self.sample.alpha, self.sample.alpha)
-        self.mask_samples.setVisible(self.sample.visible)
-        self.selection_curve.setVisible(self.sample.visible)
-        self.mask_selection.setVisible(self.sample.visible)
-        self.rect_handles.setVisible(self.sample.visible)
+        self.mask_samples.setVisible(self._roi_part_visible())
+        self.selection_curve.setVisible(self._roi_part_visible())
+        self.mask_selection.setVisible(self._roi_part_visible())
+        self.rect_handles.setVisible(self._roi_part_visible())
         self._style_curve(self.reference_curve, self.reference.color, self.reference.alpha, REFERENCE_WIDTH)
         self.reference_curve.setVisible(self.reference.visible)
         self._style_fill(self.reference_fill, self.reference.color, self.reference.alpha)
@@ -456,20 +460,30 @@ class RoiOverlay:
         # Circles only (every session before shapes, and still the usual one): the arrays below, unchanged. A rectangle or a mask in the list sends
         # the sample and reference parts through `_draw_shapes` (phase 2.4, 2026-11-18).
         circles_only = all(isinstance(roi.shape, Circle) for roi in rois)
-        sample_diameters = (
-            np.fromiter((roi.shape.diameter_px for roi in rois), dtype=np.float64, count=len(rois)) if circles_only else np.empty(0)
-        )
 
         # A part that is hidden is not computed (testing10, 2026-10-14: with every overlay switched off the overlay still
         # re-computed all its geometry on every wavelength step, ~7 ms). Showing it again goes through `apply_style` + a
         # forced redraw (`ImagePanel._apply_roi_overlay_style`), and the panel's "unchanged" test includes the visibility.
-        if self.sample.visible:
-            is_selected = np.fromiter((roi.area_roi_id in selected_ids for roi in rois), dtype=bool, count=len(rois))
+        # The Sample switch shows the sample ROIs; the Reference switch shows the reference ROIs and the rims (2026-11-22, maintainer request).
+        if self.sample.visible and self.reference.visible:
+            part_rois, part_centers = rois, centers
+        elif self.sample.visible or self.reference.visible:
+            keep = np.fromiter(
+                (self.reference.visible if is_reference(roi) else self.sample.visible for roi in rois), dtype=bool, count=len(rois)
+            )
+            part_rois, part_centers = [roi for roi, k in zip(rois, keep, strict=True) if k], centers[keep]
+        else:
+            part_rois, part_centers = [], centers[:0]
+        if part_rois:
+            sample_diameters = (
+                np.fromiter((roi.shape.diameter_px for roi in part_rois), dtype=np.float64, count=len(part_rois)) if circles_only else np.empty(0)
+            )
+            is_selected = np.fromiter((roi.area_roi_id in selected_ids for roi in part_rois), dtype=bool, count=len(part_rois))
             # One colour per ROI. Checking a colour string builds a QColor, so each
             # distinct string is resolved once, not once per ROI.
             resolved: dict[str | None, str] = {}
             sample_colors: list[str] = []
-            for roi in rois:
+            for roi in part_rois:
                 key = roi.sample_color_hex
                 if color_override is not None:
                     key = color_override.get(roi.area_roi_id, key)
@@ -479,18 +493,18 @@ class RoiOverlay:
                     resolved[key] = roi_overlay_color(key, self.sample.color)
                 sample_colors.append(resolved[key])
             if circles_only:
-                sample_x, sample_y = circle_points(centers, sample_diameters, affine_matrix, n_points=CIRCLE_POINTS)
+                sample_x, sample_y = circle_points(part_centers, sample_diameters, affine_matrix, n_points=CIRCLE_POINTS)
                 self.sample_circles.set_circles(sample_x, sample_y, sample_colors)
                 # A selected ROI keeps its own colour and fill; the white border drawn on top of it marks the selection.
                 selection_x, selection_y = circle_outlines(
-                    centers[is_selected], sample_diameters[is_selected], affine_matrix, n_points=CIRCLE_POINTS
+                    part_centers[is_selected], sample_diameters[is_selected], affine_matrix, n_points=CIRCLE_POINTS
                 )
                 self.selection_curve.setData(selection_x, selection_y)
                 self.mask_samples.clear()
                 self.mask_selection.clear()
                 self.rect_handles.clear()
             else:
-                self._draw_shapes_sample(rois, centers, is_selected, sample_colors, affine_matrix)
+                self._draw_shapes_sample(part_rois, part_centers, is_selected, sample_colors, affine_matrix)
             self._sample_drawn = True
         elif self._sample_drawn:
             self.sample_circles.clear()

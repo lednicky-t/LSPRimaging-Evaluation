@@ -107,11 +107,12 @@ class RoiQueries:
         if not rois:
             return None
         affine = self._chromatic.affine_for(frame)
-        if sample:
+        if sample or reference:
             roi_id = self.roi_at(x, y)
             if roi_id is not None:
                 roi = next(r for r in rois if r.area_roi_id == roi_id)
-                return rasterize_sample(roi, shape, affine), f"ROI {roi_id} disk"
+                if reference if is_reference(roi) else sample:  # a reference ROI is shown by the Reference switch (2026-11-22)
+                    return rasterize_sample(roi, shape, affine), f"ROI {roi_id} disk"
         if not reference:
             return None
         detection = self._roi_toolbox.detection_settings()

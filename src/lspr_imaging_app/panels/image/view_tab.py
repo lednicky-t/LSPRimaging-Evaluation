@@ -190,7 +190,9 @@ class ViewTab(QWidget):
         reference_toggle = self._roi_reference_controls.take_toggle()
         self._add_colour_hint(sample_toggle, reference_toggle)
         self._attach(sample_toggle, settings_menu(self, [("Sample ROIs", self._roi_sample_controls)]))
-        self._attach(reference_toggle, settings_menu(self, [("Reference rims", self._roi_reference_controls)]))
+        # Reference = the reference ROIs and the rims, one switch (2026-11-22); its menu also holds the Links switch (the dashed sample-to-reference lines).
+        self._links_mirror = mirror_icon_button(roi_tab.links_button, self)
+        self._attach(reference_toggle, settings_menu(self, [("Reference", self._roi_reference_controls), ("Link lines", self._links_mirror)]))
         label_settings = self._button_row(self._roi_placement_copy, self._roi_size_copy, spacing=8)
         self._attach(labels_mirror, settings_menu(self, [("Labels", label_settings)]))
         roi_row = self._button_row(sample_toggle, reference_toggle, labels_mirror)
@@ -397,6 +399,7 @@ class ViewTab(QWidget):
         self._mask_controls.refresh_theme(theme)
         self._roi_sample_controls.refresh_theme(theme)
         self._roi_reference_controls.refresh_theme(theme)
+        self._links_mirror.sync()
         self._roi_placement_copy.refresh_theme(theme)
         self._roi_size_copy.refresh_theme()
         self._group_label_menu.refresh_theme()

@@ -50,10 +50,10 @@ _SPECS: dict[str, OverlaySpec] = {
     ),
     "reference": (
         ring_icon, REFERENCE_ON_COLOR,
-        "Show or hide the reference rims.\n" + _OVERLAP_INFO,
+        "Show or hide the reference ROIs and the reference rims.\n" + _OVERLAP_INFO,
         "Colour of the reference rims.",
         "Reference rim transparency.",
-        "Choose the reference rim colour",
+        "Choose the reference colour",
     ),
 }
 
