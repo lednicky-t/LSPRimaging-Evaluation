@@ -226,6 +226,7 @@ class HistogramPanel(QWidget):
         self._plot.min_edited.connect(self._on_highlight_min_edited)
         self._plot.max_edited.connect(self._on_highlight_max_edited)
         self._plot.settings_requested.connect(self._show_settings_dialog)
+        self._plot.reset_range_requested.connect(self._reset_highlight_range)
         self._plot.y_axis_double_clicked.connect(self._cycle_y_mode)
 
         layout = QVBoxLayout(self)
@@ -590,6 +591,17 @@ class HistogramPanel(QWidget):
         if self._highlight_range.current_range() is not None:
             return
         values = finite_values()
+        if values.size == 0:
+            return
+        self._highlight_range.set_range(float(values.min()), float(values.max()))
+
+    def _reset_highlight_range(self) -> None:
+        """Icon-row button: the range goes back to the whole frame's own
+        [min, max], the same values the first-time seed uses (area selection
+        ignored on purpose). One click on the GUI thread, like the seed."""
+        if self._image is None:
+            return
+        values = self._image[np.isfinite(self._image)]
         if values.size == 0:
             return
         self._highlight_range.set_range(float(values.min()), float(values.max()))

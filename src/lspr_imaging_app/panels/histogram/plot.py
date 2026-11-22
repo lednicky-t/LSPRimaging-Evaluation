@@ -114,6 +114,9 @@ class HistogramPlot(QWidget):
     min_edited = pyqtSignal(float)
     max_edited = pyqtSignal(float)
     settings_requested = pyqtSignal()
+    # Icon-row button: put the Highlight range back to the frame's own min-max
+    # (2026-11-22). Reported only; `HistogramPanel` owns the meaning.
+    reset_range_requested = pyqtSignal()
     # Double-clicking the left (Y) axis - maintainer's spec, 2026-09-30:
     # "can y axis be switchable also by double clicking on it." `panel.py`
     # owns what "switchable" means (cycling `Y_MODES`); this plot only
@@ -251,6 +254,12 @@ class HistogramPlot(QWidget):
             svg_parts=lambda: [SvgPart("Highlight range", "Range", self._region), SvgPart("Value tick", "Tick", self._value_tick)],
         )
         self.export_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._reset_range_button = QToolButton(viewport)
+        self._reset_range_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        style_bar_icon_button(self._reset_range_button, fixed_width=True)
+        self._reset_range_button.setToolTip("Reset the highlight range to this frame's min and max")
+        self._reset_range_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._reset_range_button.clicked.connect(self.reset_range_requested)
 
         self._range_readout = HighlightRangeReadout(
             viewport,
@@ -394,6 +403,8 @@ class HistogramPlot(QWidget):
         self._default_colors["all"] = theme.text_primary
         icon = tint_tabler_icon(load_tabler_icon("settings"), QColor(theme.text_muted))
         self._settings_button.setIcon(icon)
+        # Same glyph as the Image panel's "fit range to this frame" button.
+        self._reset_range_button.setIcon(tint_tabler_icon(load_tabler_icon("arrows-minimize"), QColor(theme.text_muted)))
         self._range_readout.refresh_theme(theme)
         self._cursor_overlay.refresh_theme(theme)
         if hasattr(self, "export_button"):  # refresh_theme also runs while the plot is being built
@@ -630,6 +641,9 @@ class HistogramPlot(QWidget):
         export = self.export_button
         export.move(x - export.width() - _CORNER_MARGIN_PX, _CORNER_MARGIN_PX + (self._settings_button.height() - export.height()) // 2)
         export.raise_()
+        reset = self._reset_range_button
+        reset.move(export.x() - reset.width() - _CORNER_MARGIN_PX, _CORNER_MARGIN_PX + (self._settings_button.height() - reset.height()) // 2)
+        reset.raise_()
 
     def _reposition_cursor_overlay(self) -> None:
         """Immediately left of the settings gear, same top-right corner row
@@ -639,7 +653,7 @@ class HistogramPlot(QWidget):
         changes between the small icon and the (usually wider) live text."""
         label = self._cursor_overlay.icon_label
         label.adjustSize()
-        x = self.export_button.x() - label.width() - _CORNER_MARGIN_PX  # left of the export button, which is left of the gear
+        x = self._reset_range_button.x() - label.width() - _CORNER_MARGIN_PX  # left of the reset button, export button and gear
         y = self._settings_button.y() + (self._settings_button.height() - label.height()) // 2
         label.move(x, y)
         label.raise_()
