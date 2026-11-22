@@ -11,7 +11,7 @@ the step that a command changes is in an accent colour (add green, remove red, r
 from __future__ import annotations
 
 from PyQt6.QtCore import QPointF, QRectF, Qt
-from PyQt6.QtGui import QColor, QIcon, QPainter, QPainterPath
+from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath
 
 from ..spectra.pick_menu import PictureFor
 from .stat_icons import _RENDER_SIZE, _canvas, _pen, _picture, _polyline, _slash, _at, _STROKE
@@ -245,19 +245,34 @@ def evaluation_picture() -> PictureFor:
 
 
 def bulk_picture() -> PictureFor:
-    """The S_bulk menu (2026-11-12): a frame with a rising fit line in the accent colour and three points with error bars on it (shift against refractive index)."""
+    """The S_bulk menu: the symbol itself, a bold S with "bulk" as its subscript (maintainer, 2026-11-22; until then a frame with a fit line and three points). Also the ROI
+    table's S_bulk switch, so the symbol means the same in both places."""
 
     def draw_into(painter: QPainter, ink: QColor, theme) -> None:
-        _frame(painter, ink)
-        painter.setPen(_pen(QColor(theme.accent_blue), 1.4))
-        painter.drawLine(QPointF(3.5, 15.5), QPointF(16.5, 4.5))
-        painter.setPen(_pen(ink, 1.0))
-        for x, y, half in ((5.5, 13.2, 2.0), (10.0, 10.0, 2.6), (14.5, 6.0, 1.8)):
-            painter.drawLine(QPointF(x, y - half), QPointF(x, y + half))
+        painter.setPen(ink)
+        big = QFont(painter.font())
+        big.setBold(True)
+        big.setPixelSize(15)
+        painter.setFont(big)
+        painter.drawText(QPointF(1.0, 14.5), "S")
+        small = QFont(big)
+        small.setPixelSize(7)
+        painter.setFont(small)
+        painter.drawText(QPointF(9.5, 18.5), "bulk")  # the subscript: smaller, and lower than the S's baseline
+
+    return _picture(draw_into)
+
+
+def lbl_picture() -> PictureFor:
+    """The LbL menu (2026-11-22): four layers stacked, alternating the accent colour and the ink, the way a layer-by-layer film grows."""
+
+    def draw_into(painter: QPainter, ink: QColor, theme) -> None:
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(ink)
-        for x, y in ((5.5, 13.2), (10.0, 10.0), (14.5, 6.0)):
-            painter.drawEllipse(QPointF(x, y), 1.5, 1.5)
+        for row, y in enumerate((3.0, 7.0, 11.0, 15.0)):
+            color = QColor(theme.accent_blue if row % 2 == 0 else ink)
+            color.setAlpha(230)
+            painter.setBrush(color)
+            painter.drawRoundedRect(QRectF(2.5, y, 15.0, 2.8), 1.0, 1.0)
         painter.setBrush(Qt.BrushStyle.NoBrush)
 
     return _picture(draw_into)
@@ -307,7 +322,7 @@ def align_picture(kind: str) -> PictureFor:
 
 
 __all__ = [
-    "bulk_picture",
+    "bulk_picture", "lbl_picture",
     "add_step_after_icon", "add_step_at_cursor_icon", "add_step_before_icon", "align_picture", "evaluation_picture", "merge_steps_icon", "plan_bar_icon", "position_picture",
     "pip_icon", "remove_step_icon", "restore_steps_icon", "role_chips_icon", "split_step_icon", "text_content_picture",
 ]

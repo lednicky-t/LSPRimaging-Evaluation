@@ -15,6 +15,10 @@ four kinds of edit since schema 1.5, the rest since 1.6):
 - the **S_bulk set** (since 1.8, 2026-11-12): the steps whose means are fitted against their solutions' refractive indices for the bulk sensitivity (``"bulk"``, a list of
   references in time order of adding; shown as ``Sb`` on the bar). Any number of steps; a step gone from the plan is dropped from the set by the operation that removed it.
 
+- the **LbL series** (since 1.15, 2026-11-22; layer-by-layer deposition): one starting step and the number of steps in one cycle (``"lbl"``: ``{"start": ref, "period": n}``). The
+  steps the series uses are the start step and every ``period``-th step after it in time order (``plan/lbl.py``); the bar numbers them 0, 1, 2 ... A start step gone from the plan
+  leaves the record dormant (it is not applied), as for the S_bulk set.
+
 Everything beyond ``"edits"`` is written only when there is something to write, so a session without structure edits is saved byte for byte as in schema 1.5.
 """
 
@@ -189,6 +193,26 @@ class EvalPair:
 
 
 @dataclass(frozen=True)
+class LblSeries:
+    """The layer-by-layer series: its starting step (cycle 0) and how many steps one cycle has (the next cycle's step is `period` steps further on)."""
+
+    start: StepRef
+    period: int
+
+    def to_payload(self) -> dict:
+        return {"start": ref_to_payload(self.start), "period": self.period}
+
+    @classmethod
+    def from_payload(cls, raw: object) -> "LblSeries":
+        if not isinstance(raw, dict):
+            raise TypeError("the LbL series must be an object")
+        period = int(raw["period"])
+        if period < 1:
+            raise ValueError("an LbL cycle has at least one step")
+        return cls(start=ref_from_payload(raw["start"]), period=period)
+
+
+@dataclass(frozen=True)
 class PlanEditsState:
     """All the user's changes to the plan of a session, in a fixed order so two equal states compare equal."""
 
@@ -198,6 +222,7 @@ class PlanEditsState:
     next_uid: int = 1  # the uid of the next added step: never reused, even after a restart
     pairs: tuple[EvalPair, ...] = ()  # ordered by number; a pair with nothing set is dropped
     bulk: tuple[StepRef, ...] = ()  # the S_bulk set, no duplicates, in the order the steps were added
+    lbl: LblSeries | None = None  # the layer-by-layer series (2026-11-22), None: not set
 
     def edit_for(self, key: tuple[int, int, str]) -> PlanEdit | None:
         return next((edit for edit in self.edits if edit.key == key), None)
@@ -216,6 +241,8 @@ class PlanEditsState:
             payload["pairs"] = [pair.to_payload() for pair in self.pairs]
         if self.bulk:
             payload["bulk"] = [ref_to_payload(ref) for ref in self.bulk]
+        if self.lbl is not None:
+            payload["lbl"] = self.lbl.to_payload()
         return payload
 
     @classmethod
@@ -276,7 +303,15 @@ class PlanEditsState:
             except (KeyError, TypeError, ValueError):
                 logger.warning("A step of the S_bulk set in the session file could not be read and was skipped: %r", record)
 
+        lbl = None
+        if raw.get("lbl") is not None:
+            try:
+                lbl = LblSeries.from_payload(raw["lbl"])
+            except (KeyError, TypeError, ValueError):
+                logger.warning("The LbL series in the session file could not be read and was skipped: %r", raw.get("lbl"))
+
         return cls(
+            lbl=lbl,
             edits=tuple(sorted(edits.values(), key=lambda e: (e.step, e.measured_start_unix_ms))),
             removed=tuple(sorted(removed, key=lambda r: r[1:])),
             added=tuple(added.values()),

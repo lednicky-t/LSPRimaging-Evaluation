@@ -370,6 +370,9 @@ def _wire_theme_menu(
         bulk_plot = getattr(window, "bulk_plot", None)  # the floating S_bulk plot (2026-11-12)
         if bulk_plot is not None:
             bulk_plot.refresh_theme()
+        lbl_plot = getattr(window, "lbl_plot", None)  # the floating LbL plot (2026-11-22)
+        if lbl_plot is not None:
+            lbl_plot.refresh_theme()
         apply_windows_titlebar_color(window, theme)
         if on_theme_changed is not None:
             on_theme_changed(name)
@@ -1655,6 +1658,68 @@ def _wire_bulk_plot(m, window: QMainWindow, sensorgram_panel: SensorgramPanel, u
     window.bulk_plot = plot  # (kept for tests and for the theme switch)
 
 
+def _wire_lbl_plot(m, window: QMainWindow, sensorgram_panel: SensorgramPanel, ui_state, export_context_args: tuple) -> None:
+    """The floating LbL plot (2026-11-22, `panels/sensorgram/lbl_plot.py`): opened from the Sensorgram's LbL pop-up; shows the shift of the Sensorgram's drawn lines (or of every
+    group, the ROI table's group rows) at each cycle of the LbL series. Built like `_wire_bulk_plot`; updated only while it is shown."""
+    from .analysis.step_table import GroupMembers
+    from .panels.sensorgram.bulk_plot import BulkLine, lines_from_series
+    from .panels.sensorgram.lbl_plot import LINES_SENSORGRAM, LblPlotWindow, LblStep
+    from .plan.refractive_index import solution_of
+
+    plot = LblPlotWindow(window)
+    plot.restore_ui_state(ui_state)
+    plot.export_button.set_context(*export_context_args)
+    overlays, controls, plan, table = sensorgram_panel.bulk_overlays(), sensorgram_panel.lbl_controls(), m.experiment_plan, m.step_table
+
+    def groups() -> list:
+        return [(g, tuple(sorted(int(r) for r in g.area_roi_ids))) for g in m.roi_toolbox.groups() if g.area_roi_ids]
+
+    def update(*_args: object) -> None:
+        if not plot.isVisible():
+            return
+        used = plan.lbl_steps()
+        plot.set_steps([LblStep(step.ref, step.order, solution_of(step.label)) for step in used])
+        series, refs, y_label = overlays.bulk_inputs()
+        if plot.lines_mode() == LINES_SENSORGRAM:
+            lines = lines_from_series(series, refs)
+            note = "" if lines else ("The Sensorgram is calculating the step numbers of its lines..." if series else "Nothing is drawn on the Sensorgram.")
+            plot.set_lines(lines, y_label=y_label, note=note)
+            return
+        lines, missing = [], 0
+        for group, members in groups():
+            found = table.group_numbers(group.group_id, members)
+            if found is None:
+                missing += 1
+                continue
+            lines.append(BulkLine(group.name, group.sample_color_hex, found[0], found[1]))
+        note = f"{missing} group{'s' if missing != 1 else ''} not calculated yet." if missing else ("" if lines else "There are no ROI groups.")
+        plot.set_lines(lines, y_label=y_label, note=note, need_calculation=bool(missing) or any(not line.current for line in lines))
+
+    def calculate() -> None:
+        table.recalculate([], [GroupMembers(group.group_id, members) for group, members in groups()])
+
+    def toggled(on: bool) -> None:
+        overlays.set_numbers_for_lbl_plot(on)
+        if on:
+            plot.show()
+            plot.raise_()
+            update()
+        else:
+            plot.close()
+
+    def closed() -> None:
+        controls.set_plot_shown(False)
+        overlays.set_numbers_for_lbl_plot(False)
+
+    controls.plot_toggled.connect(toggled)
+    plot.closed.connect(closed)
+    plot.calculate_requested.connect(calculate)
+    plot.lines_mode_changed.connect(update)
+    for signal in (overlays.bulk_inputs_changed, table.numbers_changed, m.roi_toolbox.cosmetic_changed, plan.steps_changed):
+        signal.connect(update)
+    window.lbl_plot = plot  # (kept for tests and for the theme switch)
+
+
 def _wire_roi_table_title(dock: PanelContainer, panel: RoiTablePanel) -> None:
     """Make the "ROI / Groups" dock title the switch of the table's Groups-only view (2026-10-24): "Groups" highlighted = Groups-only
     (double-click it); "ROI" = every ROI (click it).
@@ -2103,10 +2168,9 @@ def build_main_window(
     window = QMainWindow()
     window.setWindowTitle(version_string())
     window.resize(1400, 900)
-    _wire_bulk_plot(
-        m, window, sensorgram_panel, ui_state,
-        (export_context, remember_export_folder, lambda: str(read(ui_state, PLOT_EXPORT_FIGURE_FORMAT)), remember_export_format),
-    )
+    plot_export_args = (export_context, remember_export_folder, lambda: str(read(ui_state, PLOT_EXPORT_FIGURE_FORMAT)), remember_export_format)
+    _wire_bulk_plot(m, window, sensorgram_panel, ui_state, plot_export_args)
+    _wire_lbl_plot(m, window, sensorgram_panel, ui_state, plot_export_args)
     # Qt's default dock options include AllowTabbedDocks, which is what let
     # a plain drag of one panel's title bar onto another's create a tab
     # group interactively - the exact behavior the maintainer asked to
@@ -2119,6 +2183,7 @@ def build_main_window(
     window.setDockOptions(QMainWindow.DockOption.AnimatedDocks | QMainWindow.DockOption.AllowNestedDocks)
     file_menu, edit_menu, view_menu = _build_menu_bar(window)
     file_actions = _wire_file_menu(file_menu, window, m, ui_state)
+    sensorgram_panel.bulk_controls().ri_requested.connect(lambda: file_actions.manager.present("plan"))  # S_bulk pop-up's "Refractive indices..." link
     attach_to_menu_bar(window.menuBar(), m.dataset)  # dataset path, type / size / cubes, and the Time / Plan checks
     startup = _build_startup_tracker(m, image_panel, spectra_panel, sensorgram_panel)
     _wire_startup_calculation(startup, roi_table_panel, m.analysis_scan.start_pool)

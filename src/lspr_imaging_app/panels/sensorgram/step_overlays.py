@@ -49,6 +49,7 @@ from ..ui_state import UiStateStore
 from .edit_group import PlanEditControls
 from .plan_actions import PlanAxisContext, PlanBarActions
 from .bulk_group import BulkControls
+from .lbl_group import LblControls
 from .evaluation_group import EvaluationControls
 from .plan_group import PlanBarControls
 from .plot import LEGEND_MAX_HEIGHT_FRACTION, MAX_LEGEND_ENTRIES, MAX_LEGEND_SERIES, SensorgramPlot
@@ -97,6 +98,7 @@ class StepOverlays(QObject):
         self._edit_has_axis = False  # what the last full update of the Edit group found: traces drawn, so the plan has an axis
         self._edit_cursor_flags = (False, False)  # (the cursor is on the plot, it is inside a step) as the Edit group last showed them
         self._numbers_for_plot = False  # the S_bulk plot is open (`set_numbers_for_plot`)
+        self._numbers_for_lbl = False  # the LbL plot is open (`set_numbers_for_lbl_plot`)
         self.plan_controls = PlanBarControls(parent)
         self.plan_controls.set_available(False)  # until a dataset with steps is open
         self.stats_controls = StatsTableControls(parent)
@@ -105,6 +107,7 @@ class StepOverlays(QObject):
         self.evaluation.role_chosen.connect(self._on_role_chosen)
         self.evaluation.pair_removed.connect(self._on_pair_removed)
         self.bulk = BulkControls(parent)  # the S_bulk set (2026-11-12): add / remove the steps selected on the bar, clear
+        self.lbl = LblControls(parent)  # the LbL series (2026-11-22): start step + steps per cycle
         self.actions = None if experiment_plan is None else PlanBarActions(experiment_plan, plot, self.plan_context, self, cursor=self.cursor_unix_ms)
         self.edit_controls = PlanEditControls(parent)  # add / remove / merge steps (2026-11-10): the right-click menu's commands on the steps selected on the bar
         if self.actions is not None:
@@ -118,6 +121,9 @@ class StepOverlays(QObject):
             self.bulk.add_requested.connect(lambda: self._plan.add_to_bulk(self.actions.selected_steps()))
             self.bulk.remove_requested.connect(lambda: self._plan.remove_from_bulk(self.actions.selected_steps()))
             self.bulk.clear_requested.connect(lambda: self._plan.clear_bulk())
+            self.lbl.start_requested.connect(self._on_lbl_start)
+            self.lbl.period_changed.connect(lambda period: self._plan.set_lbl_period(period))  # the user's edit of the box; does nothing while no series is set
+            self.lbl.clear_requested.connect(lambda: self._plan.clear_lbl())
         self.set_structure_tools(False)  # until the Experimental plan tab is shown
         self.plan_controls.settings_changed.connect(self.refresh)
         self.stats_controls.settings_changed.connect(self._on_stats_settings_changed)
@@ -132,6 +138,7 @@ class StepOverlays(QObject):
         self.stats_controls.restore_ui_state(store)
         self.evaluation.restore_ui_state(store)
         self.bulk.restore_ui_state(store)
+        self.lbl.restore_ui_state(store)
 
     def refresh_theme(self) -> None:
         self.edit_controls.refresh_theme()
@@ -139,6 +146,7 @@ class StepOverlays(QObject):
         self.stats_controls.refresh_theme()
         self.evaluation.refresh_theme()
         self.bulk.refresh_theme()
+        self.lbl.refresh_theme()
 
     def set_structure_tools(self, active: bool) -> None:
         """The right-click menu offers remove / add / unify steps and the baseline / signal roles only while the Experimental plan tab is the active one."""
@@ -188,14 +196,28 @@ class StepOverlays(QObject):
 
     def stats_wanted(self) -> bool:
         """The step statistics table is on (or the S_bulk plot is open) and the dataset has experiment steps: the lines then carry their mean +/- SD per step."""
-        return (self.stats_controls.settings().visible or self._numbers_for_plot) and self._plan is not None and self._plan.has_steps()
+        return (self.stats_controls.settings().visible or self._numbers_for_plot or self._numbers_for_lbl) and self._plan is not None and self._plan.has_steps()
 
     def set_numbers_for_plot(self, on: bool) -> None:
         """The S_bulk plot is open: the lines must carry their per-step numbers even with the step table off. Asks for a redraw when they do not yet."""
         self._numbers_for_plot = bool(on)
+        self._ask_for_numbers(on)
+
+    def set_numbers_for_lbl_plot(self, on: bool) -> None:
+        """The same for the LbL plot (2026-11-22): either plot being open is enough."""
+        self._numbers_for_lbl = bool(on)
+        self._ask_for_numbers(on)
+
+    def _ask_for_numbers(self, on: bool) -> None:
         drawn = self._drawn()
         if on and drawn is not None and any(s.step_values is None for s in drawn[1]):
             self._schedule_redraw()
+
+    def _on_lbl_start(self, period: int) -> None:
+        """The Use button: the one step selected on the bar becomes cycle 0."""
+        selected = self.actions.selected_steps()
+        if len(selected) == 1:
+            self._plan.set_lbl(selected[0], period)
 
     def bulk_inputs(self) -> tuple[list, tuple, str]:
         """(lines drawn, the plan's step references in order = the columns of their step numbers, the y-axis label) for the S_bulk plot."""
@@ -371,6 +393,7 @@ class StepOverlays(QObject):
 
     def _show_bulk(self) -> None:
         """The S_bulk pop-up: the steps of the set with their refractive indices, and what its buttons can do with the bar's selection. A few steps: cheap."""
+        self._show_lbl()  # (the LbL pop-up follows the same triggers: a new plan, a new selection on the bar)
         if self._plan is None or self.actions is None:
             self.bulk.set_available(False)
             return
@@ -384,6 +407,23 @@ class StepOverlays(QObject):
         in_set = {step.ref for step in self._plan.bulk_steps()}
         self.bulk.set_state(rows, has_selection=bool(selected), selection_in_set=any(steps[i].ref in in_set for i in selected))
         self.bulk.set_available(bool(steps))
+
+    def _show_lbl(self) -> None:
+        """The LbL pop-up: the start step, the steps the series uses and whether exactly one step is selected on the bar (the Use button). A few steps: cheap."""
+        if self._plan is None or self.actions is None:
+            self.lbl.set_available(False)
+            return
+        series = self._plan.lbl_series()
+        used = self._plan.lbl_steps()
+        start_text, uses_text = None, ""
+        if series is not None and used:
+            start_text = f"{used[0].order} · {solution_of(used[0].label) or '(no note)'}"
+            numbers = ", ".join(str(step.order) for step in used[:8]) + (" ..." if len(used) > 8 else "")
+            uses_text = f"Uses steps {numbers} (cycles 0 to {len(used) - 1})."
+        elif series is not None:
+            uses_text = "The start step is not in the plan any more: pick another."
+        self.lbl.set_state(start_text, uses_text, has_single_selection=len(self.actions.selected_steps()) == 1, period=None if series is None else series.period)
+        self.lbl.set_available(bool(self._plan.steps()))
 
     def show_stats_table(self, bars: Sequence[PlanBarStep], series: list[Series], has_steps: bool) -> None:
         """The table of mean +/- SD per step and line, from the numbers the lines carry (computed with them, in the worker), or none: no steps, nothing drawn, the numbers

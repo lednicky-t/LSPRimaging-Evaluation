@@ -52,7 +52,8 @@ from ..plan import edits
 from ..plan import refractive_index as ri
 from ..plan.axis_map import AxisMap
 from ..plan.edits import AppliedPlan, Edge, EffectiveStep, Role, Side
-from ..plan.state import PlanEditsState, StepRef
+from ..plan.lbl import lbl_indices
+from ..plan.state import LblSeries, PlanEditsState, StepRef
 from ..undo import FunctionCommand, undo_manager
 
 logger = logging.getLogger(__name__)
@@ -543,3 +544,29 @@ class ExperimentPlanModule(QObject):
     @instrumented("ExperimentPlanModule.clear_bulk")
     def clear_bulk(self) -> bool:
         return self._commit("Clear the S_bulk set", REASON_ROLES, edits.clear_bulk(self._state))
+
+    # -- the LbL series (2026-11-22) -----------------------------------------------------------------------------------------------
+
+    def lbl_series(self) -> LblSeries | None:
+        return self._state.lbl
+
+    def lbl_steps(self) -> tuple[EffectiveStep, ...]:
+        """The steps of the LbL series in cycle order (cycle 0 first); empty when none is set or its start step is gone."""
+        steps = self.steps()
+        return tuple(steps[i] for i in lbl_indices([step.ref for step in steps], self._state.lbl))
+
+    @instrumented("ExperimentPlanModule.set_lbl")
+    def set_lbl(self, start_index: int, period: int) -> bool:
+        """Start the LbL series at step `start_index` with `period` steps per cycle (one undo step). False when nothing changed or there is no such step."""
+        step = self._step(start_index)
+        return step is not None and self._commit("LbL series", REASON_ROLES, edits.set_lbl(self._state, step.ref, period))
+
+    @instrumented("ExperimentPlanModule.set_lbl_period")
+    def set_lbl_period(self, period: int) -> bool:
+        """Change the steps per cycle of the series that is set (False when none is)."""
+        series = self._state.lbl
+        return series is not None and self._commit("LbL steps per cycle", REASON_ROLES, edits.set_lbl(self._state, series.start, period))
+
+    @instrumented("ExperimentPlanModule.clear_lbl")
+    def clear_lbl(self) -> bool:
+        return self._commit("Clear the LbL series", REASON_ROLES, edits.clear_lbl(self._state))

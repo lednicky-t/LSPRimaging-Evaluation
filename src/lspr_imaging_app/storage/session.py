@@ -129,7 +129,9 @@ from ..domain.roi_shapes import NO_BORDER, Border, Circle, MaskShape, Rectangle,
 logger = logging.getLogger(__name__)
 
 SESSION_SCHEMA_NAME = "lspri_rewrite_session"
-SESSION_SCHEMA_VERSION = "1.14"
+SESSION_SCHEMA_VERSION = "1.15"
+# 1.15 (2026-11-22): the "plan" block may also hold "lbl" - the layer-by-layer series: {"start": a step reference, "period": steps per cycle} (plan/state.py ``LblSeries``).
+# Written only when a series is set; a 1.14 file has none and loads with no series, an older build ignores the key.
 # 1.14 (2026-11-20): the "spectral_correction" block may also hold "camera_response" - the camera's relative spectral sensitivity ({"source_name", "sha256", "imported_at",
 # "wavelength_nm": [...], "response": [...]}, analysis/spectral_passband.py ``CameraResponse``) - and may then have no table ("file"). A 1.13 block has neither and loads with a flat camera.
 # 1.13 (2026-11-20): optional "spectral_correction" block - the spectral correction of the LCTF passbands (selection/spectral_correction_module.py,

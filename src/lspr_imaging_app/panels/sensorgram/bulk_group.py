@@ -23,7 +23,7 @@ from collections.abc import Sequence
 
 from PyQt6.QtCore import QObject, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QIcon
-from PyQt6.QtWidgets import QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QMenu, QToolButton, QVBoxLayout, QWidget, QWidgetAction
+from PyQt6.QtWidgets import QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QMenu, QPushButton, QToolButton, QVBoxLayout, QWidget, QWidgetAction
 
 from lspr_ui import get_active_theme, load_tabler_icon
 
@@ -49,6 +49,7 @@ WEIGHTING_TIP = (
     "How the steps count in the fit. 1/σ²: a step whose mean is known better (less noise, more cubes) counts more; the statistically best line when the uncertainties are right. "
     "Equal: every step counts the same; useful to compare when one step dominates."
 )
+RI_LINK_TIP = "Open the refractive indices of the solutions (Dataset Manager > Experiment plan): see them, import a RIs.txt, or type them in."
 EMPTY_TEXT = "No steps yet. Select steps on the plan bar and click +."
 PLOT_TIP = (
     "A floating window with the step means against the refractive index: the fitted bulk line with its uncertainty, filled points for the steps in the set and hollow "
@@ -65,6 +66,7 @@ class BulkControls(QObject):
     clear_requested = pyqtSignal()
     weighting_changed = pyqtSignal(str)
     plot_toggled = pyqtSignal(bool)  # the floating S_bulk plot (2026-11-12, `bulk_plot.py`) shown / hidden
+    ri_requested = pyqtSignal()  # the "Refractive indices..." link (2026-11-22): the owner opens the Dataset Manager on its Experiment plan page
 
     def __init__(self, parent: QWidget) -> None:
         super().__init__(parent)
@@ -104,6 +106,12 @@ class BulkControls(QObject):
         self._weighting.setToolTip(WEIGHTING_TIP)
         weighting_row.addWidget(self._weighting, 1)
         outer.addLayout(weighting_row)
+        self._ri_link = QPushButton("Refractive indices...", self._panel)  # opens the Dataset Manager's table of RIs (view, import, edit)
+        self._ri_link.setFlat(True)
+        self._ri_link.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._ri_link.setToolTip(RI_LINK_TIP)
+        self._ri_link.clicked.connect(lambda _checked=False: self._open_ri())
+        outer.addWidget(self._ri_link, 0, Qt.AlignmentFlag.AlignLeft)
         self.plot_toggle = QCheckBox("Show S_bulk plot", self._panel)  # a check box draws plain text: no subscript here
         self.plot_toggle.setToolTip(PLOT_TIP)
         outer.addWidget(self.plot_toggle)
@@ -138,6 +146,10 @@ class BulkControls(QObject):
 
     def widgets(self) -> tuple[QWidget, ...]:
         return (self._button,)
+
+    def _open_ri(self) -> None:
+        self._menu.close()  # a widget in a menu does not close it by itself
+        self.ri_requested.emit()
 
     def weighting(self) -> str:
         return self._weighting.currentData() or WEIGHT_INVERSE_VARIANCE
@@ -179,6 +191,7 @@ class BulkControls(QObject):
         theme = get_active_theme()
         style_general_icon_button(self._button)
         self._button.setIcon(QIcon(bulk_picture()(theme.text_primary)))
+        self._ri_link.setStyleSheet(f"QPushButton {{ color: {theme.accent_blue}; border: none; text-decoration: underline; padding: 2px 0; }}")
         for button, name in ((self._add, "plus"), (self._remove, "minus"), (self._clear, "clear-all")):
             style_general_icon_button(button)
             button.setIconSize(QSize(ICON_SIZE, ICON_SIZE))

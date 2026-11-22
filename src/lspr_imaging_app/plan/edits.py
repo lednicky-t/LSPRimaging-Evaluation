@@ -30,7 +30,8 @@ import numpy as np
 
 from lspr_core import ImagingPlan
 
-from .state import AddedStep, EvalPair, PlanEdit, PlanEditsState, StepRef, added_ref, measured_ref, normalise_color
+from .lbl import lbl_indices
+from .state import AddedStep, EvalPair, LblSeries, PlanEdit, PlanEditsState, StepRef, added_ref, measured_ref, normalise_color
 
 Edge = Literal["start", "end"]
 Role = Literal["baseline", "signal"]
@@ -39,6 +40,8 @@ BULK_CHIP = "Sb"  # the chip of a step in the S_bulk set (after its B / S chips)
 
 def describe_role(role: str) -> str:
     """One hover line for a chip of `EffectiveStep.roles`."""
+    if role.isdigit():  # the LbL series: the chip is the cycle number
+        return f"Cycle {role} of the LbL series" + (" (the start: before the first layer)." if role == "0" else ".")
     if role == BULK_CHIP:
         return f"In the S_bulk set: its mean is one point of the bulk sensitivity fit ({role})."
     return f"{'Baseline' if role.startswith('B') else 'Signal'} step of evaluation pair {role[1:]} ({role})."
@@ -158,7 +161,9 @@ def apply_edits(plan: ImagingPlan | None, state: PlanEditsState) -> AppliedPlan:
             roles.setdefault(pair.signal, []).append(f"S{pair.number}")
     for ref in state.bulk:
         roles.setdefault(ref, []).append(BULK_CHIP)
-    ordered = tuple(replace(step, order=index + 1, roles=tuple(roles.get(step.ref, ()))) for index, step in enumerate(steps))
+    for cycle, index in enumerate(lbl_indices([step.ref for step in steps], state.lbl)):
+        roles.setdefault(steps[index].ref, []).append(str(cycle))  # the LbL chip is the cycle number: 0 = the start step
+    ordered =tuple(replace(step, order=index + 1, roles=tuple(roles.get(step.ref, ()))) for index, step in enumerate(steps))
     return AppliedPlan(ordered, tuple(warnings))
 
 
@@ -291,7 +296,14 @@ def reset_all(state: PlanEditsState | None = None) -> PlanEditsState:
     if state is None:
         return PlanEditsState()
     gone = {added_ref(a.uid) for a in state.added}
-    return PlanEditsState(next_uid=state.next_uid, pairs=_cleared(state.pairs, gone), bulk=tuple(ref for ref in state.bulk if ref not in gone))
+    return PlanEditsState(
+        next_uid=state.next_uid, pairs=_cleared(state.pairs, gone), bulk=tuple(ref for ref in state.bulk if ref not in gone), lbl=_lbl_without(state.lbl, gone),
+    )
+
+
+def _lbl_without(lbl: LblSeries | None, gone: set[StepRef]) -> LblSeries | None:
+    """The LbL series, or None when its start step is among the steps that are gone."""
+    return None if lbl is not None and lbl.start in gone else lbl
 
 
 # -- structure: remove, restore, unify, add ----------------------------------------------------------------------------------------------
@@ -318,6 +330,8 @@ def roles_lost(before: PlanEditsState, after: PlanEditsState) -> list[str]:
     dropped = len(set(before.bulk) - set(after.bulk))
     if dropped:
         lost.append("S_bulk step" if dropped == 1 else f"{dropped} S_bulk steps")
+    if before.lbl is not None and after.lbl is None:
+        lost.append("LbL series")
     return lost
 
 
@@ -343,7 +357,7 @@ def remove_steps(steps: Sequence[EffectiveStep], state: PlanEditsState, indices:
             removed.append(step.ref)
     return replace(
         state, removed=tuple(sorted(removed, key=lambda r: r[1:])), added=tuple(added), pairs=_cleared(state.pairs, gone),
-        bulk=tuple(ref for ref in state.bulk if ref not in gone),
+        bulk=tuple(ref for ref in state.bulk if ref not in gone), lbl=_lbl_without(state.lbl, gone),
     )
 
 
@@ -512,3 +526,16 @@ def remove_from_bulk(state: PlanEditsState, refs: Sequence[StepRef]) -> PlanEdit
 
 def clear_bulk(state: PlanEditsState) -> PlanEditsState:
     return replace(state, bulk=()) if state.bulk else state
+
+
+# -- the LbL series (2026-11-22) --------------------------------------------------------------------------------------------------------
+
+
+def set_lbl(state: PlanEditsState, start: StepRef, period: int) -> PlanEditsState:
+    """The LbL series starting at step `start` with `period` steps per cycle (at least 1). `state` itself when nothing changes."""
+    series = LblSeries(start, max(int(period), 1))
+    return state if state.lbl == series else replace(state, lbl=series)
+
+
+def clear_lbl(state: PlanEditsState) -> PlanEditsState:
+    return replace(state, lbl=None) if state.lbl is not None else state
