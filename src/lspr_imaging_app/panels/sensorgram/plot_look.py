@@ -34,6 +34,8 @@ from ...selection.plot_line_order_module import PlotLineOrderModule
 from ..ui_state import UiStateStore
 from .group_menu import GroupMenuButton, icon_choice_buttons, segment_stylesheet, segmented_buttons, widgets_row
 from .draw_order import DRAW_AUTO, DRAW_LEGEND, DRAW_MANUAL, DRAW_MODES
+from .legend_corner import BOTTOM_LEFT, BOTTOM_RIGHT, DEFAULT_CORNER, TOP_LEFT, TOP_RIGHT
+from .legend_corner_picker import LegendCornerPicker
 from .legend_order import SORT_GROUP, SORT_KEYS, SORT_NAME, SORT_VALUE, VALUE_MEAN, VALUE_SOURCES, VALUE_STEP
 from .line_order_dialog import LineOrderDialog, LineRow
 from .line_icons import joint_picture, lines_toggle_icon, points_lines_icon, points_toggle_icon
@@ -114,6 +116,13 @@ LEGEND_OVER_BAR_TIP = (
     "is on the other edge."
 )
 LEGEND_COUNTS_TIP = "Write the number of ROIs after the name of a group or an average: \"Group A (n=12)\" instead of \"Group A\". A line of one ROI is always \"ROI 5\"."
+CORNER_TIPS = {
+    TOP_LEFT: "Legend in the top-left corner of the plot area (where it has always been).",
+    TOP_RIGHT: "Legend in the top-right corner of the plot area.",
+    BOTTOM_LEFT: "Legend in the bottom-left corner of the plot area.",
+    BOTTOM_RIGHT: "Legend in the bottom-right corner of the plot area.",
+}
+CORNER_TIP = "Which corner of the plot area the legend sits in (the four cells are the four corners). Dragging the legend with the mouse still works; picking a corner puts it back in that corner."
 SORT_LABELS = {SORT_GROUP: "Group", SORT_NAME: "Name", SORT_VALUE: "Value"}
 SORT_TIPS = {
     SORT_GROUP: "Group: the order the lines come in (a group's number, a ROI's id). This is the order the legend always had.",
@@ -225,6 +234,7 @@ class PlotLookKeys:
     legend_spacing: str
     legend_counts: str
     legend_over_bar: str
+    legend_corner: str
     legend_sort: str
     legend_descending: str
     legend_value: str
@@ -238,6 +248,7 @@ class PlotLookKeys:
             points=f"{prefix}_points", lines=f"{prefix}_lines", point_size=f"{prefix}_point_size", dots_limit=f"{prefix}_dots_limit", line_width=f"{prefix}_line_width",
             line_style=f"{prefix}_line_style", legend_mode=f"{prefix}_legend_mode", legend_text=f"{prefix}_legend_text_pt", legend_spacing=f"{prefix}_legend_spacing",
             legend_counts=f"{prefix}_legend_counts", legend_over_bar=f"{prefix}_legend_over_bar",
+            legend_corner=f"{prefix}_legend_corner",
             legend_sort=f"{prefix}_legend_sort", legend_descending=f"{prefix}_legend_descending", legend_value=f"{prefix}_legend_value", show_cursor=f"{prefix}_show_cursor", draw_mode=f"{prefix}_draw_mode",
         )
 
@@ -391,6 +402,14 @@ class PlotLookControls(QObject):
         self.legend_over_bar.setObjectName(f"{object_prefix}_legend_over_bar")
         self.legend_over_bar.setChecked(d.legend_over_bar)
         self.legend_over_bar.setToolTip(LEGEND_OVER_BAR_TIP)
+        # -- the corner of the plot area the legend sits in (legend_corner.py): a 2 x 2 block of cells, and a note for the Sensorgram while its step table keeps the legend at its edge
+        self.corner_picker = LegendCornerPicker(CORNER_TIPS, parent, object_prefix=f"{object_prefix}_legend")
+        self.corner_picker.setToolTip(CORNER_TIP)
+        press(self.corner_picker.buttons, d.legend_corner)
+        self.corner_note = QLabel("", parent)
+        self.corner_note.setObjectName(f"{object_prefix}_legend_corner_note")
+        self.corner_note.setWordWrap(True)
+        self.corner_note.setMaximumWidth(260)
         # -- the order of the rows (legend_order.py): Group / Name / Value + a direction arrow; "Value of" only while Value is picked; the cursor toggle; a note when the order has no number
         sort_holder, self._sort_group, self._sort_buttons = segmented_buttons(parent, SORT_KEYS, SORT_LABELS, SORT_TIPS, f"{object_prefix}_legend_sort")
         self.sort_descending = IconToggle(direction_icon, SORT_DIRECTION_TIP, parent)
@@ -410,7 +429,7 @@ class PlotLookControls(QObject):
         order_row = widgets_row(parent, sort_holder, self.sort_descending)
         legend_rows = [
             ("Legend", modes_holder), ("Text", self.legend_text), ("Row gap", self.legend_spacing), ("ROI count", self.legend_counts),
-            ("Order", order_row), ("Value of", value_holder), ("Cursor", self.show_cursor), ("", self.order_note),
+            ("Corner", self.corner_picker), ("", self.corner_note), ("Order", order_row), ("Value of", value_holder), ("Cursor", self.show_cursor), ("", self.order_note),
         ]
         if legend_position:
             legend_rows.append(("Position", self.legend_over_bar))
@@ -420,6 +439,7 @@ class PlotLookControls(QObject):
         self._value_holder = value_holder
         self._sync_order_rows()
         self.set_order_note("")
+        self.set_corner_note("")
 
         style_ribbon_number_field(self.point_size, f"{POINT_SIZE_RANGE[1]} px")
         if self.dots_limit is not None:
@@ -430,7 +450,7 @@ class PlotLookControls(QObject):
         signals = [
             self.show_points.toggled, self.show_lines.toggled, self.point_size.valueChanged, self.line_width.valueChanged, self._style_group.buttonClicked,
             self.legend_text.valueChanged, self.legend_spacing.valueChanged, self.legend_counts.toggled, self._mode_group.buttonClicked, self.legend_over_bar.toggled,
-            self._sort_group.buttonClicked, self.sort_descending.toggled, self._value_group.buttonClicked, self.show_cursor.toggled,
+            self.corner_picker.group.buttonClicked, self._sort_group.buttonClicked, self.sort_descending.toggled, self._value_group.buttonClicked, self.show_cursor.toggled,
             self._draw_group.buttonClicked,
         ]
         if self.dots_limit is not None:
@@ -454,6 +474,7 @@ class PlotLookControls(QObject):
             legend_mode=self.legend_mode(), legend_text_pt=self.legend_text.value(), legend_spacing_px=self.legend_spacing.value(),
             legend_counts=self.legend_counts.isChecked(),
             legend_over_bar=self.legend_over_bar.isChecked() if self._has_position else self._defaults.legend_over_bar,
+            legend_corner=pressed(self.corner_picker.buttons) or DEFAULT_CORNER,
             legend_sort=pressed(self._sort_buttons) or SORT_GROUP, legend_descending=self.sort_descending.isChecked(),
             legend_value=pressed(self._value_buttons) or VALUE_MEAN, show_cursor=self.show_cursor.isChecked(),
             draw_mode=pressed(self._draw_buttons) or DRAW_LEGEND,
@@ -514,6 +535,11 @@ class PlotLookControls(QObject):
         """Say why the order cannot read its number now ("Select one step on the plan bar"); "" hides the note. Reports no change."""
         self.order_note.setText(text)
         self.legend_menu.set_row_visible(self.order_note, bool(text))
+
+    def set_corner_note(self, text: str) -> None:
+        """Say why the corner has no effect now (the Sensorgram: its step table keeps the legend at its edge); "" hides the note. Reports no change."""
+        self.corner_note.setText(text)
+        self.legend_menu.set_row_visible(self.corner_note, bool(text))
 
     def legend_mode(self) -> str:
         return pressed(self._mode_buttons) or LEGEND_AUTO
@@ -583,6 +609,7 @@ class PlotLookControls(QObject):
             self.legend_spacing.setValue(d.legend_spacing_px)
             self.legend_counts.setChecked(d.legend_counts)
             self.legend_over_bar.setChecked(d.legend_over_bar)
+            press(self.corner_picker.buttons, d.legend_corner)
             self.press_sort(d.legend_sort)
             self.sort_descending.setChecked(d.legend_descending)
             press(self._value_buttons, d.legend_value)
@@ -618,6 +645,7 @@ class PlotLookControls(QObject):
             button.setStyleSheet(segment)
         for button in self._style_buttons.values():  # picture buttons: they style and recolour themselves
             button.refresh_theme()
+        self.corner_picker.refresh_theme()
         for button in (self._lines_reset, self._legend_reset):
             button.setIcon(load_tabler_icon("refresh", color=theme.text_primary, size=18))
 
@@ -640,6 +668,7 @@ class PlotLookControls(QObject):
             for key, widget in pairs:
                 store.bind(key, widget)
             _restore_choice(store, k.legend_mode, self._mode_buttons)
+            _restore_choice(store, k.legend_corner, self.corner_picker.buttons)
             _restore_choice(store, k.line_style, self._style_buttons)
             _restore_choice(store, k.legend_sort, self._sort_buttons)
             _restore_choice(store, k.legend_value, self._value_buttons)
@@ -649,6 +678,7 @@ class PlotLookControls(QObject):
         self._sync_order_rows()
         self._sync_draw_edit()
         _remember_choice(store, k.legend_mode, self._mode_buttons)
+        _remember_choice(store, k.legend_corner, self.corner_picker.buttons)
         _remember_choice(store, k.line_style, self._style_buttons)
         _remember_choice(store, k.legend_sort, self._sort_buttons)
         _remember_choice(store, k.legend_value, self._value_buttons)

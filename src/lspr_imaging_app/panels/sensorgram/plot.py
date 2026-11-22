@@ -42,6 +42,7 @@ from .play_repaint import PlayCursorRepaint
 from .stats_table import LegendRows, StepStatsItem
 from .curve_smoothing import smooth_line, smooth_run
 from .draw_order import DRAW_AUTO, DRAW_LEGEND, back_to_front, roughness
+from .legend_corner import CORNER_STEP_TABLE_NOTE, DEFAULT_CORNER, corner_offset
 from .legend_order import SORT_VALUE, VALUE_MEAN, order_rows
 from .view_settings import DEFAULT_DOTS_MAX_LINES, LEGEND_HIDE, LEGEND_SHOW, LINE_SPLINE, SensorgramViewSettings, legend_text
 
@@ -90,9 +91,39 @@ class _Legend(pg.LegendItem):
     pyqtgraph makes the legend as high as its rows added up, which ignores the margins and the Row gap. With its 9 px margins the layout always needed more than that and so no row
     was ever stretched; with the tighter margins (`_LEGEND_MARGIN_PX`) a negative Row gap makes the layout need less, and the spare height was shared out between the rows, so
     the rows moved by less than the gap that was set. Here the height is the layout's own minimum, so a row gap of -3 px moves the rows by exactly -3 px, with any margin and
-    any number of rows."""
+    any number of rows.
+
+    It also knows which corner of the plot area it was last put in (the Legend menu's Corner row, `legend_corner.py`), so a corner is applied only when it *changes*: a legend the user
+    dragged by hand stays where it was dropped through every redraw, until another corner is picked."""
+
+    _corner: str | None = DEFAULT_CORNER  # the corner the legend was built in (the top-left); None = something else moved it (the step table)
+    _filling = False  # `add_entries` is adding rows: the layout is worked out once at the end, not after every row
+
+    def add_entries(self, entries: Sequence[tuple[object, str]]) -> None:
+        """Add the rows (`(sample item, text)` each) with ONE layout pass. pyqtgraph's `addItem` works the size out after every row, so n rows cost n passes over the whole layout
+        (2026-11-22: 48 of 56 ms of a Sensorgram redraw with 20 lines); the rows, their order and the final size are the same."""
+        self._filling = True
+        try:
+            for sample, text in entries:
+                self.addItem(sample, text)
+        finally:
+            self._filling = False
+            self.updateSize()
+
+    def place_in_corner(self, corner: str, across: float, down: float) -> None:
+        """Put the legend in `corner`, `across` px from the side and `down` px from the top / bottom, unless it was put there already."""
+        if corner == self._corner:
+            return
+        self._corner = corner
+        self.setOffset(corner_offset(corner, across, down))
+
+    def forget_corner(self) -> None:
+        """Something else (the step table) moved the legend: the next `place_in_corner` applies its corner again."""
+        self._corner = None
 
     def updateSize(self) -> None:
+        if self._filling:
+            return
         super().updateSize()
         if self.size is not None:  # a fixed size was asked for
             return
@@ -193,6 +224,7 @@ class SensorgramPlot(QWidget):
     plan_text_committed = pyqtSignal(int, str)  # (step index, new text) from the in-place editor
     anchor_point_added = pyqtSignal(float)  # anchor-edit mode: a left click on the plot, at this data x (the cube cursor does not move)
     anchor_point_remove_requested = pyqtSignal(float)  # anchor-edit mode: a right click on an anchor square, at its data x
+    legend_corner_note_changed = pyqtSignal(str)  # the step table went on or off: the Legend menu's Corner row says whether it has an effect ("" = it has)
     anchor_menu_requested = pyqtSignal(float, QPoint)  # anchor-edit mode: a right click away from every square: data x, screen position for the menu
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -201,10 +233,15 @@ class SensorgramPlot(QWidget):
         self._widget.setMinimumHeight(100)
         self._item = self._widget.getPlotItem()
         self._item.showGrid(x=True, y=True, alpha=0.15)
-        self._legend: pg.LegendItem | None = None
-        self._legend_placed_by_table = False  # the step statistics table moved the legend (so it is put back when the table goes)
+        self._legend: _Legend | None = None
+        self._corner_note = ""  # what the Legend menu's Corner row says now (`legend_corner_note`); `legend_corner_note_changed` fires when it changes
         self._legend_items: list[tuple[pg.PlotCurveItem, str]] = []  # every line's (marker, text), in the lines' order
         self._legend_series: list[Series] = []
+        # What `restack` needs from the last `show_series`: the lines it drew (the same objects), the view it drew with, and per line its items and its export parts.
+        self._drawn_series: tuple[Series, ...] | None = None
+        self._drawn_view: SensorgramViewSettings | None = None
+        self._line_items: dict[int, list[tuple[pg.GraphicsObject, float]]] = {}
+        self._line_parts: dict[int, list[SvgPart]] = {}
         self._legend_rank: list[int] = []  # the line shown by the legend's k-th row (the Legend menu's order); the lines' own order when the order is Group, ascending
         self._order_step: int | None = None  # the plan step the "At step" order reads (the one selected on the bar)
         self._manual_order: tuple[str, ...] = ()  # the Draw order's Manual list (the session's, `PlotLineOrderModule`), first = in front
@@ -345,6 +382,7 @@ class SensorgramPlot(QWidget):
         return self._pool.drawn
 
     def clear(self) -> None:
+        self._drawn_series = None  # nothing to re-stack
         self._pool.clear()
         if self._legend is not None:
             self._legend.clear()
@@ -404,9 +442,12 @@ class SensorgramPlot(QWidget):
             self._legend.clear()
         dots = len(series) <= view.dots_max_lines and view.show_points
         spline = view.line_style == LINE_SPLINE
+        self._line_items, self._line_parts, self._drawn_series = {}, {}, None  # per line (its index): its items, and the parts of the layered export
         for rank, line_index in enumerate(stack):
             s = series[line_index]
             dz = _Z_SPREAD * rank / count  # this line's place in the stack
+            placed: list[tuple[pg.GraphicsObject, float]] = []  # this line's items with the z they have before the stacking is added (`restack` puts them in another order)
+            parts_from = len(self._svg_parts)
             color = QColor(s.color)
             finite = np.isfinite(s.y) & np.isfinite(s.x)
             line_x, line_y = smooth_line(s.x, s.y) if spline else (s.x, s.y)  # the dots, marks and statistics stay on the measured points; only the line between them is smoothed
@@ -414,7 +455,7 @@ class SensorgramPlot(QWidget):
                 line_x, line_y = s.x, s.y  # nothing finite to smooth
             # A hidden line keeps its (invisible) item: it still gives the view its extent, which the dots, drawn out of the auto-range, do not.
             pen = _line_pen(color, view.line_width) if view.show_lines else _INVISIBLE_PEN
-            line = pool.take("line", lambda: pg.PlotCurveItem(antialias=True), z=_Z_LINE + dz)
+            line = self._take_stacked(placed, "line", lambda: pg.PlotCurveItem(antialias=True), _Z_LINE, dz)
             if finite.all():  # no gap to keep: one polyline, and pyqtgraph need not look for NaN again
                 line.setData(line_x, line_y, pen=pen, connect="all", skipFiniteCheck=True, name=s.label if named else None)
             else:  # a NaN stays a gap in the line
@@ -426,19 +467,19 @@ class SensorgramPlot(QWidget):
                 sample = line if view.show_lines else pg.PlotCurveItem(pen=_line_pen(color, view.line_width))
                 legend_slots[line_index] = (sample, legend_text(s.label, s.short_label, view.legend_counts))
             if baseline_curves and s.baseline_curve is not None:
-                dashed = pool.take("baseline_curve", lambda: pg.PlotCurveItem(antialias=True), ignore_bounds=True, z=_Z_LINE - 0.5 + dz)
+                dashed = self._take_stacked(placed, "baseline_curve", lambda: pg.PlotCurveItem(antialias=True), _Z_LINE - 0.5, dz, ignore_bounds=True)
                 pen = _line_pen(color, view.line_width)
                 pen.setStyle(Qt.PenStyle.DashLine)
                 dashed.setData(s.x, s.baseline_curve, pen=pen, connect="finite", skipFiniteCheck=False)
                 self._svg_parts.append(SvgPart("Baseline curves", s.label, dashed))
             if anchor_dots is not None and s.anchor_x is not None and s.anchor_y is not None and s.anchor_x.size:
                 ay = s.anchor_y if anchor_dots == "absolute" or s.anchor_base is None else s.anchor_y - s.anchor_base
-                squares = pool.take("anchor_dots", lambda: pg.ScatterPlotItem(), ignore_bounds=True, z=_Z_MARKS + dz)
+                squares = self._take_stacked(placed, "anchor_dots", lambda: pg.ScatterPlotItem(), _Z_MARKS, dz, ignore_bounds=True)
                 squares.setData(s.anchor_x, ay, symbol="s", size=9, brush=None, pen=pg.mkPen(color, width=1.8))
                 self._svg_parts.append(SvgPart("Baseline anchors", s.label, squares))
             if dots and finite.any():
                 # Out of the auto-range: the dots sit on the line's points (same bounds), and a dot item would also widen the range by its radius.
-                dot_item = pool.take("dots", lambda: pg.ScatterPlotItem(), ignore_bounds=True, z=_Z_DOTS + dz)
+                dot_item = self._take_stacked(placed, "dots", lambda: pg.ScatterPlotItem(), _Z_DOTS, dz, ignore_bounds=True)
                 dot_item.setData(s.x[finite], s.y[finite], symbol="o", size=view.point_size, brush=pg.mkBrush(color), pen=None)
                 self._svg_parts.append(SvgPart("Points", s.label, dot_item))
             if view.show_band and s.band_low is not None and s.band_high is not None:
@@ -455,14 +496,15 @@ class SensorgramPlot(QWidget):
                     high.setData(band_x, high_y)
                     # The fill's own bounding rectangle reaches far outside the band (the y range of an average ran from -32 to 641 nm for peaks near 595 nm),
                     # so it stays out of the auto-range; the two invisible edge curves, which are only data, give the band's real extent.
-                    fill = pool.take("band_fill", lambda: pg.FillBetweenItem(low, high), ignore_bounds=True, z=_Z_BAND + dz)  # noqa: B023 (called at once)
+                    fill = self._take_stacked(placed, "band_fill", lambda: pg.FillBetweenItem(low, high), _Z_BAND, dz, ignore_bounds=True)  # noqa: B023 (called at once)
                     fill.setCurves(low, high)
+                    fill.setZValue(_Z_BAND + dz)  # `setCurves` puts the fill just under its curves (z = -1): the band is stacked with its own line, behind every line (`restack` does the same)
                     fill.setBrush(pg.mkBrush(brush))
                     self._svg_parts += [SvgPart("Bands", s.label, fill), SvgPart("Bands", f"{s.label} (edges)", low), SvgPart("Bands", f"{s.label} (edges)", high)]
             if stale is not None and stale.any():
                 mask = np.asarray(stale, dtype=bool) & finite
                 if mask.any():
-                    hollow = pool.take("stale", lambda: pg.ScatterPlotItem(), z=_Z_RINGS + dz)
+                    hollow = self._take_stacked(placed, "stale", lambda: pg.ScatterPlotItem(), _Z_RINGS, dz)
                     hollow.setData(s.x[mask], s.y[mask], symbol="d", size=10, brush=None, pen=pg.mkPen(STALE_COLOR, width=1.5))
                     self._svg_parts.append(SvgPart("Out-of-date marks", s.label, hollow))
             marks = None if mask_marks is None else mask_marks.get(s.key)
@@ -470,15 +512,51 @@ class SensorgramPlot(QWidget):
                 for flags, symbol, size in ((marks[0], "t2", 11), (marks[1], "o", 13)):
                     on = np.asarray(flags, dtype=bool) & finite
                     if on.any():
-                        mark = pool.take(f"mark:{symbol}", lambda: pg.ScatterPlotItem(), z=_Z_MARKS + dz)
+                        mark = self._take_stacked(placed, f"mark:{symbol}", lambda: pg.ScatterPlotItem(), _Z_MARKS, dz)
                         mark.setData(s.x[on], s.y[on], symbol=symbol, size=size, brush=None, pen=pg.mkPen(MASK_COLOR, width=1.8))
                         kind = "persistent mask" if symbol == "t2" else "individual mask"
                         self._svg_parts.append(SvgPart("Mask marks", f"{s.label} ({kind})", mark))
+            self._line_items[line_index] = placed
+            self._line_parts[line_index] = self._svg_parts[parts_from:]
         pool.end()
+        self._drawn_series, self._drawn_view = tuple(series), view
         self._rebuild_legend(series, [slot for slot in legend_slots if slot is not None], legend_rank)
         if not self._view_kept:  # the user's own zoom stays over a redraw (a recompute, another selection); `reset_view` brings the full view back
             self._item.getViewBox().autoRange()
             self._apply_room()
+
+    def _take_stacked(self, placed: list, kind: str, factory, base: float, dz: float, *, ignore_bounds: bool = False):
+        """An item from the pool at z = `base` + the line's place in the stack `dz`; `placed` remembers it with its `base`, so `restack` can give it another `dz`."""
+        item = self._pool.take(kind, factory, ignore_bounds=ignore_bounds, z=base + dz)
+        placed.append((item, base))
+        return item
+
+    def can_restack(self, series: Sequence[Series]) -> bool:
+        """True when the last `show_series` drew exactly these lines (the same objects) with a view that differs from the current one only in what `restack` can change (the order of
+        the legend rows, the Draw order, the legend's corner, the cursor): then a change of those needs no redraw."""
+        drawn = self._drawn_series
+        return (
+            drawn is not None and len(drawn) == len(series) and all(a is b for a, b in zip(drawn, series))
+            and self._drawn_view is not None and self._view.differs_only_in_order(self._drawn_view)
+        )
+
+    def restack(self, series: Sequence[Series]) -> None:
+        """Put the lines in the order the view asks for now (the Draw order) and write the legend rows in the order it asks for, **without drawing the lines again** (`can_restack` first).
+        A reorder changes nothing but each line's z, the legend's rows (and with them the step table's) and the order of the layered export's parts: the items, their data, the ranges
+        and the view stay. 2026-11-22: ~130 -> ~40 ms with 160 lines; the result is pinned equal to a full redraw by `test_lspri_reorder_fast_path.py`."""
+        legend_rank = self._legend_ranking(series)
+        stack = self._stacking(series, legend_rank)
+        count = max(len(series), 1)
+        parts: list[SvgPart] = []
+        for rank, line_index in enumerate(stack):
+            dz = _Z_SPREAD * rank / count
+            for item, base in self._line_items.get(line_index, ()):
+                if item.zValue() != base + dz:
+                    item.setZValue(base + dz)
+            parts += self._line_parts.get(line_index, ())
+        self._svg_parts = parts  # the layers of a layered export are in stacking order, back to front, as a redraw writes them
+        self._drawn_view = self._view
+        self._rebuild_legend(series, self._legend_items, legend_rank)
 
     # -- the order of the legend's rows (2026-11-22, `legend_order.py`) -----------------------------------------------------------
 
@@ -494,8 +572,7 @@ class SensorgramPlot(QWidget):
             self._style_legend()
             if items:
                 self._legend_rank = self._legend_ranking(series) if rank is None else rank
-                for position in self._legend_rank:
-                    legend.addItem(*items[position])
+                legend.add_entries([items[position] for position in self._legend_rank])
         self._stats.update()  # new legend entries: new rows for the (cached) table
         self._tighten_legend()
         self._fit_legend(len(series))
@@ -584,6 +661,10 @@ class SensorgramPlot(QWidget):
             return  # "show" (the View tab) keeps the legend whatever its height
         if self._legend_size()[1] > LEGEND_MAX_HEIGHT_FRACTION * view_height:
             legend.clear()
+
+    def legend_corner_note(self) -> str:
+        """What the Legend menu should say about its Corner row ("" = nothing): that the step table, while it is on, keeps the legend at its own edge."""
+        return CORNER_STEP_TABLE_NOTE if self._stats.is_shown() else ""
 
     def legend_entry_count(self) -> int:
         """How many lines the legend names right now (0: no legend)."""
@@ -676,6 +757,10 @@ class SensorgramPlot(QWidget):
         self._stats.set_table(table, settings)
         self._place_legend()
         self._remake_room_if_changed()
+        note = self.legend_corner_note()
+        if note != self._corner_note:
+            self._corner_note = note
+            self.legend_corner_note_changed.emit(note)
 
     def stats_item(self) -> StepStatsItem:
         return self._stats
@@ -716,23 +801,23 @@ class SensorgramPlot(QWidget):
 
     def _place_legend(self) -> None:
         """With the table on, the legend sits at its edge just inside the plan bar (or at the very edge, over a bar that holds no names, when the View tab says so:
-        `_legend_ignores_bar`), so its rows and the cells line up (the table owns its place). With the table off it is where it always was (top left) and wherever the user dragged it:
-        it is put back only if the table had moved it. The band the rows take is handed to the bar, so the names of a Full bar stay out of it."""
+        `_legend_ignores_bar`), so its rows and the cells line up (the table owns its place). With the table off it is in the corner the Legend menu names (the top-left unless changed) and wherever the user dragged it:
+        the corner is applied only when it changed or the table had moved the legend (`_Legend.place_in_corner`). The band the rows take is handed to the bar, so the names of a Full bar stay out of it."""
         legend = self._legend
         if legend is None:
             self._plan_bar.set_keep_out(0.0, 0.0)
             return
         if not self._stats.is_shown():
-            if self._legend_placed_by_table:
-                legend.setOffset(_LEGEND_OFFSET_PX)
-                self._legend_placed_by_table = False
+            # With the table off the legend goes to the corner the Legend menu says (the top-left unless changed), measured from the plot's edges like the top-left always was.
+            # It is applied only when the corner changed or the table had moved the legend, so a legend the user dragged stays where it was dropped.
+            legend.place_in_corner(self._view.legend_corner, *_LEGEND_OFFSET_PX)
             self._plan_bar.set_keep_out(0.0, 0.0)
             return
+        legend.forget_corner()  # the table sets the offset below: the corner is applied again when the table goes
         position = self._stats.settings().position
         # Just inside the bar, or (the Legend menu's "at the edge of the plot") ignoring a bar without names: at the very edge, over the bar.
         gap = _LEGEND_EDGE_PX if self._legend_ignores_bar() else self._bar_height_px(position) + _LEGEND_EDGE_PX
         legend.setOffset((_LEGEND_OFFSET_PX[0], gap if position == POSITION_TOP else -gap))  # a negative offset is measured from the bottom
-        self._legend_placed_by_table = True
         height = self._legend_size()[1]
         band = gap + height + _LEGEND_EDGE_PX if height > 0.0 else 0.0  # from the edge of the plot to the far side of the rows
         self._plan_bar.set_keep_out(band if position == POSITION_TOP else 0.0, band if position != POSITION_TOP else 0.0)

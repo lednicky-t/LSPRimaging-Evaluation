@@ -399,6 +399,7 @@ class SensorgramPanel(QWidget):
         self._mask_toggle.toggled.connect(lambda _on: self._draw_last())
         self._stale_toggle.toggled.connect(lambda _on: self._draw_last())
         self._view_controls.settings_changed.connect(self._on_view_changed)
+        self._plot.legend_corner_note_changed.connect(self._view_controls.look.set_corner_note)  # the Corner row says when the step table keeps the legend at its edge
         self._plot.plan_bar().selection_changed.connect(lambda _indices: self._sync_order_step())  # the Legend menu's "At step" order reads the step selected on the bar
         self._plot.baseline_window_changed.connect(self._on_baseline_dragged)
         self._plot.y_label_double_clicked.connect(self._on_y_label_double_clicked)
@@ -448,7 +449,21 @@ class SensorgramPanel(QWidget):
         """An option of the View tab changed (or was restored): the plot takes it and the last result is drawn again. Nothing is recomputed."""
         self._plot.set_view(self._view_controls.settings())
         self._sync_order_step(redraw=False)
-        self._draw_last()
+        self._reorder_last()
+
+    def _reorder_last(self) -> None:
+        """Show the last result as the view asks for now. When only the order changed (the legend's order, the Draw order, the legend's corner, the cursor: `can_restack`) the lines stay and
+        only their stacking and the legend rows are put in the new order (~35 ms with 160 lines instead of ~130); anything else is drawn again (`_draw_last`)."""
+        if self._last is None or not self._plot.can_restack(self._last[1]):
+            self._draw_last()  # (with nothing drawn yet it only remembers, for a hidden panel, that a draw is due)
+            return
+        series = self._last[1]
+        if self._gate.defer():
+            return  # hidden: the catch-up when it is shown again draws everything
+        self._plot.set_manual_order(self._view_controls.look.manual_order())  # the Draw order's Manual list (the session's)
+        self._plot.restack(series)
+        self._view_controls.look.lines_changed()  # an open Line order table follows the lines
+        self._view_controls.look.set_order_note(self._plot.legend_order_note())
 
     def line_rows(self) -> list[LineRow]:
         """The lines drawn now as the Line order table lists them (the Draw order's Manual mode), in the plot's own order."""
@@ -463,7 +478,7 @@ class SensorgramPanel(QWidget):
         restack = self._plot.set_order_step(int(selected[0]) if len(selected) == 1 else None)
         self._view_controls.look.set_order_note(self._plot.legend_order_note())
         if restack and redraw:
-            self._draw_last()
+            self._reorder_last()
 
     def restore_ui_state(self, store: UiStateStore) -> None:
         store.bind(MASK_MARKS_KEY, self._mask_toggle)

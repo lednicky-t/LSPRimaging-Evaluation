@@ -10,8 +10,8 @@ The windows draw from the shared look (`SharedPlotLook`: a `SensorgramViewSettin
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 import pyqtgraph as pg
@@ -26,7 +26,7 @@ from .draw_order import back_to_front
 from .legend_order import SORT_VALUE, VALUE_MEAN, order_rows
 from .line_order_dialog import LineRow
 from .plot import _Legend
-from .view_settings import LEGEND_HIDE, SensorgramViewSettings, legend_text
+from .view_settings import LEGEND_HIDE, SensorgramViewSettings, UncertaintyLook, legend_text
 
 BAND_ALPHA = 45
 _INVISIBLE_PEN = pg.mkPen(QColor(0, 0, 0, 0))  # a curve that only gives the view its extent
@@ -44,7 +44,9 @@ def make_legend(item: pg.PlotItem) -> _Legend:
 
 
 def style_legend(legend: _Legend, view: SensorgramViewSettings) -> None:
-    """The View tab's legend options: the text size (entries added afterwards take it), the row gap and whether it is drawn. Call after `clear()`, before adding entries."""
+    """The View tab's legend options: the text size (entries added afterwards take it), the row gap, the corner of the plot area it sits in and whether it is drawn. Call after `clear()`,
+    before adding entries. The corner is applied only when it changed, so a legend the user dragged stays where it was dropped through every redraw."""
+    legend.place_in_corner(view.legend_corner, *LEGEND_OFFSET)
     legend.setLabelTextSize(f"{view.legend_text_pt}pt")
     legend.layout.setVerticalSpacing(float(view.legend_spacing_px))
     legend.setVisible(view.legend_mode != LEGEND_HIDE)
@@ -74,6 +76,8 @@ class LegendEntry:
     at_cursor: float = math.nan
     key: str = ""
     rough: float = 0.0
+    # The line's number at a cursor position (`at_cursor` is its value at the position the cursor had when the line was drawn): lets a moved cursor re-order the rows without drawing again.
+    value_at: Callable[[float | None], float] | None = field(default=None, compare=False, repr=False)
 
 
 def ordered_entries(entries: Sequence[LegendEntry], view: SensorgramViewSettings, *, step_known: bool) -> list[LegendEntry]:
@@ -88,9 +92,8 @@ def ordered_entries(entries: Sequence[LegendEntry], view: SensorgramViewSettings
 
 
 def fill_legend(legend: _Legend, entries: Sequence[LegendEntry], view: SensorgramViewSettings, *, step_known: bool) -> None:
-    """Write the entries into the (cleared, styled) legend in the order the view asks for."""
-    for e in ordered_entries(entries, view, step_known=step_known):
-        add_legend_entry(legend, e.color, e.width, e.text)
+    """Write the entries into the (cleared, styled) legend in the order the view asks for, with one layout pass (`_Legend.add_entries`)."""
+    legend.add_entries([(pg.PlotCurveItem(pen=pg.mkPen(e.color, width=e.width)), e.text) for e in ordered_entries(entries, view, step_known=step_known)])
 
 
 def stack_lines(
@@ -260,3 +263,23 @@ class PlotAreaButton(QPushButton):
         if watched is self._plot and event.type() == QEvent.Type.Resize and self.isVisible():
             self.place()
         return False
+
+
+@dataclass(frozen=True)
+class DrawnState:
+    """What a plot window drew last (2026-11-22): the look it drew with, its legend entries and, per entry, the plot items of that line. With it a change that only re-orders (the legend's order,
+    the Draw order, the legend's corner, the cursor: `SensorgramViewSettings.differs_only_in_order`) puts the rows and the stacking in the new order **without drawing the lines again**
+    (~80-120 ms -> ~30 ms). A window sets it at the end of `redraw` and drops it (None) whenever its lines, steps or weighting change."""
+
+    view: SensorgramViewSettings
+    unc: UncertaintyLook  # drawn with (any change of it redraws)
+    entries: list[LegendEntry]
+    groups: dict[int, list]
+
+    def can_reorder(self, view: SensorgramViewSettings, unc: UncertaintyLook) -> bool:
+        return unc == self.unc and view.differs_only_in_order(self.view)
+
+    def reordered(self, view: SensorgramViewSettings, cursor_x: float | None) -> DrawnState:
+        """The same drawing under `view`, the entries' number at the cursor read at `cursor_x` (the cursor may have moved since the draw)."""
+        entries = [replace(e, at_cursor=e.value_at(cursor_x)) if e.value_at is not None else e for e in self.entries]
+        return replace(self, view=view, entries=entries)

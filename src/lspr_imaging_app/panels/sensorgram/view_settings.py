@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 from .draw_order import DRAW_LEGEND, DRAW_MODES
+from .legend_corner import DEFAULT_CORNER, sanitize_corner
 from .legend_order import SORT_GROUP, VALUE_MEAN, LegendOrder
 
 LEGEND_AUTO, LEGEND_SHOW, LEGEND_HIDE = "auto", "show", "hide"
@@ -52,6 +53,8 @@ class SensorgramViewSettings:
     # While the step table is on the legend sits just inside the plan bar (so does the table: its rows line up with the legend's). True: it ignores the bar and what hangs from
     # it and goes to the very edge of the plot, over the bar; the table's rows follow it, and the room made for the bar and the rows is the larger of the two, not their sum.
     legend_over_bar: bool = False
+    # Which corner of the plot area the legend sits in (2026-11-22, `legend_corner.py`). The Sensorgram's step table, while it is on, keeps the legend at its own edge (its rows line up with the cells).
+    legend_corner: str = DEFAULT_CORNER
     # The order of the legend's rows (2026-11-22, `legend_order.py`): Group (as the lines come), Name or Value, ascending or descending; Value = the line's mean or its value at a step.
     legend_sort: str = SORT_GROUP
     legend_descending: bool = False
@@ -59,6 +62,12 @@ class SensorgramViewSettings:
     # Which line lies over which where lines overlap (2026-11-22, `draw_order.py`): Auto (smoothest in front), Legend (the legend's first row in front) or Manual (the Line order table).
     draw_mode: str = DRAW_LEGEND
     show_cursor: bool = True  # the cursor of the plot (the Sensorgram's cube cursor; the LbL / S_bulk plots' step cursor, which is drawn only while the order reads the value at a step)
+
+    def differs_only_in_order(self, other: SensorgramViewSettings) -> bool:
+        """True when the two differ at most in what a plot can change **without drawing its lines again** (2026-11-22): the order of the legend rows (key, direction, value), the Draw order,
+        the legend's corner and the cursor toggle. Those move rows and set a z per line; every other option (colours, sizes, joints, the legend's text, what is named) changes an item."""
+        neutral = dict(legend_sort=SORT_GROUP, legend_descending=False, legend_value=VALUE_MEAN, draw_mode=DRAW_LEGEND, legend_corner=DEFAULT_CORNER, show_cursor=True)
+        return replace(self, **neutral) == replace(other, **neutral)
 
     def legend_order(self) -> LegendOrder:
         return LegendOrder(self.legend_sort, self.legend_descending, self.legend_value).sanitized()
@@ -77,6 +86,7 @@ class SensorgramViewSettings:
             legend_mode=self.legend_mode if self.legend_mode in LEGEND_MODES else LEGEND_AUTO,
             legend_text_pt=_clamp(int(self.legend_text_pt), *LEGEND_TEXT_RANGE),
             legend_spacing_px=_clamp(int(self.legend_spacing_px), *LEGEND_SPACING_RANGE),
+            legend_corner=sanitize_corner(self.legend_corner),
             legend_sort=order.key, legend_descending=order.descending, legend_value=order.value, show_cursor=bool(self.show_cursor),
             draw_mode=self.draw_mode if self.draw_mode in DRAW_MODES else DRAW_LEGEND,
         )

@@ -42,6 +42,7 @@ from ...selection.plot_line_order_module import PLOT_BULK, PlotLineOrderModule
 from .plot_window_draw import (
     LegendEntry,
     PlotAreaButton,
+    DrawnState,
     StepCursor,
     add_band,
     fill_legend,
@@ -126,6 +127,7 @@ class BulkPlotWindow(QWidget):
         self._note = ""
         self._fits: list[tuple[BulkLine, object]] = []
         self._last_entries: list[LegendEntry] = []  # the lines drawn now: the Line order table's rows
+        self._state: DrawnState | None = None  # what was drawn last, for a change that only re-orders (None: draw everything again)
         self.look.attach_line_order(line_order, PLOT_BULK, "S_bulk", lambda: rows_of(self._last_entries))  # the Manual draw order's list is the session's
 
         outer = QVBoxLayout(self)
@@ -172,24 +174,38 @@ class BulkPlotWindow(QWidget):
             self._lines_pick.setCurrentIndex(index)  # reports, as a pick does (a restore does not)
 
     def _look_changed(self, *_args: object) -> None:
-        if self.isVisible():
+        """A look option changed, or the cursor moved. When that only re-orders (`DrawnState.can_reorder`: the legend's order, the Draw order, the legend's corner, the cursor) the lines stay and
+        the legend rows and the stacking are put in the new order (~30 ms instead of ~80-120); anything else, or nothing drawn yet, draws the plot again."""
+        if not self.isVisible():
+            return
+        state, view, unc = self._state, self.look.settings(), self.uncertainty.settings()
+        if state is None or not state.can_reorder(view, unc):
             self.redraw()
+            return
+        self._legend.clear()
+        style_legend(self._legend, view)
+        self._state = state.reordered(view, self._cursor.x())
+        self._apply_order(self._state.entries, view, state.groups)
 
     def set_steps(self, steps: Sequence[PlotStep], wavelength_nm: float | None) -> None:
         self._steps, self._wavelength_nm = list(steps), wavelength_nm
+        self._state = None
 
     def set_weighting(self, weighting: str) -> None:
         self._weighting = weighting
+        self._state = None
 
     def set_lines(self, lines: Sequence[BulkLine], *, y_label: str, note: str = "", need_calculation: bool = False) -> None:
         """New lines (or none, with `note` saying why); redraws when shown."""
         self._lines, self._y_label, self._note = list(lines), y_label, note
+        self._state = None
         self.calculate_button.set_centered(not self._lines)
         self.calculate_button.setVisible(need_calculation)
         if self.isVisible():
             self.redraw()
 
     def redraw(self) -> None:
+        self._state = None
         item = self._plot.getPlotItem()
         item.clear()
         self._cursor.readd()  # `clear()` took its line out of the plot
@@ -245,6 +261,7 @@ class BulkPlotWindow(QWidget):
                     LegendEntry(
                         len(entries), line.short_label or line.label, name, line.color, view.line_width, mean=self._mean_of(line, None), at_cursor=self._mean_of(line, self._cursor.x()),
                         key=line.short_label or line.label, rough=self._scatter_of(line, fit),
+                        value_at=lambda ri, line=line: self._mean_of(line, ri),
                     )
                 )
                 if view.show_lines:
@@ -254,6 +271,7 @@ class BulkPlotWindow(QWidget):
             if len(entries) > drawn_before:
                 groups[entries[-1].index] = list(item.items[first:])
         self._apply_order(entries, view, groups)
+        self._state = DrawnState(view, unc, entries, groups)
         self.status.setText(" ".join(notes))
 
     def _mean_of(self, line: BulkLine, ri: float | None) -> float:

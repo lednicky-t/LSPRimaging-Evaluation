@@ -33,3 +33,13 @@ Tests: `tests/integration/test_lspri_legend_order_plots.py`.
 - A new plot gets the order by calling `fill_legend` (windows) or `order_rows` (own legend), never by sorting its lines.
 - Not done: the Spectra panel's own View menu has no Order rows (it is not a `PlotLookControls`); the maintainer said "plots with a label menu", so it was left out.
 - Unseen by eye.
+
+## Legend corner (2026-11-22)
+
+The Legend menu of every plot has a **Corner** row: a 2 x 2 block of cells (the ROI-label picker's look), one per corner of the plot area. Default top-left (where the legend always was).
+
+- Pure rule: `panels/sensorgram/legend_corner.py` (`corner_offset` = the signs pyqtgraph's `setOffset` reads: positive = from left/top, negative = from right/bottom; never exactly 0). Picker: `legend_corner_picker.py`. Setting: `SensorgramViewSettings.legend_corner`; one row in `PlotLookControls`, so all plots have it; keys `..._legend_corner` (Sensorgram `sensorgram/view_legend_corner`, windows by prefix).
+- Applied by `plot._Legend.place_in_corner`, **only when the corner changes** (so a legend the user dragged stays where it was dropped through every redraw; picking a corner puts it back). Windows: `plot_window_draw.style_legend`. Sensorgram: `SensorgramPlot._place_legend`.
+- **Sensorgram with the step table on:** the table owns the legend's place (its rows line up with the cells), so the corner has no effect then; the menu says so (`CORNER_STEP_TABLE_NOTE`, `legend_corner_note_changed`), and the corner is applied again when the table goes off. The table is on by default, so in the Sensorgram the corner shows only after switching it off (Stats menu).
+- With the table off, the Sensorgram's bottom corners ignore a plan bar at the bottom (as the top-left ignores a bar at the top): the legend can lie over it.
+- Tests: `tests/unit/test_lspri_legend_corner.py`, `tests/integration/test_lspri_legend_corner_plots.py`. Unseen by eye.
