@@ -221,10 +221,6 @@ def build_top_bar(panel: ImagePanel, image_tools_content: QWidget, mask_content:
         # so the first tab opens.
         panel._tool_ribbon.set_category(panel._initial_ribbon_category)  # before the connect: restoring is not a user change
     panel._tool_ribbon.category_changed.connect(panel.ribbon_category_changed)
-    # The Mask tab's edit preview is drawn only while that tab is the open one.
-    edit_preview = panel._mask_tab.edit_preview
-    edit_preview.set_tab_active(panel._tool_ribbon.current_category() == MASK_TAB)
-    panel._tool_ribbon.category_changed.connect(lambda label: edit_preview.set_tab_active(label == MASK_TAB))
     panel._tool_ribbon.category_changed.connect(lambda _label: panel._show_current_tab())  # a tab scrolled half out of view comes into view
     panel._tool_ribbon.category_changed.connect(lambda _label: panel._refresh_tool_info(panel._active_tool.active()))
     # Short tab label, full name in the tooltip; the tab is green while the correction is applied.

@@ -14,7 +14,7 @@ displayed coordinates. It is mapped back to raw pixels the way every mask tool d
 mask in effect at the frame on screen with `MaskModule.apply_candidate`, at the Persistent / Individual scope of the
 State group. One click = one undo step ("Add selection to mask" / "Subtract selection from mask").
 
-An inverted selection is used as it edits (everything outside the shape). Widget-free, like `mask_candidate_editor.py`.
+An inverted selection is used as it edits (everything outside the shape). Widget-free.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from ..selection.area_selection_module import how_for_keys
 from .mask_edit_common import resolve_mask_edit_base
 
 if TYPE_CHECKING:
-    # Deferred, as in mask_candidate_editor.py: a top-level import would close an import cycle.
+    # Deferred, as elsewhere in the Mask tab: a top-level import would close an import cycle.
     from .image.panel import ImagePanel
 
 

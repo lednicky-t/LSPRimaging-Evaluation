@@ -1,15 +1,11 @@
-"""Live preview of what the Mask tab's Feature map tool would add, and the candidate pixels of Threshold / Local contrast (2026-10-29,
-reduced 2026-11-15).
+"""Live preview of the toolbar's Threshold, and the candidate pixels of Threshold / Local contrast (2026-10-29, reduced 2026-11-15 and 2026-11-23).
 
 History: on 2026-10-29 (maintainer: "mask editing tools are not showing the changes that would come with applying the tool") Threshold,
 Local contrast and Morphology got a live tint of the pixels they would change. On 2026-11-15 those tools (with the Histogram selection
 and Draw) moved into the selection toolbar and became *selection* tools: the selection is undoable, so there is no preview (the wand's
-decision of 2026-11-15) and the three previews went. What remains here:
+decision of 2026-11-15) and the three previews went. The Feature map's preview (the enabled kinds of its last result, with an eye toggle)
+went on 2026-11-23, when the Feature map began to make a *selection*: the selection's own outline is its picture. What remains here:
 
-- **Feature map** (2026-11-04; was ROI features): the enabled kinds of the last result of `FeatureMapTask` (the map runs on its Process
-  button, ~20-30 s, not on every change), shown while the frame on screen is the one it was made for. Nothing is computed here; Apply
-  takes the same pixels (`request_candidate` answers at once from the task). Drawn as one more tint on the image
-  (`panels/image/edit_preview_layer.py`).
 - **`request_candidate`**: the raw-space pixels Threshold or Local contrast select at a frame with the numbers in `MaskSettings` now,
   cached and computed on a worker thread (`image_tools/mask_candidates.py`). The toolbar's "Select by value" asks it
   (`panels/image/selection_by_value.py`); it is kept here because that cache is this object's.
@@ -22,18 +18,14 @@ decision of 2026-11-15) and the three previews went. What remains here:
   dragging the threshold costs milliseconds, a new sigma or frame the blur (0.2 to 4 s, on a worker thread, newest request wins, the old
   tint stays until the new one arrives).
 
-The Feature map's tint is shown only while the eye toggle is on (one state shared by the Feature map panel, remembered), the Mask ribbon tab
-is the open one, and Play is not running (the Feature map is the Mask tab's only tool since 2026-11-16, so no tool is "picked"). The Threshold's live tint needs only the armed tool (and no Play).
-
-Display state plus the request logic, widget-free like `mask_candidate_editor.py`; it changes no mask. Pixels are **raw-space** booleans
-as authored at the displayed frame, the space `MaskModule` stores masks in; the layer maps them onto the screen with the same call the
-mask overlay uses (`resolve_external_mask`).
+The tint needs only the armed tool and no Play. Display state plus the request logic, widget-free; it changes no mask. Pixels are
+**raw-space** booleans as authored at the displayed frame, the space `MaskModule` stores masks in; the layer maps them onto the screen with
+the same call the mask overlay uses (`resolve_external_mask`).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import numpy as np
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
@@ -43,18 +35,10 @@ from ..image_tools import ChromaticModule, MaskModule
 from ..image_tools.mask import raster_tools
 from ..image_tools.mask_candidates import MaskCandidates, PlaneCache, Ready
 
-if TYPE_CHECKING:
-    from .feature_map_task import FeatureMapTask
-
 Frame = tuple[int, float]
 
 KIND_THRESHOLD = "relative"  # the `MaskSettings` / old-app names of the two image-based tools
 KIND_LOCAL_CONTRAST = "local_contrast"
-KIND_FEATURE_MAP = "feature_map"
-KIND_LABELS = {KIND_THRESHOLD: "Threshold", KIND_LOCAL_CONTRAST: "Local contrast", KIND_FEATURE_MAP: "Feature map"}
-KIND_NOUNS = {  # how a tool's pixels are called in the middle of a sentence ("Added 40 feature map pixels to the mask")
-    KIND_THRESHOLD: "threshold", KIND_LOCAL_CONTRAST: "local contrast", KIND_FEATURE_MAP: "feature map",
-}
 
 _FRAME_DELAY_MS = 250  # after the last frame change (scrubbing a slider passes many frames)
 _VALUE_DELAY_MS = 40  # after the last change of a number of the armed Threshold tool (a right-drag on the image changes them many times a second)
@@ -70,7 +54,6 @@ class PreviewPixels:
 
 class MaskEditPreview(QObject):
     changed = pyqtSignal()  # the pixels to tint changed (a new set arrived, or the old one must go): the layer redraws
-    shown_changed = pyqtSignal(bool)  # the eye toggle (the Feature map panel mirrors it)
     status = pyqtSignal(str)  # one line for the tool-info row
 
     def __init__(
@@ -80,17 +63,12 @@ class MaskEditPreview(QObject):
         dataset: DatasetModule,
         candidates: MaskCandidates | None = None,
         parent: QObject | None = None,
-        *,
-        features: FeatureMapTask | None = None,
     ) -> None:
         super().__init__(parent)
         self._mask = mask
         self._chromatic = chromatic
         self._dataset = dataset
-        self._features = features  # the Feature map tool's result (the enabled kinds' pixels are previewed and merged as they are)
         self._candidates = candidates if candidates is not None else MaskCandidates(self)
-        self._shown = True
-        self._tab_active = False
         self._playing = False
         self._frame: Frame | None = None
         self._result: PreviewPixels | None = None
@@ -109,28 +87,8 @@ class MaskEditPreview(QObject):
         dataset.dataset_cleared.connect(self._on_dataset_replaced)
         mask.cosmetic_changed.connect(self._on_settings_changed)  # a number of a tool changed (`MaskModule.set_tool_settings`)
         mask.mask_changed.connect(self._on_settings_changed)  # a session restore may bring other numbers
-        if features is not None:
-            features.result_changed.connect(self._on_features_changed)
 
     # -- inputs -------------------------------------------------------------------------------------------
-
-    def shown(self) -> bool:
-        return self._shown
-
-    def set_shown(self, shown: bool) -> None:
-        shown = bool(shown)
-        if shown == self._shown:
-            return
-        self._shown = shown
-        self.shown_changed.emit(shown)
-        self._schedule(0)
-
-    def set_tab_active(self, active: bool) -> None:
-        """The Mask ribbon tab is the open one (the preview is a Mask-tab aid: it must not sit over the image while the ROIs are
-        being edited)."""
-        if bool(active) != self._tab_active:
-            self._tab_active = bool(active)
-            self._schedule(0)
 
     def set_playing(self, playing: bool) -> None:
         if bool(playing) != self._playing:
@@ -188,12 +146,9 @@ class MaskEditPreview(QObject):
         self, kind: str, frame: Frame, on_ready: Ready, *, preview: bool = False, side: str = raster_tools.SIDE_BOTH
     ) -> None:
         """The raw-space pixels Threshold (`KIND_THRESHOLD`) or Local contrast (`KIND_LOCAL_CONTRAST`) select at `frame` with the
-        numbers in `MaskSettings` now (the Feature map's, `KIND_FEATURE_MAP`, are the task's result). Cached; computed on a worker
+        numbers in `MaskSettings` now. Cached; computed on a worker
         thread otherwise; ``None`` when it failed or went stale. `side` (Threshold only) is ``"brighter"``, ``"darker"`` or ``"both"``: the
         blur is shared by the three (`PlaneCache`), so asking for the other side after one costs a compare, not a blur."""
-        if kind == KIND_FEATURE_MAP:  # nothing to compute: the map ran on its own button, the task holds what it found
-            on_ready(None if self._features is None else self._features.pixels_for(frame))
-            return
         settings = self._mask.settings()
         cube, wavelength = int(frame[0]), float(frame[1])
         dataset = self._dataset
@@ -226,11 +181,6 @@ class MaskEditPreview(QObject):
     def _on_dataset_replaced(self, *_args: object) -> None:
         self.invalidate()
 
-    def _on_features_changed(self) -> None:
-        # A result arrived or went away, or the enabled kinds changed; only the Feature map tool shows it.
-        if self._wanted() == KIND_FEATURE_MAP or (self._result is not None and self._result.kind == KIND_FEATURE_MAP):
-            self._schedule(0)
-
     def _on_settings_changed(self, *_args: object) -> None:
         """A tool's numbers changed (any of them: the key below tells whether the Threshold's did): look again shortly, so a burst of changes
         (a right-drag) becomes one request."""
@@ -241,11 +191,7 @@ class MaskEditPreview(QObject):
         """Which kind of pixels would be shown now, or ``None`` for none."""
         if self._playing or self._frame is None:
             return None
-        if self._value_kind is not None:  # the toolbar's armed tool shows live, whatever the ribbon tab and the Feature map's eye toggle say
-            return self._value_kind
-        if not self._shown or not self._tab_active:
-            return None
-        return KIND_FEATURE_MAP
+        return self._value_kind  # the toolbar's armed tool shows live, whatever the ribbon tab is
 
     def _hide_result(self) -> None:
         self._value_key = None  # re-arming asks again
@@ -271,13 +217,7 @@ class MaskEditPreview(QObject):
         if kind == KIND_THRESHOLD:
             self._refresh_threshold(frame)
             return
-        self._value_key = None
-        before = self._result
-        # The Feature map: answered at once, and no status line ("no result yet" is not a failure).
-        pixels = None if self._features is None else self._features.pixels_for(frame)
-        self._result = None if pixels is None else PreviewPixels(frame, kind, pixels)
-        if before is not None or self._result is not None:
-            self.changed.emit()
+        self._hide_result()  # no other tool is previewed
 
     def _refresh_threshold(self, frame: Frame) -> None:
         """Ask for the Threshold's pixels at `frame` with the numbers and side now, unless the pixels shown (or on their way) are for exactly

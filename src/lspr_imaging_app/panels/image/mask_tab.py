@@ -8,6 +8,8 @@ Layout (one ribbon row, captioned icon groups):
     [Add/Subtract/Replace/From mask] | [Clear] | [scope toggle] | [Feature map controls] | [scan] | [wand][px] | [PNG]
      Selection                          General   State          Feature map              Scan   Auto mask   PNG
 
+(2026-11-23: the Feature map makes a *selection* now, so it has no eye and no Add button: Selection > Add puts its result in the mask.)
+
 (2026-11-23: the Visibility group is gone; the View rail beside the image has the mask's show / colour / transparency.)
 
 (2026-11-15: the Histogram selection, Threshold, Local contrast, Morphology and Draw tools moved to the selection toolbar beside the image;
@@ -96,16 +98,14 @@ class MaskTab(QWidget):
         self._overlay_controls.color_changed.connect(self.overlay_color_changed)
         self._overlay_controls.alpha_changed.connect(self.overlay_alpha_changed)
 
-        # "Feature map": what the tool would add, previewed on the image (the panel draws it: `EditPreviewLayer`).
-        # The frame on screen comes from the same signal the editors use; whether this tab is the open one and whether Play
-        # runs are told by the panel (`ImagePanel` owns the ribbon and the slideshow).
-        self._edit_preview = MaskEditPreview(mask, chromatic, dataset, parent=self, features=features)
+        # The live tint of the toolbar's Threshold (the panel draws it: `EditPreviewLayer`). The frame on screen comes from the same signal
+        # the editors use; whether Play runs is told by the panel (`ImagePanel` owns the slideshow).
+        self._edit_preview = MaskEditPreview(mask, chromatic, dataset, parent=self)
         self._edit_preview.status.connect(status)
         image_panel.image_rendered.connect(lambda _image, cube, wavelength: self._edit_preview.set_frame((cube, wavelength)))
         image_panel.image_cleared.connect(lambda: self._edit_preview.set_frame(None))
-        self._features_panel = FeatureMapEditPanel(
-            mask, chromatic, dataset, image_panel, mask_scope, self._edit_preview, features, status
-        )
+        # "Feature map": finds the small features and makes them the area selection (2026-11-23; it made mask pixels before).
+        self._features_panel = FeatureMapEditPanel(geometry, dataset, image_panel, image_panel.area_selection(), features, status)
 
         # "General" (Clear) and "PNG" (Load/Save): plain action rows, not part of the picker/stack.
         self._clear_action = MaskClearAction(mask, image_panel, self)
@@ -175,7 +175,7 @@ class MaskTab(QWidget):
 
     @property
     def edit_preview(self) -> MaskEditPreview:
-        """The preview of what the picked tool would select (the panel draws it and remembers the eye toggle)."""
+        """The live tint of the toolbar's Threshold (the panel draws it)."""
         return self._edit_preview
 
     def refresh_theme(self) -> None:

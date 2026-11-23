@@ -1,4 +1,5 @@
-"""The Image panel's "edit preview" tint (2026-10-29): the pixels a Mask-tab tool would select or change, drawn over the image.
+"""The Image panel's "edit preview" tint (2026-10-29): the pixels the toolbar's Threshold would select, drawn over the image (until 2026-11-23
+the Feature map's too).
 
 Display only. `MaskEditPreview` decides *which* pixels (raw-space booleans, as authored at the frame on screen); this turns them into
 a coloured layer the same way the mask overlay does (`resolve_external_mask`: crop / rotate / flip, then no chromatic warp, since
@@ -10,7 +11,7 @@ Cut to the **area selection** when there is one, because an edit never reaches o
 `PreviewPixels.only_lock`) are cut to the **lock** only: the selection they are about to change is not a fence for them.
 
 Hidden while a preview tool (Rotate / Crop) shows the uncropped canvas, the same "other coordinate space" reason the mask overlay
-hides then. Colour and opacity are fixed for now (`edit_preview_toggle.preview_color`, 0.55)."""
+hides then. Colour and opacity are fixed for now (`preview_color`, 0.55)."""
 
 from __future__ import annotations
 
@@ -18,15 +19,23 @@ from collections.abc import Callable
 
 import numpy as np
 import pyqtgraph as pg
+from PyQt6.QtGui import QColor
+
+from lspr_ui import get_active_theme
 
 from ...image_tools import GeometryModule
 from ...image_tools.preprocess import resolve_external_mask
 from ...selection.area_selection_module import AreaSelectionModule
 from ..mask_edit_preview import MaskEditPreview
-from .edit_preview_toggle import preview_color
 from .overlay_tint import OverlayTint
 
 _ALPHA = 0.55
+
+
+def preview_color() -> QColor:
+    """The preview tint's colour: the theme's `figure_mask_color`, the colour the stable app drew its Local contrast / Morphology
+    previews in (distinct from the mask's red and the Histogram highlight's blue)."""
+    return QColor(get_active_theme().figure_mask_color)
 
 
 class EditPreviewLayer:

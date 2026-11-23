@@ -173,7 +173,6 @@ from .analysis_tab import AnalysisTab
 from .tuning_tab import TuningTab
 from ...storage.ui_state_keys import (
     IMAGE_CURSOR_READOUT,
-    IMAGE_MASK_EDIT_PREVIEW,
     IMAGE_GPU_DRAWING,
     IMAGE_OVERLAY_CACHE_MB,
     IMAGE_ROI_LABELS,
@@ -221,7 +220,7 @@ _TAB_INFO: dict[str, str] = {
         "Mask: pixels to ignore (kept out of the background estimate and ROI sampling). "
         "State: edit scope (persistent / individual). "
         "Selection: add / subtract / replace the mask by the selection, or make the mask the selection (the selection tools are beside the image). "
-        "Feature map: find the small features of the image and add them to the mask. Scan, Auto mask: mark and mask frames where something crossed the field. PNG: load/save the mask."
+        "Feature map: find the small features of the image and select them (Selection > Add puts them in the mask). Scan, Auto mask: mark and mask frames where something crossed the field. PNG: load/save the mask."
     ),
     CHROMATIC_TAB: (
         "Chromatic correction: Run finds landmarks on the reference frame and follows them through the "
@@ -485,14 +484,11 @@ class ImagePanel(QWidget):
         self._plot.vb.sigRangeChanged.connect(self._on_view_range_changed)
 
     def restore_ui_state(self, store: UiStateStore) -> None:
-        """Put the cursor readout toggle and the Feature map preview's eye back as
+        """Put the cursor readout toggle back as
         last left, and keep saving them (see `panels/ui_state.py`). Called
         once by the app shell after construction."""
         self._cursor_overlay.set_enabled(read(store, IMAGE_CURSOR_READOUT) is True)
         self._cursor_overlay.toggled.connect(lambda on: store.set(IMAGE_CURSOR_READOUT.key, bool(on)))
-        edit_preview = self._mask_tab.edit_preview
-        edit_preview.set_shown(read(store, IMAGE_MASK_EDIT_PREVIEW) is not False)
-        edit_preview.shown_changed.connect(lambda on: store.set(IMAGE_MASK_EDIT_PREVIEW.key, bool(on)))
         saved_color = QColor(str(store.get(IMAGE_SCALE_BAR_COLOR.key) or ""))
         if saved_color.isValid():
             self._scale_bar_item.set_color(saved_color)

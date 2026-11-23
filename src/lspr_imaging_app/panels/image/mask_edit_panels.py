@@ -8,9 +8,14 @@ request; a wand click plus the Selection group's Subtract does a similar job), t
 
 **Feature map** (2026-11-04, replaced the ROI features tool of 2026-10-29): not a live preview but a Process button
 (~20-30 s, worker processes, progress and Cancel in the status bar), a settings popup with the search limits and the cubes, then
-(2026-11-05) a kinds popup (one check box per kind) and a margin field that act on the finished map at once, and an Apply button that adds
-the enabled kinds at the Persistent / Individual scope. No ROIs: the result stays right when ROIs move.
-Record: `docs/roi_feature_detection_2026-10-29.md` sections 10-11.
+(2026-11-05) a kinds popup (one check box per kind) and a margin field that act on the finished map at once. No ROIs: the result stays
+right when ROIs move.
+**2026-11-23 (maintainer: "simplification / unification"): the map is a *selection*, not a mask.** When a run ends, the pixels of the enabled
+kinds become a new selection (Replace; undoable, cut to the lock) and the Selection group's Add puts them in the mask, like any other selection.
+So the tool has no eye (the selection's own outline is the picture), no Add button and no preview of its own. Changing the kinds or the margin
+afterwards re-makes that selection, but only while it is still the one the tool made (any other change of the selection, an undo included,
+ends that: the user's edit is never overwritten).
+Record: `docs/roi_feature_detection_2026-10-29.md` sections 10-11 and `docs/feature_map_as_selection_2026-11-23.md`.
 
 Every panel keeps this ribbon's established sizing: 28px-tall icon buttons/spinboxes, `transparent_icon_button_stylesheet()` chrome, no
 inline text labels (tooltips only) - these panels live inside `ImageToolRibbon`'s fixed-height content row.
@@ -22,6 +27,7 @@ import dataclasses
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+import numpy as np
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -41,14 +47,16 @@ from PyQt6.QtWidgets import (
 from lspr_ui import get_active_theme
 
 from ...dataset import DatasetModule
-from ...image_tools import ChromaticModule, MaskModule, MaskScopeModule
+from ...image_tools import GeometryModule
 from ...image_tools.mask import feature_map as fm
+from ...image_tools.preprocess import resolve_external_mask
+from ...selection import AreaSelectionModule
+from ...selection.area_selection_module import REPLACE
 from ..feature_map_task import DEFAULT_CUBES, FeatureMapResult, FeatureMapSummary, FeatureMapTask, choose_cubes
-from ..mask_candidate_editor import MaskCandidateEditor
-from ..mask_edit_common import ADD_COLOR, action_button, disabled_safe_icon
-from ..mask_edit_preview import KIND_FEATURE_MAP, MaskEditPreview
+from ..mask_edit_common import action_button, disabled_safe_icon
 from ..ribbon_fields import style_ribbon_number_field
-from .edit_preview_toggle import EditPreviewToggle
+
+SELECTION_LABEL = "Select feature map"  # the undo step's name
 
 if TYPE_CHECKING:
     # Deferred (type checking only): a plain top-level import here would
@@ -197,44 +205,43 @@ class _KindsPopover(QWidget):
 
 
 class FeatureMapEditPanel(QWidget):
-    """The Feature map tool: eye, settings, Process, kinds, margin, Apply (2026-11-04; replaces the ROI features tool of 2026-10-29).
+    """The Feature map tool: settings, Process, kinds, margin (2026-11-04; replaces the ROI features tool of 2026-10-29; the eye and the
+    Apply button went 2026-11-23).
 
     Screen purpose: map every small feature of the image (light-blocking spots, light-adding spots, faint light-blocking spots, disks
-    whose resonance is weaker or stronger: `feature_map.KIND_LABELS`, named for what is measured, not for a cause), without ROIs, look at it
-    on the image, and add the kinds wanted to the mask. A mask made this way stays right when ROIs are moved or changed.
-    Layout (one row, like the other tools; the left half makes the map, the right half chooses what of it is added):
+    whose resonance is weaker or stronger: `feature_map.KIND_LABELS`, named for what is measured, not for a cause), without ROIs, and
+    **select** the kinds wanted. The selection is then like any other: the Selection group's Add puts it in the mask, the toolbar's
+    tools refine it, Ctrl+Z takes it back. A mask made this way stays right when ROIs are moved or changed.
+    Layout (one row, like the other tools; the left half makes the map, the right half chooses what of it is selected):
 
-        [eye] [settings v] [process]  [kinds v] [margin px] [apply +]
+        [settings v] [process]  [kinds v] [margin px]
 
-    - **eye**: show or hide the pixels Apply would add (the enabled kinds, grown by the margin) on the image.
     - **settings**: the *search* settings: the limits (dirt %, nanostructure %, certainty, feature edge) and the cubes to average
       (popup; its tooltip always shows the numbers). Remembered. A number changes which features are found, so it needs Process
       again (~2 s on the same image and cubes: the slow part is kept; a new cube count is a full run).
     - **process**: map the image on screen from the mean of the cubes (~20-40 s the first time, worker processes; progress in the
-      status bar). Changes no mask. A green play when idle; while it runs the same button is a red stop (like the Analysis and Tuning
-      tabs' Run / Stop): a click stops the run and changes nothing.
-    - **kinds**: one check box per kind of feature to add (popup). Remembered. Acts at once, on the map already made.
-    - **margin**: how many pixels each feature is grown by in the mask (the optics blur its edge). The Background tab's "Excl.
-      dilatation" look (`ribbon_fields.style_ribbon_number_field`, a bare "n px" field; the row's one caption is "Manual edit", so
-      its tooltip names it, like the Auto mask's feathering field). Remembered. Acts on the map already made, no new Process: the
-      pixels are regrown off the GUI thread (~0.3 s, `FeatureMapTask.set_margin`) and the old ones stay on screen until then.
-    - **apply**: add the pixels of the enabled kinds to the mask in effect at this frame, at the scope the State group says
-      (Persistent or Individual), in one mask change, cut to the area selection if there is one. Like the other tools' Add it is not
-      on the undo stack. Enabled only while the image on screen is the one the map was made for and no margin is being regrown.
+      status bar). When it ends, the pixels of the enabled kinds (grown by the margin) **replace the selection** (one undo step, cut to
+      the lock; nothing found = the selection is left as it was). Changes no mask. A green play when idle; while it runs the same button
+      is a red stop (like the Analysis and Tuning tabs' Run / Stop): a click stops the run and changes nothing.
+    - **kinds**: one check box per kind of feature to select (popup). Remembered. Acts at once, on the map already made.
+    - **margin**: how many pixels each feature is grown by (the optics blur its edge). The Background tab's "Excl. dilatation" look
+      (`ribbon_fields.style_ribbon_number_field`, a bare "n px" field; its tooltip names it, like the Auto mask's feathering field).
+      Remembered. Acts on the map already made, no new Process: the pixels are regrown off the GUI thread (~0.3 s,
+      `FeatureMapTask.set_margin`) and the old ones stay until then.
+    - **kinds and margin re-make the selection** while it is still the one this tool made (`_owns_selection`): any other change of the
+      selection (a click with a tool, Deselect, an undo, a lock, a rotation) ends that, so a changed kind or margin never overwrites the
+      user's work. Each re-make is one undo step.
 
-    Important states: no image (Process disabled); running (the settings button is disabled; Apply too); a result for another frame
-    (Apply disabled, its tooltip says which frame); a margin being regrown (Apply disabled for ~0.3 s); numbers changed since the run
-    (Process's tooltip says so). Errors: in the status line (no dataset, fewer than 3 wavelengths, no disks found, a margin that
-    could not be applied)."""
+    Important states: no image (Process disabled); running (the settings button is disabled); a run that ends while another image is on
+    screen (nothing is selected; the status line says for which image the map was made); numbers changed since the run (Process's tooltip
+    says so). Errors: in the status line (no dataset, fewer than 3 wavelengths, no disks found, a margin that could not be applied)."""
 
     def __init__(
         self,
-        mask: MaskModule,
-        chromatic: ChromaticModule,
+        geometry: GeometryModule,
         dataset: DatasetModule,
         image_panel: ImagePanel,
-        mask_scope: MaskScopeModule,
-        preview: MaskEditPreview,
+        area_selection: AreaSelectionModule,
         features: FeatureMapTask,
         status: Callable[[str], None],
         parent: QWidget | None = None,
@@ -242,10 +249,14 @@ class FeatureMapEditPanel(QWidget):
         super().__init__(parent)
         self._features = features
         self._dataset = dataset
+        self._geometry = geometry
+        self._selection = area_selection
         self._status = status
-        self._editor = MaskCandidateEditor(mask, chromatic, dataset, image_panel, mask_scope, preview, status)
-
-        self._toggle = EditPreviewToggle(preview, self)
+        self._frame: tuple[int, float] | None = None  # the frame on screen
+        self._shape: tuple[int, int] | None = None  # its (displayed) pixel grid: the selection is made on it
+        self._owns_selection = False  # the selection now is the one this tool made, untouched since
+        self._made_from: dict | None = None  # the map (its `kind_cores`) that selection was made from: a new run is a new map
+        self._making = False  # this tool is changing the selection (its own `selection_changed` is not "someone else's edit")
 
         # Run / Stop in one button, like the Analysis and Tuning tabs: a green play, a red stop while the map runs (a click stops it)
         self._process_button = action_button(self, "player-play", get_active_theme().accent_green, "")
@@ -274,30 +285,24 @@ class FeatureMapEditPanel(QWidget):
         self._margin_spin.valueChanged.connect(self._on_margin_changed)
         self._pop.reset_button.clicked.connect(self._reset_added)  # Defaults also puts the kinds and the margin back
 
-        self._apply_button = action_button(self, "square-rounded-plus", ADD_COLOR, "")
-        self._apply_button.clicked.connect(self.apply)
-
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
-        layout.addWidget(self._toggle)
         layout.addWidget(self._settings_button)
         layout.addWidget(self._process_button)
-        layout.addSpacing(4)  # the map is made to the left, what of it is added is chosen to the right
+        layout.addSpacing(4)  # the map is made to the left, what of it is selected is chosen to the right
         layout.addWidget(self._kinds_button)
         layout.addWidget(self._margin_spin)
-        layout.addWidget(self._apply_button)
         layout.addStretch(1)
 
         features.running_changed.connect(lambda _running: self._refresh_state())
-        features.result_changed.connect(self._refresh_state)
-        features.regrowing_changed.connect(lambda _regrowing: self._refresh_state())
+        features.result_changed.connect(self._on_result_changed)
         features.completed.connect(self._on_completed)
         features.failed.connect(status)
         features.cancelled.connect(lambda: status("Feature map cancelled; nothing was changed."))
-        self._frame_state: tuple[bool, bool] = (False, False)  # (an image is shown, the result belongs to it) at the last full refresh
-        image_panel.image_rendered.connect(self._on_frame_changed)
-        image_panel.image_cleared.connect(self._on_frame_changed)
+        area_selection.selection_changed.connect(self._on_selection_changed)
+        image_panel.image_rendered.connect(self._on_image_rendered)
+        image_panel.image_cleared.connect(self._on_image_cleared)
         dataset.dataset_loaded.connect(lambda _ds: self._refresh_state())
         dataset.dataset_cleared.connect(self._refresh_state)
         features.set_kinds(self._kinds_pop.kinds())
@@ -337,7 +342,6 @@ class FeatureMapEditPanel(QWidget):
         self._features.set_margin(self._margin_spin.value())
 
     def refresh_theme(self) -> None:
-        self._toggle.refresh_theme()
         self._shows_stop = None  # the play icon takes the theme's green: redraw it
         self._refresh_state()
 
@@ -368,25 +372,65 @@ class FeatureMapEditPanel(QWidget):
 
     def stop(self) -> None:
         """Stop the run going on (the Stop face of the button; also callable by tests). Nothing is changed: the result of an earlier
-        run, if any, stays; no mask is touched."""
+        run, if any, stays; the selection and the masks are not touched."""
         if self._features.is_running():
             self._status("Stopping the feature map...")
             self._features.cancel()
 
     def start(self) -> None:
         """Map the image on screen with the settings shown (the button's action; also callable by tests)."""
-        frame = self._editor.frame()
+        frame = self._frame
         if frame is None or self._features.is_running():
             return
         self._status("Mapping the features of this image... (progress and Cancel in the status bar)")
         self._features.start(frame, self.settings(), self._pop.cubes())
 
-    def apply(self) -> None:
-        """Add the pixels of the enabled kinds to the mask (the button's action; also callable by tests). Waits for a margin that is
-        being regrown: until its pixels are in, the ones the task holds are the earlier margin's."""
-        if self._features.is_regrowing() or self._features.pixels_for(self._editor.frame()) is None:
+    # -- the selection ----------------------------------------------------------------------------------------
+
+    def _make_selection(self, *, clear_if_empty: bool) -> tuple[int, bool] | None:
+        """Replace the selection with the pixels of the enabled kinds of the finished map, for the image on screen. Returns ``(pixels
+        selected, whether the selection changed)``, or ``None`` when there is nothing to make it from (no map for this image, a size
+        that changed). The raw-space pixels go onto the displayed grid the way the mask overlay and the other selection tools do it
+        (`resolve_external_mask`); `combine_region` cuts them to the lock and makes the undo step. Pixels identical to the selection
+        now change nothing, so a second call for the same map adds no step. With no pixel to select (inside the lock) the selection is
+        cleared only if `clear_if_empty` (the selection already is this tool's and follows the kinds), else left alone."""
+        result = self._features.result()
+        pixels = self._features.pixels_for(self._frame)
+        if result is None or pixels is None or self._shape is None:
+            return None
+        region = resolve_external_mask(pixels, self._geometry.settings(), None)
+        if region is None or region.shape != self._shape:
+            return None
+        fence = self._selection.lock_mask(region.shape)
+        count = int(np.count_nonzero(region if fence is None else region & fence))
+        if count == 0 and not clear_if_empty:
+            return 0, False
+        self._making = True
+        try:
+            changed = self._selection.combine_region(region, REPLACE, SELECTION_LABEL)
+        finally:
+            self._making = False
+        self._owns_selection = True
+        self._made_from = result.kind_cores
+        return count, changed
+
+    def _on_selection_changed(self) -> None:
+        """The selection changed: unless this tool did it, the user took over (a tool, Deselect, an undo, a lock, a rotation)."""
+        if not self._making:
+            self._owns_selection = False
+
+    def _on_result_changed(self) -> None:
+        """The task's result changed. The same map with other kinds or another margin re-makes the selection if it is still the tool's
+        (a new run, `kind_cores` of its own, is made by `_on_completed`; a margin still being regrown waits for its pixels)."""
+        self._refresh_state()
+        result = self._features.result()
+        if not self._owns_selection or result is None or result.kind_cores is not self._made_from or self._features.is_regrowing():
             return
-        self._editor.apply(KIND_FEATURE_MAP, subtract=False, done=self._refresh_state)
+        made = self._make_selection(clear_if_empty=True)
+        if made is not None:
+            count, changed = made
+            if changed:
+                self._status(f"Feature map: the selection follows the kinds and the margin ({count:,} px).")
 
     # -- state ------------------------------------------------------------------------------------------------
 
@@ -395,7 +439,7 @@ class FeatureMapEditPanel(QWidget):
         self._refresh_state()
 
     def _on_margin_changed(self, value: int) -> None:
-        self._features.set_margin(value)  # the pixels follow off the GUI thread; `regrowing_changed` / `result_changed` refresh us
+        self._features.set_margin(value)  # the pixels follow off the GUI thread; `result_changed` (and then the selection) follows
         self._refresh_state()
 
     def _reset_added(self) -> None:
@@ -403,12 +447,18 @@ class FeatureMapEditPanel(QWidget):
         self._kinds_pop.set_defaults()
         self._margin_spin.setValue(fm.FeatureMapSettings().grow_px)
 
-    def _on_frame_changed(self, *_args: object) -> None:
-        """An image was rendered (every step of Play): O(1) unless the answer to "is there an image, and is the result its own" changed
-        - the tooltips and button states are rebuilt only then."""
-        frame = self._editor.frame()
-        if (frame is not None, self._features.pixels_for(frame) is not None) != self._frame_state:
+    def _on_image_rendered(self, image: np.ndarray, cube_index: int, wavelength_nm: float) -> None:
+        """An image was rendered (every step of Play): O(1); the buttons and tooltips are rebuilt only when an image appears."""
+        first = self._frame is None
+        self._frame = (int(cube_index), float(wavelength_nm))
+        self._shape = (int(image.shape[0]), int(image.shape[1]))
+        if first:
             self._refresh_state()
+
+    def _on_image_cleared(self) -> None:
+        self._frame = None
+        self._shape = None
+        self._refresh_state()
 
     def _numbers_changed_since(self, result: FeatureMapResult) -> bool:
         """Whether a *search* setting differs from the run's. The kinds and the margin act on the map at once, so they never make it stale.
@@ -421,21 +471,16 @@ class FeatureMapEditPanel(QWidget):
         return now != then or cubes_now != result.cubes
 
     def _refresh_state(self, *_args: object) -> None:
-        frame = self._editor.frame()
         running = self._features.is_running()
-        loaded = frame is not None
+        loaded = self._frame is not None
         result = self._features.result()
-        shown = self._features.pixels_for(frame)
-        self._frame_state = (loaded, shown is not None)
         self._process_button.setEnabled(running or loaded)  # while running it is the Stop button
         if self._shows_stop is not running:
             self._process_button.setIcon(
                 disabled_safe_icon("player-stop", _STOP_COLOR) if running else disabled_safe_icon("player-play", get_active_theme().accent_green)
             )
             self._shows_stop = running
-        regrowing = self._features.is_regrowing()
         self._settings_button.setEnabled(not running)
-        self._apply_button.setEnabled(shown is not None and bool(shown.any()) and not running and not regrowing)
         s = self.settings()
         kinds = "; ".join(fm.KIND_LABELS[k] for k in fm.KINDS if k in s.kinds) or "no kind"  # ";": a label can hold a comma
         self._settings_button.setToolTip(
@@ -444,43 +489,41 @@ class FeatureMapEditPanel(QWidget):
             f"{self._pop.cubes()} cubes. Click to change; press Process after."
         )
         self._kinds_button.setToolTip(
-            f"Kinds of feature added to the mask: {kinds}. Click to choose; it acts on the map already made, no new Process needed."
+            f"Kinds of feature selected: {kinds}. Click to choose; it acts on the map already made, no new Process needed (the selection "
+            "follows while you have not changed it)."
         )
         process_tip = (
             "Map every small feature of this image (spots that block or add light, and disks whose resonance is weaker or stronger) "
-            "from the mean of the cubes, without ROIs: moving ROIs later keeps the result. It changes no mask; progress and Cancel are "
-            "in the status bar."
+            "from the mean of the cubes, without ROIs: moving ROIs later keeps the result. The features of the enabled kinds become the "
+            "selection (Ctrl+Z takes it back; the Selection group's Add puts it in the mask). Progress and Cancel are in the status bar."
         )
         if running:
-            process_tip = "Stop the feature map. Nothing is changed: an earlier result stays, no mask is touched."
+            process_tip = "Stop the feature map. Nothing is changed: an earlier result stays, the selection is not touched."
         elif not loaded:
             process_tip += "\nShow an image first."
         elif result is not None and self._numbers_changed_since(result):
             process_tip += "\nThe settings changed since the last run: press to update the result."
         self._process_button.setToolTip(process_tip)
-        if shown is not None and regrowing:
-            self._apply_button.setToolTip("The new margin is being applied to the map: a moment, then this button is ready.")
-        elif shown is not None:
-            counts = "; ".join(f"{fm.KIND_LABELS[k]} ({result.counts[k]})" for k in fm.KINDS if k in self._features.kinds())
-            self._apply_button.setToolTip(
-                f"Add the {int(shown.sum()):,} pixels of the enabled kinds ({counts or 'none enabled'}), each feature grown by "
-                f"{result.margin_px} px, to the mask, at the scope chosen under State (Persistent or Individual)."
-                if shown.any() else "Nothing to add: no feature of the enabled kinds (see the kinds button)."
-            )
-        elif result is not None:
-            cube, wavelength = result.frame
-            self._apply_button.setToolTip(
-                f"The map was made for cube {cube}, {wavelength:g} nm. Go back to that image to add it, or press Process here."
-            )
-        else:
-            self._apply_button.setToolTip("Nothing to add yet: press Process first.")
 
     def _on_completed(self, summary: FeatureMapSummary) -> None:
+        """A run ended: its enabled kinds become the selection (when the image on screen is the one it was made for)."""
         parts = [f"{fm.KIND_LABELS[k]} ({summary.counts[k]})" for k in fm.KINDS if summary.counts[k]]
-        added = "; ".join(fm.KIND_LABELS[k] for k in fm.KINDS if k in self._features.kinds()) or "no kind"
-        text = (
+        head = (
             f"Feature map ({summary.disks} disks, {summary.cubes} cubes, {summary.seconds:.0f} s"
             f"{', slow part reused' if summary.kept else ''}): {'; '.join(parts) if parts else 'nothing found'}. "
-            f"The eye shows the {summary.pixels:,} px of the enabled kinds ({added}); the + button adds them to the mask."
         )
-        self._status(text)
+        cube, wavelength = summary.frame
+        made = self._make_selection(clear_if_empty=False)
+        if made is None:
+            self._status(
+                f"{head}It was made for cube {cube}, {wavelength:g} nm, which is not on screen now, so nothing was selected: go back to "
+                "that image and press Process again (about 2 s, the slow part is kept)."
+            )
+            return
+        count, _changed = made
+        kinds = "; ".join(fm.KIND_LABELS[k] for k in fm.KINDS if k in self._features.kinds()) or "no kind"
+        if count == 0:
+            inside = " inside the lock" if self._selection.has_lock() else ""
+            self._status(f"{head}No pixel of the enabled kinds ({kinds}){inside}: the selection is unchanged.")
+        else:
+            self._status(f"{head}Selected {count:,} px of the enabled kinds ({kinds}). Selection > Add puts them in the mask.")

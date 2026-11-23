@@ -76,6 +76,7 @@ The ROI model, the ROI table, arrays, and tuning ROI positions.
 - [`auto_crop_lattice_2026-10-21.md`](auto_crop_lattice_2026-10-21.md): Auto crop to the ROI lattice (2026-10-21)
 - [`roi_layout_row_2026-10-16.md`](roi_layout_row_2026-10-16.md): ROI layout row under the Cube slider (2026-10-16)
 - [`roi_feature_detection_2026-10-29.md`](roi_feature_detection_2026-10-29.md): Finding small features on ROIs, from the image alone (2026-10-29)
+- [`feature_map_as_selection_2026-11-23.md`](feature_map_as_selection_2026-11-23.md): the Feature map makes a selection (no eye, no Apply), decisions (2026-11-23)
 - [`roi_position_tuning_plan_2026-10-28.md`](roi_position_tuning_plan_2026-10-28.md): ROI position tuning: build plan (2026-10-28)
 - [`roi_position_tuning_2026-10-28.md`](roi_position_tuning_2026-10-28.md): ROI position tuning: data-driven centres from the Sensorgram (design + first real-data results, 2026-10-28)
 - [`single_roi_tuning_design_2026-10-28.md`](single_roi_tuning_design_2026-10-28.md): Tuning one ROI: scan modes, a pixel cache around the ROI, and a live preview (design, 2026-10-28)
