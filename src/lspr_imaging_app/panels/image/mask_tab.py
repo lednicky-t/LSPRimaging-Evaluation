@@ -44,7 +44,7 @@ from ..feature_map_task import FeatureMapTask
 from ..mask_edit_preview import MaskEditPreview
 from ..ribbon_group import group_label_style, labeled_icon_group, ribbon_separator
 from .mask_edit_panels import FeatureMapEditPanel
-from .mask_file_actions import MaskClearAction, MaskPngActions
+from .mask_file_actions import MaskPngActions
 from .mask_overlay_controls import MaskOverlayControls
 from .mask_scan_panels import MaskAutoControls, MaskScanControls
 from .mask_scope_toggle import MaskScopeToggle
@@ -107,16 +107,14 @@ class MaskTab(QWidget):
         # "Feature map": finds the small features and makes them the area selection (2026-11-23; it made mask pixels before).
         self._features_panel = FeatureMapEditPanel(geometry, dataset, image_panel, image_panel.area_selection(), features, status)
 
-        # "General" (Clear) and "PNG" (Load/Save): plain action rows, not part of the picker/stack.
-        self._clear_action = MaskClearAction(mask, image_panel, self)
+        # "PNG" (Load/Save): a plain action row, not part of the picker/stack. (Clear the whole mask moved to the image's right-click menu, 2026-11-23.)
         self._png_actions = MaskPngActions(mask, dataset, mask_scope, image_panel, self, export_task=export)
 
         # "Selection" (2026-11-14): the area selection (selection toolbar beside the image) into / out of the mask.
         self._selection_editor = MaskSelectionEditor(mask, chromatic, dataset, image_panel, mask_scope, status, geometry=geometry)
         self._selection_actions = MaskSelectionActions(self._selection_editor, image_panel.area_selection(), self)
         selection_group, self._selection_label = labeled_icon_group(self, self._selection_actions, "Selection")
-        general_group, self._general_label = labeled_icon_group(self, self._clear_action, "General")
-        state_group, self._state_label = labeled_icon_group(self, self._scope_toggle, "State")
+        scope_group, self._scope_label = labeled_icon_group(self, self._scope_toggle, "Scope")
         # 2026-11-23: no "Visibility" group on this tab (the View rail beside the image has these controls). The widget stays as the
         # twin the View rail mirrors and the Layers button reads; it is hidden, never shown here.
         self._overlay_controls.hide()
@@ -129,24 +127,27 @@ class MaskTab(QWidget):
         self._auto_controls = MaskAutoControls(dataset, mask, chromatic, events, auto, scan, status, self)
         auto_group, self._auto_label = labeled_icon_group(self, self._auto_controls, "Auto mask")
 
-        self._separators = [ribbon_separator(self) for _ in range(6)]
+        self._separators = [ribbon_separator(self) for _ in range(5)]
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
-        layout.addWidget(selection_group)
+        layout.addWidget(scope_group)
         layout.addWidget(self._separators[0])
-        layout.addWidget(general_group)
+        layout.addWidget(selection_group)
         layout.addWidget(self._separators[1])
-        layout.addWidget(state_group)
-        layout.addWidget(self._separators[2])
         layout.addWidget(features_group)
-        layout.addWidget(self._separators[3])
+        layout.addWidget(self._separators[2])
         layout.addWidget(scan_group)
-        layout.addWidget(self._separators[4])
+        layout.addWidget(self._separators[3])
         layout.addWidget(auto_group)
-        layout.addWidget(self._separators[5])
+        layout.addWidget(self._separators[4])
         layout.addWidget(png_group)
         layout.addStretch(1)
+
+    @property
+    def selection_editor(self) -> MaskSelectionEditor:
+        """Puts the selection into / out of the mask (the image's right-click menu uses it too)."""
+        return self._selection_editor
 
     @property
     def selection_actions(self) -> MaskSelectionActions:
@@ -186,7 +187,7 @@ class MaskTab(QWidget):
         for separator in self._separators:
             separator.setStyleSheet(f"color: {theme.control_border};")
         for label in (
-            self._selection_label, self._general_label, self._state_label, self._features_label, self._scan_label,
+            self._selection_label, self._scope_label, self._features_label, self._scan_label,
             self._auto_label, self._png_label
         ):
             label.setStyleSheet(group_label_style())

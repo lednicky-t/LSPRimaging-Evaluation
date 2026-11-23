@@ -17,9 +17,10 @@ from __future__ import annotations
 from PyQt6.QtCore import QSize
 from PyQt6.QtWidgets import QButtonGroup, QHBoxLayout, QToolButton, QWidget
 
-from lspr_ui import GuiTheme, get_active_theme, load_tabler_icon, transparent_icon_button_stylesheet
+from lspr_ui import GuiTheme, get_active_theme, load_tabler_icon
 
 from ...image_tools.mask_scope import MaskScope, MaskScopeModule
+from ..super_highlight import super_highlight_stylesheet
 
 from .general_group import BUTTON_SIZE as _BUTTON_SIZE
 from .general_group import ICON_SIZE as _ICON_SIZE
@@ -44,7 +45,7 @@ def _scope_button(parent: QWidget, scope: MaskScope) -> QToolButton:
     button.setAutoRaise(True)
     button.setFixedSize(_BUTTON_SIZE, _BUTTON_SIZE)
     button.setIconSize(QSize(_ICON_SIZE, _ICON_SIZE))
-    button.setStyleSheet(transparent_icon_button_stylesheet())
+    button.setStyleSheet(super_highlight_stylesheet())  # same highlight as the ROI tab's Scope
     button.setToolTip(_TOOLTIP_BY_SCOPE[scope])
     return button
 
@@ -102,5 +103,5 @@ class MaskScopeToggle(QWidget):
 
     def refresh_theme(self, _theme: GuiTheme) -> None:
         for button in (self._persistent_button, self._individual_button):
-            button.setStyleSheet(transparent_icon_button_stylesheet())
+            button.setStyleSheet(super_highlight_stylesheet())
         self._refresh_icons()

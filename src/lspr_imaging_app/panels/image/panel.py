@@ -155,6 +155,7 @@ from .ribbon_build import (
 from .gpu_view import apply_gpu_drawing
 from .image_controls import controls_text
 from .interaction import CanvasInteraction
+from .mask_menu_actions import MaskMenuActions
 from .overlay_cache import environment_budget_mb
 from .overlay_style import OverlayStyle
 from .overlay_tint import OverlayTint
@@ -713,6 +714,7 @@ class ImagePanel(QWidget):
             combine_badge=self._selection_tools.combine_badge,
             lock_to_selection=self.selection_regions.lock_to_selection, unlock=self.selection_regions.unlock_selection,
             roi_creation=self._roi_creation,
+            mask_menu=MaskMenuActions(self._mask_tab.selection_editor, self._mask, self._tints.displayed_mask, self._on_tool_status, self),
         )
         scene.sigMouseClicked.connect(self._on_scene_clicked)
         scene.sigMouseMoved.connect(self._on_scene_moved)

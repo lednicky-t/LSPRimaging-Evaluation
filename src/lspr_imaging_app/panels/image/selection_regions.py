@@ -47,6 +47,10 @@ class SelectionRegions:
             return None
         return area_selection_to_raw(region, raw_shape, self._geometry.settings())
 
+    def region_to_raw(self, region: np.ndarray, raw_shape: tuple[int, int]) -> np.ndarray | None:
+        """Any displayed-space region (a mask blob, say) as a raw-space mask, mapped like the selection is."""
+        return self._to_raw(region, raw_shape)
+
     def selection_raw_mask(self, raw_shape: tuple[int, int]) -> np.ndarray | None:
         """The region editing may reach (the selection, else the lock) as a raw-space editable mask, or `None` when nothing restricts."""
         shape = self._image_shape()

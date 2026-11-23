@@ -33,6 +33,9 @@ from .area_selection_tool import AreaSelectionTool
 from .combine_badge import CombineBadge
 from .context_menu import SubmenuFiller, show_tool_context_menu
 from .crop_tool import CropTool
+from .mask_menu_actions import (
+    CLEAR_MASK, MASK_ENTRIES, MASK_SUBMENU, REMOVE_BLOB, MaskMenuActions, mask_submenu_filler,
+)
 from .measure_line_tool import MeasureLineTool
 from .roi_context_menu import (
     ADD_RECTANGLE,
@@ -101,6 +104,9 @@ _TOOL_MENU_ICONS = {
     UNLOCK: "unlock",
     INVERT_SELECTION: "invert",
     DESELECT_SELECTION: "deselect",
+    MASK_SUBMENU: "mask",  # 2026-11-23: Mask > Add / Subtract / Convert to mask (`mask_menu_actions.py`)
+    REMOVE_BLOB: "remove_blob",
+    CLEAR_MASK: "clear_mask",
 }
 """The selection tools' right-click entry: the ROIs inside or partly inside the area selection become selected."""
 
@@ -143,6 +149,7 @@ class CanvasInteraction:
         unlock: Callable[[], None] | None = None,
         combine_badge: CombineBadge | None = None,
         roi_creation: RoiCreation,
+        mask_menu: MaskMenuActions | None = None,
     ) -> None:
         self._plot = plot
         self._view = view
@@ -163,6 +170,7 @@ class CanvasInteraction:
         self._to_reference = to_reference
         self._roi_creation = roi_creation  # Add ROI > ..., Make this ROI > ..., Link / Unlink: `roi_creation.py`
         self._notify = notify
+        self._mask_menu = mask_menu  # the mask entries of the right-click menu (Mask > ..., and on a mask pixel: Mask to selection, Remove blob, Clear)
         self._wand_click = wand_click  # the wand's click: (x, y, "replace" | "add" | "subtract")
         self._rois_touching = rois_touching  # display-space bool mask -> ids of the ROIs overlapping it
         # armed tool -> its right-button drag handler (a drag event -> the tool's numbers: `tool_drag.py`, `wand_drag.py`)
@@ -378,8 +386,8 @@ class CanvasInteraction:
             if self._in_view(scene_pos):
                 self._show_roi_menu(scene_pos)
             return
-        if button == Qt.MouseButton.RightButton and self._point_in_selection(scene_pos):
-            self._context_menu([], scene_pos)  # plain Invert/Deselect menu
+        if button == Qt.MouseButton.RightButton and (self._point_in_selection(scene_pos) or self._on_mask_pixel(scene_pos)):
+            self._context_menu([], scene_pos)  # plain selection menu (Invert / Deselect, Mask > ..., and the mask-pixel entries)
             return
         if button != Qt.MouseButton.LeftButton:
             return  # not a select gesture
@@ -574,6 +582,13 @@ class CanvasInteraction:
         self._selection.set_roi_selection(ids)
         self._notify(f"{len(ids)} ROI{'' if len(ids) == 1 else 's'} inside or partly inside the selection selected.")
 
+    def _on_mask_pixel(self, scene_pos: object) -> bool:
+        """True when the pointer is on a pixel of the mask drawn on screen (it adds the mask-pixel entries to the right-click menu)."""
+        if self._mask_menu is None or not self._in_view(scene_pos):
+            return False
+        point = self._plot.vb.mapSceneToView(scene_pos)
+        return self._mask_menu.on_mask_pixel(float(point.x()), float(point.y()))
+
     def _point_in_selection(self, scene_pos: object) -> bool:
         """True when a selection exists and the scene point lies inside the
         *editable* region (inside the shape, or outside it once inverted)."""
@@ -600,6 +615,14 @@ class CanvasInteraction:
             entries.append((LOCK_TO_SELECTION, True))
         if inside:
             entries += [(INVERT_SELECTION, True), (DESELECT_SELECTION, True)]
+        # 2026-11-23: the selection's Mask submenu (while something is selected), then the entries about the mask pixel under the pointer.
+        if self._mask_menu is not None and self._active_tool.active() in (None, ImageTool.SELECT_AREA):  # not in Crop / Rotate / Measure's menus
+            has_selection, has_mask = self._area_selection.has_selection(), self._mask_menu.has_mask()
+            if has_selection or has_mask:
+                entries.append((MASK_SUBMENU, True))
+                submenus = {**(submenus or {}), MASK_SUBMENU: mask_submenu_filler(has_selection=has_selection, has_mask=has_mask)}
+            if self._on_mask_pixel(scene_pos):
+                entries += [(REMOVE_BLOB, True), (CLEAR_MASK, True)]
         entries += exit_entries
         if not entries:
             return None
@@ -607,7 +630,7 @@ class CanvasInteraction:
             self._menu_parent,
             entries,
             icons={label: menu_icon(key) for label, key in _TOOL_MENU_ICONS.items() if any(label == entry[0] for entry in entries)},
-            separate_before={INVERT_SELECTION, EXIT_TOOL},
+            separate_before={INVERT_SELECTION, REMOVE_BLOB, EXIT_TOOL},
             submenus=submenus,
         )
         if chosen == LOCK_TO_SELECTION and self._lock_to_selection is not None:
@@ -621,6 +644,10 @@ class CanvasInteraction:
             return None
         if chosen == DESELECT_SELECTION:
             self._area_selection.clear()
+            return None
+        if chosen in MASK_ENTRIES and self._mask_menu is not None:
+            point = self._plot.vb.mapSceneToView(scene_pos)
+            self._mask_menu.run(chosen, float(point.x()), float(point.y()))
             return None
         return chosen
 

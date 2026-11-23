@@ -24,7 +24,8 @@ import weakref
 from collections.abc import Callable
 from typing import Any
 
-from PyQt6.QtGui import QAction, QIcon
+from PyQt6.QtCore import QPointF, Qt
+from PyQt6.QtGui import QAction, QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PyQt6.QtWidgets import QMenu
 
 from lspr_ui import get_active_theme, load_tabler_icon
@@ -73,6 +74,42 @@ def _sample_with_rim() -> QIcon:
     return display_icon(ink, ink)  # a filled disc inside a wider-gapped ring: a sample with its rim
 
 
+def _blob_crossed_out() -> QIcon:
+    """"Remove blob": an irregular blob (a grain of the mask) with the "off" stroke across it, drawn in the 24-unit space of the Tabler icons."""
+    size = _RENDER_SIZE
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.scale(size / 24, size / 24)
+    pen = QPen(QColor(get_active_theme().text_primary), _STROKE_WIDTH)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+    blob = QPainterPath(QPointF(6.5, 8.0))  # a lumpy closed outline, no two sides alike
+    blob.cubicTo(QPointF(7.5, 4.0), QPointF(13.5, 3.0), QPointF(16.5, 6.0))
+    blob.cubicTo(QPointF(20.0, 8.5), QPointF(21.5, 12.5), QPointF(19.0, 16.0))
+    blob.cubicTo(QPointF(16.5, 20.0), QPointF(10.0, 21.5), QPointF(6.0, 18.0))
+    blob.cubicTo(QPointF(2.5, 15.0), QPointF(3.5, 11.0), QPointF(6.5, 8.0))
+    painter.drawPath(blob)
+    painter.drawLine(QPointF(3.0, 3.0), QPointF(21.0, 21.0))  # crossed out, as Tabler's "-off" icons are
+    painter.end()
+    icon = QIcon()
+    icon.addPixmap(pixmap, QIcon.Mode.Normal)
+    return icon
+
+
+def _clear_mask_red() -> QIcon:
+    """"Clear whole mask": trash-x in the theme's red, the one entry that cannot be undone."""
+    return load_tabler_icon("trash-x", color=get_active_theme().accent_red, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH)
+
+
+def _mask_to_selection() -> QIcon:
+    from .image.mask_selection_icons import mask_to_selection_icon
+
+    return mask_to_selection_icon(get_active_theme().text_primary)  # the Mask tab's Selection from mask button
+
+
 def _plan_step(name: str, accent: str) -> Callable[[], QIcon]:
     """One of the plan bar's step icons (`sensorgram/plan_icons.py`), coloured as the ribbon's Edit group colours it
     (new = green, removed = red, restored = blue, split = gold; ``"none"`` for the one with no accent)."""
@@ -107,6 +144,11 @@ ICONS: dict[str, str | Callable[[], QIcon]] = {
     "restore_edit": "eraser",  # "Remove this cube's edit": forget one edit
     "settings": "settings",
     "mask": "mask",  # make masks
+    "mask_add": "square-rounded-plus",  # Mask > Add (the Mask tab's Selection group wears it too)
+    "mask_subtract": "square-rounded-minus",
+    "mask_to_selection": _mask_to_selection,  # Mask > Convert to selection (the mask stays, the selection is made from it)
+    "remove_blob": _blob_crossed_out,  # the blob under the pointer leaves the mask
+    "clear_mask": _clear_mask_red,  # Clear whole mask: red, it cannot be undone (Clear all's trash-x)
     "persistent": "pin",  # a mask / layout change that carries on to the cubes after it
     "individual": "focus-2",  # ... that applies to this cube only (the scope toggles' icon)
     # going somewhere, and order

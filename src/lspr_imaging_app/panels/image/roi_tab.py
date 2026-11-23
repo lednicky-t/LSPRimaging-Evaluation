@@ -197,7 +197,7 @@ class RoiTab(QWidget):
         selection_group, self._selection_caption = labeled_icon_group(self, selection_box, "Selection")
 
         # Sections left to right, a thin separator between neighbours (restyled on a theme switch).
-        sections = (display_group, scope_group, shape_group, array_group, groups_group, selection_group)
+        sections = (scope_group, display_group, shape_group, array_group, groups_group, selection_group)
         self._separators = [ribbon_separator(self) for _ in sections[1:]]
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)

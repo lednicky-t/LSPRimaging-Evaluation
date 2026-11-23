@@ -1,10 +1,13 @@
-"""The Mask tab's "General" and "PNG" groups (2026-10-02 maintainer
+"""**2026-11-23: Clear (the "General" group) left this tab: it is "Clear whole mask" in the image's right-click menu on a mask pixel
+(`mask_menu_actions.py`, same confirmation); the paragraphs below about Clear are history.**
+
+The Mask tab's "General" and "PNG" groups (2026-10-02 maintainer
 request): "copy icons from mask to load/save mask as file... these two
 icons should be in 'PNG' section... put [Clear] in solo section 'General'
 and put section the most left."
 
-Two small widgets, not one - `MaskClearAction` (just Clear, the Mask tab's
-own leftmost group) and `MaskPngActions` (Load/Save) - replacing this
+Two small widgets, not one - `MaskClearAction` (just Clear, removed 2026-11-23)
+and `MaskPngActions` (Load/Save) - replacing this
 file's original single combined `MaskFileActions` ("Automatic edit") now
 that the maintainer wants them visually and conceptually separate groups,
 not one.
@@ -66,7 +69,6 @@ if TYPE_CHECKING:
     # close a real import cycle.
     from .panel import ImagePanel
 
-_CLEAR_COLOR = "#f8fafc"  # GuiTheme.text_primary - 2026-10-02 maintainer request: white, since it's a real, active action
 _LOAD_COLOR = "#38bdf8"  # GuiTheme.accent_blue - the stable app's own literal for mask_load_from_file_button
 _SAVE_COLOR = "#22c55e"  # GuiTheme.accent_green - the stable app's own literal for mask_save_button
 _MASK_FILE_FILTER = "Mask images (*.png *.bmp *.tif *.tiff);;All files (*)"
@@ -74,7 +76,7 @@ _MASK_FILE_FILTER = "Mask images (*.png *.bmp *.tif *.tiff);;All files (*)"
 
 class _FrameTrackingWidget(QWidget):
     """Shared "know the current (cube, wavelength) frame" bookkeeping both
-    `MaskClearAction` and `MaskPngActions` need - factored out so the two
+    `MaskPngActions` needs - factored out so the two
     don't each reimplement the same `image_rendered`/`image_cleared`
     wiring `mask_edit_panels.py`'s own panels already use.
 
@@ -103,46 +105,6 @@ class _FrameTrackingWidget(QWidget):
 
     def _refresh_enabled(self) -> None:
         raise NotImplementedError
-
-
-class MaskClearAction(_FrameTrackingWidget):
-    """Solo "General" group - just Clear (eraser). Wipes the whole mask
-    timeline after a confirmation prompt - see module docstring."""
-
-    def __init__(self, mask: MaskModule, image_panel: ImagePanel, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._mask = mask
-        self._image_panel = image_panel
-
-        self._clear_button = action_button(self, "eraser", _CLEAR_COLOR, "Clear the mask entirely (start a new mask).")
-        self._clear_button.clicked.connect(self._on_clear)
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self._clear_button)
-
-        self._connect_frame_tracking(image_panel)
-        self._refresh_enabled()
-
-    def _refresh_enabled(self) -> None:
-        self._clear_button.setEnabled(self._last_frame is not None)
-
-    def _on_clear(self) -> None:
-        # The one Mask command with a confirmation prompt - see module
-        # docstring for why (wipes the whole timeline, no undo exists for
-        # any Mask command).
-        choice = QMessageBox.question(
-            self,
-            "Clear mask",
-            "Clear the mask entirely, across every cube and wavelength? "
-            "Clearing cannot be undone (unlike the other mask edits).",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if choice != QMessageBox.StandardButton.Yes:
-            return
-        self._mask.clear_all_masks()
-        self._image_panel.tool_status_changed.emit("Mask cleared.")
 
 
 class MaskPngActions(_FrameTrackingWidget):

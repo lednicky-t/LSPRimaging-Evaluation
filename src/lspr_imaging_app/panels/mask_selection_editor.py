@@ -125,6 +125,26 @@ class MaskSelectionEditor:
         self._status(f"Selection from mask: {verb} {count:,} mask px.")
         return count
 
+    def remove_region(self, region: np.ndarray) -> int:
+        """Take a displayed-space region (the mask blob the right-click menu points at) out of the mask in effect at the frame, at the
+        Persistent / Individual scope (one undo step). Returns the raw pixels of the region (0 = nothing done)."""
+        frame = self._last_frame
+        raw_shape = self._dataset.raw_plane_shape()
+        if frame is None or raw_shape is None:
+            self._status("Remove blob: no image on screen.")
+            return 0
+        raw_region = self._image_panel.selection_regions.region_to_raw(region, raw_shape)
+        count = 0 if raw_region is None else int(np.count_nonzero(raw_region))
+        if raw_region is None or count == 0:
+            self._status("Remove blob: the blob covers no pixel of the image.")
+            return 0
+        base_mask = resolve_mask_edit_base(self._mask, self._chromatic, frame, raw_shape)
+        self._mask.apply_candidate(
+            base_mask, raw_region, target_frame=frame, scope=self._mask_scope.scope().value, subtract=True, label="Remove mask blob"
+        )
+        self._status(f"Removed a mask blob ({count:,} px) from the mask.")
+        return count
+
     def apply(self, *, subtract: bool) -> int:
         """Merge the selection into the mask (``subtract=False``) or take it out. Returns the number of selected raw
         pixels used (0 when nothing was done; the status bar says why)."""
