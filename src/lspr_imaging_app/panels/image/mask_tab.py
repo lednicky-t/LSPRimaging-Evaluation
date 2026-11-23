@@ -5,8 +5,10 @@ by hand or automatically, and load/save it as a PNG.
 
 Layout (one ribbon row, captioned icon groups):
 
-    [Add/Subtract/Replace/From mask] | [Clear] | [scope toggle] | [overlay show/colour/transparency] | [Feature map controls] | [scan] | [wand][px] | [PNG]
-     Selection                          General   State                 Visibility                   Feature map                    Scan   Auto mask   PNG
+    [Add/Subtract/Replace/From mask] | [Clear] | [scope toggle] | [Feature map controls] | [scan] | [wand][px] | [PNG]
+     Selection                          General   State          Feature map              Scan   Auto mask   PNG
+
+(2026-11-23: the Visibility group is gone; the View rail beside the image has the mask's show / colour / transparency.)
 
 (2026-11-15: the Histogram selection, Threshold, Local contrast, Morphology and Draw tools moved to the selection toolbar beside the image;
 2026-11-16: the Eraser went and with it the "Manual edit" picker: the Feature map, which acts on the mask itself, is the one tool left and its
@@ -115,7 +117,9 @@ class MaskTab(QWidget):
         selection_group, self._selection_label = labeled_icon_group(self, self._selection_actions, "Selection")
         general_group, self._general_label = labeled_icon_group(self, self._clear_action, "General")
         state_group, self._state_label = labeled_icon_group(self, self._scope_toggle, "State")
-        visibility_group, self._visibility_label = labeled_icon_group(self, self._overlay_controls, "Visibility")
+        # 2026-11-23: no "Visibility" group on this tab (the View rail beside the image has these controls). The widget stays as the
+        # twin the View rail mirrors and the Layers button reads; it is hidden, never shown here.
+        self._overlay_controls.hide()
         features_group, self._features_label = labeled_icon_group(self, self._features_panel, "Feature map")
         png_group, self._png_label = labeled_icon_group(self, self._png_actions, "PNG")
         # "Scan": marks the frames where something dark crossed the field with pointers on the Mask rows (no mask is changed).
@@ -125,17 +129,15 @@ class MaskTab(QWidget):
         self._auto_controls = MaskAutoControls(dataset, mask, chromatic, events, auto, scan, status, self)
         auto_group, self._auto_label = labeled_icon_group(self, self._auto_controls, "Auto mask")
 
-        self._separators = [ribbon_separator(self) for _ in range(7)]
+        self._separators = [ribbon_separator(self) for _ in range(6)]
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
         layout.addWidget(selection_group)
-        layout.addWidget(self._separators[6])
-        layout.addWidget(general_group)
         layout.addWidget(self._separators[0])
-        layout.addWidget(state_group)
+        layout.addWidget(general_group)
         layout.addWidget(self._separators[1])
-        layout.addWidget(visibility_group)
+        layout.addWidget(state_group)
         layout.addWidget(self._separators[2])
         layout.addWidget(features_group)
         layout.addWidget(self._separators[3])
@@ -184,7 +186,7 @@ class MaskTab(QWidget):
         for separator in self._separators:
             separator.setStyleSheet(f"color: {theme.control_border};")
         for label in (
-            self._selection_label, self._general_label, self._state_label, self._visibility_label, self._features_label, self._scan_label,
+            self._selection_label, self._general_label, self._state_label, self._features_label, self._scan_label,
             self._auto_label, self._png_label
         ):
             label.setStyleSheet(group_label_style())

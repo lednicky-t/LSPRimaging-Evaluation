@@ -219,7 +219,7 @@ _VIEW_RANGE_PERSIST_DEBOUNCE_MS = 600
 _TAB_INFO: dict[str, str] = {
     "Mask": (
         "Mask: pixels to ignore (kept out of the background estimate and ROI sampling). "
-        "State: edit scope (persistent / individual). Visibility: tint on/off, colour, transparency. "
+        "State: edit scope (persistent / individual). "
         "Selection: add / subtract / replace the mask by the selection, or make the mask the selection (the selection tools are beside the image). "
         "Feature map: find the small features of the image and add them to the mask. Scan, Auto mask: mark and mask frames where something crossed the field. PNG: load/save the mask."
     ),
