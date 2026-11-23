@@ -85,7 +85,9 @@ class ScanResultsModule(QObject):
         self._checking = False
         self._generation = 0  # bumped by every set_scan_file / invalidate: a load or check from an older one is dropped
         self._recheck = False  # a change arrived while a check was running
-        self._paused = False  # `set_paused`: no check starts; one runs when live again if one was wanted
+        self._paused = False  # `set_paused`: the user's Live / Paused choice. No check starts; one runs when live again if one was wanted
+        self._displays_hidden = False  # `set_displays_hidden`: nothing that shows the check's answer is on screen. A second, separate reason to hold,
+        # so the user's choice above is never overwritten (it is "remembered" by not being touched)
         self._check_wanted = False
         self._threads: list[threading.Thread] = []
         self._loaded_emitted_at = 0.0  # perf_counter when the loader thread handed the file over (for the "how long did the GUI thread take to get to it" figure)
@@ -211,18 +213,46 @@ class ScanResultsModule(QObject):
         """Something that can alter a stored number changed: look again at what is out of date, after a short pause."""
         if self._stored is None:
             return
-        if self._paused:
+        if self._held():
             self._check_wanted = True
             return
         self._timer.start()
+
+    def _held(self) -> bool:
+        """No check may start now: the user paused the analysis displays, or none of the displays that show the answer is on screen."""
+        return self._paused or self._displays_hidden
+
+    def check_is_waiting(self) -> bool:
+        """A check is wanted but held back (paused or nothing on screen to show it): ``stale_cubes()`` is as of the last check, and one runs
+        when the hold ends. For code that waits for the first check (the start-up tracker) and must not wait for one that will not come."""
+        return self._check_wanted and self._held()
 
     def set_paused(self, paused: bool) -> None:
         """Paused (the analysis displays are paused): no check starts, a wanted one waits; live again: it runs once. A running check finishes."""
         paused = bool(paused)
         if paused == self._paused:
             return
+        was_held = self._held()
         self._paused = paused
-        if paused:
+        self._hold_changed(was_held)
+
+    def set_displays_hidden(self, hidden: bool) -> None:
+        """Nothing that shows the check's answer is on screen (the Spectra and Sensorgram docks are closed, behind another tab or the window is
+        minimised): no check starts, since nobody could see it, and the freeze it costs (the snapshot of the app's inputs is on the GUI thread) buys
+        nothing. One runs when a display is shown again. Independent of :meth:`set_paused`: the user's Live / Paused choice is not changed by it
+        and holds again when the displays come back."""
+        hidden = bool(hidden)
+        if hidden == self._displays_hidden:
+            return
+        was_held = self._held()
+        self._displays_hidden = hidden
+        self._hold_changed(was_held)
+
+    def _hold_changed(self, was_held: bool) -> None:
+        now_held = self._held()
+        if now_held == was_held:
+            return
+        if now_held:
             if self._timer.isActive():
                 self._timer.stop()
                 self._check_wanted = True
@@ -338,7 +368,7 @@ class ScanResultsModule(QObject):
     def _start_check(self) -> None:
         if self._stored is None or self._path is None:
             return
-        if self._paused:
+        if self._held():
             self._check_wanted = True
             return
         if self._checking:
@@ -348,7 +378,7 @@ class ScanResultsModule(QObject):
             return  # the scan reloads the file and asks again when it is done
         t_start = time.perf_counter()
         try:
-            snapshot = snapshot_source(self._source_factory())  # GUI thread: reads the modules, ~0.1 s on the real dataset
+            snapshot = snapshot_source(self._source_factory())  # GUI thread: reads the modules, ~1.9 s on the 71,685-frame dataset (4.1 s before 2026-11-23: docs/snapshot_source_cost_2026-11-23.md)
         except (ValueError, RuntimeError) as exc:  # no dataset, no ROIs...: nothing to compare
             self._stale, self._reason = None, ""
             self._message = str(exc)

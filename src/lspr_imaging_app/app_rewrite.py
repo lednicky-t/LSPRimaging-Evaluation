@@ -24,7 +24,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import Qt, QByteArray, QPoint, QTimer, QUrl
 from PyQt6.QtGui import QAction, QActionGroup, QDesktopServices, QGuiApplication, QPixmapCache
-from PyQt6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMenu, QMessageBox, QStatusBar, QWidget
+from PyQt6.QtWidgets import QApplication, QDockWidget, QFileDialog, QMainWindow, QMenu, QMessageBox, QStatusBar, QWidget
 
 from lspr_core import ACKNOWLEDGEMENT_REQUEST, DISCLAIMER_POINTS, LICENSE_NAME, NOTICE_URL, citation_text
 from lspr_core.perf import get_runtime
@@ -380,6 +380,22 @@ def _wire_theme_menu(
 
     dark_action.triggered.connect(lambda checked: switch_theme(LSPRI_DARK_THEME, "dark") if checked else None)
     bright_action.triggered.connect(lambda checked: switch_theme(LSPRI_BRIGHT_THEME, "bright") if checked else None)
+
+
+def _wire_check_follows_displays(scan_results: ScanResultsModule, docks: dict[str, QDockWidget]) -> None:
+    """The out-of-date check runs only while a display that shows its answer is on screen (2026-11-23). Only the Spectra and Sensorgram panels draw
+    the result (the grey diamonds), and both do nothing while hidden; the check, which belongs to no panel, kept running after every mask edit and
+    froze the window for seconds (the snapshot of the app's inputs is on the GUI thread) with nobody to see the answer. With both hidden the check
+    waits; when one is shown it runs once. The user's Live / Paused choice is a separate hold (`AnalysisLiveModule`) and is never changed here, so
+    it is still what it was when the displays come back. Like `HiddenPanelGate`, a dock counts as shown until its `visibilityChanged` says otherwise."""
+    shown = {name: True for name in docks}
+
+    def follow(name: str, visible: bool) -> None:
+        shown[name] = bool(visible)
+        scan_results.set_displays_hidden(not any(shown.values()))
+
+    for name, dock in docks.items():
+        dock.visibilityChanged.connect(lambda visible, name=name: follow(name, visible))
 
 
 def analysis_scan_source(m: _Modules) -> ScanSource:
@@ -1418,6 +1434,8 @@ def _build_startup_tracker(
         # No file, or a file that has been read *and* compared with the current setup (stale_cubes() is None until that check ran).
         if scan.is_loading() or scan.is_checking():
             return False
+        if scan.check_is_waiting():
+            return True  # held back (paused, or Spectra and Sensorgram hidden): it runs when they are shown; the start-up must not wait for it
         return scan.stored() is None or scan.stale_cubes() is not None or bool(scan.message())
 
     tracker = StartupTracker([
@@ -2223,6 +2241,7 @@ def build_main_window(
     for dock_name, hidden_aware_panel in (("Histogram", histogram_panel), ("ROI / Groups", roi_table_panel), ("Spectra", spectra_panel),
                                              ("Sensorgram", sensorgram_panel)):
         panel_docks[dock_name].visibilityChanged.connect(hidden_aware_panel.set_panel_visible)
+    _wire_check_follows_displays(m.scan_results, {name: panel_docks[name] for name in ("Spectra", "Sensorgram")})
 
     # View menu, top to bottom (the order of these calls is the menu order):
     # Show/Hide all + one checkable, Ctrl+1..5-shortcut toggleViewAction()

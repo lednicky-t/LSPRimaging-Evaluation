@@ -337,7 +337,9 @@ def source_from_modules(
         rois_at=roi_toolbox.rois_at,
         has_timeline=roi_toolbox.has_timeline,
         chromatic_affine=lambda cube, wl: chromatic.affine_for((cube, wl)),
-        chromatic_affine_between=chromatic.affine_between,
+        # Made fresh with every source, and every consumer snapshots the source at once on the GUI thread, so the memo never outlives an edit
+        # of the chromatic models (`affine_between_memo`: same numbers as `affine_between`, 69,029 calls cost 4 s without it).
+        chromatic_affine_between=chromatic.affine_between_memo(),
         resolve_mask=lambda cube, wl: _mask_ref(mask.resolve_mask_change((cube, wl))),
         geometry=geometry.settings,
         background=background.settings,
@@ -357,7 +359,8 @@ def _mask_ref(change) -> MaskRef | None:
 def snapshot_source(source: ScanSource, cubes: Sequence[int] | None = None) -> ScanSource:
     """Read everything a scan needs from ``source`` **now** and return a :class:`ScanSource` over plain tables.
 
-    Call this on the thread that owns the modules (the GUI thread); it is a few hundred lookups of microseconds each. Afterwards
+    Call this on the thread that owns the modules (the GUI thread); it is a few lookups per *frame* (71,685 frames on a 2,655-cube
+    dataset: the check after every mask edit froze the window for 3 to 4 s before 2026-11-23). Afterwards
     :func:`build_scan_plan` can run on any thread: nothing it reads is a live module or a live ROI object (the ROIs are copied),
     so an edit made while the scan is being prepared or run cannot change it. The only deferred work is decoding the stored ignore
     masks (``MaskRef.load``), which is the expensive part and is safe off-thread because a ``MaskChange`` is immutable.

@@ -114,6 +114,7 @@ landmark` off-thread - not a missing module command.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 
 import numpy as np
@@ -244,6 +245,35 @@ class ChromaticModule(QObject):
             self.affine_for(to_key),
             affine.invert_affine_matrix(self.affine_for(from_key)),
         )
+
+    def affine_between_memo(self) -> Callable[[tuple[int, float], tuple[int, float]], np.ndarray]:
+        """A function that answers exactly what `affine_between` answers (same numbers to the last bit), for **one synchronous
+        loop over many frames** (the scan's snapshot asks it once per frame: 69,029 times on a 2,655 x 27 dataset).
+
+        `affine_between` inverts `from_key`'s matrix and composes with `to_key`'s on every call. In that loop the authored frame is
+        the same for nearly every call, and many frames share one matrix, so this keeps (a) the inverse of each `from_key` and (b) the
+        composed result per (`from_key`, bytes of the `to_key` matrix), both made by the very same two functions: 3.9 s -> see
+        `docs/snapshot_source_cost_2026-11-23.md`. **Throw the function away after the loop**: it does not notice a change of the
+        models or of the "Apply correction" switch. The arrays it returns are shared and read-only; copy before changing one."""
+        inverses: dict[tuple[int, float], np.ndarray] = {}
+        composed: dict[tuple[tuple[int, float], bytes], np.ndarray] = {}
+
+        def between(from_key: tuple[int, float], to_key: tuple[int, float]) -> np.ndarray:
+            if from_key == to_key:
+                return affine.identity_affine_matrix()
+            to_matrix = self.affine_for(to_key)
+            memo_key = (from_key, np.ascontiguousarray(to_matrix, dtype=np.float64).tobytes())
+            result = composed.get(memo_key)
+            if result is None:
+                inverse = inverses.get(from_key)
+                if inverse is None:
+                    inverse = inverses[from_key] = affine.invert_affine_matrix(self.affine_for(from_key))
+                result = affine.compose_affine_matrices(to_matrix, inverse)
+                result.flags.writeable = False
+                composed[memo_key] = result
+            return result
+
+        return between
 
     def warp_mask_between(self, mask: np.ndarray, from_key: tuple[int, float], to_key: tuple[int, float]) -> np.ndarray:
         """Like `warp_mask()`, but for a mask authored at an arbitrary
