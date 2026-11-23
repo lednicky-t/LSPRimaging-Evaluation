@@ -71,6 +71,7 @@ from lspr_ui import get_active_theme, load_tabler_icon, tint_tabler_icon
 from ...analysis.export_tables import histogram_table
 from ..cursor_overlay import CursorOverlay
 from ..image.canvas_tools import style_bar_icon_button
+from ..image.mask_edit_tool_icons import histogram_reset_icon
 from ..plot_export_button import ExportData, PlotExportButton
 from ..svg_layers import SvgPart
 from . import compute
@@ -403,8 +404,8 @@ class HistogramPlot(QWidget):
         self._default_colors["all"] = theme.text_primary
         icon = tint_tabler_icon(load_tabler_icon("settings"), QColor(theme.text_muted))
         self._settings_button.setIcon(icon)
-        # Same glyph as the Image panel's "fit range to this frame" button.
-        self._reset_range_button.setIcon(tint_tabler_icon(load_tabler_icon("arrows-minimize"), QColor(theme.text_muted)))
+        # The highlight-range icon (as the View ribbon's histogram switch) with circular arrows on it (2026-11-23).
+        self._reset_range_button.setIcon(histogram_reset_icon())
         self._range_readout.refresh_theme(theme)
         self._cursor_overlay.refresh_theme(theme)
         if hasattr(self, "export_button"):  # refresh_theme also runs while the plot is being built

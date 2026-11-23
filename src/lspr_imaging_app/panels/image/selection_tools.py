@@ -29,6 +29,7 @@ from .layers import IMAGE, LAYER_NAMES, ImageLayers
 from .layers_button import LayersButton
 from .selection_by_value import MODE_METHODS, ByValueSelector
 from .selection_modify import ModifySelectionMenu
+from .selection_stats_overlay import SelectionStatsOverlay
 from .selection_regions import SelectionRegions
 from .selection_toolbar import SelectionToolbar
 from .tool_drag import DragAdjuster, DragAxis
@@ -84,6 +85,8 @@ class SelectionTools:
             gesture_how=area_tool.gesture_how, parent=panel,
         )
         self.combine_badge.held_mode_changed.connect(self.toolbar.show_held_mode)  # the mode button follows Shift / Alt
+        # Top-left corner of the image: share of the image selected, blobs, mean diameter (`selection_stats_overlay.py`).
+        self.stats_overlay = SelectionStatsOverlay(plot.vb, area_selection, geometry, image_shape, panel)
         self.wand = WandTask(area_selection, self.toolbar.wand_form.settings, status, panel)
         self.wand_drag = WandDragAdjuster(self.toolbar.wand_form, view)
         self.wand.busy_changed.connect(self.toolbar.set_wand_busy)

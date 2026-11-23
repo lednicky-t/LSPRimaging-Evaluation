@@ -8,9 +8,10 @@ from __future__ import annotations
 from PyQt6.QtCore import QSize
 from PyQt6.QtWidgets import QButtonGroup, QHBoxLayout, QToolButton, QWidget
 
-from lspr_ui import GuiTheme, get_active_theme, load_tabler_icon, transparent_icon_button_stylesheet
+from lspr_ui import GuiTheme, get_active_theme, load_tabler_icon
 
 from ...roi.scope import SCOPE_INDIVIDUAL, SCOPE_PERSISTENT, RoiScopeModule
+from ..super_highlight import super_highlight_stylesheet
 
 from .general_group import BUTTON_SIZE as _BUTTON_SIZE
 from .general_group import ICON_SIZE as _ICON_SIZE
@@ -42,7 +43,7 @@ class RoiScopeToggle(QWidget):
             button.setAutoRaise(True)
             button.setFixedSize(_BUTTON_SIZE, _BUTTON_SIZE)
             button.setIconSize(QSize(_ICON_SIZE, _ICON_SIZE))
-            button.setStyleSheet(transparent_icon_button_stylesheet())
+            button.setStyleSheet(super_highlight_stylesheet())
             button.setToolTip(_TIP[name])
             group.addButton(button)
             layout.addWidget(button)
@@ -67,5 +68,5 @@ class RoiScopeToggle(QWidget):
 
     def refresh_theme(self, _theme: GuiTheme) -> None:
         for button in self._buttons.values():
-            button.setStyleSheet(transparent_icon_button_stylesheet())
+            button.setStyleSheet(super_highlight_stylesheet())
         self._refresh_icons()

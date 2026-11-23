@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import functools
 
-from PyQt6.QtCore import QRectF, Qt
+from PyQt6.QtCore import QRect, QRectF, Qt
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 
 from lspr_ui import load_tabler_icon
@@ -60,8 +60,7 @@ _DESIGN_SIZE = 24
 _RENDER_SIZE = 48  # 2x _DESIGN_SIZE
 
 _MUTED = "#8b95a3"  # GuiTheme.text_dim - fixed literal, see module docstring ("static, not theme-dependent")
-_SELECTED = "#22c55e"  # GuiTheme.accent_green - "this is the region a tool would add/affect", matches
-# MaskOverlayControls/MaskHighlightActions's own "#22c55e == add/visible" convention elsewhere in this ribbon.
+_SELECTED = "#38bdf8"  # GuiTheme.accent_blue, the app's standard blue (maintainer 2026-11-23: was green #22c55e): "the region a tool would add/affect"
 _THRESHOLD_LINE = "#ef4444"  # GuiTheme.accent_red
 _LOCAL_CONTRAST_CENTER = "#38bdf8"  # GuiTheme.accent_blue
 _MORPHOLOGY_SHAPE = "#b4bdc9"  # GuiTheme.text_muted
@@ -112,6 +111,23 @@ def histogram_selection_icon(active: bool = True) -> QIcon:
         color = _SELECTED if (active and index in (1, 2, 3)) else _MUTED
         painter.setBrush(QColor(color))
         painter.drawRoundedRect(QRectF(x, _BASELINE_Y - height, _BAR_WIDTH, height), 0.8, 0.8)
+    painter.end()
+    return QIcon(pixmap)
+
+
+@functools.lru_cache(maxsize=None)
+def histogram_reset_icon() -> QIcon:
+    """The Histogram plot's "reset the highlight range" button (2026-11-23): the highlight-range icon (`histogram_selection_icon`, the bars
+    with the blue middle) with a small circular-arrows badge in the top-right corner, where the outer bars leave room. The badge is a
+    light glyph with a thin black border (as `array_controls._find_array_icon`'s plus), readable on a dark or a light theme."""
+    pixmap = histogram_selection_icon(True).pixmap(_RENDER_SIZE, _RENDER_SIZE).copy()
+    painter = QPainter(pixmap)
+    outline = load_tabler_icon("refresh", color="#000000", size=_RENDER_SIZE, stroke_width=4.6).pixmap(_RENDER_SIZE, _RENDER_SIZE)
+    arrows = load_tabler_icon("refresh", color="#f3f4f6", size=_RENDER_SIZE, stroke_width=3.2).pixmap(_RENDER_SIZE, _RENDER_SIZE)
+    corner = _RENDER_SIZE * 3 // 5
+    target = QRect(_RENDER_SIZE - corner, 0, corner, corner)
+    painter.drawPixmap(target, outline)
+    painter.drawPixmap(target, arrows)
     painter.end()
     return QIcon(pixmap)
 

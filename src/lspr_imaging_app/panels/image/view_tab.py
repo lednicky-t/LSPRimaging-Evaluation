@@ -116,9 +116,8 @@ class ViewTab(QWidget):
         self._display_range_controls = DisplayRangeControls(self)
         self._display_range_controls.changed.connect(self.display_range_changed)
         rows.append(self._display_range_controls)
-        # The AR / MR switch opens the numbers on a right-click; the "..." opens them on either click.
+        # The AR / MR switch opens the numbers on a right-click (the "..." button that did it on a left click was removed 2026-11-23).
         self._attach(self._display_range_controls.toggle_button, self._display_range_controls.range_menu)
-        self._attach(self._display_range_controls.more_button, self._display_range_controls.range_menu, left_click=True)
         display_range_group = self._section(self._display_range_controls)  # Image
 
         # All: Show all / Hide all, wired below once every overlay control exists (`set_all_overlays`).

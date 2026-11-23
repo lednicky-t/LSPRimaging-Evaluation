@@ -83,6 +83,7 @@ from .selection_by_value import ICON_CHOICE_STYLE, MODE_METHODS, ByValueSelector
 from .selection_menu_icons import FILL_HOLES_ICON
 from .selection_palette import PAST, PRESENT
 from .selection_style import SelectionStyle
+from .selection_view_blink import ViewButtonBlink
 from .selection_view_form import SelectionViewForm
 from .side_rails import LEFT, beside_point, tooltip_point, valid_side
 from .wheel_tool_button import WheelToolButton
@@ -460,6 +461,8 @@ class SelectionToolbar(QFrame):
         self._view_button = QToolButton(self)
         _style_button(self._view_button)
         self._view_button.clicked.connect(lambda _checked=False: self.show_view_menu())
+        self._view_blink = ViewButtonBlink(self._view_button, selection, self)  # the eye says "a selection is applied" (`selection_view_blink.py`)
+        self._style.changed.connect(lambda: self._refresh_view_icons(get_active_theme()))  # the lit eye wears the selection's colour
         outer.addSpacing(4)
         outer.addWidget(self._view_button, 0, Qt.AlignmentFlag.AlignHCenter)
         if layers_button is not None:  # 1b. Layers (2026-11-16): the active layer and the layers' eyes, pinned under View
@@ -901,6 +904,13 @@ class SelectionToolbar(QFrame):
             tip = "Lock: make a selection first."
         self._lock_button.setToolTip(tip)
 
+    def _refresh_view_icons(self, theme: GuiTheme) -> None:
+        """The eye's two faces: plain (no selection) and lit in the selection's colour (a selection is applied)."""
+        def eye(color: str) -> QIcon:
+            return load_tabler_icon("eye", color=color, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH)
+
+        self._view_blink.set_icons(eye(theme.text_primary), eye(self._style.color(PAST)))
+
     def refresh_theme(self, theme: GuiTheme) -> None:
         self._column.refresh_theme()
         for button in (*self._tool_buttons.values(), self._mode_button, self._lock_button, self._view_button):
@@ -910,10 +920,11 @@ class SelectionToolbar(QFrame):
             refresh = getattr(self._layers_button, "refresh", None)
             if callable(refresh):
                 refresh(theme)
-        self._view_button.setIcon(load_tabler_icon("eye", color=theme.text_primary, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH))
+        self._refresh_view_icons(theme)
         self._view_button.setToolTip(
             "View: how the selection looks on the image. The colour of the selection and of the shape being dragged, also the colour of the "
-            "Venn circles of the mode button, and an infill for each in five opacities (none by default)."
+            "Venn circles of the mode button, and an infill for each in five opacities (none by default).\n"
+            "The eye blinks when a selection is applied and stays in the selection's colour while there is one."
         )
         self._view_form.refresh_theme(theme)
         self.wand_form.refresh_theme(theme)

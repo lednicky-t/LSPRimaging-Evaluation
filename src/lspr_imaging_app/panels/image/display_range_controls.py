@@ -5,15 +5,16 @@ range (black point = about its lowest value, white point = about its highest), s
 bright looks like a dim one and brightness changes between frames or wavelengths are hidden. A **fixed** range
 uses the same black and white point for every frame, so equal values look equal in every frame.
 
-Layout: two ribbon buttons (`BUTTON_SIZE`), the same size as every other icon in the ribbon,
+Layout: one ribbon button (`BUTTON_SIZE`), the same size as every other icon in the ribbon,
 
-    [AR / MR] [...]
+    [AR / MR]
 
-(The View tab's "Image" group puts the cursor-readout toggle before these two.)
+(The View tab's "Image" group puts the cursor-readout toggle before it. The separate "..." button was removed 2026-11-23: the numbers are
+in the right-click menu of AR / MR, which the View ribbon wires in `view_tab.py`.)
 
 * AR / MR (checkable; "auto range" / "manual range", was a pin until 2026-10-23): off = automatic per frame; on = every frame uses the fixed range. Its tooltip names the
   range that is in use.
-* "..." opens a small panel (a `QWidgetAction` in a `QMenu`, like the ROIs tab's display menu) with
+* A right-click on it opens a small panel (a `QWidgetAction` in a `QMenu`, like the ROIs tab's display menu) with
 
       Black point (min)   [    0 ]
       White point (max)   [65535 ]
@@ -125,15 +126,11 @@ class DisplayRangeControls(QWidget):
         action = QWidgetAction(self._menu)
         action.setDefaultWidget(self._panel)
         self._menu.addAction(action)
-        self._more = QToolButton(self)
-        self._more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self._more.setMenu(self._menu)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
         layout.addWidget(self._toggle)
-        layout.addWidget(self._more)
         self.refresh_theme(get_active_theme())
         self._refresh()  # greyed fields, the readout and the icons for the starting (automatic) state
 
@@ -145,13 +142,8 @@ class DisplayRangeControls(QWidget):
         return self._toggle
 
     @property
-    def more_button(self) -> QToolButton:
-        """The "..." button that opens the numbers."""
-        return self._more
-
-    @property
     def range_menu(self) -> QMenu:
-        """The numbers' pop-up (the side ribbon opens it from either button, `view_ribbon.py`)."""
+        """The numbers' pop-up (the side ribbon opens it on a right-click of the AR / MR switch, `view_ribbon.py`)."""
         return self._menu
 
     def insert_leading(self, button: QWidget, index: int = 0) -> None:
@@ -254,7 +246,7 @@ class DisplayRangeControls(QWidget):
         self._refresh_look(get_active_theme())
 
     def refresh_theme(self, theme: GuiTheme) -> None:
-        for button in (self._toggle, self._more, self._fit, self._full):
+        for button in (self._toggle, self._fit, self._full):
             style_general_icon_button(button)
             button.setIconSize(QSize(ICON_SIZE, ICON_SIZE))
         self._panel.setStyleSheet(
@@ -276,8 +268,6 @@ class DisplayRangeControls(QWidget):
             else "Display range is automatic: each frame is scaled to its own range. Click to use one fixed range "
             "for every frame (it starts at the full 16-bit range, 0 to 65535)."
         )
-        self._more.setIcon(load_tabler_icon("dots", color=theme.text_secondary, size=ICON_SIZE * 2, stroke_width=2.1))
-        self._more.setToolTip("Display range numbers: black point, white point, and a button to take this frame's range.")
         self._fit.setIcon(load_tabler_icon("arrows-minimize", color=theme.text_secondary, size=ICON_SIZE * 2, stroke_width=2.1))
         self._fit.setToolTip("Set min and max to this frame's own range (a starting point to adjust from).")
         self._full.setIcon(load_tabler_icon("arrows-maximize", color=theme.text_secondary, size=ICON_SIZE * 2, stroke_width=2.1))
