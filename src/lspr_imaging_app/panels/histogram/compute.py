@@ -7,7 +7,7 @@ GUI (CLAUDE.md: "Don't mix scientific code with GUI code").
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
@@ -80,15 +80,23 @@ class RedrawCounts:
     all_counts: np.ndarray
     ignore_counts: np.ndarray | None
     """Counts of the Ignore-mask pixels, or None when there is no mask."""
+    region_counts: dict[str, np.ndarray] = field(default_factory=dict)
+    """Counts of the pixels inside each extra region asked for (the "Everything" view's selection and lock curves), by name."""
 
 
 def redraw_counts(
-    image: np.ndarray, region: np.ndarray | None, ignore_mask: np.ndarray | None, edges: np.ndarray
+    image: np.ndarray,
+    region: np.ndarray | None,
+    ignore_mask: np.ndarray | None,
+    edges: np.ndarray,
+    extra_regions: dict[str, np.ndarray] | None = None,
 ) -> RedrawCounts:
     """The heavy numeric half of a Histogram redraw (~25 ms on a 1.2 MP frame, 17 of it the sort inside
     `np.histogram`), written so it can run on a worker thread: it only reads its arguments (the frame, the
     area-selection region and the ignore mask are never modified in place by the app) and returns new ones.
-    Pixels outside `region` count as "no data", like NaN pixels; `ignore_mask` must have `image`'s shape."""
+    Pixels outside `region` count as "no data", like NaN pixels; `ignore_mask` must have `image`'s shape.
+    `extra_regions` ({name: boolean map of `image`'s shape}) are counted *besides* the whole-frame curve, not instead of
+    it: `region_counts[name]` holds the counts of the finite pixels inside that map (same bins, raw counts)."""
     if region is not None:
         image = np.where(region, image, np.float32(np.nan))
     finite = np.isfinite(image)
@@ -96,8 +104,10 @@ def redraw_counts(
     in_domain = int(np.count_nonzero(region)) if region is not None else int(image.size)
     all_counts = counts_of_finite(image[finite], edges)
     ignore_counts = None if ignore_mask is None else population_counts(image[ignore_mask], edges)
+    region_counts = {name: counts_of_finite(image[finite & mask], edges) for name, mask in (extra_regions or {}).items()}
     return RedrawCounts(
-        image=image, total_pixels=total_pixels, in_domain=in_domain, all_counts=all_counts, ignore_counts=ignore_counts
+        image=image, total_pixels=total_pixels, in_domain=in_domain, all_counts=all_counts, ignore_counts=ignore_counts,
+        region_counts=region_counts,
     )
 
 

@@ -865,6 +865,10 @@ class ImagePanel(QWidget):
         front door needs no extra constructor argument."""
         return self._area_selection
 
+    def selection_style(self):
+        """The selection outlines' colours and fills (`SelectionStyle`); the Histogram's Selection curve wears the same colour."""
+        return self._area_tool.style
+
     def active_ribbon_category(self) -> str:
         return self._tool_ribbon.current_category()
 

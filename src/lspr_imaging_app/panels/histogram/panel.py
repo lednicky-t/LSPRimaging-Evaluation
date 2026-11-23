@@ -46,7 +46,7 @@ import json
 import logging
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from PyQt6.QtCore import QTimer, pyqtSignal
@@ -58,8 +58,10 @@ from ...image_tools import ChromaticModule, GeometryModule, MaskModule
 from ...image_tools.preprocess import resolve_external_mask
 from ...roi import RoiToolbox
 from ...selection import HighlightRangeModule, SelectionModule
+from ..image.lock_layer import BORDER_COLOR as LOCK_COLOR
 from ..image.panel import ImagePanel
-from ...storage.ui_state_keys import HISTOGRAM_CURSOR_READOUT, HISTOGRAM_CURVE_STYLES, read
+from ..image.selection_palette import PAST
+from ...storage.ui_state_keys import HISTOGRAM_CURSOR_READOUT, HISTOGRAM_CURVE_STYLES, HISTOGRAM_SHOW_EVERYTHING, read
 from ..ui_state import UiStateStore
 from ..visibility_gate import HiddenPanelGate
 from . import compute
@@ -103,6 +105,7 @@ class _RedrawJob:
     ignore_mask: np.ndarray | None
     edges: np.ndarray
     bin_width: float
+    extra_regions: dict[str, np.ndarray] = field(default_factory=dict)  # "Everything" view: the selection / lock maps, counted besides the frame
 
 
 class HistogramPanel(QWidget):
@@ -169,6 +172,9 @@ class HistogramPanel(QWidget):
         # actually happens - see `_redraw`'s own comment for why the Y
         # refit can't just happen immediately in the settings handler.
         self._pending_y_refit = False
+        # False: the plot narrows to the area selection (while the View ribbon is rolled down). True: the whole frame stays and the
+        # selection / lock are extra curves (the icon-row toggle, 2026-11-23; remembered, `restore_ui_state`).
+        self._show_everything = False
 
         self._build_ui()
         # Applied after `_build_ui` constructs `self._plot`, same as the
@@ -177,6 +183,7 @@ class HistogramPanel(QWidget):
         # once real data arrives) already reads them fresh every time.
         self._plot.set_log_y(self._log_y)
         self._plot.set_line_width(self._line_width)
+        self._follow_selection_colors()
 
         self._calm = False
         self._gate = HiddenPanelGate(on_shown=self._schedule_redraw)  # no redraw while the dock is hidden
@@ -213,6 +220,17 @@ class HistogramPanel(QWidget):
         if isinstance(saved, dict):
             self._plot.set_curve_styles(saved)
         self._plot.curve_styles_changed.connect(lambda styles: store.set(HISTOGRAM_CURVE_STYLES.key, json.dumps(styles)))
+        self._show_everything = read(store, HISTOGRAM_SHOW_EVERYTHING) is True
+        self._plot.set_show_everything(self._show_everything)
+        self._schedule_redraw()
+        self._plot.show_everything_toggled.connect(lambda on: store.set(HISTOGRAM_SHOW_EVERYTHING.key, bool(on)))
+
+    def _follow_selection_colors(self) -> None:
+        """The Selection curve wears the selection's colour on the image (the toolbar's View pop-up changes it); the Lock curve the lock's border."""
+        style = self._image_panel.selection_style()
+        apply = lambda: self._plot.set_region_colors(style.color(PAST), LOCK_COLOR)  # noqa: E731
+        style.changed.connect(apply)
+        apply()
 
     def export_button(self):
         """The plot's export control (figure and data); the app tells it where to save (`PlotExportButton.set_context`)."""
@@ -228,6 +246,7 @@ class HistogramPanel(QWidget):
         self._plot.settings_requested.connect(self._show_settings_dialog)
         self._plot.reset_range_requested.connect(self._reset_highlight_range)
         self._plot.y_axis_double_clicked.connect(self._cycle_y_mode)
+        self._plot.show_everything_toggled.connect(self._on_show_everything_toggled)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -311,14 +330,16 @@ class HistogramPanel(QWidget):
         # data" pixels) - so the whole plot narrows to the selection with no
         # other change. The highlight range is still seeded from the *whole*
         # frame, so selecting an area never moves the user's range.
-        region = self._selection_region(image.shape)
+        # "Show everything": the frame is not narrowed; the selection and the lock are counted as curves of their own instead.
+        region = None if self._show_everything else self._selection_region(image.shape)
+        extra_regions = self._extra_regions(image.shape) if self._show_everything else {}
         self._ensure_highlight_range_seeded(lambda: image[np.isfinite(image)])
         ignore_mask = self._resolve_ignore_mask()
         if ignore_mask is not None and ignore_mask.shape != image.shape:
             ignore_mask = None  # a real, if narrow, mismatch case - see _resolve_ignore_mask's caller contract
         job = _RedrawJob(
             self._generation, self._frame, image, region, ignore_mask,
-            compute.histogram_edges(self._bin_width), self._bin_width,
+            compute.histogram_edges(self._bin_width), self._bin_width, extra_regions,
         )
         if self._worker.is_running():
             self._queued_job = job  # newest wins: started as soon as the running one has been delivered
@@ -333,7 +354,7 @@ class HistogramPanel(QWidget):
         def task() -> None:
             started = time.perf_counter()
             try:
-                counts = compute.redraw_counts(job.image, job.region, job.ignore_mask, job.edges)
+                counts = compute.redraw_counts(job.image, job.region, job.ignore_mask, job.edges, job.extra_regions)
             except Exception:  # a failed redraw leaves the plot as it was
                 logger.exception("Histogram computation failed")
                 counts = None
@@ -379,6 +400,10 @@ class HistogramPanel(QWidget):
         reference_peak = compute.peak_count(counts.all_counts)
         all_curve = self._scaled(counts.all_counts, total_pixels, reference_peak)
         self._plot.set_all_pixels(edges, all_curve)
+        # Same scale as the All-pixels curve (a share of the whole frame), so a small selection reads small.
+        self._plot.set_region_curves(
+            edges, {name: self._scaled(c, total_pixels, reference_peak) for name, c in counts.region_counts.items()}
+        )
 
         # `None`: no authored mask for this frame - the curve draws as empty/zero, not "every pixel".
         if counts.ignore_counts is None:
@@ -422,6 +447,17 @@ class HistogramPanel(QWidget):
             # (A result made with the old bin width does not count: the redraw for the new one is behind it.)
             self._pending_y_refit = False
             self._plot.refit_y()
+
+    def _extra_regions(self, image_shape: tuple[int, ...]) -> dict[str, np.ndarray]:
+        """The area selection (clipped to the lock) and the lock, each only if there is one: what the "Everything" view adds as curves."""
+        area = self._image_panel.area_selection()
+        regions = {"selection": area.selected_mask(image_shape), "lock": area.lock_mask(image_shape)}
+        return {name: mask for name, mask in regions.items() if mask is not None}
+
+    def _on_show_everything_toggled(self, everything: bool) -> None:
+        self._show_everything = bool(everything)
+        self._pending_y_refit = True  # the All-pixels curve changes size (selection -> whole frame, or back): fit Y to what comes
+        self._schedule_redraw()
 
     def _selection_region(self, image_shape: tuple[int, ...]) -> np.ndarray | None:
         """The canvas at `image_shape` (the lock if there is one, else the area selection: `AreaSelectionModule.canvas_mask`), or

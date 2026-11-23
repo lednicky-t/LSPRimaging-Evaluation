@@ -84,6 +84,11 @@ from .highlight_range_controls import HighlightRangeReadout
 _SAMPLE_COLOR = "#f59e0b"
 _REFERENCE_COLOR = "#38bdf8"
 _IGNORE_MASK_COLOR = "#ef4444"
+# "Everything" view: the area selection wears the selection's own colour on the image (pink by default, the user can change it:
+# `set_region_colors`), the lock its amber border (`panels/image/lock_layer.BORDER_COLOR`, handed in by the panel).
+_SELECTION_COLOR = "#f472b6"
+_LOCK_COLOR = "#f59e0b"
+_REGION_CURVES = (("selection", "Selection"), ("lock", "Lock"))
 _HIGHLIGHT_BRUSH = (56, 189, 248, 35)
 _HIGHLIGHT_LINE = (56, 189, 248, 160)
 _VALUE_TICK_COLOR = "#facc15"
@@ -118,6 +123,9 @@ class HistogramPlot(QWidget):
     # Icon-row button: put the Highlight range back to the frame's own min-max
     # (2026-11-22). Reported only; `HistogramPanel` owns the meaning.
     reset_range_requested = pyqtSignal()
+    # Icon-row toggle (2026-11-23): False = the plot narrows to the area selection (the original behaviour), True = the whole
+    # frame stays and the selection / lock are drawn as curves of their own. Reported only; `HistogramPlot` draws the icon.
+    show_everything_toggled = pyqtSignal(bool)
     # Double-clicking the left (Y) axis - maintainer's spec, 2026-09-30:
     # "can y axis be switchable also by double clicking on it." `panel.py`
     # owns what "switchable" means (cycling `Y_MODES`); this plot only
@@ -135,6 +143,7 @@ class HistogramPlot(QWidget):
         self._default_colors: dict[str, str] = {}
         self._dashed_keys: set[str] = set()
         self._styles: dict[str, dict] = {}
+        self._listed: dict[str, bool] = {}  # region curves: whether their legend entry is there now
 
         self._plot_widget = pg.PlotWidget(parent=self)
         self._plot_widget.setMinimumHeight(100)
@@ -200,6 +209,13 @@ class HistogramPlot(QWidget):
         self._sample_curve = self._add_curve("sample", _SAMPLE_COLOR, "Sample ROI")
         self._reference_curve = self._add_curve("reference", _REFERENCE_COLOR, "Reference ROI")
         self._ignore_mask_curve = self._add_curve("ignore", _IGNORE_MASK_COLOR, "Ignore mask")
+        # The "Everything" view's extra curves: the pixels inside the area selection / the lock, over the whole frame's curve. They are in
+        # the legend only while they have data (`set_region_curves`).
+        self._selection_curve = self._add_curve("selection", _SELECTION_COLOR, "Selection")
+        self._lock_curve = self._add_curve("lock", _LOCK_COLOR, "Lock")
+        for key, _name in _REGION_CURVES:
+            self._listed[key] = True
+            self._set_listed(key, False)
         # Selected ROIs only (ROI table selection): dashed, same hue as the
         # whole-population curves, each drawn at its own scale (panel.py).
         self._selected_sample_curve = self._add_curve("sel_sample", _SAMPLE_COLOR, "Selected sample (own scale)", dashed=True)
@@ -262,6 +278,14 @@ class HistogramPlot(QWidget):
         self._reset_range_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self._reset_range_button.clicked.connect(self.reset_range_requested)
 
+        # Whole frame vs the selection only (2026-11-23). Its icon shows what the plot is doing now.
+        self._scope_button = QToolButton(viewport)
+        self._scope_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        style_bar_icon_button(self._scope_button, fixed_width=True)
+        self._scope_button.setCheckable(True)
+        self._scope_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._scope_button.toggled.connect(self._on_scope_toggled)
+
         self._range_readout = HighlightRangeReadout(
             viewport,
             theme,
@@ -305,8 +329,12 @@ class HistogramPlot(QWidget):
         if dashed:
             self._dashed_keys.add(key)
         self._apply_curve_style(curve)
-        # Right-click on this curve's legend entry opens its style popup. Left-click
-        # (show/hide the line) stays pyqtgraph's own: only the right button is intercepted.
+        self._hook_legend_entry(curve)
+        return curve
+
+    def _hook_legend_entry(self, curve: pg.PlotDataItem) -> None:
+        """Right-click on this curve's legend entry (the last one added) opens its style popup. Left-click
+        (show/hide the line) stays pyqtgraph's own: only the right button is intercepted."""
         sample, label = self._legend.items[-1]
         for target in (sample, label):
             native = getattr(target, "mouseClickEvent", None)  # the label has none of its own
@@ -319,7 +347,18 @@ class HistogramPlot(QWidget):
                     native(event)
 
             target.mouseClickEvent = _click
-        return curve
+
+    def _set_listed(self, key: str, listed: bool) -> None:
+        """Put the legend entry of region curve `key` in or out (the entry is built anew, so its right-click style menu is hooked again)."""
+        if self._listed.get(key) == listed:
+            return
+        self._listed[key] = listed
+        curve = {"selection": self._selection_curve, "lock": self._lock_curve}[key]
+        if not listed:
+            self._legend.removeItem(curve)
+            return
+        self._legend.addItem(curve, dict(_REGION_CURVES)[key])
+        self._hook_legend_entry(curve)
 
     def _default_line(self, key: str) -> str:
         return "dash" if key in self._dashed_keys else "solid"
@@ -402,6 +441,7 @@ class HistogramPlot(QWidget):
         theme = get_active_theme()
         self._plot_widget.setBackground(theme.toolbar_bg)
         self._default_colors["all"] = theme.text_primary
+        self._refresh_scope_button()
         icon = tint_tabler_icon(load_tabler_icon("settings"), QColor(theme.text_muted))
         self._settings_button.setIcon(icon)
         # The highlight-range icon (as the View ribbon's histogram switch) with circular arrows on it (2026-11-23).
@@ -431,6 +471,47 @@ class HistogramPlot(QWidget):
     def set_selected_reference(self, edges: np.ndarray, values: np.ndarray) -> None:
         self._selected_reference_curve.setData(edges, values)
 
+    def set_region_curves(self, edges: np.ndarray, values: dict[str, np.ndarray]) -> None:
+        """The "Everything" view's curves, by key ("selection", "lock"): a key in `values` is drawn and listed in the legend, a key
+        left out is emptied and leaves the legend."""
+        for key, curve in (("selection", self._selection_curve), ("lock", self._lock_curve)):
+            if key in values:
+                curve.setData(edges, values[key])
+            else:
+                curve.clear()
+            self._set_listed(key, key in values)
+
+    def set_region_colors(self, selection: str, lock: str) -> None:
+        """The curves' default colours (a colour picked in a curve's own style menu still wins)."""
+        if (selection, lock) == (self._default_colors["selection"], self._default_colors["lock"]):
+            return
+        self._default_colors["selection"] = selection
+        self._default_colors["lock"] = lock
+        self._apply_curve_pens()
+
+    def set_show_everything(self, everything: bool) -> None:
+        """Set the toggle from outside (a saved state); reports nothing."""
+        blocked = self._scope_button.blockSignals(True)
+        try:
+            self._scope_button.setChecked(bool(everything))
+        finally:
+            self._scope_button.blockSignals(blocked)
+        self._refresh_scope_button()
+
+    def _on_scope_toggled(self, everything: bool) -> None:
+        self._refresh_scope_button()
+        self.show_everything_toggled.emit(bool(everything))
+
+    def _refresh_scope_button(self) -> None:
+        everything = self._scope_button.isChecked()
+        color = QColor(get_active_theme().text_muted)
+        self._scope_button.setIcon(tint_tabler_icon(load_tabler_icon("photo" if everything else "select-rectangle"), color))
+        self._scope_button.setToolTip(
+            "Showing everything: the whole image, plus the selection and the lock as curves of their own. Click to narrow the plot to the selection."
+            if everything
+            else "Showing the selection only (the whole image when nothing is selected). Click to show everything, with the selection and the lock as extra curves."
+        )
+
     def set_ignore_mask(self, edges: np.ndarray, values: np.ndarray) -> None:
         self._ignore_mask_curve.setData(edges, values)
 
@@ -449,6 +530,7 @@ class HistogramPlot(QWidget):
             self._selected_sample_curve, self._selected_reference_curve,
         ):
             curve.clear()
+        self.set_region_curves(np.zeros(0), {})
         self.set_excluded_text(None)
         self.set_highlight_range(None)
 
@@ -645,6 +727,9 @@ class HistogramPlot(QWidget):
         reset = self._reset_range_button
         reset.move(export.x() - reset.width() - _CORNER_MARGIN_PX, _CORNER_MARGIN_PX + (self._settings_button.height() - reset.height()) // 2)
         reset.raise_()
+        scope = self._scope_button
+        scope.move(reset.x() - scope.width() - _CORNER_MARGIN_PX, _CORNER_MARGIN_PX + (self._settings_button.height() - scope.height()) // 2)
+        scope.raise_()
 
     def _reposition_cursor_overlay(self) -> None:
         """Immediately left of the settings gear, same top-right corner row
@@ -654,7 +739,7 @@ class HistogramPlot(QWidget):
         changes between the small icon and the (usually wider) live text."""
         label = self._cursor_overlay.icon_label
         label.adjustSize()
-        x = self._reset_range_button.x() - label.width() - _CORNER_MARGIN_PX  # left of the reset button, export button and gear
+        x = self._scope_button.x() - label.width() - _CORNER_MARGIN_PX  # left of the scope toggle, reset button, export button and gear
         y = self._settings_button.y() + (self._settings_button.height() - label.height()) // 2
         label.move(x, y)
         label.raise_()
