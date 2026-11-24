@@ -35,6 +35,8 @@ from ..roi_selection_lock import TIP as LOCK_TIP
 SELECT_GROUP = "select_group"
 ADD_ROI = "add_roi"  # Add ROI > Circle (the name is older than the submenu)
 ADD_RECTANGLE = "add_rectangle"
+FIT_CIRCLE = "fit_circle"  # Add ROI > Circle fitted to selection (the area selection is one blob)
+FIT_RECTANGLE = "fit_rectangle"  # Add ROI > Rectangle fitted to selection
 ADD_SELECTION_ONE = "add_selection_one"  # Add ROI > Current selection > All together as one ROI
 ADD_SELECTION_BLOBS = "add_selection_blobs"  # ... > Separate blobs
 MAKE_SAMPLE = "make_sample"
@@ -95,10 +97,32 @@ def fill_add_roi_from_selection(add_root: QMenu) -> dict[QAction, str]:
     return picked
 
 
-def add_roi_submenu_filler(*, can_add_shapes: bool, can_add_from_selection: bool) -> Callable[[QMenu], dict[QAction, str]]:
+def add_shape_entries(
+    add_root: QMenu, entry: Callable[[QMenu, str, str, str], QAction], *, can_add: bool, fit_to_blob: bool
+) -> None:
+    """The Circle and Rectangle entries of an "Add ROI" submenu, the one definition behind both menus. While the area selection is exactly one blob
+    (``fit_to_blob``, 2026-11-24, maintainer) they are **fitted to it** and say so in their text, wherever the pointer is (a circle of the blob's area, the smallest
+    rectangle that contains it, a rim of the ROI's own area); the plain entries, which place a 20 px shape at the click, then give way (Ctrl+D drops the selection to get them
+    back). Otherwise the plain ones, where a ROI may be placed (``can_add``)."""
+    if fit_to_blob:
+        entry(add_root, "Circle fitted to selection", "roi_circle", FIT_CIRCLE).setToolTip(
+            "A sample ROI: the circle with the same area as the selected blob, centred on the blob's centre of mass, with a rim of the same area as the ROI."
+        )
+        entry(add_root, "Rectangle fitted to selection", "roi_rectangle", FIT_RECTANGLE).setToolTip(
+            "A sample ROI: the smallest rectangle (turned as needed) that contains the selected blob, with a rim of the same area as the ROI."
+        )
+    elif can_add:
+        entry(add_root, "Circle", "roi_circle", ADD_ROI)
+        entry(add_root, "Rectangle", "roi_rectangle", ADD_RECTANGLE)
+
+
+def add_roi_submenu_filler(
+    *, can_add_shapes: bool, can_add_from_selection: bool, fit_to_blob: bool = False
+) -> Callable[[QMenu], dict[QAction, str]]:
     """The filler of the selection tools' "Add ROI" submenu with the same entries as the ROIs tab's menu (2026-11-23, maintainer: the tools' menu
-    should offer Circle and Rectangle too): Circle and Rectangle where a ROI may be placed (``can_add_shapes``), Current selection where there is an
-    area selection (``can_add_from_selection``). Returns ``{action: ADD_ROI / ADD_RECTANGLE / ADD_SELECTION_ONE / ADD_SELECTION_BLOBS}``."""
+    should offer Circle and Rectangle too): Circle and Rectangle where a ROI may be placed (``can_add_shapes``; fitted to the blob when ``fit_to_blob``, see
+    `add_shape_entries`), Current selection where there is an area selection (``can_add_from_selection``). Returns ``{action: ADD_ROI / ADD_RECTANGLE /
+    FIT_CIRCLE / FIT_RECTANGLE / ADD_SELECTION_ONE / ADD_SELECTION_BLOBS}``."""
 
     def fill(add_root: QMenu) -> dict[QAction, str]:
         picked: dict[QAction, str] = {}
@@ -108,11 +132,10 @@ def add_roi_submenu_filler(*, can_add_shapes: bool, can_add_from_selection: bool
             picked[action] = choice
             return action
 
-        if can_add_shapes:
-            entry(add_root, "Circle", "roi_circle", ADD_ROI)
-            entry(add_root, "Rectangle", "roi_rectangle", ADD_RECTANGLE)
+        add_shape_entries(add_root, entry, can_add=can_add_shapes, fit_to_blob=fit_to_blob)
         if can_add_from_selection:
             add_current_selection_menu(add_root, entry)
+        add_root.setToolTipsVisible(True)
         return picked
 
     return fill
@@ -130,6 +153,7 @@ def show_roi_context_menu(
     clicked_group_fully_selected: bool = False,
     locked: bool = False,
     can_add_from_selection: bool = False,
+    fit_to_blob: bool = False,
     selected_roles: tuple[int, int] = (0, 0),
     can_link: bool = False,
     can_unlink: bool = False,
@@ -145,7 +169,8 @@ def show_roi_context_menu(
     is in a group: it adds "Select whole group" (left out once every member is already selected, or while the selection is locked). ``locked``: the ROI
     selection is locked: the entries that would change it (Select whole group, Deselect) are left out and "Lock ROI selection" shows a check mark.
     ``can_add``: the click is somewhere a circle or rectangle may be added; ``can_add_from_selection``: there is an area selection to make ROIs from (the
-    Add ROI submenu offers only what can be done, and is left out when neither). ``selected_roles``: how many of the selected ROIs are samples and
+    Add ROI submenu offers only what can be done, and is left out when neither). ``fit_to_blob``: the area selection is exactly one blob, so Circle and Rectangle are
+    fitted to it (`add_shape_entries`). ``selected_roles``: how many of the selected ROIs are samples and
     how many references (the Make entry that already holds for all of them is checked). ``can_link`` / ``can_unlink``: the selection holds something to
     link or to take apart (`roi.link_actions`); the entry is left out otherwise. ``can_add_rim`` / ``can_turn_rim_off`` / ``can_rim_to_reference``: the selection holds a ROI that can get a
     rim (an unused reference, a sample whose rim is off), a sample whose rim is on (it can be turned off, linked or not), or a sample whose rim can become a linked reference (left out otherwise). ``can_match_rim_area``: the selection holds a sample whose rim is on, so "Rim as large as ROI" is offered. ``any_selected_grouped``: Ungroup is offered. ``can_deselect_area``: there is an
@@ -164,11 +189,10 @@ def show_roi_context_menu(
         return action
 
     # -- the ROI selection and what a click can add: Add ROI, Delete, Select whole group, Deselect, Lock ROI selection -------------
-    if can_add or can_add_from_selection:
+    if can_add or can_add_from_selection or fit_to_blob:
         add_menu_root = give_icon(menu.addMenu(ADD_ROI_SUBMENU), "add_roi")
-        if can_add:
-            entry(add_menu_root, "Circle", "roi_circle", ADD_ROI)
-            entry(add_menu_root, "Rectangle", "roi_rectangle", ADD_RECTANGLE)
+        add_menu_root.setToolTipsVisible(True)
+        add_shape_entries(add_menu_root, entry, can_add=can_add, fit_to_blob=fit_to_blob)
         if can_add_from_selection:
             add_current_selection_menu(add_menu_root, entry)
     if have_selection:

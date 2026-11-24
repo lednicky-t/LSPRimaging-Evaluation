@@ -4,6 +4,9 @@ One small object between the Image panel's gestures (the right-click ROI menu, t
 commands, so none of that goes into `panel.py` (which has a size budget) and a refusal always reaches the status bar:
 
 * **Add ROI > Circle / Rectangle** at the point clicked (a 20 px circle, a 20 x 20 px square; their size and angle are edited afterwards).
+* **Add ROI > Circle / Rectangle fitted to selection** (2026-11-24, replaces the two plain entries while the area selection is exactly one blob): a circle of the
+  blob's area at its centre of mass, or the smallest rectangle that contains it (`roi/shape_fit.py`), a sample ROI whose rim has the shared default gap and the
+  thickness that gives it the area of the ROI itself (`rim_area.equal_area_thickness`, as "Rim as large as ROI"; maintainer, 2026-11-24).
 * **Add ROI > Current selection > All together / Separate blobs** (maintainer's choice, 2026-11-18): the area selection becomes pixel-mask ROIs, by default
   **references, linked to nothing**. The selection is made on the frame on screen, so it is first carried back into the reference frame the ROIs
   are stored in (the inverse of the frame's chromatic affine; nothing to do for the identity).
@@ -26,13 +29,15 @@ from PyQt6.QtCore import QObject, Qt, pyqtSignal
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import QWidget
 
-from ...domain.roi_shapes import Rectangle
+from ...domain.roi_shapes import Border, Rectangle
 from ...image_tools.chromatic.affine import invert_affine_matrix
 from ...image_tools.chromatic.warp import warp_boolean_mask_affine
 from ...roi import RoiToolbox
 from ...roi.clipboard import RoiClip
 from ...roi.link_actions import can_link, can_unlink, link_selected, split_by_role, unlink_selected
+from ...roi.rim_area import equal_area_thickness
 from ...roi.scope import RoiEditTarget
+from ...roi.shape_fit import fit_circle, fit_rectangle, has_single_blob
 from ...selection import AreaSelectionModule, SelectionModule
 from ...shortcuts import bind_action
 from .rectangle_size_dialog import ask_rectangle_size
@@ -213,7 +218,36 @@ class RoiCreation(QObject):
         """The area selection as pixel-mask reference ROIs, linked to nothing: one ROI for all of it (``together``) or one per separate blob."""
         self._run("Add ROI from selection", lambda: self._add_from_selection(together))
 
-    def _add_from_selection(self, together: bool) -> str:
+    def has_single_blob(self) -> bool:
+        """The area selection is exactly one separate blob (8-connected): the right-click menu then offers a circle / rectangle **fitted** to it.
+        Asked when a menu opens (one labelling of the selection, a few ms on a full frame), never while the pointer moves."""
+        shape = self._image_shape()
+        plane = None if shape is None else self._area_selection.selected_mask(shape)
+        return plane is not None and has_single_blob(plane)
+
+    def add_fitted(self, kind: str) -> None:
+        """Add a circle (``"circle"``) or the smallest containing rectangle (``"rectangle"``) fitted to the one blob of the area selection, as a **sample ROI whose rim
+        has the default gap and the area of the ROI**; it becomes the ROI selection. One undo step. Says why in the status line when the selection is not one blob."""
+        label = "Add circle ROI fitted to the selection" if kind == "circle" else "Add rectangle ROI fitted to the selection"
+        self._run(label, lambda: self._add_fitted(kind))
+
+    def _add_fitted(self, kind: str) -> str:
+        if kind not in ("circle", "rectangle"):
+            raise ValueError(f"unknown shape {kind!r}")
+        fitted = (fit_circle if kind == "circle" else fit_rectangle)(self._selection_in_reference_frame())
+        # the rim keeps the shared default gap and gets the thickness at which it has the area of the ROI itself (the same rule as "Rim as large as ROI")
+        gap = self._toolbox.detection_settings().default_border().gap_px
+        rim = Border(gap, equal_area_thickness(fitted.shape, gap))
+        roi_id = self._toolbox.add_shaped_roi(fitted.center_x, fitted.center_y, fitted.shape, border=rim)
+        self._select({roi_id})
+        if kind == "circle":
+            size = f"{fitted.shape.diameter_px:.1f} px across"
+        else:
+            size = f"{fitted.shape.width_px:.1f} x {fitted.shape.height_px:.1f} px, turned {fitted.shape.angle_deg:.1f} deg"
+        return f"Added {kind} ROI {roi_id} fitted to the selected blob ({fitted.blob_pixels} px; {size}), with a rim of its own area ({rim.gap_px:g} px gap, {rim.thickness_px:.1f} px thick)."
+
+    def _selection_in_reference_frame(self) -> np.ndarray:
+        """The area selection as a bool plane in the reference frame ROIs are stored in; ``ValueError`` (for the status line) when there is none."""
         shape = self._image_shape()
         plane = None if shape is None else self._area_selection.selected_mask(shape)
         if plane is None or not plane.any():
@@ -221,6 +255,10 @@ class RoiCreation(QObject):
         affine = np.asarray(self._current_affine(), dtype=np.float64)
         if not np.array_equal(affine[:2, :3], np.eye(2, 3)):  # the selection is of the frame on screen; ROIs are stored in the reference frame
             plane = warp_boolean_mask_affine(plane, invert_affine_matrix(affine), output_shape=plane.shape)
+        return plane
+
+    def _add_from_selection(self, together: bool) -> str:
+        plane = self._selection_in_reference_frame()
         ids = self._toolbox.add_mask_rois(plane, together=together)
         self._select(ids)
         count = f"{len(ids)} reference ROI{'' if len(ids) == 1 else 's'}"

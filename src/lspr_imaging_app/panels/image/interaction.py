@@ -49,6 +49,8 @@ from .roi_context_menu import (
     DELETE,
     DESELECT,
     DESELECT_AREA,
+    FIT_CIRCLE,
+    FIT_RECTANGLE,
     GROUP,
     LINK,
     MAKE_REFERENCE,
@@ -428,6 +430,7 @@ class CanvasInteraction:
             any_selected_grouped=any(toolbox.group_for_roi(selected) is not None for selected in ids),
             can_add=self.in_selection(x, y),
             can_add_from_selection=self._roi_creation.has_pixel_selection(),
+            fit_to_blob=self._roi_creation.has_single_blob(),
             selected_roles=self._roi_creation.role_counts(ids),
             can_link=self._roi_creation.can_link(ids),
             can_unlink=self._roi_creation.can_unlink(ids),
@@ -453,6 +456,10 @@ class CanvasInteraction:
             self._roi_creation.add_circle(x, y)
         elif choice.action == ADD_RECTANGLE:
             self._roi_creation.add_rectangle(x, y)
+        elif choice.action == FIT_CIRCLE:
+            self._roi_creation.add_fitted("circle")
+        elif choice.action == FIT_RECTANGLE:
+            self._roi_creation.add_fitted("rectangle")
         elif choice.action == COPY:
             self._roi_creation.copy_selected()
         elif choice.action == PASTE:
@@ -555,6 +562,7 @@ class CanvasInteraction:
         # 2026-11-23: Add ROI also offers Circle / Rectangle at the click, where the ROIs tab's menu does (the point is editable under the selection).
         can_add_shapes = self.in_selection(x, y)
         can_add_from_selection = self._roi_creation.has_pixel_selection()
+        fit_to_blob = self._roi_creation.has_single_blob()  # (2026-11-24) one blob selected: Circle / Rectangle are fitted to it
         chosen = self._context_menu(
             [
                 (SELECT_ROIS_IN_SELECTION, can_pick),
@@ -565,7 +573,9 @@ class CanvasInteraction:
             ],
             scene_pos,
             submenus={
-                ADD_ROI_SUBMENU: add_roi_submenu_filler(can_add_shapes=can_add_shapes, can_add_from_selection=can_add_from_selection)
+                ADD_ROI_SUBMENU: add_roi_submenu_filler(
+                    can_add_shapes=can_add_shapes, can_add_from_selection=can_add_from_selection, fit_to_blob=fit_to_blob
+                )
             },
         )
         if chosen == EXIT_TOOL:
@@ -574,6 +584,10 @@ class CanvasInteraction:
             self._roi_creation.add_circle(x, y)
         elif chosen == ADD_RECTANGLE:
             self._roi_creation.add_rectangle(x, y)
+        elif chosen == FIT_CIRCLE:
+            self._roi_creation.add_fitted("circle")
+        elif chosen == FIT_RECTANGLE:
+            self._roi_creation.add_fitted("rectangle")
         elif chosen == SELECT_ROIS_IN_SELECTION:
             self.select_rois_in_selection()  # (Lock / Unlock are handled in `_context_menu`)
         elif chosen in (ADD_SELECTION_ONE, ADD_SELECTION_BLOBS):
