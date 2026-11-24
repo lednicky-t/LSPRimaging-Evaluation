@@ -578,7 +578,7 @@ class RoiToolbox(QObject):
 
     @instrumented("RoiToolbox.add_roi")
     def add_roi(self, x: float, y: float, *, sample_diameter_px: float = 20.0) -> int:
-        """Manually place one ROI at (x, y) - the click-to-add tool. Not in
+        """Manually place one ROI at (x, y) - the right-click menu's Add ROI > Circle. Not in
         the original scaffold's stub list (a real gap: there was no command
         for the old app's `_add_roi_at`, the single most basic way to
         populate the toolbox short of running detection). IDs are already

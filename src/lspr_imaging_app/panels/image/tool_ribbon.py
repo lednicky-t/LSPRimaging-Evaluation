@@ -9,15 +9,9 @@ tools", "Mask", "Histogram", "ROIs" - and embeds that instead. "Mask" holds
 `MaskOverlayControls` (show/hide + color + transparency for the mask-overlay
 tint) - it used to share "Image tools" with `TransformsSection`, separated
 by a vertical divider, until it got its own tab (2026-10-01, maintainer
-request - keep the mask icons out of "Image tools"). `CanvasToolsBar`
-(`canvas_tools.py`) is unchanged and is now just the "ROIs" category's
-content widget: Select and Add ROI are both ROI actions (Select's own
-tooltip is "Left-click an ROI to select it, drag to move it"), so they
-landed under "ROIs" rather than the more generic "Image tools" - a labeling
-call, easy to revisit, not a behavior change; `panel.py` still reaches the
-same `CanvasToolsBar` instance through its own `_canvas_tools` attribute,
-so nothing that already drives its buttons directly (tests included) needed
-to change.
+request - keep the mask icons out of "Image tools"). (The "ROIs" category once held
+the Image panel's own Select / Add ROI bar, `CanvasToolsBar`; it was deleted
+2026-11-24, see `canvas_tools.py`.)
 
 **"Image tools" holds a second `TransformsSection` instance** (2026-09-30,
 maintainer request - "duplicate transform tools and put them in image
@@ -40,16 +34,12 @@ sub-tabs within the bottom row) are not built - the maintainer's plan is to
 add them once a category actually has enough tools to need grouping within
 itself, not to guess at that structure now.
 
-**"ROIs" holds the canvas tools plus how the ROI circles are drawn**
-(2026-10-07, maintainer request): `RoiOverlayControls` twice (show/hide, colour
-and transparency for the sample circles, and the same for the reference
-rings) and a toggle for the ROI labels, each a captioned group beside the
-Select / Add tools. Display-only; `ImagePanel` owns the values.
+**"ROIs" holds the ROI tab** (`roi_tab.py`: scope, Array, Groups, selection lock).
+Display-only; `ImagePanel` owns the values.
 
 **The bottom row is a fixed height** regardless of which category is
-showing (`_ROW_HEIGHT` - the tallest of `CanvasToolsBar`'s,
-`TransformsSection`'s, and the "Mask" tab's captioned-icon-groups' own
-natural heights), so switching tabs never resizes the Image panel's top bar
+showing (`_ROW_HEIGHT` - the taller of `TransformsSection`'s and the
+captioned-icon-groups' own natural heights), so switching tabs never resizes the Image panel's top bar
 - `QStackedWidget` would otherwise report whichever page happens to be the
 tallest.
 
@@ -87,9 +77,8 @@ from lspr_ui import GuiTheme, get_active_theme
 from ..ribbon_group import ribbon_separator
 from ..ribbon_icon_size import CAPTIONED_GROUP_HEIGHT as _CAPTIONED_GROUP_ROW_HEIGHT
 from .transforms_settings import ROW_HEIGHT as _TRANSFORMS_ROW_HEIGHT
-from .canvas_tools import _BAR_MARGIN, _BUTTON_SIZE
+from .canvas_tools import _BAR_MARGIN
 
-_CANVAS_TOOLS_ROW_HEIGHT = _BUTTON_SIZE + 2 * _BAR_MARGIN
 # The "Mask" and "Histogram" tabs' captioned icon groups (`ribbon_group.py`'s
 # `labeled_icon_group`, 2026-10-02) each carry a small caption under their
 # icons: icon row (the ribbon's one icon-button size) + 2px group spacing +
@@ -101,11 +90,10 @@ _CANVAS_TOOLS_ROW_HEIGHT = _BUTTON_SIZE + 2 * _BAR_MARGIN
 # every tab's content is a captioned group row (38 px with 24 px icons), the
 # "Image tools" tab's `TransformsSection` included: it used to add a 4 px margin
 # on every side (50 px then 46 px), which made it the tallest and left every
-# other tab 8 px of empty room below its captions. `CanvasToolsBar` (26 px) is
-# shorter. Shorter content sits at the top of the extra room - see module
-# docstring for why one fixed height for every category, not a per-category
-# one, is the point.
-_ROW_HEIGHT = max(_CANVAS_TOOLS_ROW_HEIGHT, _TRANSFORMS_ROW_HEIGHT, _CAPTIONED_GROUP_ROW_HEIGHT)
+# other tab 8 px of empty room below its captions. Shorter content sits at the top
+# of the extra room - see module docstring for why one fixed height for every
+# category, not a per-category one, is the point.
+_ROW_HEIGHT = max(_TRANSFORMS_ROW_HEIGHT, _CAPTIONED_GROUP_ROW_HEIGHT)
 ROI_TAB = "ROIs"  # the ROI tab: the canvas ROI gestures (rubber-band, right-drag move, right-click menu) are live only here
 _TAB_HEIGHT = 20
 _TAB_FONT_SIZE_PX = 11
@@ -320,9 +308,7 @@ class ImageToolRibbon(QWidget):
         """Re-applies the tab strip's QSS (checked/hover state is handled
         by the stylesheet's own pseudo-selectors, not re-applied per click -
         see `_tab_button_stylesheet`). Content widgets are themed by
-        whoever owns them (`panel.py` themes `CanvasToolsBar` directly
-        through its own `_canvas_tools` reference); this method only
-        touches the tabs themselves."""
+        whoever owns them; this method only touches the tabs themselves."""
         self._theme = theme
         for name in self._category_names:
             self._refresh_tab(name)

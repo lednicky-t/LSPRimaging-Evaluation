@@ -79,11 +79,6 @@ _TOOL_CONTROLS: dict[ImageTool | None, tuple[Control, ...]] = {
         Control("Esc", "leave the tool (the selection stays)"),
         Control("General > All", "remove the selection - editing tools work everywhere again"),
     ),
-    ImageTool.ADD_ROI: (
-        Control("Left-click", "place a new ROI at the cursor - stays active for placing several in a row"),
-        Control("Right-click", "menu with Exit tool"),
-        Control("Esc", "leave the tool"),
-    ),
 }
 
 

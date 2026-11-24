@@ -254,7 +254,7 @@ class HistogramPlot(QWidget):
         # `theme.compact_icon_inner/outer` default (22/26px): that token is
         # used elsewhere in the app for toolbar-row buttons with room to
         # spare, but the Image panel's own floating-overlay icons (crop's
-        # apply checkmark, the canvas tools bar, its cursor/"i" icons - see
+        # apply checkmark, the cursor/"i" icons - see
         # `style_bar_icon_button`'s own docstring) are deliberately smaller
         # (16/22px) to read as compact corner chrome, not a second toolbar.
         # `style_bar_icon_button` is that one shared place the Image panel

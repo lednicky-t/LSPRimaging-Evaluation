@@ -275,7 +275,6 @@ class CanvasInteraction:
             ImageTool.MEASURE: self._click_measure,
             ImageTool.CROP: self._click_crop,
             ImageTool.SELECT_AREA: lambda pos, btn: self._click_select_area(pos, btn, modifiers),
-            ImageTool.ADD_ROI: self._click_add_roi,
         }
         tool = self._active_tool.active()
         handler = handlers.get(tool) if tool is not None else None
@@ -364,20 +363,6 @@ class CanvasInteraction:
         point = self._plot.vb.mapSceneToView(scene_pos)
         assert self._wand_click is not None
         self._wand_click(float(point.x()), float(point.y()), how)
-
-    def _click_add_roi(self, scene_pos: object, button: object) -> None:
-        if not self._in_view(scene_pos):
-            return
-        if button == Qt.MouseButton.LeftButton:
-            p = self._plot.vb.mapSceneToView(scene_pos)
-            if self.in_selection(float(p.x()), float(p.y())):
-                self._roi_creation.add_picked(float(p.x()), float(p.y()))
-            elif self._area_selection.has_lock() and not self._area_selection.has_selection():
-                self._notify("ROI not added: it is outside the lock (Unlock in the selection toolbar to place it there).")
-            else:
-                self._notify("ROI not added: it is outside the selection (Deselect to place it anywhere).")
-        elif button == Qt.MouseButton.RightButton:
-            self._show_add_roi_context_menu(scene_pos)
 
     def _click_select(self, event: object, scene_pos: object, button: object) -> None:
         """No tool active: select the ROI under the cursor. On the ROIs tab a
@@ -534,16 +519,6 @@ class CanvasInteraction:
             self._apply_crop()
         elif chosen == "Cancel crop":
             self._active_tool.set_active(ImageTool.CROP, False)
-
-    def _show_add_roi_context_menu(self, scene_pos: object) -> None:
-        """Right-click while Add ROI is active: a menu with a single "Exit
-        tool" action, always enabled - same shape as Rotate/Measure's own
-        "Cancel ..." menus (`_show_rotate_context_menu`/`_show_measure_
-        context_menu`), just not labeled "Cancel" since there is no
-        in-progress point to drop - each click here is already a complete,
-        independent action."""
-        if self._context_menu([(EXIT_TOOL, True)], scene_pos) == EXIT_TOOL:
-            self._active_tool.set_active(ImageTool.ADD_ROI, False)
 
     def _show_select_area_context_menu(self, scene_pos: object) -> None:
         """Right-click while a selection tool is armed: "Select ROIs in selection" (2026-11-15, maintainer request: the

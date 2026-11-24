@@ -1,11 +1,11 @@
 """Esc leaves the active canvas tool (2026-11-19, maintainer: "make every tool exit by Esc, add it as a shortcut").
 
-Every canvas tool is an `ImageTool` of the shared `ActiveToolModule`: Rotate, Crop, Measure, Add ROI, and SELECT_AREA, which is the whole selection toolbar
+Every canvas tool is an `ImageTool` of the shared `ActiveToolModule`: Rotate, Crop, Measure, and SELECT_AREA, which is the whole selection toolbar
 (Rectangle, Lasso, Wand, Draw, Histogram range, Threshold, Local contrast). One key, ``tools.cancel`` (`shortcuts.py`), leaves whichever is on.
 
 **Esc in two steps.** The first Esc drops what the tool is in the middle of (Rotate's / Measure's first point, Crop's edit that is not applied yet:
 `CanvasInteraction.handle_key`, which did that on its own before); the next Esc leaves the tool (`ActiveToolModule.set_active(tool, False)`: the same as the
-right-click menu's "Exit tool" / "Cancel ...", and as a second click on the tool's button). A tool with nothing in progress (every selection tool, Add ROI)
+right-click menu's "Exit tool" / "Cancel ...", and as a second click on the tool's button). A tool with nothing in progress (every selection tool)
 is left by the first Esc. Leaving a tool never changes the image or the selection (the selection stays); a selection drag that is in progress is dropped
 (`ImagePanel._on_active_tool_changed` cancels the gesture).
 

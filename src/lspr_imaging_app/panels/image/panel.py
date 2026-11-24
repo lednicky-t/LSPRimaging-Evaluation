@@ -696,8 +696,6 @@ class ImagePanel(QWidget):
         self._roi_creation.status.connect(self._on_tool_status)
         self._roi_tab.link_requested.connect(self._roi_creation.link)
         self._roi_tab.unlink_requested.connect(self._roi_creation.unlink)
-        self._roi_tab.shape_changed.connect(self._roi_creation.set_picked_shape)
-        self._roi_creation.set_picked_shape(self._roi_tab.shape_picker.shape())
         self._interaction = CanvasInteraction(
             plot=self._plot, view=self._view, menu_parent=self,
             active_tool=self._active_tool, roi_toolbox=self._roi_toolbox, selection=self._selection,
@@ -1928,8 +1926,8 @@ class ImagePanel(QWidget):
 
         Rendered at `_ICON_SIZE * 2` and displayed at `_ICON_SIZE`
         (`style_bar_icon_button`'s `setIconSize`) - the same 2x-render-for-
-        crispness convention `_ToolGroupButton.refresh` already uses for
-        Select/Add ROI's icons, not a fresh choice."""
+        crispness convention `_ToolGroupButton.refresh` uses, not a fresh
+        choice."""
         theme = get_active_theme()
         render_size = _ICON_SIZE * 2
         self._tool_info.setIcon(load_tabler_icon("info-circle", color=theme.text_muted, size=render_size))

@@ -140,7 +140,7 @@ BINDINGS: tuple[Binding, ...] = (
     # -- tools of the Image view -----------------------------------------------------------------
     Binding(
         "tools.cancel", "Image tools",
-        "Leave the tool that is on (Rotate, Crop, Measure, Add ROI, Rectangle, Lasso, Wand, Draw, Histogram range, Threshold, Local contrast): the first Esc drops what the "
+        "Leave the tool that is on (Rotate, Crop, Measure, Rectangle, Lasso, Wand, Draw, Histogram range, Threshold, Local contrast): the first Esc drops what the "
         "tool is in the middle of (a placed first point, a crop that is not applied), the next one leaves it. Not while a number or text field has the keyboard",
         keys=("Esc",), scope=_TOOLS,
     ),

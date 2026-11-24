@@ -1,22 +1,18 @@
-"""Which canvas tool is on right now (rotate / crop / measure / add ROI).
+"""Which canvas tool is on right now (rotate / crop / measure / select area).
 
-One tiny shared object, so the Workflow panel's Transforms buttons, the
-Image panel's own canvas-tools bar (``panels/image/canvas_tools.py``, added
-2026-09-30), and the Image panel's click handling all agree on the mode
+One tiny shared object, so the Image tools tab's buttons, the selection
+toolbar, and the Image panel's click handling all agree on the mode
 without any of them knowing about each other - the rewrite's replacement
 for the stable app's ``window._active_tool`` string, which every part of
 the main window read and wrote directly.
 
-**One shared state machine for two visually-separate toolbars, on purpose**
-(2026-09-30, maintainer's direction): Rotate/Crop/Measure (Transforms row,
-Workflow panel) resample the actual pixel grid - a genuinely different
-category from ``ADD_ROI`` (Image panel's own bar), which only places a
-record, no pixel data touched. They stay visually separate for that reason,
-but only one canvas gesture can ever be in progress at a time regardless of
-which toolbar it came from - you cannot add ROIs while Crop's preview is
-showing the uncropped frame with the ROI overlay hidden. Splitting them into
-two enums would let that invariant silently break; one shared enum makes it
-structural instead.
+**One shared state machine for several toolbars, on purpose**
+(2026-09-30, maintainer's direction): only one canvas gesture can ever be
+in progress at a time regardless of which toolbar it came from. Splitting
+the tools into several enums would let that invariant silently break; one
+shared enum makes it structural instead. (An ``ADD_ROI`` click-to-add tool
+was the fourth member until it was deleted 2026-11-24: no screen could turn
+it on any more. A ROI is added from the right-click menu.)
 
 **At most one tool is active.** Activating a tool switches the previous one
 off (and emits once, with the new state), which is what keeps e.g. the
@@ -44,7 +40,6 @@ class ImageTool(enum.Enum):
     ROTATE = "rotate"
     CROP = "crop"
     MEASURE = "measure"
-    ADD_ROI = "add_roi"
     SELECT_AREA = "select_area"  # drag out the rectangle/lasso set by AreaSelectionModule.mode()
 
 

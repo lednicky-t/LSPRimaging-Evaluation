@@ -1,12 +1,15 @@
 """The Image panel's "ROIs" ribbon tab (split out of `panel.py` 2026-10-10).
 
-Screen purpose: choose how ROIs look on the image, where ROI edits land, what
-shape a new ROI has, create / arrange ROIs in arrays and groups, and lock the ROI selection.
+Screen purpose: choose how ROIs look on the image, where ROI edits land, create / arrange ROIs in arrays
+and groups, and lock the ROI selection.
 
 Layout (one ribbon row, captioned groups, thin separators between them):
 
-    [display menu] | [scope toggle] | [shape picker] | [array controls] | [group controls] | [lock]
-       Display          Scope            Shape             Array              Groups          Selection
+    [display menu] | [scope toggle] | [array controls] | [group controls] | [lock]
+       Display          Scope             Array              Groups          Selection
+
+(The Shape picker of this row was deleted 2026-11-24: it only steered the click-to-add ROI tool, which no
+screen could turn on any more. A ROI of a given shape is added from the right-click menu, Add ROI.)
 
 **Selection** (2026-11-16, maintainer request): one lock button. While it is on, clicks on the image and in the ROI table no longer change
 which ROIs are selected (`SelectionModule.set_roi_selection_locked`, which says what is blocked and what is not); the same switch is the
@@ -54,7 +57,6 @@ from .roi_label_size_box import RoiLabelSizeBox
 from .roi_overlay import RoiOverlay
 from .roi_overlay_controls import RoiOverlayControls
 from .roi_scope_toggle import RoiScopeToggle
-from .roi_shape_picker import RoiShapePicker
 
 
 class RoiTab(QWidget):
@@ -69,7 +71,6 @@ class RoiTab(QWidget):
     # The labels button's icon was redrawn (toggle, theme change, restore); the View tab's copy follows it.
     labels_icon_refreshed = pyqtSignal()
     group_labels_changed = pyqtSignal()
-    shape_changed = pyqtSignal(str)  # the Shape picker's choice: "circle" or "rectangle" (what the Add ROI tool places)
     status = pyqtSignal(str)  # a one-line result from the Array / Groups actions
     auto_crop_readiness_changed = pyqtSignal(object)  # re-emitted from `ArrayActions` for the Image tools tab
 
@@ -123,9 +124,6 @@ class RoiTab(QWidget):
         display_group, self._display_caption = labeled_icon_group(self, self._display_menu, "Display")
         self._scope_toggle = RoiScopeToggle(roi_scope, self)
         scope_group, self._scope_caption = labeled_icon_group(self, self._scope_toggle, "Scope")
-        self._shape_picker = RoiShapePicker(self)
-        self._shape_picker.shape_changed.connect(self.shape_changed)
-        shape_group, self._shape_caption = labeled_icon_group(self, self._shape_picker, "Shape")
         self._array_controls = ArrayControls(geometry, self)
         array_group, self._array_caption = labeled_icon_group(self, self._array_controls, "Array")
         self._array_actions = ArrayActions(
@@ -201,7 +199,7 @@ class RoiTab(QWidget):
         # stays built but hidden, because it holds the original Sample / Reference / Labels widgets: they are the source
         # of truth that the View ribbon copies (`ViewTab._copy_roi_controls`) and that the panel restores into.
         display_group.setVisible(False)
-        sections = (scope_group, shape_group, array_group, groups_group, selection_group)
+        sections = (scope_group, array_group, groups_group, selection_group)
         self._separators = [ribbon_separator(self) for _ in sections[1:]]
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -247,10 +245,6 @@ class RoiTab(QWidget):
     @property
     def labels_button(self) -> QToolButton:
         return self._labels_button
-
-    @property
-    def shape_picker(self) -> RoiShapePicker:
-        return self._shape_picker
 
     @property
     def link_button(self) -> QToolButton:
@@ -316,7 +310,6 @@ class RoiTab(QWidget):
         self._label_placement_picker.bind_ui_state(store, "image/roi_label_placement")
         store.bind("image/roi_label_point_size", self._label_size_box)
         self._group_controls.label_menu.bind_ui_state(store)
-        self._shape_picker.bind_ui_state(store, "image/roi_shape")
         store.bind("image/roi_show_links", self._links_button)
         # (The lock is not bound here: it belongs to the session, next to the selection it holds - `SessionState.selection_locked`.)
 
@@ -384,7 +377,6 @@ class RoiTab(QWidget):
         self._label_size_box.refresh_theme()
         self._display_menu.refresh_theme(theme)
         self._group_controls.refresh_theme()
-        self._shape_picker.refresh_theme()
         self._array_controls.refresh_theme()
         self._scope_toggle.refresh_theme(theme)
         for separator in self._separators:
@@ -392,7 +384,6 @@ class RoiTab(QWidget):
         for caption in (
             self._display_caption,
             self._scope_caption,
-            self._shape_caption,
             self._array_caption,
             self._groups_caption,
             self._selection_caption,

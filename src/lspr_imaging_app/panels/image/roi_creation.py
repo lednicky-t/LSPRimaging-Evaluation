@@ -59,7 +59,6 @@ class RoiCreation(QObject):
         self._current_affine = current_affine
         self._to_reference = to_reference
         self._dialog_parent = action_parent
-        self._picked_shape = "circle"  # the Shape picker's choice: what the Add ROI tool places
         # Ctrl+L / Ctrl+K work from anywhere in the application (the ROI table is another dock); they always run, and say why when they cannot.
         self.link_action = QAction("Link references", action_parent)
         self.unlink_action = QAction("Unlink", action_parent)
@@ -92,20 +91,6 @@ class RoiCreation(QObject):
         """A `DEFAULT_RECTANGLE_PX` square, not turned, centred on the display point ``(x, y)``, selected."""
         shape = Rectangle(DEFAULT_RECTANGLE_PX, DEFAULT_RECTANGLE_PX, 0.0)
         self._run("Add rectangle ROI", lambda: self._select({self._toolbox.add_shaped_roi(*self._to_reference(x, y), shape)}) or None)
-
-    def set_picked_shape(self, shape: str) -> None:
-        """The Shape picker's choice (``"circle"`` or ``"rectangle"``): what a click of the Add ROI tool places."""
-        self._picked_shape = shape
-
-    def add_picked(self, x: float, y: float) -> None:
-        """What the Add ROI tool does on a click at the view point ``(x, y)``: the picked shape, centred there. The point goes through ``to_reference`` like the
-        right-click menu's (cell shift off, then the frame's affine inverted), so the ROI is drawn under the pointer; until 2026-11-18 the tool stored the raw
-        pointer position, which is half a pixel off the pixels the ROI measures (and the affine's shift off, away from the reference wavelength)."""
-        if self._picked_shape == "rectangle":
-            shape = Rectangle(DEFAULT_RECTANGLE_PX, DEFAULT_RECTANGLE_PX, 0.0)
-            self._run("Add rectangle ROI", lambda: self._toolbox.add_shaped_roi(*self._to_reference(x, y), shape) and None)
-        else:
-            self._run("Add ROI", lambda: self._toolbox.add_roi(*self._to_reference(x, y)) and None)
 
     def has_pixel_selection(self) -> bool:
         """There is an area selection (rectangle, lasso, wand, brush) to make ROIs from."""

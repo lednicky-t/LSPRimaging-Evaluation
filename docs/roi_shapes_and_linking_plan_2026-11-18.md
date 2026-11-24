@@ -291,7 +291,8 @@ What exists:
 - `panels/image/roi_creation.py` (`RoiCreation`: the one object between menu / buttons / keys and the toolbox; a refusal goes to the status bar; the
   display selection is carried back into the reference frame by the inverse chromatic affine), `roi_context_menu.py` (new entries; `ADD_ROI` stays the
   "Circle" choice), `rectangle_size_dialog.py`, ROIs tab Link / Unlink / Links buttons, Shape picker (Circle, Rectangle; remembered; sets what the Add ROI
-  tool places).
+  tool places). **(The Shape picker, the click-to-add Add ROI tool and `ImageTool.ADD_ROI` were deleted 2026-11-24: the tool's bar had been off the
+  screen since 2026-10-07, so nothing could arm it and the picker steered nothing. Add ROI > Circle / Rectangle is the right-click menu's.)**
 - Display: dashed **link lines** from each sample to its references (the Links eye, on by default, remembered), the label **"R7"** for a reference ROI
   (samples keep their plain number), a reference ROI wears the reference colour and has no border drawn; the table's first column shows "R7" with a tooltip
   (what a sample is measured against, or which samples use a reference), the Shape column says "Rectangle" with a pictogram and the size in its tooltip.
