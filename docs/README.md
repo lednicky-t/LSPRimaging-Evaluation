@@ -67,6 +67,7 @@ From pixels to numbers, and how the numbers are shown.
 
 The ROI model, the ROI table, arrays, and tuning ROI positions.
 
+- [`rim_size_and_noise_2026-11-24.md`](rim_size_and_noise_2026-11-24.md): Rim area and rim gap vs the noise and bias of the final value, measured on LbL ROI 75 and 12 Bulk ROIs (2026-11-24); scripts in `tools/rim_size_study/`
 - [`roi_system_roadmap.md`](roi_system_roadmap.md): ROI System Roadmap
 - [`roi_timeline_design_2026-10-08.md`](roi_timeline_design_2026-10-08.md): ROI geometry timeline (Persistent / Individual scope): design (2026-10-08)
 - [`roi_table_audit_2026-10-06.md`](roi_table_audit_2026-10-06.md): ROI / Group table audit: stable app vs rewrite (2026-10-06)
