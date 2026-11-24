@@ -4,7 +4,7 @@ Three actions, all returning an `ArrayResult` that the ROI toolbox can store:
 
 - `detect_array`: **Auto** (nothing given) or **Semi** (some of diameter / rows / cols / pitch given): find
   the array in the image, size the sample disks and the reference rings. The priors are checked against the
-  result (warnings); the search itself is not narrowed by them yet.
+  result (warnings); the search itself is not narrowed by rows / columns / pitch yet (a given diameter does set the search size).
 - `refine_array`: take existing ROIs (an array the user has placed and labelled), move each to the best
   position near where it is, and re-measure the sizes.
 - `place_array`: **Manual**: stamp a lattice from the typed numbers. No image needed; with an image and
@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 from scipy.spatial import cKDTree
@@ -319,8 +319,6 @@ def _contrast(image: np.ndarray, rough_diameter_px: float, valid_mask: np.ndarra
 
 
 def _as_ratio(ring: RingParams) -> RingParams:
-    from dataclasses import replace
-
     return replace(ring, inner_mode="ratio")
 
 
@@ -375,8 +373,6 @@ def _size_all(
 
     ring_params = settings.ring
     if ring_params.max_radius_px is None:
-        from dataclasses import replace
-
         ring_params = replace(ring_params, max_radius_px=pitch_limit)
     ring_indices = np.flatnonzero(ok)
     rings: list[SpotRing] = measure_rings(contrast, centers[ring_indices], sample[ring_indices], ring_params, valid)
@@ -404,8 +400,6 @@ def _size_all(
 
 
 def _with_limit(edge: EdgeSizeParams, limit: float) -> EdgeSizeParams:
-    from dataclasses import replace
-
     return replace(edge, max_radius_px=limit)
 
 

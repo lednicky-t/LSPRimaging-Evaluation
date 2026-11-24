@@ -581,7 +581,7 @@ class ChromaticCorrectionTab(QWidget):
             return
         reference = self._resolve_reference()
         if reference is None:
-            self._fail("Choose a reference frame first (Workflow panel, Reference frame).")
+            self._fail("Choose a reference frame first (the Set reference or Find reference button beside the Cube and Wavelength sliders).")
             return
         cube, wavelength = int(reference[0]), float(reference[1])
         if not self._is_spectral(cube, wavelength):

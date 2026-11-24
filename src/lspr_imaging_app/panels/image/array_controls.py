@@ -4,7 +4,7 @@ Display only (CLAUDE.md, `panels/`): this widget holds the controls and turns cl
 panel starts `roi/array_task.ArrayAction`, and `RoiToolbox.place_array` / `refine_rois` store the result.
 Design record: `docs/roi_array_section_audit_2026-10-08.md`.
 
-Row (the ribbon is a fixed-height row): mode (Auto / Semi / Manual), Run, Refine, gear (settings menu).
+Row (the ribbon is a fixed-height row): mode (Auto / Semi / Manual), Run, Refine, Reorder IDs (by rows / by columns), gear (settings menu).
 - **Auto**: nothing to enter. **Semi**: any of rows, columns, disk diameter, pitch typed in the settings
   menu is checked against the result (0 = "auto" = not given). **Manual**: everything typed (rows,
   columns, disk diameter, pitch, rotation, anchor); "Snap to image" then moves every node onto its spot.
@@ -75,19 +75,19 @@ OVERLAP_INFO = (
 )
 
 
-def _find_array_icon(dots_color: str, plus_color: str) -> QIcon:
-    """3x3 dots (an array) with a thick plus over the top-right corner: "find / add an array"."""
+def _find_array_icon(dots_color: str, glass_color: str) -> QIcon:
+    """3x3 dots (an array) with a magnifying glass over the bottom-right corner: "find the array"."""
     size = ICON_SIZE * 2
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
     painter.drawPixmap(0, 0, load_tabler_icon("grid-dots", color=dots_color, size=size, stroke_width=2.6).pixmap(size, size))
-    outline = load_tabler_icon("plus", color="#000000", size=size, stroke_width=4.6).pixmap(size, size)  # thin black border
-    plus = load_tabler_icon("plus", color=plus_color, size=size, stroke_width=3.4).pixmap(size, size)
-    corner = size * 4 // 5
-    target = QRect(size - corner + size // 10, -size // 10, corner, corner)
+    outline = load_tabler_icon("search", color="#000000", size=size, stroke_width=4.6).pixmap(size, size)  # thin black border
+    glass = load_tabler_icon("search", color=glass_color, size=size, stroke_width=3.4).pixmap(size, size)
+    big = size * 7 // 10
+    target = QRect(size - big + size // 10, size - big + size // 10, big, big)
     painter.drawPixmap(target, outline)
-    painter.drawPixmap(target, plus)
+    painter.drawPixmap(target, glass)
     painter.end()
     return QIcon(pixmap)
 
@@ -110,26 +110,23 @@ def auto_value_menu(spin: QAbstractSpinBox) -> QMenu:
     return menu
 
 
-class _AutoSpinBox(QSpinBox):
+class _AutoMenuMixin:
+    """The right-click menu of a spin box whose lowest value reads "auto": the line edit's usual entries plus Set to auto (`auto_value_menu`)."""
+
+    def contextMenuEvent(self, event: QContextMenuEvent | None) -> None:
+        if event is None:
+            return
+        menu = auto_value_menu(self)  # type: ignore[arg-type]  # (mixed into a `QAbstractSpinBox`)
+        menu.exec(event.globalPos())
+        menu.deleteLater()
+
+
+class _AutoSpinBox(_AutoMenuMixin, QSpinBox):
     """A whole-number field whose lowest value reads "auto"; its right-click menu has Set to auto."""
 
-    def contextMenuEvent(self, event: QContextMenuEvent | None) -> None:
-        if event is None:
-            return
-        menu = auto_value_menu(self)
-        menu.exec(event.globalPos())
-        menu.deleteLater()
 
-
-class _AutoDoubleSpinBox(QDoubleSpinBox):
+class _AutoDoubleSpinBox(_AutoMenuMixin, QDoubleSpinBox):
     """The same for a length (`LengthField`'s spin box) whose lowest value reads "auto"."""
-
-    def contextMenuEvent(self, event: QContextMenuEvent | None) -> None:
-        if event is None:
-            return
-        menu = auto_value_menu(self)
-        menu.exec(event.globalPos())
-        menu.deleteLater()
 
 
 class LengthField(QWidget):
@@ -376,6 +373,8 @@ class ArrayControls(QWidget):
         super().__init__(parent)
         self._running = False
         self._selected = 0
+        self._saved_getters: dict[str, Callable[[], object]] = {}  # name -> current value, filled by `bind_ui_state`
+        self._store: UiStateStore | None = None
         self._mode = ArrayModePicker(_MODE_TIPS, self)
         self._mode.mode_changed.connect(self._on_mode_changed)
 
@@ -558,12 +557,13 @@ class ArrayControls(QWidget):
         for name, (_getter, setter) in spec.items():
             setter(read(store, ARRAY_KEYS[name]))
         p._refresh_all_auto()  # (a length restored with `set_value_px` announces nothing)
-        self._pending_store = (store, {name: getter for name, (getter, _s) in spec.items()})
-        self.changed.connect(self._save)  # only now: restoring must not save what it just read
+        if self._store is None:  # (a second call only re-reads the store; the save is connected once)
+            self.changed.connect(self._save)  # only now: restoring must not save what it just read
+        self._store = store
+        self._saved_getters = {name: getter for name, (getter, _s) in spec.items()}
 
     def _save(self) -> None:
-        store, getters = getattr(self, "_pending_store", (None, {}))
-        if store is None:
+        if self._store is None:
             return
-        for name, getter in getters.items():
-            store.set(ARRAY_KEYS[name].key, getter())
+        for name, getter in self._saved_getters.items():
+            self._store.set(ARRAY_KEYS[name].key, getter())

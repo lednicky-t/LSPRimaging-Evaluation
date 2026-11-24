@@ -25,7 +25,8 @@ Rules (maintainer, 2026-10-08)
   (`transforms_settings.py`). Each dependency is measured, never remembered: the lattice tilt from the ROI centres
   as they are now (`chunk_plan.lattice_tilt_deg`, within `LEVEL_TOLERANCE_DEG`), the ROIs from the toolbox, the
   chromatic correction from its fitted models. So all three survive a session reload and follow later edits.
-- Scope toggle (Persistent / Individual, like the Mask): not built yet; every edit is Persistent, as ROIs always were.
+- Scope (Persistent / Individual, like the Mask): a refine's edit lands where the ROIs tab's scope toggle says (`edit_target`); placing or detecting an array
+  is always a base (Persistent) change, since it makes or replaces ROIs.
 
 Positions: the thread works on the displayed image of that frame; results are mapped back to the reference
 frame (inverse of the chromatic affine of that frame, the identity at the reference wavelength) before they are
@@ -146,7 +147,6 @@ class ArrayActions(QObject):
         # measure the tilt on the image, so its result stands in until a lattice can confirm it - and only while
         # the rotation is still the one it set.
         self._levelled_at: float | None = None
-        self._last_request: dict | None = None
         self._edit_target = edit_target
 
         controls.run_requested.connect(self._on_run)
@@ -231,7 +231,7 @@ class ArrayActions(QObject):
             return
         reference = self._resolve_reference()
         if reference is None:
-            self._fail_message("Choose a reference frame first (Workflow panel, Reference frame).")
+            self._fail_message("Choose a reference frame first (the Set reference or Find reference button beside the Cube and Wavelength sliders).")
             return
         wavelength = float(reference[1])
         if is_dark_frame_wavelength(wavelength):
@@ -247,20 +247,17 @@ class ArrayActions(QObject):
             self._selection.set_wavelength(wavelength)
         cube = int(self._selection.current_cube())
         settings = self._controls.settings()
-        selected = tuple(sorted(self._selection.selected_roi_ids()))
-        request: dict = dict(
-            settings=settings, cube_index=cube, wavelength_nm=wavelength, roi_ids=selected, grid=grid,
-        )
+        roi_ids = tuple(sorted(self._selection.selected_roi_ids()))
         centers = diameters = None
         if kind == REFINE:
             affine = np.asarray(self._chromatic.affine_for((cube, wavelength)), dtype=np.float64)
-            keep = [roi for roi in self._toolbox.rois_at(cube) if roi.area_roi_id in set(selected)]
+            wanted = set(roi_ids)
+            keep = [roi for roi in self._toolbox.rois_at(cube) if roi.area_roi_id in wanted]
             positions = self._toolbox.display_positions((cube, wavelength), affine)
-            ids_all = [roi.area_roi_id for roi in self._toolbox.rois()]  # same order as `rois_at`
-            centers = np.array([positions[ids_all.index(roi.area_roi_id)] for roi in keep], dtype=np.float64)
+            row_of = {roi.area_roi_id: row for row, roi in enumerate(self._toolbox.rois())}  # `positions` has one row per ROI, in this order
+            centers = np.array([positions[row_of[roi.area_roi_id]] for roi in keep], dtype=np.float64)
             diameters = np.array([nominal_diameter(roi.shape, roi.center_x, roi.center_y) for roi in keep], dtype=np.float64)
-            request["roi_ids"] = tuple(roi.area_roi_id for roi in keep)
-        self._last_request = dict(kind=kind, **request)
+            roi_ids = tuple(roi.area_roi_id for roi in keep)
         self.status.emit("Array: working...")
         self._action.start(
             kind,
@@ -270,7 +267,7 @@ class ArrayActions(QObject):
             geometry=self._geometry.settings(),
             background=self._background.settings(),
             load_plane=self._load_plane,
-            roi_ids=request["roi_ids"],
+            roi_ids=roi_ids,
             centers_xy=centers,
             sample_diameters_px=diameters,
             grid=grid,
@@ -313,11 +310,7 @@ class ArrayActions(QObject):
     def _chromatic_on(self) -> bool:
         """The correction is switched on and something is fitted - the cheap question (`has_fitted_models`), the
         only one the readiness check needs."""
-        return (
-            self._chromatic is not None
-            and bool(self._chromatic.settings().chromatic_correction_enabled)
-            and bool(self._chromatic.has_fitted_models)
-        )
+        return bool(self._chromatic.settings().chromatic_correction_enabled) and bool(self._chromatic.has_fitted_models)
 
     @staticmethod
     def _centers_of(rois: Sequence) -> np.ndarray:
@@ -341,7 +334,7 @@ class ArrayActions(QObject):
             default_border=settings.default_border(),
         )
         centers = self._centers_of(rois)
-        reach = cp.affine_reach(centers, self._chromatic.fitted_affines() if self._chromatic is not None else None)
+        reach = cp.affine_reach(centers, self._chromatic.fitted_affines())
         return centers, cp.grow_boxes(boxes, centers, *reach)
 
     def _schedule_auto_crop_readiness(self, *_args: object) -> None:

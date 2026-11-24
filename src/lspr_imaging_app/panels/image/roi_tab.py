@@ -13,7 +13,7 @@ screen could turn on any more. A ROI of a given shape is added from the right-cl
 
 **Selection** (2026-11-16, maintainer request): one lock button. While it is on, clicks on the image and in the ROI table no longer change
 which ROIs are selected (`SelectionModule.set_roi_selection_locked`, which says what is blocked and what is not); the same switch is the
-"Lock selection" entry of both ROI context menus. A change that was refused says so in the status line (the module's `roi_selection_refused`).
+"Lock ROI selection" entry of both ROI context menus. A change that was refused says so in the status line (the module's `roi_selection_refused`).
 The lock is saved in the session with the selection it holds (schema 1.10) and comes back with it; it is not a remembered UI setting.
 
 Display only (CLAUDE.md "panels/"): the colours and visibility are reported

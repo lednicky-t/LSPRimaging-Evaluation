@@ -92,7 +92,8 @@ def build_roi_tab(panel: ImagePanel) -> QWidget:
     creates: `_roi_tab`
     reads: `_array_action`, `_background`, `_chromatic`, `_dataset`, `_edit_target`, `_geometry`, `_roi_overlay`, `_roi_scope`,
     `_roi_toolbox`, `_selection`, `_transforms_section`
-    calls its methods: `_on_auto_crop_readiness`
+    calls its methods: `_on_auto_crop_readiness`, `_resolve_reference_frame`, `_draw_roi_overlay` and connects the handlers `_on_roi_overlay_changed`,
+    `_on_roi_labels_toggled`, `_on_roi_label_placement_changed`, `_on_group_labels_changed`, `_on_tool_status`, `_on_transforms_navigate`
     """
     panel._roi_tab = RoiTab(
         panel._roi_overlay, panel._roi_scope, panel._geometry, panel._background, panel._chromatic, panel._dataset,
@@ -207,8 +208,6 @@ def build_top_bar(panel: ImagePanel, image_tools_content: QWidget, mask_content:
             ("Image tools", image_tools_content),
             (MASK_TAB, mask_content),
             (ROI_TAB, roi_content),
-            # Empty on purpose (2026-10-03): filled directly here, not in
-            # the Workflow panel (maintainer's plan for chromatic correction).
             (CHROMATIC_TAB, panel._chromatic_tab),
             (BACKGROUND_TAB, panel._background_tab),
             (ANALYSIS_TAB, panel._analysis_tab),
