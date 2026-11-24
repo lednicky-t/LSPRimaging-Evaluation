@@ -160,6 +160,7 @@ from ..domain.roi_links import (
     reference_source,
     samples_linked_to,
 )
+from .clipboard import ClippedRoi, RoiClip
 from .mask_regions import mask_regions
 from .ordering import move_block, renumbering
 from .rasterize import rasterize_reference, rasterize_sample
@@ -641,6 +642,70 @@ class RoiToolbox(QObject):
 
         apply()
         undo_manager.push(FunctionCommand("Add ROI from selection" if len(new_rois) == 1 else f"Add {len(new_rois)} ROIs from selection", undo_fn=revert, redo_fn=apply))
+        return ids
+
+    # -- copy / paste of whole ROIs (2026-11-24) -------------------------------------------------------------------
+
+    def copy_rois(self, roi_ids: Collection[int], *, cube: int | None = None) -> RoiClip:
+        """A `RoiClip` of ``roi_ids`` as they are at ``cube`` (``None``: their base geometry). Changes nothing (no undo step, no signal). An unknown id raises
+        `KeyError`; nothing to copy raises `ValueError`. Links are kept only between ROIs copied together."""
+        rois = self._require_rois(roi_ids)
+        if not rois:
+            raise ValueError("there is no ROI to copy: select one first.")
+        position = {roi.area_roi_id: index for index, roi in enumerate(rois)}
+        geometries = [geometry_at(roi, cube) for roi in rois]
+        xs = [g.center_x for g in geometries]
+        ys = [g.center_y for g in geometries]
+        anchor = ((min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0)
+        items = tuple(
+            ClippedRoi(g, roi.role, tuple(position[i] for i in roi.reference_roi_ids if i in position))
+            for roi, g in zip(rois, geometries, strict=True)
+        )
+        return RoiClip(items, anchor)
+
+    @instrumented("RoiToolbox.paste_rois")
+    def paste_rois(self, clip: RoiClip, x: float, y: float) -> tuple[int, ...]:
+        """New ROIs from ``clip``, the middle of their box on ``(x, y)`` (reference frame, px): one undo step, one signal. They get the next free ids in the
+        clip's order and no group. A circle or a rectangle sits where the arrangement puts it; **a pixel map moves by whole pixels** (`_at_position`), so it can
+        be up to half a pixel from its place and its label point moves with it. Links between ROIs that were copied together are made again between the
+        copies. Returns the new ids."""
+        if not len(clip):
+            raise ValueError("there is nothing to paste: copy a ROI first.")
+        if not (math.isfinite(x) and math.isfinite(y)):
+            raise ValueError(f"the paste position must be finite, got ({x}, {y})")
+        first_id = max(self._rois, default=0) + 1
+        ids = tuple(range(first_id, first_id + len(clip)))
+        new_rois: list[AreaRoi] = []
+        for index, item in enumerate(clip.rois):
+            g = item.geometry
+            placed = self._at_position(g, g.center_x - clip.anchor[0] + x, g.center_y - clip.anchor[1] + y)
+            links = tuple(sorted(ids[k] for k in item.linked_to)) if item.role != ROLE_REFERENCE else ()
+            new_rois.append(
+                AreaRoi(
+                    area_roi_id=ids[index], center_x=placed.center_x, center_y=placed.center_y, shape=placed.shape, border=placed.border,
+                    role=item.role, reference_roi_ids=links,
+                )
+            )
+        linked_samples = tuple(roi.area_roi_id for roi in new_rois if roi.reference_roi_ids)
+
+        def apply() -> None:
+            for roi in new_rois:
+                self._rois[roi.area_roi_id] = roi
+            self._roi_id_counter = itertools.count(first_id + len(new_rois))
+            self.geometry_changed.emit(RoiComputationalChange(roi_ids=ids, reason="added"))
+            if linked_samples:
+                self.links_changed.emit(RoiLinkChange(sample_ids=linked_samples, reason="pasted"))
+
+        def revert() -> None:
+            for roi in new_rois:
+                self._rois.pop(roi.area_roi_id, None)
+            self._roi_id_counter = itertools.count(first_id)
+            self.geometry_changed.emit(RoiComputationalChange(roi_ids=ids, reason="deleted"))
+
+        apply()
+        undo_manager.push(
+            FunctionCommand("Paste ROI" if len(new_rois) == 1 else f"Paste {len(new_rois)} ROIs", undo_fn=revert, redo_fn=apply)
+        )
         return ids
 
     # -- command API: rim pair <-> linked pair (plan 2026-11-19, "Rim pairs, linked pairs, the Type column") ----------

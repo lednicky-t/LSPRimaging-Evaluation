@@ -85,6 +85,20 @@ BINDINGS: tuple[Binding, ...] = (
     Binding(
         "groups.ungroup", "ROIs", "Take the selected ROIs out of their groups (the ROIs stay; a group left empty goes away)", keys=("Ctrl+Shift+G",),
     ),
+    Binding(
+        "roi.copy", "ROIs", "Copy the selected ROIs (their shapes, rims and roles; links between the copied ones); works on the Image panel, not in the ROI table",
+        keys=("Ctrl+C", "Ctrl+Ins"), scope=_VIEW,
+    ),
+    Binding(
+        "roi.paste", "ROIs", "Paste the copied ROIs with the middle of their box on the pointer; the copies become the selection",
+        keys=("Ctrl+V", "Shift+Ins"), scope=_VIEW,
+    ),
+    Binding("roi.delete", "ROIs", "Delete the selected ROIs; works on the Image panel (the ROI table has its own Delete)", keys=("Delete",), scope=_VIEW),
+    Binding(
+        "selection.deselect", "ROIs", "Deselect: drop the ROI selection (unless it is locked) and the area selection (rectangle, lasso, wand, brush)",
+        keys=("Ctrl+D",), scope=_VIEW,
+    ),
+    Binding("roi.select_all", "ROIs", "Select all ROIs (while the ROIs tab of the Image panel is open)", keys=("Ctrl+A",), scope=_VIEW),
     Binding("help.log_console", "Help", "Show or hide the Log Console", keys=("Ctrl+Shift+L",)),
     Binding("help.shortcuts", "Help", "Show the keyboard shortcuts", keys=("F1",)),
     *(

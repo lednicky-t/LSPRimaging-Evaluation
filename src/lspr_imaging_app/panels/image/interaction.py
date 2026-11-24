@@ -45,6 +45,7 @@ from .roi_context_menu import (
     ADD_SELECTION_BLOBS,
     ADD_SELECTION_ONE,
     ADD_TO_GROUP,
+    COPY,
     DELETE,
     DESELECT,
     DESELECT_AREA,
@@ -52,6 +53,7 @@ from .roi_context_menu import (
     LINK,
     MAKE_REFERENCE,
     MAKE_SAMPLE,
+    PASTE,
     REMOVE_CUBE_EDIT,
     RIM_TO_REFERENCE,
     SELECT_GROUP,
@@ -193,6 +195,17 @@ class CanvasInteraction:
 
     def _in_view(self, scene_pos: object) -> bool:
         return bool(self._plot.vb.sceneBoundingRect().contains(scene_pos))
+
+    def pointer_xy(self) -> tuple[float, float] | None:
+        """Where the mouse pointer is on the image (display point), read now; ``None`` when it is not over the image (Ctrl+V pastes there)."""
+        viewport = self._view.viewport()
+        if viewport is None:
+            return None
+        scene_pos = self._view.mapToScene(viewport.mapFromGlobal(QCursor.pos()))
+        if not self._in_view(scene_pos):
+            return None
+        point = self._plot.vb.mapSceneToView(scene_pos)
+        return float(point.x()), float(point.y())
 
     def _set_view_cursor(self, shape: Qt.CursorShape | QCursor | None) -> None:
         """Set the canvas cursor (a standard shape, or a cursor of our own such as the rotate cursor), or drop any custom one (`None`)."""
@@ -421,6 +434,7 @@ class CanvasInteraction:
             can_turn_rim_off=self._roi_creation.can_turn_rim_off(ids),
             can_rim_to_reference=self._roi_creation.can_rim_to_reference(ids),
             can_deselect_area=self._area_selection.has_selection(),
+            paste_count=self._roi_creation.pasted_count(),
             can_remove_cube_edit=any(
                 toolbox.roi_by_id(i).timeline and int(self._selection.current_cube()) in toolbox.roi_by_id(i).timeline.cubes() for i in ids
             ),
@@ -437,6 +451,10 @@ class CanvasInteraction:
             self._roi_creation.add_circle(x, y)
         elif choice.action == ADD_RECTANGLE:
             self._roi_creation.add_rectangle(x, y)
+        elif choice.action == COPY:
+            self._roi_creation.copy_selected()
+        elif choice.action == PASTE:
+            self._roi_creation.paste_at(x, y)
         elif choice.action in (ADD_SELECTION_ONE, ADD_SELECTION_BLOBS):
             self._roi_creation.add_from_selection(together=choice.action == ADD_SELECTION_ONE)
         elif choice.action == MAKE_SAMPLE:

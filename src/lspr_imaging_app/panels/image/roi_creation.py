@@ -9,7 +9,12 @@ commands, so none of that goes into `panel.py` (which has a size budget) and a r
   are stored in (the inverse of the frame's chromatic affine; nothing to do for the identity).
 * **Make this ROI > Sample / Reference**, **Link** and **Unlink** of the selected ROIs (`roi.link_actions` decides which ROIs a selection means).
 
-Every command is one undo step (the toolbox's); a refusal says why in the status line and changes nothing. No state of its own.
+* **Ctrl+A** selects all ROIs while the ROIs tab is open.
+* **Delete / Ctrl+D** (2026-11-24): Delete removes the selected ROIs; Ctrl+D drops the ROI selection and the area selection.
+* **Copy / Paste** (2026-11-24, Ctrl+C / Ctrl+V on the Image panel and the right-click menu): the selected ROIs are copied (`RoiToolbox.copy_rois`) and pasted
+  with the middle of their box on the pointer (`paste_rois`). The copy is held here, in this app only: not saved, and not on the system clipboard.
+
+Every command is one undo step (the toolbox's); a refusal says why in the status line and changes nothing. No domain state of its own (only the copy).
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ from ...domain.roi_shapes import Rectangle
 from ...image_tools.chromatic.affine import invert_affine_matrix
 from ...image_tools.chromatic.warp import warp_boolean_mask_affine
 from ...roi import RoiToolbox
+from ...roi.clipboard import RoiClip
 from ...roi.link_actions import can_link, can_unlink, link_selected, split_by_role, unlink_selected
 from ...selection import AreaSelectionModule, SelectionModule
 from ...shortcuts import bind_action
@@ -47,11 +53,24 @@ class RoiCreation(QObject):
         current_affine: Callable[[], np.ndarray],
         to_reference: Callable[[float, float], tuple[float, float]],
         action_parent: QWidget,
+        pointer_xy: Callable[[], tuple[float, float] | None] | None = None,
+        roi_tab_active: Callable[[], bool] | None = None,
         parent: QObject | None = None,
     ) -> None:
         """``image_shape()``: the processed frame on screen, or ``None`` without one. ``current_affine()``: that frame's chromatic affine (2 x 3).
-        ``to_reference(x, y)``: a display point in the reference frame. ``action_parent``: the widget the Link / Unlink shortcuts live on."""
+        ``to_reference(x, y)``: a display point in the reference frame. ``action_parent``: the widget the Link / Unlink shortcuts live on.
+        ``pointer_xy()``: where the mouse pointer is on the image (display point), or ``None`` when it is not over it (Ctrl+V pastes there)."""
         super().__init__(parent)
+        self._pointer_xy = pointer_xy
+        self._roi_tab_active = roi_tab_active
+        self._clip: RoiClip | None = None  # the copied ROIs: this app's own clipboard, not saved, not the system one
+        # Ctrl+C / Ctrl+V on the Image panel (the ROI table keeps its own: they copy cells there). A text field inside the panel keeps its own copy / paste.
+        self.copy_action = QAction("Copy ROIs", action_parent)
+        self.paste_action = QAction("Paste ROIs", action_parent)
+        for action, binding_id, command in ((self.copy_action, "roi.copy", self.copy_selected), (self.paste_action, "roi.paste", self.paste_at_pointer)):
+            bind_action(action, binding_id, context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            action.triggered.connect(lambda _checked=False, run=command: run())
+            action_parent.addAction(action)
         self._toolbox = toolbox
         self._selection = selection
         self._area_selection = area_selection
@@ -64,6 +83,17 @@ class RoiCreation(QObject):
         self.unlink_action = QAction("Unlink", action_parent)
         for action, binding_id, command in ((self.link_action, "links.link", self.link), (self.unlink_action, "links.unlink", self.unlink)):
             bind_action(action, binding_id, context=Qt.ShortcutContext.ApplicationShortcut)
+            action.triggered.connect(lambda _checked=False, run=command: run())
+            action_parent.addAction(action)
+        # Delete / Ctrl+D on the Image panel (2026-11-24): delete the selected ROIs; drop the ROI selection and the area selection. Text fields keep their own keys.
+        self.delete_action = QAction("Delete selected ROIs", action_parent)
+        self.deselect_action = QAction("Deselect", action_parent)
+        self.select_all_action = QAction("Select all ROIs", action_parent)
+        for action, binding_id, command in (
+            (self.delete_action, "roi.delete", self.delete_selected), (self.deselect_action, "selection.deselect", self.deselect_all),
+            (self.select_all_action, "roi.select_all", self.select_all),
+        ):
+            bind_action(action, binding_id, context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
             action.triggered.connect(lambda _checked=False, run=command: run())
             action_parent.addAction(action)
 
@@ -80,6 +110,86 @@ class RoiCreation(QObject):
 
     def _select(self, ids) -> None:
         self._selection.set_roi_selection({int(i) for i in ids})  # a locked selection refuses and says so itself
+
+    # -- copy and paste ----------------------------------------------------------------------------
+
+    def can_paste(self) -> bool:
+        """Something was copied."""
+        return self._clip is not None
+
+    def pasted_count(self) -> int:
+        return 0 if self._clip is None else len(self._clip)
+
+    def copy_selected(self) -> None:
+        """Copy the selected ROIs (as they are at the cube on screen) into the app's ROI clipboard. Says why when none is selected."""
+
+        def command() -> str:
+            ids = self._selection.selected_roi_ids()
+            if not ids:
+                raise ValueError("select one or more ROIs first.")
+            clip = self._toolbox.copy_rois(ids, cube=int(self._selection.current_cube()))
+            self._clip = clip
+            return f"Copied {len(clip)} ROI{'' if len(clip) == 1 else 's'}: Ctrl+V pastes them at the pointer."
+
+        self._run("Copy ROIs", command)
+
+    def paste_at_pointer(self) -> None:
+        """Ctrl+V: paste where the mouse pointer is on the image; says so when it is not over the image."""
+        spot = None if self._pointer_xy is None else self._pointer_xy()
+        if spot is None:
+            self.status.emit("Paste ROIs: move the pointer over the image, then paste.")
+            return
+        self.paste_at(*spot)
+
+    def paste_at(self, x: float, y: float) -> None:
+        """Paste the copied ROIs with the middle of their box on the display point ``(x, y)``; the new ROIs become the selection (so the next paste
+        can follow at once). One undo step."""
+
+        def command() -> str:
+            if self._clip is None:
+                raise ValueError("copy one or more ROIs first (select them, then Ctrl+C).")
+            ids = self._toolbox.paste_rois(self._clip, *self._to_reference(x, y))
+            self._select(ids)
+            return f"Pasted {len(ids)} ROI{'' if len(ids) == 1 else 's'}."
+
+        self._run("Paste ROIs", command)
+
+    # -- delete and deselect (Delete / Space) --------------------------------------------------------
+
+    def delete_selected(self) -> None:
+        """Delete the selected ROIs (one undo step); says so when none is selected."""
+
+        def command() -> str:
+            ids = tuple(sorted(self._selection.selected_roi_ids()))
+            if not ids:
+                raise ValueError("select one or more ROIs first.")
+            self._toolbox.delete_rois(ids)
+            return f"Deleted {len(ids)} ROI{'' if len(ids) == 1 else 's'} (Ctrl+Z brings them back)."
+
+        self._run("Delete ROIs", command)
+
+    def deselect_all(self) -> None:
+        """Drop the ROI selection (a locked one refuses and says so) and the area selection (one undo step)."""
+        had_area = bool(self._area_selection.has_selection())
+        had_rois = bool(self._selection.selected_roi_ids())
+        if not (had_area or had_rois):
+            self.status.emit("Deselect: nothing is selected.")
+            return
+        if had_area:
+            self._area_selection.clear()
+        if had_rois:
+            self._selection.set_roi_selection(set())  # a locked ROI selection refuses and says so itself
+
+    def select_all(self) -> None:
+        """Ctrl+A: select every ROI (samples and references), while the ROIs ribbon tab is open; says so otherwise. A locked ROI selection refuses and says so."""
+        if self._roi_tab_active is not None and not self._roi_tab_active():
+            self.status.emit("Select all ROIs: open the ROIs tab first.")
+            return
+        ids = {roi.area_roi_id for roi in self._toolbox.rois()}
+        if not ids:
+            self.status.emit("Select all ROIs: there are no ROIs.")
+            return
+        self._selection.set_roi_selection(ids)
 
     # -- adding ----------------------------------------------------------------------------------
 

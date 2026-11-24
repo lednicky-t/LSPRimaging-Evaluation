@@ -5,8 +5,8 @@ and groups, and lock the ROI selection.
 
 Layout (one ribbon row, captioned groups, thin separators between them):
 
-    [display menu] | [scope toggle] | [array controls] | [group controls] | [lock]
-       Display          Scope             Array              Groups          Selection
+    [scope toggle] | [lock, link, unlink] | [group controls] | [array controls] | [position tuning]
+         Scope            Selection              Group              Array            Tuning
 
 (The Shape picker of this row was deleted 2026-11-24: it only steered the click-to-add ROI tool, which no
 screen could turn on any more. A ROI of a given shape is added from the right-click menu, Add ROI.)
@@ -145,7 +145,7 @@ class RoiTab(QWidget):
         self._array_actions.status.connect(self.status)
         self._array_actions.auto_crop_readiness_changed.connect(self.auto_crop_readiness_changed)
         self._group_controls = GroupControls(self)
-        groups_group, self._groups_caption = labeled_icon_group(self, self._group_controls, "Groups")
+        groups_group, self._groups_caption = labeled_icon_group(self, self._group_controls, "Group")
         self._group_actions = GroupActions(
             self._group_controls,
             toolbox=roi_toolbox,
@@ -190,8 +190,11 @@ class RoiTab(QWidget):
         selection_row = QHBoxLayout(selection_box)
         selection_row.setContentsMargins(0, 0, 0, 0)
         selection_row.setSpacing(2)
-        for button in (self._lock_button, self._link_button, self._unlink_button, self._links_button):
+        for button in (self._lock_button, self._link_button, self._unlink_button):
             selection_row.addWidget(button)
+        # No Links eye here (maintainer, 2026-11-24): the View ribbon has it. The button stays built but hidden, because it
+        # is the source of truth the View ribbon mirrors (`ViewTab._links_mirror`) and that is remembered ("image/roi_show_links").
+        self._links_button.setVisible(False)
         selection_group, self._selection_caption = labeled_icon_group(self, selection_box, "Selection")
 
         # Sections left to right, a thin separator between neighbours (restyled on a theme switch).
@@ -199,7 +202,7 @@ class RoiTab(QWidget):
         # stays built but hidden, because it holds the original Sample / Reference / Labels widgets: they are the source
         # of truth that the View ribbon copies (`ViewTab._copy_roi_controls`) and that the panel restores into.
         display_group.setVisible(False)
-        sections = (scope_group, array_group, groups_group, selection_group)
+        sections = (scope_group, selection_group, groups_group, array_group)  # Tuning is appended after Array by `add_tuning`
         self._separators = [ribbon_separator(self) for _ in sections[1:]]
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)

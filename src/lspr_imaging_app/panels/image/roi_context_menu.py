@@ -48,7 +48,9 @@ GROUP = "group"
 ADD_TO_GROUP = "add_to_group"
 UNGROUP = "ungroup"
 DELETE = "delete"
-DESELECT = "deselect"
+COPY = "copy"  # copy the selected ROIs (2026-11-24; Ctrl+C)
+PASTE = "paste"  # paste the copied ROIs at the point clicked (Ctrl+V pastes at the pointer)
+DESELECT ="deselect"
 DESELECT_AREA = "deselect_area"  # drop the area selection (rectangle / lasso / wand / brush), not the ROI selection
 REMOVE_CUBE_EDIT = "remove_cube_edit"
 TOGGLE_LOCK = "toggle_lock"  # the "Lock ROI selection" entry (a check mark: on = the ROI selection is locked)
@@ -134,6 +136,7 @@ def show_roi_context_menu(
     can_turn_rim_off: bool = False,
     can_rim_to_reference: bool = False,
     can_deselect_area: bool = False,
+    paste_count: int = 0,
 ) -> RoiMenuChoice | None:
     """Pop the menu at the cursor. ``groups`` is ``(group_id, name)`` pairs.
     ``clicked_group`` is ``(name, member_count)`` when the ROI under the cursor
@@ -144,7 +147,8 @@ def show_roi_context_menu(
     how many references (the Make entry that already holds for all of them is checked). ``can_link`` / ``can_unlink``: the selection holds something to
     link or to take apart (`roi.link_actions`); the entry is left out otherwise. ``can_add_rim`` / ``can_turn_rim_off`` / ``can_rim_to_reference``: the selection holds a ROI that can get a
     rim (an unused reference, a sample whose rim is off), a sample whose rim is on (it can be turned off, linked or not), or a sample whose rim can become a linked reference (left out otherwise). ``any_selected_grouped``: Ungroup is offered. ``can_deselect_area``: there is an
-    area selection (the marching ants), so "Deselect area" is offered.
+    area selection (the marching ants), so "Deselect area" is offered. ``paste_count``: how many ROIs are on the ROI clipboard (0 = none: no Paste entry;
+    the entry is also left out where a ROI may not be placed, ``can_add``). Copy is offered with a selection.
     Returns the choice, or `None` if dismissed."""
     plural = "" if selected_count == 1 else "s"
     have_selection = selected_count > 0
@@ -165,6 +169,15 @@ def show_roi_context_menu(
             entry(add_menu_root, "Rectangle", "roi_rectangle", ADD_RECTANGLE)
         if can_add_from_selection:
             add_current_selection_menu(add_menu_root, entry)
+    if have_selection:
+        copy = entry(menu, f"Copy {selected_count} ROI{plural}", "copy", COPY)
+        bind_action(copy, "roi.copy")  # (shown for the key's sake: the working action is `RoiCreation.copy_action`)
+        copy.setShortcutVisibleInContextMenu(True)
+    if paste_count > 0 and can_add:
+        paste = entry(menu, f"Paste {paste_count} ROI{'' if paste_count == 1 else 's'} here", "paste", PASTE)
+        paste.setToolTip("The copied ROIs, with the middle of their box on the point clicked. The copies become the selection.")
+        bind_action(paste, "roi.paste")
+        paste.setShortcutVisibleInContextMenu(True)
     if have_selection:
         entry(menu, f"Delete {selected_count} ROI{plural}", "delete", DELETE)
     if clicked_group is not None and not clicked_group_fully_selected and not locked:

@@ -692,6 +692,8 @@ class ImagePanel(QWidget):
         self._roi_creation = RoiCreation(
             self._roi_toolbox, self._selection, self._area_selection, image_shape=lambda: self._last_image_shape,
             current_affine=self._roi_queries.current_affine, to_reference=self._roi_queries.display_to_reference, action_parent=self,
+            pointer_xy=lambda: self._interaction.pointer_xy(),  # (made just below; read only when Ctrl+V is pressed)
+            roi_tab_active=lambda: self._tool_ribbon.current_category() == ROI_TAB,
         )
         self._roi_creation.status.connect(self._on_tool_status)
         self._roi_tab.link_requested.connect(self._roi_creation.link)
