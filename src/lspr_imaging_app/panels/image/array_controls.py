@@ -20,8 +20,9 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from PyQt6.QtCore import QRect, Qt, pyqtSignal
-from PyQt6.QtGui import QIcon, QPainter, QPixmap
+from PyQt6.QtGui import QAction, QContextMenuEvent, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
+    QAbstractSpinBox,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -30,6 +31,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMenu,
+    QPushButton,
     QSpinBox,
     QToolButton,
     QVBoxLayout,
@@ -45,6 +47,7 @@ from ...roi.array_pipeline import ArraySettings
 from ...roi.edge_size import EdgeSizeParams
 from ...roi.ring_size import RingParams
 from ...storage.ui_state_keys import ARRAY_KEYS, read
+from ..menu_icons import give_icon, menu_icon
 from ..ui_state import UiStateStore
 from .array_mode_picker import ArrayModePicker
 from .array_reorder_picker import ArrayReorderPicker
@@ -89,6 +92,46 @@ def _find_array_icon(dots_color: str, plus_color: str) -> QIcon:
     return QIcon(pixmap)
 
 
+def auto_value_menu(spin: QAbstractSpinBox) -> QMenu:
+    """The right-click menu of a field whose lowest value reads "auto" (2026-11-23, maintainer: once typed over, a field could not go back to auto).
+
+    The line edit's usual entries (Cut, Copy, Paste ...) with **Set to auto** on top; the entry is left out while the field already is auto (a menu offers
+    only what can be done now). Picking it sets the field to its lowest value, so the field's own change signal fires like any edit. The caller runs and
+    deletes the menu."""
+    menu = spin.lineEdit().createStandardContextMenu()
+    if spin.value() != spin.minimum():
+        first = menu.actions()[0] if menu.actions() else None
+        action = give_icon(QAction("Set to auto", menu), "reset")
+        action.setToolTip("Back to auto: the value is found from the image.")
+        action.triggered.connect(lambda _checked=False: spin.setValue(spin.minimum()))
+        menu.insertAction(first, action)
+        if first is not None:
+            menu.insertSeparator(first)
+    return menu
+
+
+class _AutoSpinBox(QSpinBox):
+    """A whole-number field whose lowest value reads "auto"; its right-click menu has Set to auto."""
+
+    def contextMenuEvent(self, event: QContextMenuEvent | None) -> None:
+        if event is None:
+            return
+        menu = auto_value_menu(self)
+        menu.exec(event.globalPos())
+        menu.deleteLater()
+
+
+class _AutoDoubleSpinBox(QDoubleSpinBox):
+    """The same for a length (`LengthField`'s spin box) whose lowest value reads "auto"."""
+
+    def contextMenuEvent(self, event: QContextMenuEvent | None) -> None:
+        if event is None:
+            return
+        menu = auto_value_menu(self)
+        menu.exec(event.globalPos())
+        menu.deleteLater()
+
+
 class LengthField(QWidget):
     """A length in pixels shown as px or um (the app-wide unit), edited with 0.1 px resolution.
 
@@ -101,7 +144,7 @@ class LengthField(QWidget):
         self._geometry = geometry
         self._px = 0.0
         self._updating = False
-        self._spin = QDoubleSpinBox(self)
+        self._spin = _AutoDoubleSpinBox(self) if auto_text is not None else QDoubleSpinBox(self)
         self._spin.setRange(0.0, 1_000_000.0)
         self._spin.setKeyboardTracking(False)
         self._spin.setAlignment(Qt.AlignmentFlag.AlignRight)
@@ -205,10 +248,11 @@ class _Popover(QWidget):
             return box
 
         def spin(minimum: int, maximum: int, tip: str, special: str | None = None, suffix: str = "") -> QSpinBox:
-            box = QSpinBox(self)
+            box = _AutoSpinBox(self) if special else QSpinBox(self)
             box.setRange(minimum, maximum)
             if special:
                 box.setSpecialValueText(special)
+                tip += " Right-click: Set to auto."
             box.setSuffix(suffix)
             box.setToolTip(tip)
             box.valueChanged.connect(lambda _v: self.changed.emit())
@@ -226,7 +270,7 @@ class _Popover(QWidget):
 
         def length(tip: str, auto_text: str | None = None) -> LengthField:
             field = LengthField(geometry, auto_text=auto_text, parent=self)
-            field.setToolTip(tip)
+            field.setToolTip(tip + (" Right-click: Set to auto." if auto_text else ""))
             field.value_changed.connect(lambda _v: self.changed.emit())
             return field
 
@@ -257,6 +301,14 @@ class _Popover(QWidget):
         form.addRow("First disk y", self.anchor_y)
         form.addRow("", self.snap)
         form.addRow("", self.bright)
+        # One button for the five fields that can read "auto" (2026-11-24, maintainer); the others (rotation, anchor, the choices) have no auto value.
+        self.all_auto = QPushButton("Set all to auto", self)
+        self.all_auto.setIcon(menu_icon("reset"))
+        self.all_auto.setToolTip("Rows, columns, disk diameter and both pitches back to auto: found from the image.")
+        self.all_auto.clicked.connect(lambda _checked=False: self.set_all_auto())
+        form.addRow("", self.all_auto)
+        self.changed.connect(self._refresh_all_auto)
+        self._refresh_all_auto()
 
         form = section("Sample disk size")
         self.edge_model = combo(_EDGE_LABELS, "How the disk edge is defined on a blurred edge (to be compared; one will stay).")
@@ -290,6 +342,27 @@ class _Popover(QWidget):
         info.setWordWrap(True)
         info.setStyleSheet(f"color: {get_active_theme().text_muted};")
         layout.addWidget(info)
+
+    def _auto_fields(self) -> tuple[QSpinBox | LengthField, ...]:
+        return (self.rows, self.cols, self.diameter, self.pitch_x, self.pitch_y)
+
+    def is_all_auto(self) -> bool:
+        return not any((f.value() if isinstance(f, QSpinBox) else f.value_px()) for f in self._auto_fields())
+
+    def set_all_auto(self) -> None:
+        """Rows, columns, disk diameter and both pitches back to auto (0). Announced once, not once per field."""
+        for field in self._auto_fields():
+            if isinstance(field, QSpinBox):
+                blocked = field.blockSignals(True)
+                field.setValue(0)
+                field.blockSignals(blocked)
+            else:
+                field.set_value_px(0.0)  # (does not announce)
+        self._refresh_all_auto()
+        self.changed.emit()
+
+    def _refresh_all_auto(self) -> None:
+        self.all_auto.setEnabled(not self.is_all_auto())  # nothing to do while everything already is auto
 
 
 class ArrayControls(QWidget):
@@ -484,6 +557,7 @@ class ArrayControls(QWidget):
         assert set(spec) == set(ARRAY_KEYS), "every Array control needs a row in storage/ui_state_keys.py ARRAY_KEYS"
         for name, (_getter, setter) in spec.items():
             setter(read(store, ARRAY_KEYS[name]))
+        p._refresh_all_auto()  # (a length restored with `set_value_px` announces nothing)
         self._pending_store = (store, {name: getter for name, (getter, _s) in spec.items()})
         self.changed.connect(self._save)  # only now: restoring must not save what it just read
 

@@ -197,7 +197,11 @@ class RoiTab(QWidget):
         selection_group, self._selection_caption = labeled_icon_group(self, selection_box, "Selection")
 
         # Sections left to right, a thin separator between neighbours (restyled on a theme switch).
-        sections = (scope_group, display_group, shape_group, array_group, groups_group, selection_group)
+        # No Display section (maintainer, 2026-11-23): the View ribbon's right-click menus have these controls. The group
+        # stays built but hidden, because it holds the original Sample / Reference / Labels widgets: they are the source
+        # of truth that the View ribbon copies (`ViewTab._copy_roi_controls`) and that the panel restores into.
+        display_group.setVisible(False)
+        sections = (scope_group, shape_group, array_group, groups_group, selection_group)
         self._separators = [ribbon_separator(self) for _ in sections[1:]]
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)

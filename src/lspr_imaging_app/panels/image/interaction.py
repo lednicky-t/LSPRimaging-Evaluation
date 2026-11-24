@@ -59,7 +59,7 @@ from .roi_context_menu import (
     TURN_RIM_OFF,
     UNGROUP,
     UNLINK,
-    fill_add_roi_from_selection,
+    add_roi_submenu_filler,
     show_roi_context_menu,
 )
 from .roi_creation import RoiCreation
@@ -553,19 +553,30 @@ class CanvasInteraction:
         can_pick = (
             self._rois_touching is not None and self._area_selection.has_selection() and not self._selection.roi_selection_locked()
         )
+        point = self._plot.vb.mapSceneToView(scene_pos)
+        x, y = float(point.x()), float(point.y())
+        # 2026-11-23: Add ROI also offers Circle / Rectangle at the click, where the ROIs tab's menu does (the point is editable under the selection).
+        can_add_shapes = self.in_selection(x, y)
+        can_add_from_selection = self._roi_creation.has_pixel_selection()
         chosen = self._context_menu(
             [
                 (SELECT_ROIS_IN_SELECTION, can_pick),
-                (ADD_ROI_SUBMENU, self._roi_creation.has_pixel_selection()),
+                (ADD_ROI_SUBMENU, can_add_shapes or can_add_from_selection),
                 (LOCK_TO_SELECTION, self._area_selection.has_selection() and self._lock_to_selection is not None),
                 (UNLOCK, self._area_selection.has_lock() and self._unlock is not None),
                 (EXIT_TOOL, True),
             ],
             scene_pos,
-            submenus={ADD_ROI_SUBMENU: fill_add_roi_from_selection},
+            submenus={
+                ADD_ROI_SUBMENU: add_roi_submenu_filler(can_add_shapes=can_add_shapes, can_add_from_selection=can_add_from_selection)
+            },
         )
         if chosen == EXIT_TOOL:
             self._active_tool.set_active(ImageTool.SELECT_AREA, False)
+        elif chosen == ADD_ROI:  # Add ROI > Circle
+            self._roi_creation.add_circle(x, y)
+        elif chosen == ADD_RECTANGLE:
+            self._roi_creation.add_rectangle(x, y)
         elif chosen == SELECT_ROIS_IN_SELECTION:
             self.select_rois_in_selection()  # (Lock / Unlock are handled in `_context_menu`)
         elif chosen in (ADD_SELECTION_ONE, ADD_SELECTION_BLOBS):

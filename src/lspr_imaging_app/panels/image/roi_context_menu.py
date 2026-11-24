@@ -92,6 +92,29 @@ def fill_add_roi_from_selection(add_root: QMenu) -> dict[QAction, str]:
     return picked
 
 
+def add_roi_submenu_filler(*, can_add_shapes: bool, can_add_from_selection: bool) -> Callable[[QMenu], dict[QAction, str]]:
+    """The filler of the selection tools' "Add ROI" submenu with the same entries as the ROIs tab's menu (2026-11-23, maintainer: the tools' menu
+    should offer Circle and Rectangle too): Circle and Rectangle where a ROI may be placed (``can_add_shapes``), Current selection where there is an
+    area selection (``can_add_from_selection``). Returns ``{action: ADD_ROI / ADD_RECTANGLE / ADD_SELECTION_ONE / ADD_SELECTION_BLOBS}``."""
+
+    def fill(add_root: QMenu) -> dict[QAction, str]:
+        picked: dict[QAction, str] = {}
+
+        def entry(target: QMenu, text: str, icon: str, choice: str) -> QAction:
+            action = give_icon(target.addAction(text), icon)
+            picked[action] = choice
+            return action
+
+        if can_add_shapes:
+            entry(add_root, "Circle", "roi_circle", ADD_ROI)
+            entry(add_root, "Rectangle", "roi_rectangle", ADD_RECTANGLE)
+        if can_add_from_selection:
+            add_current_selection_menu(add_root, entry)
+        return picked
+
+    return fill
+
+
 def show_roi_context_menu(
     parent: QWidget,
     *,
