@@ -179,6 +179,7 @@ ICONS: dict[str, str | Callable[[], QIcon]] = {
     "unlink": "link-off",
     "add_rim": _sample_with_rim,  # "Add rim": the ROI measures against a rim of its own
     "turn_rim_off": _rim_off,  # "Turn rim off": the ring crossed out, as the ROI tab's ring toggle shows "off"
+    "match_rim_area": "ruler-measure",  # "Rim as large as ROI": measure the ROI's area, give the rim the same
     "rim_to_reference": "link",  # "Turn rim into linked reference": the rim becomes a reference ROI, linked
     "group": "group-rois",
     "ungroup": "ungroup-rois",

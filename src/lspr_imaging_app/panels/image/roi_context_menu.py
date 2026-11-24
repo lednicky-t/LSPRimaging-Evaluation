@@ -44,6 +44,7 @@ UNLINK = "unlink"
 ADD_RIM = "add_rim"
 TURN_RIM_OFF = "turn_rim_off"
 RIM_TO_REFERENCE = "rim_to_reference"
+MATCH_RIM_AREA = "match_rim_area"
 GROUP = "group"
 ADD_TO_GROUP = "add_to_group"
 UNGROUP = "ungroup"
@@ -135,6 +136,7 @@ def show_roi_context_menu(
     can_add_rim: bool = False,
     can_turn_rim_off: bool = False,
     can_rim_to_reference: bool = False,
+    can_match_rim_area: bool = False,
     can_deselect_area: bool = False,
     paste_count: int = 0,
 ) -> RoiMenuChoice | None:
@@ -146,7 +148,7 @@ def show_roi_context_menu(
     Add ROI submenu offers only what can be done, and is left out when neither). ``selected_roles``: how many of the selected ROIs are samples and
     how many references (the Make entry that already holds for all of them is checked). ``can_link`` / ``can_unlink``: the selection holds something to
     link or to take apart (`roi.link_actions`); the entry is left out otherwise. ``can_add_rim`` / ``can_turn_rim_off`` / ``can_rim_to_reference``: the selection holds a ROI that can get a
-    rim (an unused reference, a sample whose rim is off), a sample whose rim is on (it can be turned off, linked or not), or a sample whose rim can become a linked reference (left out otherwise). ``any_selected_grouped``: Ungroup is offered. ``can_deselect_area``: there is an
+    rim (an unused reference, a sample whose rim is off), a sample whose rim is on (it can be turned off, linked or not), or a sample whose rim can become a linked reference (left out otherwise). ``can_match_rim_area``: the selection holds a sample whose rim is on, so "Rim as large as ROI" is offered. ``any_selected_grouped``: Ungroup is offered. ``can_deselect_area``: there is an
     area selection (the marching ants), so "Deselect area" is offered. ``paste_count``: how many ROIs are on the ROI clipboard (0 = none: no Paste entry;
     the entry is also left out where a ROI may not be placed, ``can_add``). Copy is offered with a selection.
     Returns the choice, or `None` if dismissed."""
@@ -213,6 +215,11 @@ def show_roi_context_menu(
     if can_turn_rim_off:
         entry(menu, "Turn rim off", "turn_rim_off", TURN_RIM_OFF).setToolTip(
             "The sample becomes a rim-less ROI (on every cube). Its shape is untouched and the rim's offset and thickness are remembered: Add rim brings the same rim back."
+        )
+    if can_match_rim_area:
+        entry(menu, "Rim as large as ROI", "match_rim_area", MATCH_RIM_AREA).setToolTip(
+            "Set the rim's thickness so that the rim has the same area as the ROI itself (circle and rectangle: exact; pixel map: the nearest pixel count). "
+            "The rim's offset from the edge stays. The area is the shape's own, not cut by the image edge."
         )
     if can_rim_to_reference:
         entry(menu, "Turn rim into linked reference", "rim_to_reference", RIM_TO_REFERENCE).setToolTip(

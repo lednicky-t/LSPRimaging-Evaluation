@@ -164,6 +164,7 @@ from .clipboard import ClippedRoi, RoiClip
 from .mask_regions import mask_regions
 from .ordering import move_block, renumbering
 from .rasterize import rasterize_reference, rasterize_sample
+from .rim_area import equal_area_thickness
 from .palette import first_free_tint_index, gradient_tints, next_group_color, normalize_hex, tint_color
 
 logger = logging.getLogger(__name__)
@@ -750,6 +751,35 @@ class RoiToolbox(QObject):
         targets = [roi for roi in self._require_rois(roi_ids) if self.can_turn_rim_off(roi.area_roi_id)]
         if targets:
             self._switch_rims(targets, on=False, label="Turn rim off" if len(targets) == 1 else f"Turn {len(targets)} rims off")
+
+    def _has_rim_at(self, roi: AreaRoi, cube: int | None) -> bool:
+        """True for a sample whose rim is on in its geometry on ``cube`` (``None``: the base geometry)."""
+        return not is_reference(roi) and effective_border(geometry_at(roi, cube).border, self._detection_settings.default_border()).enabled
+
+    def can_match_rim_area(self, roi_id: int) -> bool:
+        """True when `match_rim_area` can work on ROI ``roi_id``: a sample whose rim is on (linked or not). Whether the rim is on is asked of the base geometry; the command asks again for its cube."""
+        return self._has_rim_at(self._rois[int(roi_id)], None)
+
+    @instrumented("RoiToolbox.match_rim_area")
+    def match_rim_area(self, roi_ids: Collection[int], *, cube: int | None = None, scope: str = SCOPE_PERSISTENT) -> None:
+        """Give the rim of each sample ROI in ``roi_ids`` the **thickness at which its area equals the area of the sample ROI**; the rim's offset (gap) and the shape stay
+        (`rim_area.equal_area_thickness`: exact for a circle and a rectangle, the nearest pixel count for a pixel map). The area is the shape's own, not cut by the image edge.
+        Like any rim size it follows the scope rules (``cube`` / ``scope``, as `set_rim`). One undo step; a ROI without a rim on this cube (a reference, a rim-less sample) is left
+        alone, and nothing to change pushes no step. Raises ``KeyError`` for an unknown id and ``ValueError`` when a shape has no area."""
+        targets: list[tuple[AreaRoi, Shape, Border | None]] = []
+        default_border = self._detection_settings.default_border()
+        for roi in self._require_rois(roi_ids):
+            if not self._has_rim_at(roi, cube):
+                continue
+            g = geometry_at(roi, cube)
+            gap = effective_border(g.border, default_border).gap_px
+            try:
+                thickness = equal_area_thickness(g.shape, gap)
+            except ValueError as exc:
+                raise ValueError(f"ROI {roi.area_roi_id}: {exc}") from None
+            targets.append((roi, g.shape, self._edited_rim(roi, g.border, default_border, None, thickness)))
+        if targets:
+            self._set_shapes(targets, "Rim as large as the ROI" if len(targets) == 1 else "Rims as large as their ROIs", cube=cube, scope=scope)
 
     def _switch_rims(self, rois: Sequence[AreaRoi], *, on: bool, label: str) -> None:
         """Turn the rim of every ROI in ``rois`` on or off in **every state** (`_rim_borders`), keeping its numbers (`roi_shapes.border_switched_on / _off`): one undo step, one

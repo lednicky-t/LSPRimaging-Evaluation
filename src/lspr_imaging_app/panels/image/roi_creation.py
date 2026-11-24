@@ -32,6 +32,7 @@ from ...image_tools.chromatic.warp import warp_boolean_mask_affine
 from ...roi import RoiToolbox
 from ...roi.clipboard import RoiClip
 from ...roi.link_actions import can_link, can_unlink, link_selected, split_by_role, unlink_selected
+from ...roi.scope import RoiEditTarget
 from ...selection import AreaSelectionModule, SelectionModule
 from ...shortcuts import bind_action
 from .rectangle_size_dialog import ask_rectangle_size
@@ -55,12 +56,14 @@ class RoiCreation(QObject):
         action_parent: QWidget,
         pointer_xy: Callable[[], tuple[float, float] | None] | None = None,
         roi_tab_active: Callable[[], bool] | None = None,
+        edit_target: RoiEditTarget | None = None,
         parent: QObject | None = None,
     ) -> None:
         """``image_shape()``: the processed frame on screen, or ``None`` without one. ``current_affine()``: that frame's chromatic affine (2 x 3).
         ``to_reference(x, y)``: a display point in the reference frame. ``action_parent``: the widget the Link / Unlink shortcuts live on.
         ``pointer_xy()``: where the mouse pointer is on the image (display point), or ``None`` when it is not over it (Ctrl+V pastes there)."""
         super().__init__(parent)
+        self._edit_target = edit_target  # where a rim-size edit lands (scope + cube); None = the base geometry
         self._pointer_xy = pointer_xy
         self._roi_tab_active = roi_tab_active
         self._clip: RoiClip | None = None  # the copied ROIs: this app's own clipboard, not saved, not the system one
@@ -282,6 +285,22 @@ class RoiCreation(QObject):
             return f"Turned the rim off on {len(ids)} ROI{'' if len(ids) == 1 else 's'} (Add rim brings it back with the same size)."
 
         self._run("Turn rim off", command)
+
+    def can_match_rim_area(self, roi_ids) -> bool:
+        """Some selected ROI is a sample whose rim is on (the rim's thickness can be set to the sample's area)."""
+        return any(self._toolbox.can_match_rim_area(i) for i in self._known(roi_ids))
+
+    def match_rim_area(self, roi_ids) -> None:
+        """Set the thickness of the selected samples' rims so that each rim has the area of its sample ROI (`RoiToolbox.match_rim_area`; the offset stays; scope and cube as for any rim size)."""
+        ids = [i for i in self._known(roi_ids) if self._toolbox.can_match_rim_area(i)]
+
+        def command() -> str:
+            if not ids:
+                raise ValueError("no selected ROI has a rim (a reference or a rim-less ROI has none to set).")
+            self._toolbox.match_rim_area(ids, **({} if self._edit_target is None else self._edit_target.kwargs()))
+            return f"Set the rim of {len(ids)} ROI{'' if len(ids) == 1 else 's'} to the area of the ROI itself (its offset is unchanged)."
+
+        self._run("Rim as large as the ROI", command)
 
     def _known(self, roi_ids) -> list[int]:
         have = {roi.area_roi_id for roi in self._toolbox.rois()}

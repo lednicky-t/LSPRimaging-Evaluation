@@ -635,3 +635,11 @@ What the scan measures moves with it: a test compares `rasterize_sample` before 
   or wholly outside the image is clipped by the rasterizer like any ROI there (no clamping, as for a circle). Session files are unchanged (a map stores its `x0 / y0` and its centre).
 - **Tests:** `tests/integration/test_lspri_roi_phase3_ui.py` (grab by pixel, whole-pixel move with a circle + undo, the scan's pixels move, typed / tiny / wheel halves, drag in small steps,
   drag with a circle), `test_lspri_rewrite_roi_table_panel.py` (wheel, typed value, paste), `test_lspri_roi_cell_paste.py`, `test_lspri_rim_pairs.py`.
+
+## Rim as large as the ROI (2026-11-24)
+
+Right-click ROI menu, **Rim as large as ROI** (shown for a sample whose rim is on): `RoiToolbox.match_rim_area` sets the rim's **thickness** so the rim has the same area as the sample ROI; the offset and the shape stay. The scope / cube rules are those of any rim size (`RoiEditTarget`, as the table's Offset / Thickness cells). One undo step.
+
+* Solver: `roi/rim_area.py` (pure). Circle and rectangle are **exact** (ring `outer = sqrt(R^2 + inner^2)`; rectangle: quadratic from the rounded-corner area `wh + 2(w+h)s + pi s^2`). A pixel map is **counted** the way the scan reads its rim (`rasterize._mask_band`, blob by blob, no cache) and the nearest count is taken; never an empty rim (a one-pixel line jumps from 0 to twice its own count).
+* The target is the shape's **geometric area**, not a pixel count: pixel counts of a circle move with its sub-pixel centre and the chromatic shift. On a 24 px circle at an integer centre the sample reads 441 px (area 452) and the rim 464 px, a 5 % gap that is the pixel grid, not the solver. The area is **not cut by the image edge** and not reduced by neighbouring ROIs' pixels.
+* Tests: `tests/unit/test_lspri_rim_area.py`.

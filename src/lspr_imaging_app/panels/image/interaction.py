@@ -59,6 +59,7 @@ from .roi_context_menu import (
     SELECT_GROUP,
     TOGGLE_LOCK,
     TURN_RIM_OFF,
+    MATCH_RIM_AREA,
     UNGROUP,
     UNLINK,
     add_roi_submenu_filler,
@@ -433,6 +434,7 @@ class CanvasInteraction:
             can_add_rim=self._roi_creation.can_add_rim(ids),
             can_turn_rim_off=self._roi_creation.can_turn_rim_off(ids),
             can_rim_to_reference=self._roi_creation.can_rim_to_reference(ids),
+            can_match_rim_area=self._roi_creation.can_match_rim_area(ids),
             can_deselect_area=self._area_selection.has_selection(),
             paste_count=self._roi_creation.pasted_count(),
             can_remove_cube_edit=any(
@@ -465,6 +467,8 @@ class CanvasInteraction:
             self._roi_creation.add_rim(ids)
         elif choice.action == TURN_RIM_OFF:
             self._roi_creation.turn_rim_off(ids)
+        elif choice.action == MATCH_RIM_AREA:
+            self._roi_creation.match_rim_area(ids)
         elif choice.action == RIM_TO_REFERENCE:
             self._roi_creation.rim_to_reference(ids)
         elif choice.action == LINK:
