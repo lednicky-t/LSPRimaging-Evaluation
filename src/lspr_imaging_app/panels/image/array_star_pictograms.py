@@ -23,7 +23,7 @@ BOX = 24
 DOT = 1.9
 KINDS = (
     "type_rectangular", "type_triangular", "cell_square", "cell_rectangle", "cell_equilateral", "cell_triangle",
-    "rows", "cols", "pitch_x", "pitch_y", "step_x", "step_y", "angle", "row_offset",
+    "apply", "cancel", "rows", "cols", "pitch_x", "pitch_y", "step_x", "step_y", "angle", "row_offset",
 )
 
 
@@ -97,6 +97,19 @@ def _draw_cell_triangle(p: QPainter, dim: str, accent: str) -> None:
     _cell(p, [(15.5, 5.5), (21.0, 18.0), (3.5, 18.0)], dim, accent)  # lopsided: not all sides, not all angles equal
 
 
+def _draw_apply(p: QPainter, dim: str, accent: str) -> None:
+    """A tick: make the array."""
+    p.setPen(_pen(accent, 2.6))
+    p.drawPolyline([QPointF(4.5, 12.5), QPointF(9.5, 17.5), QPointF(19.5, 6.5)])
+
+
+def _draw_cancel(p: QPainter, dim: str, accent: str) -> None:
+    """A cross: close without making anything."""
+    p.setPen(_pen(accent, 2.6))
+    p.drawLine(QPointF(6.0, 6.0), QPointF(18.0, 18.0))
+    p.drawLine(QPointF(18.0, 6.0), QPointF(6.0, 18.0))
+
+
 def _draw_cols(p: QPainter, dim: str, accent: str) -> None:
     _dots(p, _square_lattice(3, 3, 5.0, 4.0, 7.0), dim)
     _arrow(p, (5.0, 20.5), (19.0, 20.5), accent)
@@ -162,6 +175,8 @@ _DRAWINGS: dict[str, Callable[[QPainter, str, str], None]] = {
     "cell_rectangle": _draw_cell_rectangle,
     "cell_equilateral": _draw_cell_equilateral,
     "cell_triangle": _draw_cell_triangle,
+    "apply": _draw_apply,
+    "cancel": _draw_cancel,
     "rows": _draw_rows,
     "cols": _draw_cols,
     "pitch_x": _draw_pitch_x,

@@ -9,7 +9,7 @@ Layout (a panel inside the app window; `array_star.py` owns it, the preview and 
     (o) Columns   [ 2 ]    (o) Rows    [ 2 ]       columns = x, so they stand over pitch x;
     (o) Pitch x   [ 50 px] (o) Pitch y [ 50 px]    rows = y, over pitch y
     Advanced v    (free-standing text, rolls down: increment x / y, angle, row offset)
-    status line (what is wrong / what will be made)                 [Cancel] [Apply]
+    status line (what is wrong / what will be made)                 (cross = cancel) (tick = apply)
 
 The lattice type is ONE icon: it shows the current type and a click switches to the other. Next to it the regular-cell switch is one icon too, showing the cell
 you get (rectangular: square on / rectangle off; triangular: equilateral on / lopsided off). Neither has a button around it. Display only: this widget holds settings and reports them (`spec()` -> `roi.array_layout.ArraySpec`); it knows nothing of ROIs. Lengths are pixels
@@ -27,7 +27,6 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
-    QPushButton,
     QSpinBox,
     QToolButton,
     QVBoxLayout,
@@ -182,9 +181,9 @@ class ArrayStarPanel(QWidget):
         self._message = QLabel("", self)
         self._message.setWordWrap(True)
         self._count = QLabel("", self)
-        self.cancel_button = QPushButton("Cancel", self)
-        self.apply_button = QPushButton("Apply", self)
-        self.apply_button.setDefault(True)
+        # Free-standing icons, like the type and cell icons (no button around them): a cross closes without making anything, a tick makes the array.
+        self.cancel_button = FlatIconButton("Cancel: close without making anything.", self)
+        self.apply_button = FlatIconButton("Apply: make the array (one undo step; Ctrl+Z takes it back).", self)
         self.cancel_button.clicked.connect(lambda _checked=False: self.cancel_requested.emit())
         self.apply_button.clicked.connect(lambda _checked=False: self.apply_requested.emit())
         bottom = QHBoxLayout()
@@ -389,6 +388,11 @@ class ArrayStarPanel(QWidget):
         current, other = lattice_kind(self._kind).label, lattice_kind(self._next_kind()).label
         self.kind_button.setToolTip(f"Lattice type: {current}. Click for {other}.")
 
+    def _refresh_action_icons(self) -> None:
+        theme = get_active_theme()
+        self.cancel_button.setIcon(pictogram_icon("cancel", accent=theme.text_secondary))
+        self.apply_button.setIcon(pictogram_icon("apply", accent=theme.accent_green))  # (greyed by Qt while there is nothing to apply)
+
     def _refresh_regular_icon(self) -> None:
         """The cell the lattice has: rectangular, a square (regular cell on) or a rectangle; triangular, an equilateral triangle or a lopsided one."""
         theme = get_active_theme()
@@ -416,5 +420,6 @@ class ArrayStarPanel(QWidget):
         self._refresh_kind_icons()
         self._refresh_regular_icon()
         self._refresh_advanced_icon()
+        self._refresh_action_icons()
         self.picker.refresh_theme()
         self.numbering.refresh_theme()
