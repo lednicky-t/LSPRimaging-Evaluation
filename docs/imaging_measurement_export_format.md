@@ -1,5 +1,12 @@
 # Imaging Measurement Export/Backup Format
 
+> **Historical (checked 2026-11-25).** This describes `measurement_backup.h5`, written by the original app's
+> analysis engine. That engine, its writer (`ImagingMeasurementExportWriter`, `storage/measurement_export_schema7.py`)
+> and `analysis/store.py` were removed in the 2026-10-29 cut-over (`old_generation_cutover_plan_2026-10-29.md`);
+> the current app stores analysis in `sessions/<id>/analysis/scan.h5` (`analysis/scan_store.py`). Nothing in
+> `src/` writes this format, and no importer for it will be built (`CLAUDE.md`, "What NOT to do"). Kept so an old
+> file can still be understood. File names below are the original app's.
+
 **Status (2026-09-10): Phase A implemented - schema major 7 is real, alongside 6.7, both
 supported by the same dual-mode writer.** A new backup file now always starts life as schema 7
 (fixed-size, pre-allocated `/rois/<roi_id>/...` layout - combined with the resize-cost fix from

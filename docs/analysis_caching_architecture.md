@@ -1,5 +1,12 @@
 # Analysis caching architecture: what exists and why
 
+> **Historical (checked 2026-11-25).** This describes the original app's five caches behind the Spectra and
+> Sensogram panels (`analysis_worker_mixin.py`, `analysis_tasks.py`, `chromatic_controller.py`, ...). Those files
+> went in the 2026-10-29 cut-over. Today the stored numbers live in one file, `sessions/<id>/analysis/scan.h5`,
+> where the cell hash decides what is stale (`analysis/scan_store.py`, `scan_fingerprint.py`; rules in
+> `CLAUDE.md`, "Scan (analysis step 1) and what it stores"). The lesson here still holds: one code path must answer
+> "is this ROI's data fresh". Cited by `CLAUDE.md` as an incident write-up.
+
 **Status: unified 2026-09-16.** Originally an audit (2026-09-15) of 8 caching
 mechanisms found behind the Spectra and Sensogram panels, triggered by the
 maintainer being surprised at "four caching tiers" mentioned in passing while

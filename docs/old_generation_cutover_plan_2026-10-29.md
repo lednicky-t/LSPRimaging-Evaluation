@@ -1,6 +1,6 @@
 # Cut-over plan: replacing the old LSPRi Evaluation app with the rewrite (2026-10-29)
 
-**Status: plan only. Nothing in this file has been done.** It answers audit decision D4 (`whole_app_audit_2026-10-29.md`). Every phase that deletes or changes behaviour needs your yes first; section 9 lists the questions.
+**Status (updated 2026-11-25): mostly done.** Phases 1b and 2a-2f were carried out on 2026-10-29 (the rewrite replaced the old app; the old generation, the old analysis engine and the dead shared functions are gone). Still open: phase 3 (renaming the shared `io/`, `processing/`, `gui/` modules). The text below is the plan as written before the work, so it speaks in the future tense. It answers audit decision D4 (`whole_app_audit_2026-10-29.md`). Every phase that deletes or changes behaviour needs your yes first; section 9 lists the questions.
 
 Words used here. *Old generation*: the original app (`gui/`, `io/dataset.py`, `processing/`, `app.py`, started by `run.py` and by the Suite card "LSPRimaging Evaluation"). *Rewrite*: the new app on the `rewrite` branch. *Cut-over*: the day the Suite card starts the rewrite and the old code is removed. *Shared module*: a file both apps import.
 

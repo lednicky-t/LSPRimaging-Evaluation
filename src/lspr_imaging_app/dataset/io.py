@@ -1215,11 +1215,11 @@ def _export_ome_zarr_dataset_to_path(
     def _plane_excluded(fi: int, wn: float) -> bool:
         return skip_excluded and is_excluded(excluded_rules or [], fi, wn)
 
-    def _build_per_image_spec(fp: int, wp: int, fi: int, wn: float) -> ShardWriteSpec:
-        record = record_map.get((int(fi), float(wn)))
+    def _shard_spec(record_paths: list[str], shard_path: Path) -> ShardWriteSpec:
+        """One shard's job; everything but the planes it reads and the file it writes is the same for every shard."""
         return ShardWriteSpec(
-            record_paths=[str(record.path) if record is not None and not _plane_excluded(fi, wn) else ""],
-            shard_path=str(shard_base_dir / str(fp) / str(wp) / "0" / "0"),
+            record_paths=record_paths,
+            shard_path=str(shard_path),
             inner_chunk_h=ich, inner_chunk_w=icw,
             image_height=height, image_width=width,
             shard_h=sh, shard_w=sw, n_cy=n_cy, n_cx=n_cx,
@@ -1232,24 +1232,21 @@ def _export_ome_zarr_dataset_to_path(
             value_step=value_step,
         )
 
+    def _build_per_image_spec(fp: int, wp: int, fi: int, wn: float) -> ShardWriteSpec:
+        record = record_map.get((int(fi), float(wn)))
+        return _shard_spec(
+            [str(record.path) if record is not None and not _plane_excluded(fi, wn) else ""],
+            shard_base_dir / str(fp) / str(wp) / "0" / "0",
+        )
+
     def _build_per_spectral_cube_spec(fp: int, fi: int) -> ShardWriteSpec:
-        return ShardWriteSpec(
-            record_paths=[
+        return _shard_spec(
+            [
                 str(record_map[(int(fi), float(wn))].path)
                 if (int(fi), float(wn)) in record_map and not _plane_excluded(fi, wn) else ""
                 for wn in wavelengths
             ],
-            shard_path=str(shard_base_dir / str(fp) / "0" / "0" / "0"),
-            inner_chunk_h=ich, inner_chunk_w=icw,
-            image_height=height, image_width=width,
-            shard_h=sh, shard_w=sw, n_cy=n_cy, n_cx=n_cx,
-            n_inner=n_inner_shard,
-            dtype_str=target_dtype.str,
-            fill_value=fill_value, compression_cname=compression_cname,
-            apply_image_tools=apply_image_tools,
-            preprocessing=preprocessing if apply_image_tools else None,
-            frame_x0=frame_x0, frame_y0=frame_y0,
-            value_step=value_step,
+            shard_base_dir / str(fp) / "0" / "0" / "0",
         )
 
     if per_spectral_cube:
@@ -1360,12 +1357,7 @@ def _export_ome_zarr_dataset_to_path(
     # (rotation/flip/crop never change the scale). The older rule - read it
     # from `preprocessing` only when image tools were baked in - stays as a
     # fallback for callers that still pass settings.
-    if pixel_size_um is not None:
-        pixel_size = valid_pixel_size(*pixel_size_um)
-    elif apply_image_tools and preprocessing is not None and bool(getattr(preprocessing, "calibration_enabled", False)):
-        pixel_size = valid_pixel_size(float(preprocessing.microns_per_pixel_x), float(preprocessing.microns_per_pixel_y))
-    else:
-        pixel_size = None
+    pixel_size = _export_pixel_size(pixel_size_um, apply_image_tools, preprocessing)
 
     scale = build_scale(pixel_size)
     transforms: list[dict] = [{"type": "scale", "scale": scale}]
@@ -1404,41 +1396,9 @@ def _export_ome_zarr_dataset_to_path(
             "stored_value_without_source": 0,
         }
     if apply_image_tools and preprocessing is not None:
-        crop = preprocessing.crop
-        lspr_attrs["image_tools"] = {
-            # Rotation resamples the raw pixels (Lanczos4, `geometry/transform.py` `_cv2_affine`); flip and crop do not.
-            "interpolation": "lanczos4" if _rotation_active(preprocessing) else "none",
-            # Rotated values rounded onto this step (the camera's; 1 = whole counts). Planes whose source was not on
-            # it were rounded to whole counts instead: `planes_not_on_value_step`.
-            "value_step": int(value_step),
-            "planes_not_on_value_step": int(off_step_planes),
-            "rotation_angle_deg": float(preprocessing.rotation_angle_deg),
-            "flip_horizontal": bool(preprocessing.flip_horizontal),
-            "flip_vertical": bool(preprocessing.flip_vertical),
-            "crop": (
-                {"x": int(crop.x), "y": int(crop.y), "width": int(crop.width), "height": int(crop.height)}
-                if crop.enabled and crop.width > 0 and crop.height > 0
-                else None
-            ),
-        }
+        lspr_attrs["image_tools"] = _image_tools_attrs(preprocessing, value_step, off_step_planes)
     if frame is not None:
-        vx0, vy0 = max(-frame_x0, 0), max(-frame_y0, 0)
-        lspr_attrs["export_frame"] = {
-            "origin_x": frame_x0,
-            "origin_y": frame_y0,
-            "width": width,
-            "height": height,
-            "source_width": int(source_width),
-            "source_height": int(source_height),
-            # Stored pixels that hold source pixels; everything else is fill (padding).
-            "valid_region": {
-                "x": vx0,
-                "y": vy0,
-                "width": min(frame_x0 + width, source_width) - max(frame_x0, 0),
-                "height": min(frame_y0 + height, source_height) - max(frame_y0, 0),
-            },
-            "lossless": frame_x0 <= 0 and frame_y0 <= 0 and frame_x0 + width >= source_width and frame_y0 + height >= source_height,
-        }
+        lspr_attrs["export_frame"] = _export_frame_attrs(frame_x0, frame_y0, width, height, source_width, source_height)
     plane_times = _write_plane_times(group, dataset, spectral_cubes, wavelengths)
     if plane_times is not None:
         lspr_attrs["plane_times"] = {
@@ -1468,6 +1428,62 @@ def _export_ome_zarr_dataset_to_path(
 
     _export_experimental_data(dataset, destination)
     return destination
+
+
+def _export_pixel_size(
+    pixel_size_um: tuple[float, float] | None, apply_image_tools: bool, preprocessing: GeometrySettings | None
+) -> tuple[float, float] | None:
+    """Physical pixel size (um/px, x then y) for the exported y/x axes, or None.
+
+    `pixel_size_um` is the calibration passed by the caller and is valid for the raw pixels (rotation/flip/crop never
+    change the scale). The older rule, reading it from `preprocessing` only when image tools were baked in, stays as a
+    fallback for callers that still pass settings."""
+    if pixel_size_um is not None:
+        return valid_pixel_size(*pixel_size_um)
+    if apply_image_tools and preprocessing is not None and bool(getattr(preprocessing, "calibration_enabled", False)):
+        return valid_pixel_size(float(preprocessing.microns_per_pixel_x), float(preprocessing.microns_per_pixel_y))
+    return None
+
+
+def _image_tools_attrs(preprocessing: GeometrySettings, value_step: int, off_step_planes: int) -> dict:
+    """The `lspr.image_tools` record of an export whose pixels had rotation / flip / crop baked in."""
+    crop = preprocessing.crop
+    return {
+        # Rotation resamples the raw pixels (Lanczos4, `geometry/transform.py` `_cv2_affine`); flip and crop do not.
+        "interpolation": "lanczos4" if _rotation_active(preprocessing) else "none",
+        # Rotated values rounded onto this step (the camera's; 1 = whole counts). Planes whose source was not on
+        # it were rounded to whole counts instead: `planes_not_on_value_step`.
+        "value_step": int(value_step),
+        "planes_not_on_value_step": int(off_step_planes),
+        "rotation_angle_deg": float(preprocessing.rotation_angle_deg),
+        "flip_horizontal": bool(preprocessing.flip_horizontal),
+        "flip_vertical": bool(preprocessing.flip_vertical),
+        "crop": (
+            {"x": int(crop.x), "y": int(crop.y), "width": int(crop.width), "height": int(crop.height)}
+            if crop.enabled and crop.width > 0 and crop.height > 0
+            else None
+        ),
+    }
+
+
+def _export_frame_attrs(frame_x0: int, frame_y0: int, width: int, height: int, source_width: int, source_height: int) -> dict:
+    """The `lspr.export_frame` record: the stored window, and which of its pixels have a source pixel behind them."""
+    return {
+        "origin_x": frame_x0,
+        "origin_y": frame_y0,
+        "width": width,
+        "height": height,
+        "source_width": int(source_width),
+        "source_height": int(source_height),
+        # Stored pixels that hold source pixels; everything else is fill (padding).
+        "valid_region": {
+            "x": max(-frame_x0, 0),
+            "y": max(-frame_y0, 0),
+            "width": min(frame_x0 + width, source_width) - max(frame_x0, 0),
+            "height": min(frame_y0 + height, source_height) - max(frame_y0, 0),
+        },
+        "lossless": frame_x0 <= 0 and frame_y0 <= 0 and frame_x0 + width >= source_width and frame_y0 + height >= source_height,
+    }
 
 
 def _export_valid_mask(

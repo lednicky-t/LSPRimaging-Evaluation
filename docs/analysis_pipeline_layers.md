@@ -6,12 +6,22 @@ closed by the same change that added this doc, which introduced the
 Individual / Average all / Average by group Sensogram display modes in
 `gui/analysis_controller.py`.**
 
+> **Updated 2026-11-25 (file names).** The layering below still holds, but
+> the files named in the first half of this doc (`gui/analysis_tasks.py`,
+> `gui/analysis_controller.py`, `gui/analysis_worker_mixin.py`,
+> `processing/roi_math.py`, `processing/trace_statistics.py`) belong to the
+> original app (git tag `legacy-final`) and are gone. Their line numbers and
+> the regression test `test_lspri_roi_absorbance_multi_roi_isolation.py` no
+> longer exist either. Today: layer 1 = `analysis/frame_reduce.py` (the scan)
+> and `analysis/reduction.py`; layers 2-3 = `analysis/query.py`; Pillar II =
+> `analysis/statistics.py`. See the table in "Where this lives on the
+> `rewrite` branch" below. The old-app passages are kept as history.
+
 This is the maintainer's own description of how analysis should be
 layered, written down so it doesn't have to be re-derived from scratch or
 re-explained in a future session. Read this before touching
-`gui/analysis_tasks.py`, `gui/analysis_controller.py`,
-`gui/analysis_worker_mixin.py`, or anything under "Statistics" in the
-Analysis panel.
+`analysis/frame_reduce.py`, `analysis/query.py`, `analysis/statistics.py`,
+or anything under "Statistics" in the Analysis panel.
 
 ## The three per-ROI layers (Pillar I - the heavy work)
 
@@ -36,6 +46,11 @@ This is the expensive part: a real pixel read and fit, once per ROI per
 spectral cube.
 
 ### Where this is enforced in code
+
+*(Old app, history. In the current app the same rule is stated at the top of
+`analysis/frame_reduce.py`: "A ROI's pixels are never pooled with another
+ROI's before reducing", and `analysis/tasks.compute_cell` is the independent
+reference implementation the scan is checked against.)*
 
 `gui/analysis_tasks.py`'s `_scoped_formula_spectrum_task` is the one
 spectrum-compute path, used for every dataset format
@@ -109,7 +124,7 @@ already-fitted per-ROI sensogram values. See
 `gui/analysis_controller.py`'s sensogram trace-fetch/aggregation code for
 the current implementation.
 
-## Where this lives on the `rewrite` branch (2026-09-23)
+## Where this lives now (written 2026-09-23 on the `rewrite` branch; the rewrite replaced the original app on 2026-10-29, so the "Stable build" column is the old app)
 
 The layering above is now built as separate modules rather than being a
 description of how the GUI happens to be arranged. Read this table before
