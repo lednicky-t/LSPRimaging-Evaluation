@@ -78,7 +78,7 @@ from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 from ..frame_naming import FrameNamingScheme
 from ..applog import timed
-from .session import PreparedSession, SessionState, SessionWriter, prepare_session
+from .session import NewerSessionError, PreparedSession, SessionState, SessionWriter, prepare_session
 
 logger = logging.getLogger(__name__)
 
@@ -316,7 +316,16 @@ class SessionAutosave(QObject):
 
     def _report_failure(self, root: Path, error: BaseException) -> None:
         """Log it *and* tell the user (`save_failed`). The change stays pending for the root being saved, so the
-        next edit or the quit flush tries again rather than treating a failed write as a completed one."""
+        next edit or the quit flush tries again rather than treating a failed write as a completed one.
+
+        A session saved by a newer build (`NewerSessionError`) is a refusal, not an accident: said as it is, without the
+        traceback and without "will retry" (every retry is refused the same way until the app is updated)."""
+        if isinstance(error, NewerSessionError):
+            logger.warning("Session autosave refused for %s: %s", root, error)
+            if root == self._root:
+                self._dirty = True
+            self.save_failed.emit(f"Session not saved: {error}")
+            return
         logger.error("Session autosave failed for %s", root, exc_info=(type(error), error, error.__traceback__))
         if root == self._root:
             self._dirty = True

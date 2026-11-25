@@ -21,7 +21,7 @@ from .transient_detection import KIND_PARTICLE, ContourMask, TransientEvent
 
 logger = logging.getLogger(__name__)
 
-SCAN_ALGORITHM_VERSION = 1  # bump when the detection maths changes in a way that makes old lists not comparable
+TRANSIENT_SCAN_ALGORITHM_VERSION = 1  # the Mask tab's transient scan (not the analysis scan's analysis/scan_fingerprint.SCAN_ALGORITHM_VERSION); bump when the detection maths changes in a way that makes old lists not comparable
 
 
 @dataclass(frozen=True)
@@ -37,7 +37,7 @@ class MaskPointer:
 class ScanInfo:
     """How a list was made: the algorithm version, when, with which settings, and what the scan covered."""
 
-    algorithm_version: int = SCAN_ALGORITHM_VERSION
+    algorithm_version: int = TRANSIENT_SCAN_ALGORITHM_VERSION
     created_utc: str = ""
     settings: dict = field(default_factory=dict)  # plain numbers and flags: sigma factor, stride, bin factor, ...
     frames_in_range: int = 0
@@ -127,7 +127,7 @@ def from_payload(payload: object) -> MaskPointersState:
     info = None
     if isinstance(raw_info, dict):
         info = ScanInfo(
-            algorithm_version=int(raw_info.get("algorithm_version", SCAN_ALGORITHM_VERSION)),
+            algorithm_version=int(raw_info.get("algorithm_version", TRANSIENT_SCAN_ALGORITHM_VERSION)),
             created_utc=str(raw_info.get("created_utc", "")),
             settings=dict(raw_info.get("settings") or {}),
             frames_in_range=int(raw_info.get("frames_in_range", 0)),

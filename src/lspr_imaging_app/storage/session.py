@@ -82,6 +82,7 @@ import base64
 import json
 import logging
 import os
+import re
 import tempfile
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -150,7 +151,7 @@ SESSION_SCHEMA_VERSION = "1.16"
 # absent = none, the built-in ring is its reference), domain/roi_links.py. Written only when not the default, so a session without references is written exactly
 # as before; a 1.10 (or older) file loads as all samples with their built-in rings. An older build ignores both keys (it would analyse a reference ROI as a sample).
 # 1.10 (2026-11-16): the "selection" block may also hold "locked": true - the ROI selection lock (selection/module.py). Written only when the selection is locked, so a
-# session without a lock is written exactly as before; a 1.9 (or older) file has none and loads unlocked. (The version compare is on the major number only, so "1.10" > "1.9" needs no care.)
+# session without a lock is written exactly as before; a 1.9 (or older) file has none and loads unlocked. (`load_session` checks the major number only; `is_newer_than_this_build` compares numbers, so "1.10" > "1.9".)
 # 1.9 (2026-11-13): the "refractive_index" block may also hold "rows" - the user's working table (edited, added, removed rows, rows assigned to steps by hand), plan/refractive_index.py;
 # "solutions" stays the imported copy and is never changed. Optional: a 1.8 file has none (the working table is then the imported one) and a table nobody edited is written exactly as before.
 # 1.8 (2026-11-12): the "plan" block may also hold "bulk" (the steps of the S_bulk set: the bulk sensitivity's steps), plan/state.py. Optional: a 1.7 file has none, and
@@ -168,6 +169,10 @@ SESSION_SCHEMA_VERSION = "1.16"
 rule `docs/schemas/hdf_standard.md` sets for measurement files. `load_session`
 rejects an unknown schema name and an incompatible major version rather than
 guessing at a file it doesn't understand.
+
+A file of a newer *minor* version opens without the parts this build does not
+know, and is then **never saved over** (`refuse_to_overwrite_newer_session`,
+2026-11-25): saving it back would delete what the newer build stored there.
 
 1.0 -> 1.1 (2026-09-23): added the `"analysis"` block (`MetricSettings` +
 `StatisticsSettings`), when the query layer gave those an owner. Additive,
@@ -546,6 +551,54 @@ def session_path(root: Path) -> Path:
     return session_dir(root) / "session.json"
 
 
+class NewerSessionError(RuntimeError):
+    """The session on disk was saved by a newer build of the app; this build does not save over it."""
+
+
+_VERSION_IN_HEAD = re.compile(r'"schema_version"\s*:\s*"(\d+(?:\.\d+)*)"')
+_HEAD_BYTES = 4096  # "schema_version" is the second key `prepare_session` writes: always in the first few hundred bytes
+
+
+def _version_tuple(version: str) -> tuple[int, ...]:
+    """``"1.10"`` -> ``(1, 10)``: compared as numbers, so 1.10 is newer than 1.9."""
+    return tuple(int(part) for part in version.split("."))
+
+
+def session_file_version(path: Path) -> str | None:
+    """The ``schema_version`` written at the top of the session file at ``path``, or None (no file, or none found in its head).
+    Reads only the first few KB: called before every save."""
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(_HEAD_BYTES).decode("utf-8", errors="replace")
+    except FileNotFoundError:
+        return None
+    match = _VERSION_IN_HEAD.search(head)
+    return None if match is None else match.group(1)
+
+
+def is_newer_than_this_build(version: str) -> bool:
+    """True when a session of ``version`` was written by a newer build than this one (`SESSION_SCHEMA_VERSION`)."""
+    try:
+        return _version_tuple(version) > _version_tuple(SESSION_SCHEMA_VERSION)
+    except ValueError:
+        return False
+
+
+def refuse_to_overwrite_newer_session(path: Path) -> None:
+    """Raise `NewerSessionError` when the session file at ``path`` was written by a newer build (2026-11-25).
+
+    An older build reads such a file "minus the fields it does not know" (`_decode_area_roi`, the optional blocks), so saving
+    it back would delete what the newer build stored there: the LbL series, the line order, the spectral correction, and a
+    reference ROI would be saved as a sample (1.11). The file is left exactly as it is; the autosave shows the message."""
+    version = session_file_version(path)
+    if version is not None and is_newer_than_this_build(version):
+        raise NewerSessionError(
+            f"this session was saved by a newer version of the app (session format {version}; this version writes "
+            f"{SESSION_SCHEMA_VERSION}). It is not saved over, so nothing the newer version stored is lost: "
+            f"changes made here are not kept. Update the app to keep working on this dataset."
+        )
+
+
 def _masks_dir(root: Path) -> Path:
     return session_dir(root) / "masks"
 
@@ -615,8 +668,12 @@ class SessionWriter:
         self._root, self._naming, self._known = Path(root), naming, dict(known)
 
     def write(self, root: Path, prepared: PreparedSession) -> Path:
-        """Write `prepared` under ``root/session/``, returning the JSON's path."""
+        """Write `prepared` under ``root/session/``, returning the JSON's path.
+
+        Raises `NewerSessionError`, before anything is written, when the session on disk was saved by a newer build
+        (`refuse_to_overwrite_newer_session`)."""
         root = Path(root)
+        refuse_to_overwrite_newer_session(session_path(root))
         with timed(logger, "session.write", root=root.name) as t:
             encoded, stats = self._encode_mask_changes(root, prepared.mask_changes, prepared.naming)
             self.last_stats = stats
@@ -883,6 +940,11 @@ def load_session(
         raise ValueError(
             f"{path} is schema version {version}, which this build "
             f"(supporting {SESSION_SCHEMA_VERSION}) cannot read"
+        )
+    if is_newer_than_this_build(version):
+        logger.warning(
+            "%s is session format %s, newer than this build's %s: opened without the parts this build does not know, "
+            "and it will not be saved over (refuse_to_overwrite_newer_session)", path, version, SESSION_SCHEMA_VERSION,
         )
 
     naming_raw = payload.get("frame_naming") or {}
