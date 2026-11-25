@@ -160,6 +160,8 @@ from ..domain.roi_links import (
     reference_source,
     samples_linked_to,
 )
+from .array_layout import ArraySpec
+from .array_stamp import plan_stamp
 from .clipboard import ClippedRoi, RoiClip
 from .mask_regions import mask_regions
 from .ordering import move_block, renumbering
@@ -708,6 +710,55 @@ class RoiToolbox(QObject):
             FunctionCommand("Paste ROI" if len(new_rois) == 1 else f"Paste {len(new_rois)} ROIs", undo_fn=revert, redo_fn=apply)
         )
         return ids
+
+    @instrumented("RoiToolbox.stamp_array")
+    def stamp_array(self, seed_ids: Collection[int], spec: ArraySpec, *, cube: int | None = None, label: str = "Array") -> tuple[int, ...]:
+        """Manual array (Array\\*): copies of the ``seed_ids`` ROIs on the other nodes of the lattice ``spec`` describes, plus one `RoiArrayGroup` recipe holding
+        the seed and the copies (`roi/array_stamp.py`). The seed stays where it is and keeps its ids. One undo step, one signal. Returns the new ids.
+
+        Raises ``ValueError`` (nothing changed) for an invalid spec, nothing selected, or a seed that already belongs to an array (it would leave that array)."""
+        clip = self.copy_rois(seed_ids, cube=cube)  # ascending ids; raises KeyError for an unknown id, ValueError for none
+        ids = tuple(sorted({int(i) for i in seed_ids}))
+        taken = [i for i in ids if self._rois[i].array_id]
+        if taken:
+            raise ValueError(f"ROI {taken[0]} already belongs to {self._rois[taken[0]].array_id}: select ROIs that are not in an array.")
+        numbers = [int(a.rsplit("_", 1)[-1]) for a in self._array_groups if a.rsplit("_", 1)[-1].isdigit()]
+        array_id = f"array_{max(numbers, default=0) + 1}"
+        first_id = max(self._rois, default=0) + 1
+        plan = plan_stamp(clip, ids, spec, first_id=first_id, array_id=array_id, label=label, place=self._at_position)
+        new_ids = tuple(roi.area_roi_id for roi in plan.new_rois)
+        linked = tuple(roi.area_roi_id for roi in plan.new_rois if roi.reference_roi_ids)
+        seeds = [self._rois[i] for i in ids]
+        renumbers = any(old != new for old, new in plan.id_map.items())
+        undo_map = {new: old for old, new in plan.id_map.items()}
+
+        def apply() -> None:
+            for roi in plan.new_rois:
+                self._rois[roi.area_roi_id] = roi
+            for seed in seeds:
+                seed.array_id = array_id
+            self._array_groups[array_id] = plan.recipe
+            self._roi_id_counter = itertools.count(first_id + len(new_ids))
+            self.geometry_changed.emit(RoiComputationalChange(roi_ids=new_ids, reason="added"))
+            if linked:
+                self.links_changed.emit(RoiLinkChange(sample_ids=linked, reason="pasted"))
+            if renumbers:  # the numbering (rows / columns, from a corner) puts the array's ROIs into the ids they hold together
+                self._remap_ids({i: plan.id_map.get(i, i) for i in self._rois})
+
+        def revert() -> None:
+            if renumbers:
+                self._remap_ids({i: undo_map.get(i, i) for i in self._rois})
+            for roi in plan.new_rois:
+                self._rois.pop(roi.area_roi_id, None)
+            for seed in seeds:
+                seed.array_id = None
+            self._array_groups.pop(array_id, None)
+            self._roi_id_counter = itertools.count(first_id)
+            self.geometry_changed.emit(RoiComputationalChange(roi_ids=new_ids, reason="deleted"))
+
+        apply()
+        undo_manager.push(FunctionCommand(label, undo_fn=revert, redo_fn=apply))
+        return tuple(plan.id_map.get(i, i) for i in new_ids)  # the copies' numbers as they are now
 
     # -- command API: rim pair <-> linked pair (plan 2026-11-19, "Rim pairs, linked pairs, the Type column") ----------
 
@@ -1904,28 +1955,29 @@ class RoiToolbox(QObject):
         if all(old == new for old, new in id_map.items()):
             return
         reverse = {new: old for old, new in id_map.items()}
+        self._remap_ids(id_map)
+        undo_manager.push(FunctionCommand(label, undo_fn=lambda: self._remap_ids(reverse), redo_fn=lambda: self._remap_ids(id_map)))
 
-        def apply(mapping: dict[int, int]) -> None:
-            by_current_id = dict(self._rois)
-            renumbered: dict[int, AreaRoi] = {}
-            for old, new in mapping.items():
-                roi = by_current_id[old]
-                roi.area_roi_id = new
-                renumbered[new] = roi
-            self._rois = dict(sorted(renumbered.items()))
-            for roi in self._rois.values():  # links follow their references' new numbers
-                if roi.reference_roi_ids:
-                    roi.reference_roi_ids = tuple(sorted(mapping[i] for i in roi.reference_roi_ids))
-            for group in self._groups.values():
-                group.area_roi_ids = sorted(mapping[roi_id] for roi_id in group.area_roi_ids)
-            for array in self._array_groups.values():
-                array.member_area_roi_ids = [mapping[roi_id] for roi_id in array.member_area_roi_ids]
-            changed = tuple(sorted(new for old, new in mapping.items() if old != new))
-            self.roi_ids_renumbered.emit(dict(mapping))
-            self.cosmetic_changed.emit(RoiCosmeticChange(roi_ids=changed, reason="renumbered"))
-
-        apply(id_map)
-        undo_manager.push(FunctionCommand(label, undo_fn=lambda: apply(reverse), redo_fn=lambda: apply(id_map)))
+    def _remap_ids(self, mapping: dict[int, int]) -> None:
+        """Give every ROI the id ``mapping`` says (a permutation of **all** current ids): groups, arrays and links follow, and `roi_ids_renumbered`
+        and a cosmetic change are emitted. No undo step of its own: `_renumber` and `stamp_array` wrap it in theirs."""
+        by_current_id = dict(self._rois)
+        renumbered: dict[int, AreaRoi] = {}
+        for old, new in mapping.items():
+            roi = by_current_id[old]
+            roi.area_roi_id = new
+            renumbered[new] = roi
+        self._rois = dict(sorted(renumbered.items()))
+        for roi in self._rois.values():  # links follow their references' new numbers
+            if roi.reference_roi_ids:
+                roi.reference_roi_ids = tuple(sorted(mapping[i] for i in roi.reference_roi_ids))
+        for group in self._groups.values():
+            group.area_roi_ids = sorted(mapping[roi_id] for roi_id in group.area_roi_ids)
+        for array in self._array_groups.values():
+            array.member_area_roi_ids = [mapping[roi_id] for roi_id in array.member_area_roi_ids]
+        changed = tuple(sorted(new for old, new in mapping.items() if old != new))
+        self.roi_ids_renumbered.emit(dict(mapping))
+        self.cosmetic_changed.emit(RoiCosmeticChange(roi_ids=changed, reason="renumbered"))
 
     @instrumented("RoiToolbox.reorder_rois")
     def reorder_rois(self, new_order: Sequence[int]) -> None:

@@ -255,6 +255,13 @@ class RoiArrayGroup:
     anchor_y_px: float
     rotation_deg: float = 0.0
     member_area_roi_ids: list[int] = field(default_factory=list)
+    spec: dict[str, object] = field(default_factory=dict)
+    """A **manual** array (Array\\*, `roi/array_layout.ArraySpec`): the settings it was made from, so it can be edited later. Empty for an
+    array the detector made. The positions of the members are still the truth; this is the recipe that regenerates them."""
+    unit_size: int = 1
+    """Manual array: ROIs per node (the selection that was repeated). ``member_area_roi_ids`` is node-major: row-major nodes, ``unit_size`` ids each."""
+    seed_node: int = 0
+    """Manual array: row-major index of the node the original selection occupies (its ROIs keep their ids and are in ``member_area_roi_ids`` there)."""
 
 
 @dataclass(slots=True)

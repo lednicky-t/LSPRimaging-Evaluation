@@ -28,6 +28,7 @@ from .chromatic_tab import ChromaticCorrectionTab
 from .canvas_tools import style_bar_icon_button
 from .general_group import style_general_icon_button
 from .mask_tab import MaskTab
+from .array_star import ArrayStarController
 from .roi_tab import RoiTab
 from .side_rails import LEFT, RIGHT, SideRail, SideRails
 from .view_ribbon import ViewRibbon
@@ -89,7 +90,7 @@ def build_mask_tab(panel: ImagePanel) -> QWidget:
 
 def build_roi_tab(panel: ImagePanel) -> QWidget:
     """Moved out of `ImagePanel._build_roi_tab` (2026-11-15). On the panel it
-    creates: `_roi_tab`
+    creates: `_roi_tab`, `_array_star`
     reads: `_array_action`, `_background`, `_chromatic`, `_dataset`, `_edit_target`, `_geometry`, `_roi_overlay`, `_roi_scope`,
     `_roi_toolbox`, `_selection`, `_transforms_section`
     calls its methods: `_on_auto_crop_readiness`, `_resolve_reference_frame`, `_draw_roi_overlay` and connects the handlers `_on_roi_overlay_changed`,
@@ -108,6 +109,13 @@ def build_roi_tab(panel: ImagePanel) -> QWidget:
     panel._roi_tab.label_size_changed.connect(panel._roi_overlay.set_label_point_size)
     panel._roi_tab.group_labels_changed.connect(panel._on_group_labels_changed)
     panel._roi_tab.status.connect(panel._on_tool_status)
+    # Array* (manual array with a live preview on the canvas): the controller draws on the plot, the tab gives its button a place.
+    panel._array_star = ArrayStarController(
+        plot=panel._plot, toolbox=panel._roi_toolbox, selection=panel._selection, chromatic=panel._chromatic, geometry=panel._geometry,
+        current_frame=lambda: (panel._current_cube(), panel._current_wavelength()), host=panel, parent=panel,
+    )
+    panel._array_star.status.connect(panel._on_tool_status)
+    panel._roi_tab.add_array_star(panel._array_star)
     # Auto rotate and Auto crop (Image tools tab) act through the ROI tab, which owns the array tools; that
     # tab is built before this one. Auto crop also shows which of its dependencies are still missing, and its
     # menu rows lead to the tab that fixes them.

@@ -185,6 +185,12 @@ class LengthField(QWidget):
             self._unit.setChecked(um)
             self._unit.setText("µm" if um else "px")
             self._unit.setEnabled(self._geometry.can_display_micrometers())
+            theme = get_active_theme()  # the switch's text is always drawn (also while it cannot be clicked, without a calibration)
+            self._unit.setStyleSheet(
+                f"QToolButton {{ border: none; background: transparent; padding: 0px 2px; font-weight: 600; color: {theme.text_secondary}; }}"
+                f"QToolButton:disabled {{ color: {theme.text_dim}; background: transparent; }}"
+                f"QToolButton:hover:enabled {{ color: {theme.accent_blue}; }}"
+            )
             self._unit.setToolTip(
                 ("Micrometers (click for pixels)" if um else "Pixels (click for micrometers)")
                 if self._geometry.can_display_micrometers()

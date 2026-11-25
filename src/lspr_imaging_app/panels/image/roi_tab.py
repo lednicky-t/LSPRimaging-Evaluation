@@ -5,8 +5,8 @@ and groups, and lock the ROI selection.
 
 Layout (one ribbon row, captioned groups, thin separators between them):
 
-    [scope toggle] | [lock, link, unlink] | [group controls] | [array controls] | [position tuning]
-         Scope            Selection              Group              Array            Tuning
+    [scope toggle] | [lock, link, unlink] | [group controls] | [array controls] | [Array* button] | [position tuning]
+         Scope            Selection              Group              Array             Array*            Tuning
 
 (The Shape picker of this row was deleted 2026-11-24: it only steered the click-to-add ROI tool, which no
 screen could turn on any more. A ROI of a given shape is added from the right-click menu, Add ROI.)
@@ -46,6 +46,7 @@ from ..ribbon_group import group_label_style, labeled_icon_group, ribbon_separat
 from ..ui_state import UiStateStore
 from .array_actions import ArrayActions
 from .array_controls import ArrayControls
+from .array_star import ArrayStarController
 from .general_group import ICON_SIZE as _RIBBON_ICON_SIZE
 from .general_group import style_general_icon_button
 from .group_actions import GroupActions
@@ -90,6 +91,7 @@ class RoiTab(QWidget):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self._array_star: ArrayStarController | None = None  # added by `add_array_star`
         self._sample_controls = RoiOverlayControls(
             "sample", visible=overlay.sample.visible, color=QColor(overlay.sample.color),
             alpha=overlay.sample.alpha, parent=self,
@@ -221,6 +223,17 @@ class RoiTab(QWidget):
         self.layout().insertWidget(at, separator)
         self.layout().insertWidget(at + 1, tuning)
 
+    def add_array_star(self, controller: ArrayStarController) -> None:
+        """The "Array*" section (2026-11-25), after Array: a button that opens the manual-array pop-out. The controller is built by `ribbon_build`
+        (it needs the canvas); this tab only gives it a place and keeps it styled."""
+        self._array_star = controller
+        group, self._array_star_caption = labeled_icon_group(self, controller.button, "Array*")
+        separator = ribbon_separator(self)
+        self._separators.append(separator)
+        at = self.layout().count() - 1  # before the trailing stretch
+        self.layout().insertWidget(at, separator)
+        self.layout().insertWidget(at + 1, group)
+
     def auto_rotate(self) -> None:
         """Image tools tab's Auto rotate: level the image by the detected array's tilt (`ArrayActions.auto_rotate`)."""
         self._array_actions.auto_rotate()
@@ -310,6 +323,8 @@ class RoiTab(QWidget):
     def bind_ui_state(self, store: UiStateStore) -> None:
         """Remember the Array, ROI-label place and Groups-label settings (see `panels/ui_state.py`)."""
         self._array_controls.bind_ui_state(store)
+        if self._array_star is not None:
+            self._array_star.bind_ui_state(store)
         self._label_placement_picker.bind_ui_state(store, "image/roi_label_placement")
         store.bind("image/roi_label_point_size", self._label_size_box)
         self._group_controls.label_menu.bind_ui_state(store)
@@ -381,6 +396,9 @@ class RoiTab(QWidget):
         self._display_menu.refresh_theme(theme)
         self._group_controls.refresh_theme()
         self._array_controls.refresh_theme()
+        if self._array_star is not None:
+            self._array_star.refresh_theme()
+            self._array_star_caption.setStyleSheet(group_label_style())
         self._scope_toggle.refresh_theme(theme)
         for separator in self._separators:
             separator.setStyleSheet(f"color: {theme.control_border};")

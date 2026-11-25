@@ -1563,6 +1563,7 @@ class ImagePanel(QWidget):
 
         frame = (self._current_cube(), self._current_wavelength())
         affine = self._chromatic.affine_for(frame)
+        self._array_star.on_frame()  # the Array* preview (a no-op while its pop-out is closed)
         self._tuning_overlay.update(self._tuning_view, affine)  # the tuning crosses: not part of the ROI layer cache, a comparison when nothing changed
         # `only_if_changed` (the per-frame redraw, i.e. every wavelength step): ~40 ms of the GUI thread
         # per frame on 100+ ROIs (measured 2026-10-14), and nothing the overlay draws changes between two

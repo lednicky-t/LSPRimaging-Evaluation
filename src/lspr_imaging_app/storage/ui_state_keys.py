@@ -236,6 +236,25 @@ ARRAY_KEYS = {  # ROIs tab, "Array" group (panels/image/array_controls.py); leng
     "outer_ratio": UiKey("array/ring_outer_ratio", 1.25, float),
     "ring_size_mode": UiKey("array/ring_size_mode", "uniform", str),
 }
+ARRAY_STAR_KEYS = {  # ROIs tab, "Array*" pop-out (panels/image/array_star.py); lengths are stored in pixels
+    "kind": UiKey("array_star/kind", "rectangular", str),
+    "rows": UiKey("array_star/rows", 2, int),
+    "cols": UiKey("array_star/cols", 2, int),
+    "pitch_x": UiKey("array_star/pitch_x_px", 50.0, float),
+    "pitch_y": UiKey("array_star/pitch_y_px", 50.0, float),
+    "start_x": UiKey("array_star/start_x", 0.0, float),
+    "start_y": UiKey("array_star/start_y", 0.0, float),
+    "angle": UiKey("array_star/angle_deg", 0.0, float),
+    "step_x": UiKey("array_star/pitch_factor_x", 1.0, float),
+    "step_y": UiKey("array_star/pitch_factor_y", 1.0, float),
+    "row_offset": UiKey("array_star/row_offset", 0.0, float),
+    "regular": UiKey("array_star/regular_cell", False, bool),
+    "advanced": UiKey("array_star/advanced_open", False, bool),
+    "number_by": UiKey("array_star/number_by", "rows", str),
+    "number_x": UiKey("array_star/number_start_x", 0.0, float),
+    "number_y": UiKey("array_star/number_start_y", 0.0, float),
+    "opacity": UiKey("array_star/preview_opacity", 0.5, float),
+}
 HAND_WIRED_KEYS: tuple[UiKey, ...] = (
     HISTOGRAM_CURSOR_READOUT, HISTOGRAM_CURVE_STYLES, HISTOGRAM_SHOW_EVERYTHING, IMAGE_CURSOR_READOUT,
     IMAGE_SCALE_BAR_COLOR, IMAGE_ROI_LABELS, SELECTION_COMBINE_MODE, SELECTION_WAND_METHOD, IMAGE_LAYER_IMAGE_VISIBLE, IMAGE_ACTIVE_LAYER,
@@ -243,7 +262,7 @@ HAND_WIRED_KEYS: tuple[UiKey, ...] = (
     *(key for keys_for_kind in ROI_OVERLAY_KEYS.values() for key in keys_for_kind.values()),
     *(key for keys_for_role in SELECTION_STYLE_KEYS.values() for key in keys_for_role.values()),
     CUBE_DISPLAY_MODE, MASK_SCOPE, ROI_SCOPE, ROI_ROW_VISIBLE, ROI_ROW_SELECTED_ONLY, MASK_ROWS_VISIBLE, EXPORT_SHARD,
-    *ARRAY_KEYS.values(), *SLIDER_COLOR_KEYS.values(),
+    *ARRAY_KEYS.values(), *ARRAY_STAR_KEYS.values(), *SLIDER_COLOR_KEYS.values(),
 )
 
 ALL_KEYS: tuple[UiKey, ...] = (
