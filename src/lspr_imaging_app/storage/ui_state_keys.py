@@ -255,6 +255,26 @@ ARRAY_STAR_KEYS = {  # ROIs tab, "Array*" pop-out (panels/image/array_star.py); 
     "number_y": UiKey("array_star/number_start_y", 0.0, float),
     "opacity": UiKey("array_star/preview_opacity", 0.5, float),
 }
+
+ARRAY_FIND_KEYS = {  # ROIs tab, "Find*" pop-out (panels/image/array_find.py): the array finder's thresholds and switches
+    "slider": UiKey("array_find/strictness", 0.5, float),
+    "similarity": UiKey("array_find/similarity", 0.6, float),
+    "strength": UiKey("array_find/strength", 0.35, float),
+    "position_tol": UiKey("array_find/position_tolerance", 0.05, float),
+    "size_tol": UiKey("array_find/size_tolerance", 0.25, float),
+    "fix_type": UiKey("array_find/fix_type", True, bool),
+    "fix_size": UiKey("array_find/fix_size", True, bool),
+    "place_missing": UiKey("array_find/place_missing", False, bool),
+    "corners": UiKey("array_find/seeds_are_corners", True, bool),
+    "bright": UiKey("array_find/bright_spots", False, bool),
+    "use_mask": UiKey("array_find/use_mask", True, bool),
+    "individual": UiKey("array_find/individual_sizes", False, bool),
+    "advanced": UiKey("array_find/advanced_open", False, bool),
+    "number_by": UiKey("array_find/number_by", "rows", str),
+    "number_x": UiKey("array_find/number_start_x", 0.0, float),
+    "number_y": UiKey("array_find/number_start_y", 0.0, float),
+    "opacity": UiKey("array_find/preview_opacity", 0.5, float),
+}
 HAND_WIRED_KEYS: tuple[UiKey, ...] = (
     HISTOGRAM_CURSOR_READOUT, HISTOGRAM_CURVE_STYLES, HISTOGRAM_SHOW_EVERYTHING, IMAGE_CURSOR_READOUT,
     IMAGE_SCALE_BAR_COLOR, IMAGE_ROI_LABELS, SELECTION_COMBINE_MODE, SELECTION_WAND_METHOD, IMAGE_LAYER_IMAGE_VISIBLE, IMAGE_ACTIVE_LAYER,
@@ -262,7 +282,7 @@ HAND_WIRED_KEYS: tuple[UiKey, ...] = (
     *(key for keys_for_kind in ROI_OVERLAY_KEYS.values() for key in keys_for_kind.values()),
     *(key for keys_for_role in SELECTION_STYLE_KEYS.values() for key in keys_for_role.values()),
     CUBE_DISPLAY_MODE, MASK_SCOPE, ROI_SCOPE, ROI_ROW_VISIBLE, ROI_ROW_SELECTED_ONLY, MASK_ROWS_VISIBLE, EXPORT_SHARD,
-    *ARRAY_KEYS.values(), *ARRAY_STAR_KEYS.values(), *SLIDER_COLOR_KEYS.values(),
+    *ARRAY_KEYS.values(), *ARRAY_STAR_KEYS.values(), *ARRAY_FIND_KEYS.values(), *SLIDER_COLOR_KEYS.values(),
 )
 
 ALL_KEYS: tuple[UiKey, ...] = (

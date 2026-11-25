@@ -28,6 +28,7 @@ from .chromatic_tab import ChromaticCorrectionTab
 from .canvas_tools import style_bar_icon_button
 from .general_group import style_general_icon_button
 from .mask_tab import MaskTab
+from .array_find import ArrayFindController
 from .array_star import ArrayStarController
 from .roi_tab import RoiTab
 from .side_rails import LEFT, RIGHT, SideRail, SideRails
@@ -90,7 +91,7 @@ def build_mask_tab(panel: ImagePanel) -> QWidget:
 
 def build_roi_tab(panel: ImagePanel) -> QWidget:
     """Moved out of `ImagePanel._build_roi_tab` (2026-11-15). On the panel it
-    creates: `_roi_tab`, `_array_star`
+    creates: `_roi_tab`, `_array_star`, `_array_find`
     reads: `_array_action`, `_background`, `_chromatic`, `_dataset`, `_edit_target`, `_geometry`, `_roi_overlay`, `_roi_scope`,
     `_roi_toolbox`, `_selection`, `_transforms_section`
     calls its methods: `_on_auto_crop_readiness`, `_resolve_reference_frame`, `_draw_roi_overlay` and connects the handlers `_on_roi_overlay_changed`,
@@ -115,7 +116,15 @@ def build_roi_tab(panel: ImagePanel) -> QWidget:
         current_frame=lambda: (panel._current_cube(), panel._current_wavelength()), host=panel, parent=panel,
     )
     panel._array_star.status.connect(panel._on_tool_status)
-    panel._roi_tab.add_array_star(panel._array_star)
+    # Find* (the array finder, next to Array*): same place, its own pop-out; works on the reference-wavelength image of the cube on screen.
+    panel._array_find = ArrayFindController(
+        plot=panel._plot, toolbox=panel._roi_toolbox, selection=panel._selection, area_selection=panel._area_selection, image_shape=lambda: panel._last_image_shape,
+        chromatic=panel._chromatic, geometry=panel._geometry, background=panel._background, mask=panel._mask, task=panel._array_find_task,
+        current_frame=lambda: (panel._current_cube(), panel._current_wavelength()), resolve_reference=panel._resolve_reference_frame,
+        load_plane=panel._dataset.load_plane, has_dataset=lambda: bool(panel._dataset.spectral_cubes()), host=panel, parent=panel,
+    )
+    panel._array_find.status.connect(panel._on_tool_status)
+    panel._roi_tab.add_array_star(panel._array_star, panel._array_find)
     # Auto rotate and Auto crop (Image tools tab) act through the ROI tab, which owns the array tools; that
     # tab is built before this one. Auto crop also shows which of its dependencies are still missing, and its
     # menu rows lead to the tab that fixes them.

@@ -92,6 +92,10 @@ def _find_array_icon(dots_color: str, glass_color: str) -> QIcon:
     return QIcon(pixmap)
 
 
+find_array_icon = _find_array_icon
+"""Public name of the "find the array" icon (the array finder's button uses it too)."""
+
+
 def auto_value_menu(spin: QAbstractSpinBox) -> QMenu:
     """The right-click menu of a field whose lowest value reads "auto" (2026-11-23, maintainer: once typed over, a field could not go back to auto).
 

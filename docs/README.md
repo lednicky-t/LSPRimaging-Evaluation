@@ -75,6 +75,8 @@ The ROI model, the ROI table, arrays, and tuning ROI positions.
 - [`group_table_ordering.md`](group_table_ordering.md): Group table ordering ("#" column, Move Up/Down)
 - [`roi_array_section_audit_2026-10-08.md`](roi_array_section_audit_2026-10-08.md): ROI tab "Array" section: audit and proposed design (2026-10-08)
 - [`array_spot_size_scan_2026-10-20.md`](array_spot_size_scan_2026-10-20.md): Array detection: spot-size scan (2026-10-20)
+- [`array_finder_design_2026-11-25.md`](array_finder_design_2026-11-25.md): Array finder (Find*): design, what exists, and the old-Detect-vs-Find* comparison on real images (2026-11-25)
+- [`array_star_manual_array_2026-11-25.md`](array_star_manual_array_2026-11-25.md): Array* manual array from the selection (2026-11-25)
 - [`auto_crop_lattice_2026-10-21.md`](auto_crop_lattice_2026-10-21.md): Auto crop to the ROI lattice (2026-10-21)
 - [`roi_layout_row_2026-10-16.md`](roi_layout_row_2026-10-16.md): ROI layout row under the Cube slider (2026-10-16)
 - [`roi_feature_detection_2026-10-29.md`](roi_feature_detection_2026-10-29.md): Finding small features on ROIs, from the image alone (2026-10-29)

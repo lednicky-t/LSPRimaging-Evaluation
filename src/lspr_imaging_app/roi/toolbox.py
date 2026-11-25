@@ -161,6 +161,8 @@ from ..domain.roi_links import (
     samples_linked_to,
 )
 from .array_layout import ArraySpec
+from .array_finder import FinderResult, FinderSettings
+from .array_found_plan import plan_found
 from .array_stamp import plan_stamp
 from .clipboard import ClippedRoi, RoiClip
 from .mask_regions import mask_regions
@@ -719,36 +721,62 @@ class RoiToolbox(QObject):
         Raises ``ValueError`` (nothing changed) for an invalid spec, nothing selected, or a seed that already belongs to an array (it would leave that array)."""
         clip = self.copy_rois(seed_ids, cube=cube)  # ascending ids; raises KeyError for an unknown id, ValueError for none
         ids = tuple(sorted({int(i) for i in seed_ids}))
-        taken = [i for i in ids if self._rois[i].array_id]
+        array_id, first_id = self._next_array_slot(ids)
+        plan = plan_stamp(clip, ids, spec, first_id=first_id, array_id=array_id, label=label, place=self._at_position)
+        return self._commit_array_plan(plan.new_rois, plan.recipe, ids, plan.id_map, first_id, label)
+
+    @instrumented("RoiToolbox.place_found_array")
+    def place_found_array(
+        self, result: FinderResult, settings: FinderSettings, seed_ids: Collection[int], numbering: ArraySpec, *, cube: int | None = None, label: str = "Find array"
+    ) -> tuple[int, ...]:
+        """Array finder (Find*): the ROIs of ``result`` that are not seeds, at the positions the image gave, plus one `RoiArrayGroup` recipe (`roi/array_found_plan.py`).
+        The seeds that sit on the array stay where they are and keep their ids. One undo step, one signal. Returns the new ids as they are numbered now.
+
+        Raises ``ValueError`` (nothing changed) for a result with no spot or a seed that already belongs to an array."""
+        ids = tuple(sorted({int(i) for i in seed_ids}))
+        clip = self.copy_rois(ids, cube=cube) if ids else None
+        array_id, first_id = self._next_array_slot(ids)
+        plan = plan_found(
+            result, settings, clip, ids, numbering, first_id=first_id, array_id=array_id, label=label,
+            default_gap_px=self._detection_settings.default_border().gap_px, place=self._at_position,
+        )
+        return self._commit_array_plan(plan.new_rois, plan.recipe, plan.seed_ids, plan.id_map, first_id, label)
+
+    def _next_array_slot(self, seed_ids: Collection[int]) -> tuple[str, int]:
+        """``(id of the next array, id of the next ROI)``; raises ``ValueError`` when a seed already belongs to an array (it would silently leave it)."""
+        taken = [i for i in seed_ids if self._rois[i].array_id]
         if taken:
             raise ValueError(f"ROI {taken[0]} already belongs to {self._rois[taken[0]].array_id}: select ROIs that are not in an array.")
         numbers = [int(a.rsplit("_", 1)[-1]) for a in self._array_groups if a.rsplit("_", 1)[-1].isdigit()]
-        array_id = f"array_{max(numbers, default=0) + 1}"
-        first_id = max(self._rois, default=0) + 1
-        plan = plan_stamp(clip, ids, spec, first_id=first_id, array_id=array_id, label=label, place=self._at_position)
-        new_ids = tuple(roi.area_roi_id for roi in plan.new_rois)
-        linked = tuple(roi.area_roi_id for roi in plan.new_rois if roi.reference_roi_ids)
-        seeds = [self._rois[i] for i in ids]
-        renumbers = any(old != new for old, new in plan.id_map.items())
-        undo_map = {new: old for old, new in plan.id_map.items()}
+        return f"array_{max(numbers, default=0) + 1}", max(self._rois, default=0) + 1
+
+    def _commit_array_plan(self, new_rois: Sequence[AreaRoi], recipe: RoiArrayGroup, seed_ids: Collection[int], id_map: dict[int, int], first_id: int, label: str) -> tuple[int, ...]:
+        """Store a planned array (the new ROIs, its recipe, the renumbering) as one undo step and one signal; the seeds join it. Shared by `stamp_array` and
+        `place_found_array`. Returns the new ids as numbered now."""
+        array_id = recipe.array_id
+        new_ids = tuple(roi.area_roi_id for roi in new_rois)
+        linked = tuple(roi.area_roi_id for roi in new_rois if roi.reference_roi_ids)
+        seeds = [self._rois[i] for i in seed_ids]
+        renumbers = any(old != new for old, new in id_map.items())
+        undo_map = {new: old for old, new in id_map.items()}
 
         def apply() -> None:
-            for roi in plan.new_rois:
+            for roi in new_rois:
                 self._rois[roi.area_roi_id] = roi
             for seed in seeds:
                 seed.array_id = array_id
-            self._array_groups[array_id] = plan.recipe
+            self._array_groups[array_id] = recipe
             self._roi_id_counter = itertools.count(first_id + len(new_ids))
             self.geometry_changed.emit(RoiComputationalChange(roi_ids=new_ids, reason="added"))
             if linked:
                 self.links_changed.emit(RoiLinkChange(sample_ids=linked, reason="pasted"))
             if renumbers:  # the numbering (rows / columns, from a corner) puts the array's ROIs into the ids they hold together
-                self._remap_ids({i: plan.id_map.get(i, i) for i in self._rois})
+                self._remap_ids({i: id_map.get(i, i) for i in self._rois})
 
         def revert() -> None:
             if renumbers:
                 self._remap_ids({i: undo_map.get(i, i) for i in self._rois})
-            for roi in plan.new_rois:
+            for roi in new_rois:
                 self._rois.pop(roi.area_roi_id, None)
             for seed in seeds:
                 seed.array_id = None
@@ -758,7 +786,7 @@ class RoiToolbox(QObject):
 
         apply()
         undo_manager.push(FunctionCommand(label, undo_fn=revert, redo_fn=apply))
-        return tuple(plan.id_map.get(i, i) for i in new_ids)  # the copies' numbers as they are now
+        return tuple(id_map.get(i, i) for i in new_ids)  # the new ROIs' numbers as they are now
 
     # -- command API: rim pair <-> linked pair (plan 2026-11-19, "Rim pairs, linked pairs, the Type column") ----------
 

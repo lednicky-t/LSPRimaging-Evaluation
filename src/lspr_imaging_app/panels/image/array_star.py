@@ -44,7 +44,7 @@ PROBLEM_COLOR = "#f59e0b"
 DEBOUNCE_MS = 30
 
 
-class _PopupFrame(QFrame):
+class PopupFrame(QFrame):
     """The frame the panel sits in: the window colour (what the fields have) and a thin border, painted here so no style-sheet cascade can change it."""
 
     def paintEvent(self, event) -> None:
@@ -90,7 +90,7 @@ class ArrayStarController(QObject):
 
         self._host = host
         self._open = False
-        self.popup = _PopupFrame(host)  # a child of the Image panel: in the app window, over the image, not a window of its own
+        self.popup = PopupFrame(host)  # a child of the Image panel: in the app window, over the image, not a window of its own
         self.popup.setObjectName("ArrayStarPopup")
         self.popup.hide()
         self.panel = ArrayStarPanel(geometry, self.popup)

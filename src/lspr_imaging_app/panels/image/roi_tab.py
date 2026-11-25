@@ -46,6 +46,7 @@ from ..ribbon_group import group_label_style, labeled_icon_group, ribbon_separat
 from ..ui_state import UiStateStore
 from .array_actions import ArrayActions
 from .array_controls import ArrayControls
+from .array_find import ArrayFindController
 from .array_star import ArrayStarController
 from .general_group import ICON_SIZE as _RIBBON_ICON_SIZE
 from .general_group import style_general_icon_button
@@ -92,6 +93,7 @@ class RoiTab(QWidget):
     ) -> None:
         super().__init__(parent)
         self._array_star: ArrayStarController | None = None  # added by `add_array_star`
+        self._array_find: ArrayFindController | None = None  # the Find* button beside it
         self._sample_controls = RoiOverlayControls(
             "sample", visible=overlay.sample.visible, color=QColor(overlay.sample.color),
             alpha=overlay.sample.alpha, parent=self,
@@ -223,11 +225,19 @@ class RoiTab(QWidget):
         self.layout().insertWidget(at, separator)
         self.layout().insertWidget(at + 1, tuning)
 
-    def add_array_star(self, controller: ArrayStarController) -> None:
-        """The "Array*" section (2026-11-25), after Array: a button that opens the manual-array pop-out. The controller is built by `ribbon_build`
-        (it needs the canvas); this tab only gives it a place and keeps it styled."""
+    def add_array_star(self, controller: ArrayStarController, finder: ArrayFindController | None = None) -> None:
+        """The "Array*" section (2026-11-25), after Array: a button that opens the manual-array pop-out, and beside it (``finder``) the Find* button that opens the
+        array finder's. The controllers are built by `ribbon_build` (they need the canvas); this tab only gives them a place and keeps them styled."""
         self._array_star = controller
-        group, self._array_star_caption = labeled_icon_group(self, controller.button, "Array*")
+        self._array_find = finder
+        row = QWidget(self)
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(2)
+        row_layout.addWidget(controller.button)
+        if finder is not None:
+            row_layout.addWidget(finder.button)
+        group, self._array_star_caption = labeled_icon_group(self, row, "Array*")
         separator = ribbon_separator(self)
         self._separators.append(separator)
         at = self.layout().count() - 1  # before the trailing stretch
@@ -325,6 +335,8 @@ class RoiTab(QWidget):
         self._array_controls.bind_ui_state(store)
         if self._array_star is not None:
             self._array_star.bind_ui_state(store)
+        if self._array_find is not None:
+            self._array_find.bind_ui_state(store)
         self._label_placement_picker.bind_ui_state(store, "image/roi_label_placement")
         store.bind("image/roi_label_point_size", self._label_size_box)
         self._group_controls.label_menu.bind_ui_state(store)
@@ -398,6 +410,8 @@ class RoiTab(QWidget):
         self._array_controls.refresh_theme()
         if self._array_star is not None:
             self._array_star.refresh_theme()
+        if self._array_find is not None:
+            self._array_find.refresh_theme()
             self._array_star_caption.setStyleSheet(group_label_style())
         self._scope_toggle.refresh_theme(theme)
         for separator in self._separators:
