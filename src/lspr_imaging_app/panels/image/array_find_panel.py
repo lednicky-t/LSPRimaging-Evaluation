@@ -27,8 +27,8 @@ from lspr_ui import CompactWedgeSlider, get_active_theme, load_tabler_icon
 from ...image_tools.geometry.module import GeometryModule
 from ...roi.array_finder import FinderResult, FinderSettings
 from ...roi.array_layout import ArraySpec
-from .array_star_pictograms import FlatIconButton, pictogram_icon
-from .array_star_picker import NumberingPicker
+from .array_pictograms import FlatIconButton, pictogram_icon
+from .array_picker import NumberingPicker
 from .general_group import ICON_SIZE
 
 OPACITY_DEFAULT = 0.5
@@ -200,7 +200,7 @@ class ArrayFindPanel(QWidget):
         self.refresh_theme()
 
     def paintEvent(self, event) -> None:
-        QPainter(self).fillRect(self.rect(), QColor(get_active_theme().window_bg))  # the colour the fields have (as the Array* panel)
+        QPainter(self).fillRect(self.rect(), QColor(get_active_theme().window_bg))  # the colour the fields have (as the Array panel)
 
     # -- construction helpers -------------------------------------------------------------------------------------
 

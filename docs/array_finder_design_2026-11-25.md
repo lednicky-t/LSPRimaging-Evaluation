@@ -1,12 +1,12 @@
 # Array finder ("Find*"): fill in an array from the image, guided by ROIs (design, 2026-11-25)
 
 Status: design agreed with the maintainer the same day; **built the same day, tested offscreen, not yet seen by eye** (see "What exists" at the end). The old Array group
-(`array_controls.py`, Auto / Semi / Manual) and the manual Array* panel stay untouched; the maintainer wants to **compare the old and the new
+(`array_controls.py`, Auto / Semi / Manual) and the manual Array panel stay untouched; the maintainer wants to **compare the old and the new
 finder** before deciding which to keep. So the new code shares no logic with `roi/array_detection.py` (that module only gets thin public aliases).
 
 ## What it is
 
-A second button in the ROIs tab's Array* section opens a pop-out like the manual one. The user guides with 0, 1 or 2 selected ROIs or an area
+A second button in the ROIs tab's Array section opens a pop-out like the manual one. The user guides with 0, 1 or 2 selected ROIs or an area
 selection; the tool finds the similar spots in the image, works out whether they form a lattice and shows the array as ghosts (live). Apply makes
 the ROIs (one undo step), Cancel makes nothing. The guides narrow the search; the image decides.
 
@@ -31,7 +31,7 @@ the ROIs (one undo step), Cancel makes nothing. The guides narrow the search; th
 
 ## Decisions (maintainer, 2026-11-25)
 
-- Separate icon + pop-out in the Array* section (not a mode of the manual panel).
+- Separate icon + pop-out in the Array section (not a mode of the manual panel).
 - Missing nodes: leave out by default; a toggle in the pop-out places them.
 - Keep both finders until compared.
 - All four phases wanted.
@@ -49,7 +49,7 @@ Detect does not read the mask at all.
 
 - A ROI on the wrong spot silently skews a measurement: nothing is made without Apply, strays and missing nodes are drawn differently, Apply is one undo step.
 - The seeds stay where they are (they are the user's ROIs); the new ROIs are placed by the image, so a seed that is 1 px off its spot is 1 px off its neighbours.
-- One lattice per run. Several points per cell (dimers, honeycomb) need a basis: not built (same as the manual Array*).
+- One lattice per run. Several points per cell (dimers, honeycomb) need a basis: not built (same as the manual Array).
 - Thresholds (similarity 0.6, strength 0.35, position 0.05 x pitch, size 0.25) are first guesses until compared on real images.
 
 ## What exists (2026-11-25)
@@ -61,7 +61,7 @@ Detect does not read the mask at all.
 | Blob -> circle / rectangle / pixel map (pure) | `roi/shape_guess.py` (overlap 0.85) |
 | New ROIs + recipe (pure) | `roi/array_found_plan.py`; command `RoiToolbox.place_found_array` (shares `_commit_array_plan` with `stamp_array`) |
 | Threads (search, build) | `roi/array_find_task.py` (joined to the status-bar task indicator) |
-| Pop-out, outlines, wiring | `panels/image/array_find_panel.py`, `array_find_ghosts.py`, `array_find.py`, `popout_placer.py`; button in the Array* section (`roi_tab.add_array_star`) |
+| Pop-out, outlines, wiring | `panels/image/array_find_panel.py`, `array_find_ghosts.py`, `array_find.py`, `popout_placer.py`; button in the Array section (`roi_tab.add_array`) |
 | Remembered settings | `ARRAY_FIND_KEYS` in `storage/ui_state_keys.py` |
 
 Tests: `tests/unit/test_lspri_array_lattice.py`, `..._array_finder.py`, `..._roi_found_array.py`, `..._shape_guess.py`, `tests/integration/test_lspri_array_find.py`; synthetic images

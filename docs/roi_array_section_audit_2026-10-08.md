@@ -301,7 +301,7 @@ Half-max / gradient are very uniform across the array (no outlier). The plateau 
 
 # 12. The Array group is built (2026-10-08, end of day)
 
-ROIs tab -> new group **Array** (after Labels). Not looked at in the running app (static checks + tests only): please check it by eye.
+ROIs tab -> new group **Array* (after Labels). Not looked at in the running app (static checks + tests only): please check it by eye.
 
 ## 12.1 Pieces
 

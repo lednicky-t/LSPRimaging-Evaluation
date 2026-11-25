@@ -1,6 +1,6 @@
 """Manual array layout: where the copies of the selected ROI(s) go (pure: numpy only, no Qt, no image).
 
-The "Array*" pop-out of the ROIs tab stamps a **unit** (the selected ROI, or several as one pattern) on the
+The "Array" pop-out of the ROIs tab stamps a **unit** (the selected ROI, or several as one pattern) on the
 nodes of a lattice. This module is the only place that knows where the nodes are, so the live preview and
 Apply cannot disagree. Positions are processed-image pixel-index coordinates (x right, y down), the same as
 `AreaRoi.center_x / center_y`; the 0.5 px canvas shift is the overlay's business (`lspri-roi-model.md`).

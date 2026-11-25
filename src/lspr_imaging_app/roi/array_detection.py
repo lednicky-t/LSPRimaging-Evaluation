@@ -1,72 +1,41 @@
-"""Find a regular array of round spots in an image (pure: numpy / scipy / cv2, no Qt).
+"""Helpers of the array finder that work on a contrast map (pure: numpy / scipy / cv2, no Qt).
 
-Replaces the old pair `processing/roi_array_geometry.estimate_array_geometry` (global
-min-max normalisation, square pitch only, axis-aligned only, row / column counts from 1-D
-clustering) + `roi/detection._fit_grid_array` (integer pitch, per-pixel Python loop; 47 s on
-a 1300 x 900 image with 170 spots, `tools/array_lab.py` (removed in cut-over phase 2c), 2026-10-08).
+The old detector built on these (`find_array`, with its result type, `lattice_nodes` and `refine_centers`) was retired 2026-11-25 together with the old Array group;
+what is left is what `array_finder.py` shares:
 
-Space: pixel coordinates of the image passed in (pixel centres at integers). The caller
-passes the **reference-wavelength image of the current cube** in processed space (rotated /
-cropped / background-removed as the user has it) and stores the result in the reference frame.
-All lengths are diameters or pitches in pixels, floats (resolution 0.1 px or better).
+- `prepare_contrast`: the contrast map of an image, spots positive (`image_features.contrast_map`; ``bright=True`` flips the sign for bright spots).
+- `scan_spot_radius`: the spot size when no ROI says it: every radius of `SIZE_SCAN_RADII_PX` runs a candidate search and a lattice fit on a half-size copy and is scored by
+  how many candidates fit one common lattice (debris and small features do not form a lattice, so they cannot win). Added 2026-10-20: it replaced a single scale-space
+  guess that failed on 97 of 156 real images (whole array found in 59 / 156 -> 156 / 156).
+- `matched_filter` and `refine_nodes`: a disk-minus-ring matched filter for the whole image and the sub-pixel peak of it near each node.
 
-Method
-1. Contrast map (`image_features.contrast_map`): spots become positive whatever the
-   illumination; `bright=True` flips the sign for bright spots.
-2. Spot size: `ArrayPrior.diameter_px`, or a scan over diameters 6-120 px scored by how many
-   candidates fit one lattice (`_scan_spot_radius`, 2026-10-20; replaced a single scale-space
-   guess that failed on 97 of 156 real images). Then candidate spots: Laplacian-of-Gaussian
-   peaks at that size, on a reduced copy (positions only need to be good to a pixel or two here).
-3. Lattice: the two shortest strong neighbour vectors give the lattice vectors a1 (mostly
-   along x) and a2 (mostly along y); every candidate is given integer indices (i, j); origin
-   and both vectors are then fitted by least squares on the inliers (repeated with the
-   updated lattice). Pitch x, pitch y and the tilt of the rows come from this fit, so a
-   tilted array or different x / y pitches are handled, and one pass gives rows, columns and
-   the residual of every spot.
-4. Centres: a matched filter (disk minus surrounding ring) computed once for the whole image,
-   then a sub-pixel peak near each lattice node. A node with no signal keeps its lattice
-   position and is reported ``found = False`` (the old code called this ``inferred``).
-
-Sizing the spots is a separate step (`edge_size.py`); the diameter in `ArrayFit` is only the
-rough value the search used.
+Space: pixel coordinates of the image passed in (pixel centres at integers); all lengths are diameters or pitches in pixels.
 """
 
 from __future__ import annotations
 
 import math
 import warnings
-from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import cv2
 import numpy as np
 from scipy import ndimage
 from scipy.spatial import cKDTree
 
-from ..image_features import FeatureSearchError, contrast_map, fill_invalid, odd_size
-from ..progress import Cancelled, ProgressCallback, StageProgress
+from ..image_features import contrast_map, fill_invalid, odd_size
+from ..progress import Cancelled, StageProgress
 
 __all__ = [
-    "ArrayFit",
     "ArrayPrior",
     "Cancelled",
-    "STAGE_WEIGHTS",
-    "find_array",
-    "lattice_nodes",
-    "prepare_contrast",
     "matched_filter",
-    "refine_centers",
+    "prepare_contrast",
     "refine_nodes",
     "scan_spot_radius",
 ]
 
-STAGE_WEIGHTS = {"size": 0.75, "contrast": 0.0625, "candidates": 0.03125, "lattice": 0.03125, "refine": 0.125}
-"""Share of the progress bar per stage. Measured 2026-10-20 on a 1300 x 900 image with 160 spots: the size scan
-~1.7 s of ~2.0 s (with a diameter given the scan is skipped and the bar jumps past it). Binary fractions on purpose:
-they sum to exactly 1.0, so the bar ends at 1.0 (0.8 + 0.05 + ... ends at 1.0000000000000002)."""
-
 MIN_SPOTS = 6
-MIN_OCCUPANCY = 0.5
 
 SIZE_SCAN_RADII_PX = np.geomspace(3.0, 60.0, 27)
 """Spot radii tried when no diameter is given: diameter 6-120 px in ~12 % steps. The isolated-disk test accepts a
@@ -88,187 +57,10 @@ class ArrayPrior:
     pitch_y_px: float | None = None
 
 
-@dataclass(frozen=True)
-class ArrayFit:
-    rows: int
-    cols: int
-    pitch_x_px: float
-    """Length of the lattice vector along the rows (`a1`)."""
-    pitch_y_px: float
-    """Length of the lattice vector along the columns (`a2`)."""
-    tilt_deg: float
-    """Angle of `a1` from the image x axis (positive = clockwise on screen, y points down)."""
-    skew_deg: float
-    """Angle between `a1` and `a2` minus 90 (0 for a rectangular array)."""
-    origin_xy: tuple[float, float]
-    """Lattice position of node (row 0, col 0)."""
-    a1_xy: tuple[float, float]
-    a2_xy: tuple[float, float]
-    rough_diameter_px: float
-    centers_xy: np.ndarray
-    """(rows * cols, 2), row-major (row 0 first), matched-filter centres where found, else lattice positions."""
-    found: np.ndarray
-    """(rows * cols,) bool: a real spot was located at this node."""
-    scores: np.ndarray
-    """(rows * cols,) matched-filter score at the centre (contrast units)."""
-    residual_rms_px: float
-    """RMS distance of the found centres from the fitted lattice."""
-    warnings: tuple[str, ...] = field(default_factory=tuple)
-
-    @property
-    def count(self) -> int:
-        return self.rows * self.cols
-
-    @property
-    def found_count(self) -> int:
-        return int(self.found.sum())
 
 
-def lattice_nodes(
-    rows: int,
-    cols: int,
-    origin_xy: tuple[float, float],
-    a1_xy: tuple[float, float],
-    a2_xy: tuple[float, float],
-) -> np.ndarray:
-    """Node positions (rows * cols, 2), row-major, of a lattice: origin + col * a1 + row * a2.
-    Also what a manual "place array" uses."""
-    if rows < 1 or cols < 1:
-        raise ValueError("rows and cols must be at least 1")
-    j, i = np.mgrid[0:rows, 0:cols]
-    i = i.reshape(-1, 1).astype(np.float64)
-    j = j.reshape(-1, 1).astype(np.float64)
-    return np.asarray(origin_xy, dtype=np.float64) + i * np.asarray(a1_xy, dtype=np.float64) + j * np.asarray(a2_xy, dtype=np.float64)
 
 
-def find_array(
-    image: np.ndarray,
-    *,
-    valid_mask: np.ndarray | None = None,
-    prior: ArrayPrior | None = None,
-    bright: bool = False,
-    progress: ProgressCallback | None = None,
-    cancelled: Callable[[], bool] | None = None,
-    diagnostics: dict | None = None,
-) -> ArrayFit | None:
-    """The array in `image`, or ``None`` with ``diagnostics["reason"]`` saying why not.
-
-    `valid_mask` (True = usable) is combined with the finite pixels of `image`. Raises
-    `Cancelled` when `cancelled()` becomes true at a progress checkpoint."""
-    prior = prior or ArrayPrior()
-    diagnostics = diagnostics if diagnostics is not None else {}
-    step = StageProgress(STAGE_WEIGHTS, progress, cancelled)
-
-    def fail(reason: str) -> None:
-        diagnostics["reason"] = reason
-        return None
-
-    image = np.asarray(image, dtype=np.float32)
-    if image.ndim != 2 or image.size == 0:
-        return fail("The image is empty or not 2-D.")
-    step("size", 0.0, "Array: preparing the image...")
-    if bright:
-        # contrast_map wants dark spots: mirror the intensity range (stays positive, keeps the scale)
-        finite_values = image[np.isfinite(image)]
-        if finite_values.size:
-            image = (float(finite_values.max()) + float(finite_values.min())) - image
-    try:
-        filled, finite = fill_invalid(image)
-    except FeatureSearchError as error:
-        return fail(str(error))
-    valid = finite if valid_mask is None or valid_mask.shape != image.shape else (finite & valid_mask)
-    if not valid.any():
-        return fail("No valid (unmasked) pixels to search.")
-    # Light smoothing: the matched filter and the LoG do the real averaging. The background size is tied
-    # to the spot size once known; a first coarse pass needs one for the size estimate.
-    if prior.diameter_px:
-        radius = 0.5 * float(prior.diameter_px)
-        step("size", 1.0, "Array: spot size given.")
-    else:
-        radius = _scan_spot_radius(filled, valid, step, diagnostics)
-        if radius is None:
-            return None  # diagnostics["reason"] set
-    if radius < 2.0:
-        return fail(f"Spots are too small to search for (radius {radius:.1f} px).")
-    step("contrast", 0.0, "Array: contrast map...")
-    background_px = int(np.clip(odd_size(6.0 * radius), 31, 251))
-    contrast = contrast_map(filled, background_px, 1.0)
-    diagnostics["rough_diameter_px"] = 2.0 * radius
-    step("contrast", 1.0, "Array: contrast map ready.")
-
-    # -- candidates ---------------------------------------------------------------------
-    usable = ndimage.distance_transform_edt(valid) > radius if not valid.all() else np.ones(valid.shape, dtype=bool)
-    step("candidates", 0.0, "Array: searching for spots...")
-    points = _find_spots(contrast, radius, usable)
-    diagnostics["blob_count"] = int(len(points))
-    points = points[_is_isolated_disk(contrast, points, radius)] if len(points) else points
-    diagnostics["candidate_count"] = int(len(points))
-    step("candidates", 1.0, f"Array: {len(points)} candidate spots.")
-    if len(points) < MIN_SPOTS:
-        return fail(
-            f"Only {len(points)} candidate spots (need at least {MIN_SPOTS}). The contrast may be too low, "
-            "or the spots a different size from the search size."
-        )
-
-    # -- lattice -------------------------------------------------------------------------
-    step("lattice", 0.0, "Array: fitting the lattice...")
-    lattice = _fit_lattice(points, radius, prior, diagnostics)
-    if lattice is None:
-        return None  # diagnostics["reason"] set
-    origin, a1, a2, indices, rows, cols = lattice
-    step("lattice", 1.0, f"Array: {rows} x {cols} lattice.")
-    occupancy = len(indices) / float(rows * cols)
-    diagnostics["occupancy"] = occupancy
-    if rows < 2 or cols < 2:
-        return fail(f"Only {rows} row(s) x {cols} column(s): no periodicity to measure a pitch from.")
-    if occupancy < MIN_OCCUPANCY:
-        return fail(
-            f"Only {occupancy * 100:.0f}% of the {rows} x {cols} lattice has a spot near it: too sparse to trust."
-        )
-
-    # -- refine ---------------------------------------------------------------------------
-    step("refine", 0.0, "Array: refining the centres...")
-    score_map = _matched_filter(contrast, radius)
-    step("refine", 0.5, "Array: locating the spots...")
-    nodes = lattice_nodes(rows, cols, origin, a1, a2)
-    window = 0.35 * min(np.hypot(*a1), np.hypot(*a2))
-    centers, scores = _refine_nodes(score_map, nodes, window, usable)
-    reference = float(np.median(scores[_indices_to_flat(indices, cols, rows)])) if len(indices) else 0.0
-    found = scores >= 0.4 * reference
-    centers = np.where(found[:, None], centers, nodes)
-    # Tighten the lattice on the refined centres of the found spots (sub-pixel), then report its residual.
-    origin, a1, a2 = _refit(centers, cols, found, origin, a1, a2)
-    lattice_positions = lattice_nodes(rows, cols, origin, a1, a2)
-    residual = float(np.sqrt(np.mean(np.sum((centers[found] - lattice_positions[found]) ** 2, axis=1)))) if found.any() else math.nan
-    step("refine", 1.0, "Array: done.")
-
-    warnings: list[str] = []
-    if prior.rows and prior.rows != rows or prior.cols and prior.cols != cols:
-        warnings.append(f"Found {rows} x {cols}, but {prior.rows or '?'} x {prior.cols or '?'} was expected.")
-    if prior.pitch_x_px and abs(np.hypot(*a1) - prior.pitch_x_px) > 0.05 * prior.pitch_x_px:
-        warnings.append(f"Pitch x {np.hypot(*a1):.1f} px differs from the expected {prior.pitch_x_px:.1f} px.")
-    if prior.pitch_y_px and abs(np.hypot(*a2) - prior.pitch_y_px) > 0.05 * prior.pitch_y_px:
-        warnings.append(f"Pitch y {np.hypot(*a2):.1f} px differs from the expected {prior.pitch_y_px:.1f} px.")
-    diagnostics["reason"] = "ok"
-    tilt = math.degrees(math.atan2(a1[1], a1[0]))
-    skew = math.degrees(math.acos(float(np.clip(np.dot(a1, a2) / (np.hypot(*a1) * np.hypot(*a2)), -1.0, 1.0)))) - 90.0
-    return ArrayFit(
-        rows=rows,
-        cols=cols,
-        pitch_x_px=float(np.hypot(*a1)),
-        pitch_y_px=float(np.hypot(*a2)),
-        tilt_deg=tilt,
-        skew_deg=skew,
-        origin_xy=(float(origin[0]), float(origin[1])),
-        a1_xy=(float(a1[0]), float(a1[1])),
-        a2_xy=(float(a2[0]), float(a2[1])),
-        rough_diameter_px=2.0 * radius,
-        centers_xy=centers,
-        found=found,
-        scores=scores,
-        residual_rms_px=residual,
-        warnings=tuple(warnings),
-    )
 
 
 def prepare_contrast(
@@ -294,19 +86,6 @@ def prepare_contrast(
     return contrast_map(filled, background_px, smooth_sigma), valid
 
 
-def refine_centers(
-    contrast: np.ndarray,
-    centers_xy: np.ndarray,
-    radius_px: float,
-    window_px: float,
-    valid_mask: np.ndarray | None = None,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Move each centre to the sub-pixel maximum of the matched filter within `window_px` of it.
-
-    Returns (centres, scores); a centre with no usable signal in its window comes back unchanged with score 0.
-    Used to refine an existing set of ROIs (the "Refine array" action) and to snap a manual array to the image."""
-    usable = valid_mask if valid_mask is not None else np.ones(contrast.shape, dtype=bool)
-    return _refine_nodes(_matched_filter(contrast, radius_px), np.asarray(centers_xy, dtype=np.float64), float(window_px), usable)
 
 
 # -- spot size -------------------------------------------------------------------------
@@ -343,7 +122,7 @@ def _scan_spot_radius(filled: np.ndarray, valid: np.ndarray, step: StageProgress
     if best < MIN_SPOTS:
         diagnostics["reason"] = (
             f"No regular array of round spots found at any spot size from {2 * SIZE_SCAN_RADII_PX[0]:.0f} to "
-            f"{2 * SIZE_SCAN_RADII_PX[-1]:.0f} px. If the spots are there, set their diameter (Array settings, Semi)."
+            f"{2 * SIZE_SCAN_RADII_PX[-1]:.0f} px. If the spots are there, select a ROI on one of them (Array > Find)."
         )
         return None
     good = [i for i, s in enumerate(scores) if s >= SIZE_SCAN_GOOD_FRACTION * best]
@@ -537,17 +316,8 @@ def _lsq(points: np.ndarray, indices: np.ndarray, origin: np.ndarray, a1: np.nda
     return solution[0], solution[1], solution[2]
 
 
-def _refit(centers: np.ndarray, cols: int, found: np.ndarray, origin, a1, a2):
-    """Re-fit origin / a1 / a2 on refined centres of the found nodes (indices are row-major)."""
-    flat = np.flatnonzero(found)
-    if len(flat) < MIN_SPOTS:
-        return origin, a1, a2
-    indices = np.column_stack([flat, flat % cols, flat // cols])
-    return _lsq(centers, indices, origin, a1, a2)
 
 
-def _indices_to_flat(indices: np.ndarray, cols: int, rows: int) -> np.ndarray:
-    return indices[:, 2] * cols + indices[:, 1]
 
 
 # -- centres ---------------------------------------------------------------------------

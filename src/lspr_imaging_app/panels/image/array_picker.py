@@ -1,4 +1,4 @@
-"""Start-point picker of the Array* pop-out: nine dots, no buttons.
+"""Start-point picker of the Array pop-out: nine dots, no buttons.
 
 One painted widget (not nine buttons): a faint rectangle stands for the array, a dot sits at each of the nine places the selected ROI(s) can have in it (corners,
 middle of the edges, middle). The picked dot is large and in the accent colour; the dot under the pointer grows a little. A click anywhere in a dot's third of

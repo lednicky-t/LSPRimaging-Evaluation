@@ -5,8 +5,8 @@ and groups, and lock the ROI selection.
 
 Layout (one ribbon row, captioned groups, thin separators between them):
 
-    [scope toggle] | [lock, link, unlink] | [group controls] | [array controls] | [Array* button] | [position tuning]
-         Scope            Selection              Group              Array             Array*            Tuning
+    [scope toggle] | [lock, link, unlink] | [group controls] | [Array, Find*, Reorder] | [position tuning]
+         Scope            Selection              Group              Array                  Tuning
 
 (The Shape picker of this row was deleted 2026-11-24: it only steered the click-to-add ROI tool, which no
 screen could turn on any more. A ROI of a given shape is added from the right-click menu, Add ROI.)
@@ -19,14 +19,13 @@ The lock is saved in the session with the selection it holds (schema 1.10) and c
 Display only (CLAUDE.md "panels/"): the colours and visibility are reported
 through `overlay_changed` / `labels_toggled`, where the labels sit through
 `label_placement_changed`, and the panel applies them to the overlay; ROI edits
-go through `ArrayActions` / `GroupActions`, which call the `RoiToolbox` command
-API. The View tab carries copies of the Display controls and of the Groups
+go through `GroupActions` and the Array controllers, which call the `RoiToolbox` command
+API. (The old Array group - Auto / Semi / Manual, Refine, Reorder menu - was retired 2026-11-25; Auto rotate and Auto crop of the Image tools tab live in
+`auto_transforms.py`.) The View tab carries copies of the Display controls and of the Groups
 label menu (`view_tab.py`); it reads them from the public properties here.
 """
 
 from __future__ import annotations
-
-from collections.abc import Callable
 
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtGui import QColor
@@ -34,20 +33,16 @@ from PyQt6.QtWidgets import QHBoxLayout, QToolButton, QWidget
 
 from lspr_ui import get_active_theme, load_tabler_icon
 
-from ...dataset import DatasetModule
-from ...image_tools import BackgroundModule, ChromaticModule, GeometryModule
 from ...roi import RoiToolbox
-from ...roi.array_task import ArrayAction
-from ...roi.scope import RoiEditTarget, RoiScopeModule
+from ...roi.scope import RoiScopeModule
 from ...selection import SelectionModule
 from .. import roi_selection_lock
 from ...shortcuts import display
 from ..ribbon_group import group_label_style, labeled_icon_group, ribbon_separator
 from ..ui_state import UiStateStore
-from .array_actions import ArrayActions
-from .array_controls import ArrayControls
 from .array_find import ArrayFindController
-from .array_star import ArrayStarController
+from .array_reorder import ArrayReorderButton, reorder_roi_numbers
+from .array import ArrayController
 from .general_group import ICON_SIZE as _RIBBON_ICON_SIZE
 from .general_group import style_general_icon_button
 from .group_actions import GroupActions
@@ -74,25 +69,17 @@ class RoiTab(QWidget):
     labels_icon_refreshed = pyqtSignal()
     group_labels_changed = pyqtSignal()
     status = pyqtSignal(str)  # a one-line result from the Array / Groups actions
-    auto_crop_readiness_changed = pyqtSignal(object)  # re-emitted from `ArrayActions` for the Image tools tab
 
     def __init__(
         self,
         overlay: RoiOverlay,
         roi_scope: RoiScopeModule,
-        geometry: GeometryModule,
-        background: BackgroundModule,
-        chromatic: ChromaticModule,
-        dataset: DatasetModule,
         roi_toolbox: RoiToolbox,
         selection: SelectionModule,
-        array_action: ArrayAction,
-        edit_target: RoiEditTarget,
-        resolve_reference: Callable[[], tuple[int, float] | None],
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self._array_star: ArrayStarController | None = None  # added by `add_array_star`
+        self._array: ArrayController | None = None  # added by `add_array`
         self._array_find: ArrayFindController | None = None  # the Find* button beside it
         self._sample_controls = RoiOverlayControls(
             "sample", visible=overlay.sample.visible, color=QColor(overlay.sample.color),
@@ -128,26 +115,10 @@ class RoiTab(QWidget):
         display_group, self._display_caption = labeled_icon_group(self, self._display_menu, "Display")
         self._scope_toggle = RoiScopeToggle(roi_scope, self)
         scope_group, self._scope_caption = labeled_icon_group(self, self._scope_toggle, "Scope")
-        self._array_controls = ArrayControls(geometry, self)
-        array_group, self._array_caption = labeled_icon_group(self, self._array_controls, "Array")
-        self._array_actions = ArrayActions(
-            self._array_controls,
-            array_action,
-            toolbox=roi_toolbox,
-            selection=selection,
-            geometry=geometry,
-            background=background,
-            chromatic=chromatic,
-            load_plane=dataset.load_plane,
-            has_dataset=lambda: bool(dataset.spectral_cubes()),
-            raw_plane_shape=dataset.raw_plane_shape,
-            resolve_reference=resolve_reference,
-            dialog_parent=self,
-            edit_target=edit_target,
-            parent=self,
+        self._reorder_button = ArrayReorderButton(self)  # the Array section's Reorder icon (placed by `add_array`)
+        self._reorder_button.reorder_requested.connect(
+            lambda by, start_x, start_y: self.status.emit(reorder_roi_numbers(roi_toolbox, selection, by, start_x, start_y))
         )
-        self._array_actions.status.connect(self.status)
-        self._array_actions.auto_crop_readiness_changed.connect(self.auto_crop_readiness_changed)
         self._group_controls = GroupControls(self)
         groups_group, self._groups_caption = labeled_icon_group(self, self._group_controls, "Group")
         self._group_actions = GroupActions(
@@ -206,7 +177,7 @@ class RoiTab(QWidget):
         # stays built but hidden, because it holds the original Sample / Reference / Labels widgets: they are the source
         # of truth that the View ribbon copies (`ViewTab._copy_roi_controls`) and that the panel restores into.
         display_group.setVisible(False)
-        sections = (scope_group, selection_group, groups_group, array_group)  # Tuning is appended after Array by `add_tuning`
+        sections = (scope_group, selection_group, groups_group)  # the Array section and Tuning are appended by `add_array` / `add_tuning`
         self._separators = [ribbon_separator(self) for _ in sections[1:]]
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -225,10 +196,10 @@ class RoiTab(QWidget):
         self.layout().insertWidget(at, separator)
         self.layout().insertWidget(at + 1, tuning)
 
-    def add_array_star(self, controller: ArrayStarController, finder: ArrayFindController | None = None) -> None:
-        """The "Array*" section (2026-11-25), after Array: a button that opens the manual-array pop-out, and beside it (``finder``) the Find* button that opens the
+    def add_array(self, controller: ArrayController, finder: ArrayFindController | None = None) -> None:
+        """The "Array" section (2026-11-25), after Array: a button that opens the manual-array pop-out, and beside it (``finder``) the Find* button that opens the
         array finder's. The controllers are built by `ribbon_build` (they need the canvas); this tab only gives them a place and keeps them styled."""
-        self._array_star = controller
+        self._array = controller
         self._array_find = finder
         row = QWidget(self)
         row_layout = QHBoxLayout(row)
@@ -237,26 +208,13 @@ class RoiTab(QWidget):
         row_layout.addWidget(controller.button)
         if finder is not None:
             row_layout.addWidget(finder.button)
-        group, self._array_star_caption = labeled_icon_group(self, row, "Array*")
+        row_layout.addWidget(self._reorder_button)
+        group, self._array_caption = labeled_icon_group(self, row, "Array")
         separator = ribbon_separator(self)
         self._separators.append(separator)
         at = self.layout().count() - 1  # before the trailing stretch
         self.layout().insertWidget(at, separator)
         self.layout().insertWidget(at + 1, group)
-
-    def auto_rotate(self) -> None:
-        """Image tools tab's Auto rotate: level the image by the detected array's tilt (`ArrayActions.auto_rotate`)."""
-        self._array_actions.auto_rotate()
-
-    def auto_crop(self) -> None:
-        """Image tools tab's Auto crop: crop to the ROI lattice (`ArrayActions.auto_crop`)."""
-        self._array_actions.auto_crop()
-
-    def auto_crop_readiness(self):
-        """Which of Auto crop's dependencies are met right now (`ArrayActions.auto_crop_readiness`) - for the
-        Image tools tab's button, which this tab only forwards for (it owns the array tools, that tab owns the
-        button)."""
-        return self._array_actions.auto_crop_readiness()
 
     # -- what the View tab copies ------------------------------------------
 
@@ -284,6 +242,11 @@ class RoiTab(QWidget):
     def links_button(self) -> QToolButton:
         """The Links switch (checked = the link lines are drawn)."""
         return self._links_button
+
+    @property
+    def reorder_button(self) -> ArrayReorderButton:
+        """The Array section's Reorder icon (`ribbon_build` wires its live preview to it)."""
+        return self._reorder_button
 
     @property
     def lock_button(self) -> QToolButton:
@@ -332,9 +295,8 @@ class RoiTab(QWidget):
 
     def bind_ui_state(self, store: UiStateStore) -> None:
         """Remember the Array, ROI-label place and Groups-label settings (see `panels/ui_state.py`)."""
-        self._array_controls.bind_ui_state(store)
-        if self._array_star is not None:
-            self._array_star.bind_ui_state(store)
+        if self._array is not None:
+            self._array.bind_ui_state(store)
         if self._array_find is not None:
             self._array_find.bind_ui_state(store)
         self._label_placement_picker.bind_ui_state(store, "image/roi_label_placement")
@@ -407,19 +369,18 @@ class RoiTab(QWidget):
         self._label_size_box.refresh_theme()
         self._display_menu.refresh_theme(theme)
         self._group_controls.refresh_theme()
-        self._array_controls.refresh_theme()
-        if self._array_star is not None:
-            self._array_star.refresh_theme()
+        self._reorder_button.refresh_theme()
+        if self._array is not None:
+            self._array.refresh_theme()
         if self._array_find is not None:
             self._array_find.refresh_theme()
-            self._array_star_caption.setStyleSheet(group_label_style())
+            self._array_caption.setStyleSheet(group_label_style())
         self._scope_toggle.refresh_theme(theme)
         for separator in self._separators:
             separator.setStyleSheet(f"color: {theme.control_border};")
         for caption in (
             self._display_caption,
             self._scope_caption,
-            self._array_caption,
             self._groups_caption,
             self._selection_caption,
         ):

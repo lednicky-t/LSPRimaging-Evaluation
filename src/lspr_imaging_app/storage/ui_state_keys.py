@@ -211,32 +211,7 @@ ROI_ROW_SELECTED_ONLY = UiKey("image/roi_row_selected_only", False, bool)
 # The two Mask rows under the Cube and wavelength sliders (panels/image/mask_rows.py): shown
 MASK_ROWS_VISIBLE = UiKey("image/mask_rows_visible", True, bool)
 EXPORT_SHARD = UiKey("export/shard", "", str)  # Export tab Shard menu: a chunk-style key; "" = none (an unknown one is ignored)
-ARRAY_KEYS = {  # ROIs tab, "Array" group (panels/image/array_controls.py); lengths are stored in pixels
-    "mode": UiKey("array/mode", "auto", str),
-    "rows": UiKey("array/rows", 0, int),
-    "cols": UiKey("array/cols", 0, int),
-    "diameter": UiKey("array/diameter_px", 0.0, float),
-    "pitch_x": UiKey("array/pitch_x_px", 0.0, float),
-    "pitch_y": UiKey("array/pitch_y_px", 0.0, float),
-    "rotation": UiKey("array/rotation_deg", 0.0, float),
-    "anchor_x": UiKey("array/anchor_x_px", 0.0, float),
-    "anchor_y": UiKey("array/anchor_y_px", 0.0, float),
-    "snap": UiKey("array/snap_to_image", False, bool),
-    "bright": UiKey("array/bright_spots", False, bool),
-    "edge_model": UiKey("array/edge_model", "plateau_fraction", str),
-    "edge_fraction": UiKey("array/edge_fraction_percent", 15.0, float),
-    "edge_sigma": UiKey("array/edge_sigma_k", 3.0, float),
-    "size_mode": UiKey("array/size_mode", "uniform", str),
-    "inner_mode": UiKey("array/ring_inner_mode", "measured", str),
-    "ring_fraction": UiKey("array/ring_background_percent", 5.0, float),
-    "ring_margin": UiKey("array/ring_margin_px", 0.0, float),
-    "inner_ratio": UiKey("array/ring_inner_ratio", 1.4, float),
-    "thickness_mode": UiKey("array/ring_thickness_mode", "equal_area", str),
-    "thickness": UiKey("array/ring_width_px", 6.0, float),
-    "outer_ratio": UiKey("array/ring_outer_ratio", 1.25, float),
-    "ring_size_mode": UiKey("array/ring_size_mode", "uniform", str),
-}
-ARRAY_STAR_KEYS = {  # ROIs tab, "Array*" pop-out (panels/image/array_star.py); lengths are stored in pixels
+ARRAY_KEYS = {  # ROIs tab, "Array" pop-out (panels/image/array.py); lengths are stored in pixels. (The key strings still say array_star/: renamed in code only, so saved settings survive.)
     "kind": UiKey("array_star/kind", "rectangular", str),
     "rows": UiKey("array_star/rows", 2, int),
     "cols": UiKey("array_star/cols", 2, int),
@@ -282,7 +257,7 @@ HAND_WIRED_KEYS: tuple[UiKey, ...] = (
     *(key for keys_for_kind in ROI_OVERLAY_KEYS.values() for key in keys_for_kind.values()),
     *(key for keys_for_role in SELECTION_STYLE_KEYS.values() for key in keys_for_role.values()),
     CUBE_DISPLAY_MODE, MASK_SCOPE, ROI_SCOPE, ROI_ROW_VISIBLE, ROI_ROW_SELECTED_ONLY, MASK_ROWS_VISIBLE, EXPORT_SHARD,
-    *ARRAY_KEYS.values(), *ARRAY_STAR_KEYS.values(), *ARRAY_FIND_KEYS.values(), *SLIDER_COLOR_KEYS.values(),
+    *ARRAY_KEYS.values(), *ARRAY_FIND_KEYS.values(), *SLIDER_COLOR_KEYS.values(),
 )
 
 ALL_KEYS: tuple[UiKey, ...] = (

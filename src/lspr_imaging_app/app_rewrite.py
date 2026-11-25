@@ -75,7 +75,7 @@ from .panels.feature_map_task import TASK_ID as FEATURE_MAP_TASK_ID
 from .dataset.module import EXPORT_TASK_ID as ZARR_EXPORT_TASK_ID, LOAD_TASK_ID as DATASET_LOAD_TASK_ID
 from .image_tools.mask_scan_task import TASK_ID as SCAN_TASK_ID, TransientScanTask
 from .roi.array_find_task import TASK_ID as ARRAY_FIND_TASK_ID
-from .roi.array_task import TASK_ID as ARRAY_TASK_ID
+from .panels.image.auto_transforms import TASK_ID as AUTO_ROTATE_TASK_ID
 from .panels.image.chromatic_tab import ChromaticUiValues
 from .image_tools import (
     ActiveToolModule,
@@ -1512,8 +1512,8 @@ def _build_status_bar(
     image_panel.mask_auto.task_finished.connect(task_indicator.finish)
     image_panel.feature_map.task_progress.connect(task_indicator.report)
     image_panel.feature_map.task_finished.connect(task_indicator.finish)
-    image_panel.array_action.task_progress.connect(task_indicator.report)
-    image_panel.array_action.task_finished.connect(task_indicator.finish)
+    image_panel.auto_transforms.task_progress.connect(task_indicator.report)
+    image_panel.auto_transforms.task_finished.connect(task_indicator.finish)
     image_panel.array_find_task.task_progress.connect(task_indicator.report)
     image_panel.array_find_task.task_finished.connect(task_indicator.finish)
     m.dataset.task_progress.connect(task_indicator.report)  # OME-Zarr export (Image panel, Export tab) and "Open dataset" (which step of the load)
@@ -1549,7 +1549,7 @@ def _build_status_bar(
         AUTO_MASK_TASK_ID: image_panel.mask_auto.cancel,
         MASK_EXPORT_TASK_ID: image_panel.mask_export.cancel,
         FEATURE_MAP_TASK_ID: image_panel.feature_map.cancel,
-        ARRAY_TASK_ID: image_panel.array_action.cancel,
+        AUTO_ROTATE_TASK_ID: image_panel.auto_transforms.cancel,
         ARRAY_FIND_TASK_ID: image_panel.array_find_task.cancel,
         REFERENCE_TASK_ID: m.reference_auto.cancel,
         **{presenter.task.task_id: presenter.cancel for presenter in check_presenters},

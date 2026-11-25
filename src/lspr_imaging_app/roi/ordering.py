@@ -77,6 +77,30 @@ def order_by_grid(
     return [roi_id for line in grid_lines(ids, xy, band_px, column_major=column_major) for roi_id in line]
 
 
+def order_by_grid_from_corner(
+    ids: Sequence[int],
+    xy: Sequence[tuple[float, float]],
+    band_px: float,
+    *,
+    by: str = "rows",
+    from_right: bool = False,
+    from_bottom: bool = False,
+) -> list[int]:
+    """``ids`` in the order a numbering of the array visits them (2026-11-25, the Array "Numbering" picker): ``by`` "rows" or "columns", starting at the top-left
+    corner, or at the right (``from_right``) and / or bottom (``from_bottom``) one. The lines (rows or columns) are found as in `grid_lines`; ``from_bottom`` (rows) /
+    ``from_right`` (columns) says which line comes first, the other flag which end each line is read from. With the defaults this is `order_by_grid`."""
+    if by not in ("rows", "columns"):
+        raise ValueError(f"numbering is by 'rows' or 'columns', not {by!r}")
+    columns = by == "columns"
+    lines = grid_lines(ids, xy, band_px, column_major=columns)  # rows: top row first, each left to right; columns: left column first, each top to bottom
+    reverse_lines, reverse_within = (from_right, from_bottom) if columns else (from_bottom, from_right)
+    if reverse_lines:
+        lines = lines[::-1]
+    if reverse_within:
+        lines = [line[::-1] for line in lines]
+    return [roi_id for line in lines for roi_id in line]
+
+
 def grid_band_px(diameters_px: Sequence[float]) -> float:
     """The ``band_px`` for `grid_lines`: 0.75 of the median disk diameter, at least 5 px."""
     sizes = sorted(float(d) for d in diameters_px if d)

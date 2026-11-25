@@ -1,8 +1,8 @@
-"""The Array* pop-out's content: every setting of a manual array, each with its pictogram (and its name), plus Apply / Cancel.
+"""The Array pop-out's content: every setting of a manual array, each with its pictogram (and its name), plus Apply / Cancel.
 
 Screen purpose: set up a regular array from the selected ROI(s) while the canvas shows it live.
 
-Layout (a panel inside the app window; `array_star.py` owns it, the preview and Apply), one row each:
+Layout (a panel inside the app window; `array.py` owns it, the preview and Apply), one row each:
 
     [type] [cell]                                         (preview opacity wedge, starts in the middle)
     Start point  (nine dots)    Numbering  (reading path over nine dots; double-click the picked corner: rows <-> columns)
@@ -37,13 +37,13 @@ from lspr_ui import CompactWedgeSlider, get_active_theme, load_tabler_icon
 
 from ...image_tools.geometry.module import GeometryModule
 from ...roi.array_layout import LATTICE_KINDS, ArraySpec, lattice_kind
-from .array_controls import LengthField
-from .array_star_pictograms import FlatIconButton, Pictogram, pictogram_icon
-from .array_star_picker import CornerPicker, NumberingPicker
+from .length_field import LengthField
+from .array_pictograms import FlatIconButton, Pictogram, pictogram_icon
+from .array_picker import CornerPicker, NumberingPicker
 from .general_group import ICON_SIZE
 
 OPACITY_DEFAULT = 0.5
-"""The wedge starts in the middle: left of it the preview fades, right of it the spots get more solid (`array_star_ghosts.preview_alphas`)."""
+"""The wedge starts in the middle: left of it the preview fades, right of it the spots get more solid (`array_ghosts.preview_alphas`)."""
 FACTOR_MIN, FACTOR_MAX = 0.1, 10.0
 """Range of a pitch increment (a factor; 1 = constant pitch)."""
 COUNT_WIDTH, NUMBER_WIDTH, LENGTH_WIDTH = 56, 84, 106
@@ -67,7 +67,7 @@ _REGULAR_TIP = (
 )
 
 
-class ArrayStarPanel(QWidget):
+class ArrayPanel(QWidget):
     spec_changed = pyqtSignal()
     advanced_toggled = pyqtSignal(bool)
     opacity_changed = pyqtSignal(float)  # 0 - 1 (0.5 = the usual look): how strongly the preview of the new ROIs is drawn on the image
@@ -76,7 +76,7 @@ class ArrayStarPanel(QWidget):
 
     def __init__(self, geometry: GeometryModule, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setObjectName("ArrayStarPanel")
+        self.setObjectName("ArrayPanel")
         self._ready = False  # the controls are being built: their first values are not edits
         self._pictograms: list[Pictogram] = []
         self._kind = LATTICE_KINDS[0].key
@@ -363,7 +363,7 @@ class ArrayStarPanel(QWidget):
     def _on_advanced_toggled(self, opened: bool) -> None:
         self._advanced.setVisible(bool(opened))
         self._refresh_advanced_icon()
-        self.advanced_toggled.emit(bool(opened))  # the popup holding this panel resizes to fit (`ArrayStarController`)
+        self.advanced_toggled.emit(bool(opened))  # the popup holding this panel resizes to fit (`ArrayController`)
 
     def _refresh_locks(self) -> None:
         """While the regular cell is on, show the values in force in the y fields and the row offset and lock them."""

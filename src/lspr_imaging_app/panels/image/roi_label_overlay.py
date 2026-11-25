@@ -60,7 +60,23 @@ class RoiLabelItem(pg.GraphicsObject):
         self._bitmaps: dict[tuple[str, float], QPixmap] = {}  # (text, device pixel ratio) -> halo + text, transparent
         self._advances: dict[str, float] = {}  # text -> its width in logical px (no halo padding)
         self._placement = DEFAULT_ROI_PLACEMENT
+        self._text_color = QColor(_TEXT_COLOR)
+        self._muted: frozenset[int] = frozenset()
         self.setVisible(False)
+
+    def set_text_color(self, color: QColor) -> None:
+        """The text colour (white by default; the Reorder preview's copy of this item wears the accent colour). Drops the cached bitmaps."""
+        if QColor(color) != self._text_color:
+            self._text_color = QColor(color)
+            self._bitmaps.clear()
+            self.update()
+
+    def set_muted(self, indices: frozenset[int]) -> None:
+        """Entries (by position in `set_labels`' list) that are not painted: the Reorder preview draws its own labels over those ROIs. Display only; kept across
+        `set_labels`, so a redraw while the preview is open does not bring the muted labels back."""
+        if frozenset(indices) != self._muted:
+            self._muted = frozenset(indices)
+            self.update()
 
     def placement(self) -> str:
         return self._placement
@@ -113,7 +129,7 @@ class RoiLabelItem(pg.GraphicsObject):
             painter.setPen(_HALO_COLOR)
             for dx, dy in _HALO_OFFSETS:
                 painter.drawText(QPointF(baseline.x() + dx, baseline.y() + dy), text)
-            painter.setPen(_TEXT_COLOR)
+            painter.setPen(self._text_color)
             painter.drawText(baseline, text)
             painter.end()
             self._bitmaps[key] = bitmap
@@ -152,6 +168,8 @@ class RoiLabelItem(pg.GraphicsObject):
         ascent = QFontMetricsF(self._font).ascent()
         placement = self._placement
         for index in np.flatnonzero(inside):
+            if self._muted and int(index) in self._muted:
+                continue
             text = self._entries[int(index)][3]
             # The text box is `advance` wide and `ascent` tall (digits and capitals; descenders hang into the gap).
             left, top = placement_origin(

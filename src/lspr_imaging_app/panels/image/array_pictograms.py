@@ -1,4 +1,4 @@
-"""The small drawings of the Array* pop-out: one pictogram per setting, drawn here (not Tabler icons).
+"""The small drawings of the Array pop-out: one pictogram per setting, drawn here (not Tabler icons).
 
 Why drawn and not vendored: a setting like "pitch" or "start corner" is a picture of *lattice dots with the one measure highlighted*, and no icon set has
 those. Each drawing shows dim dots (the lattice) and the measure in the accent colour (an arrow, a bracket, an arc), so the field next to it reads without

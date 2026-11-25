@@ -131,7 +131,6 @@ from ...image_tools.mask_scan_task import TransientScanTask
 from ..feature_map_task import FeatureMapTask
 from ...storage.session_carry_task import SessionCarry
 from ...roi.array_find_task import ArrayFindTask
-from ...roi.array_task import ArrayAction
 from ...roi.display_style import RoiDisplayStyle
 from ...roi.scope import RoiEditTarget, RoiScopeModule
 from .background_tab import BACKGROUND_INFO_HTML
@@ -169,7 +168,7 @@ from .prefetch import prefetch_order
 from .render import ImageRenderer, RenderRequest, RenderResult
 from .roi_gestures import RoiGestures
 from .roi_overlay import SAMPLE_WIDTH, SAMPLE_WIDTH_FAST, add_curve
-from .array_actions import AutoCropReadiness
+from .auto_transforms import AutoCropReadiness, AutoTransforms
 from .display_range_controls import FULL_16BIT_RANGE
 from .analysis_tab import AnalysisTab
 from .tuning_tab import TuningTab
@@ -363,8 +362,7 @@ class ImagePanel(QWidget):
         self._feature_map = FeatureMapTask(
             geometry, chromatic, dataset, None if frame_roles is None else frame_roles.is_spectral, self
         )
-        self._array_action = ArrayAction(self)  # ROIs tab, Array group (panels/image/array_actions.py)
-        self._array_find_task = ArrayFindTask(self)  # ROIs tab, Array* section, Find* (panels/image/array_find.py)
+        self._array_find_task = ArrayFindTask(self)  # ROIs tab, Array section, Find* (panels/image/array_find.py)
         # Persistent / Individual ROI edit scope, shared with the ROI table (optional so tests build the panel alone).
         self._roi_scope = roi_scope if roi_scope is not None else RoiScopeModule(self)
         # The one place the ROI display style (Sample / Reference colour, transparency, visibility) lives.
@@ -467,7 +465,6 @@ class ImagePanel(QWidget):
             app.aboutToQuit.connect(self._mask_export.shutdown)
             app.aboutToQuit.connect(self._mask_auto.shutdown)
             app.aboutToQuit.connect(self._feature_map.shutdown)
-            app.aboutToQuit.connect(self._array_action.shutdown)
             app.aboutToQuit.connect(self._array_find_task.shutdown)
 
         self._redraw_timer = QTimer(self)
@@ -584,9 +581,9 @@ class ImagePanel(QWidget):
         return self._feature_map
 
     @property
-    def array_action(self) -> ArrayAction:
-        """The Array tools' background action (the app shell connects it to the task indicator)."""
-        return self._array_action
+    def auto_transforms(self) -> AutoTransforms:
+        """Auto rotate and Auto crop (the app shell connects its Auto rotate search to the task indicator)."""
+        return self._auto_transforms
 
     @property
     def array_find_task(self) -> ArrayFindTask:
@@ -1571,7 +1568,7 @@ class ImagePanel(QWidget):
 
         frame = (self._current_cube(), self._current_wavelength())
         affine = self._chromatic.affine_for(frame)
-        self._array_star.on_frame()  # the Array* preview (a no-op while its pop-out is closed)
+        self._array.on_frame()  # the Array preview (a no-op while its pop-out is closed)
         self._array_find.on_frame()  # the Find* preview (the same)
         self._tuning_overlay.update(self._tuning_view, affine)  # the tuning crosses: not part of the ROI layer cache, a comparison when nothing changed
         # `only_if_changed` (the per-frame redraw, i.e. every wavelength step): ~40 ms of the GUI thread

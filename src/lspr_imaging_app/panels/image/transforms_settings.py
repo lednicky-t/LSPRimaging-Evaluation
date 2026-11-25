@@ -123,7 +123,7 @@ _AUTO_CROP_WAITING_COLOR = "#f59e0b"
 # tool already uses, so this adds no icon file (`packages/lspr_ui/ICONS.md`).
 _AUTO_CROP_STEPS = (
     ("level", "Level the array", "Auto rotate (Rotation group)", None),
-    ("rois", "Place the ROIs", "ROIs tab, Array group", "grid-dots"),
+    ("rois", "Place the ROIs", "ROIs tab, Array section", "grid-dots"),
     ("chromatic", "Fit the chromatic correction", "Chromatic tab", "color-picker"),
 )
 # The "Calibrate" group (Measure, captioned - see module docstring) is
@@ -256,9 +256,9 @@ class TransformsSection(QWidget):
     cross, and the measured tilt when there is one.
     """
 
-    # Auto rotate clicked: the owner (Image panel) runs the array detection (`ArrayActions.auto_rotate`), which
+    # Auto rotate clicked: the owner (Image panel) runs the array finder (`AutoTransforms.auto_rotate`), which
     # lives with the ROI tools; this widget owns no state and never computes. Auto crop is the same arrangement
-    # (`ArrayActions.auto_crop` crops to the ROI lattice; it neither detects nor rotates).
+    # (`AutoTransforms.auto_crop` crops to the ROI lattice; it neither detects nor rotates).
     auto_rotate_requested = pyqtSignal()
     auto_crop_requested = pyqtSignal()
     # A row of Auto crop's pick-up menu that is not an action of this ribbon tab: "rois" / "chromatic", which the
@@ -278,7 +278,7 @@ class TransformsSection(QWidget):
 
         self._auto_rotate_button = _icon_button(self, checkable=False)
         self._auto_rotate_button.setToolTip(
-            "Auto rotate: find the spot array (as ROIs > Array > Detect does, on the reference wavelength) and "
+            "Auto rotate: find the spot array (as ROIs > Find does, on the reference wavelength; select a ROI on a spot to guide it) and "
             "rotate the image by its tilt, however small, so the rows run level. No ROIs are placed; existing "
             "ROIs follow the rotation."
         )
@@ -384,7 +384,7 @@ class TransformsSection(QWidget):
     def set_auto_crop_state(
         self, *, levelled: bool | None, rois: bool, chromatic: bool, level_note: str = ""
     ) -> None:
-        """What the owner measured (`ArrayActions.auto_crop_readiness`): whether the array is level, whether there
+        """What the owner measured (`AutoTransforms.auto_crop_readiness`): whether the array is level, whether there
         are ROIs, and whether the chromatic correction is fitted. ``level_note`` is that row's reason in words
         (the measured tilt, or why there is none) - this widget only renders what it is given."""
         state = _AutoCropState(levelled, bool(rois), bool(chromatic), level_note)

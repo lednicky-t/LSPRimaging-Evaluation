@@ -1,4 +1,4 @@
-"""Outlines of the copies the Array* pop-out would make, as the canvas draws them (pure numpy, no Qt).
+"""Outlines of the copies the Array pop-out would make, as the canvas draws them (pure numpy, no Qt).
 
 One closed outline per copy, in **view coordinates** of the frame on screen: the copy's stored centre (reference frame, pixel-index) goes through the frame's
 chromatic affine and gets the half-cell shift, exactly as `RoiQueries.view_centers` does for real ROIs; circles and rectangles are bent by the affine's linear

@@ -1,17 +1,17 @@
 """Find* (2026-11-25): fill in an array from the image, guided by the selected ROI(s) or an area selection, with a live preview on the canvas.
 
-Screen purpose: the ROIs tab's "Array*" section has a second button, **Find***. It opens a pop-out (`ArrayFindPanel`, a child widget of the Image panel just under the
-button, like the manual Array* one). The selected ROI(s) (or, without any, the area selection, or nothing at all) guide a search of the image; the pop-out shows what
+Screen purpose: the ROIs tab's "Array" section has a second button, **Find***. It opens a pop-out (`ArrayFindPanel`, a child widget of the Image panel just under the
+button, like the manual Array one). The selected ROI(s) (or, without any, the area selection, or nothing at all) guide a search of the image; the pop-out shows what
 was found as outlines on the canvas (blue = ROIs Apply makes, grey = a node of the array with no spot, amber = a similar spot that is not on the lattice). Apply makes the
 new ROIs (`RoiToolbox.place_found_array`, one undo step); Cancel or the button again closes it and makes nothing.
 
 Design: `docs/array_finder_design_2026-11-25.md`. This file wires the pieces and owns no ROI state; the maths is `roi/array_finder.py`, the threads are
-`roi/array_find_task.py`, the ROI command is `RoiToolbox.place_found_array`. The old Array group stays (the maintainer compares the two).
+`roi/array_find_task.py`, the ROI command is `RoiToolbox.place_found_array`. The old Array group (Auto / Semi / Manual detector) was retired 2026-11-25; Auto rotate (Image tools tab) uses this finder too (`auto_transforms.py`).
 
 Work is split in two (the Feature map's pattern): the **search** (image -> candidates; slow, cached) runs when the guide, the frame or the image settings change; the
 **build** (candidates -> array; quick) runs on every change of a slider or switch. Both run off the GUI thread; the old picture stays until the new one is ready.
 
-The image: **the reference wavelength of the cube on screen**, processed as the Image panel shows it (the Array group's rule); positions are therefore in the reference
+The image: **the reference wavelength of the cube on screen**, processed as the Image panel shows it (the rule of the retired Array group, kept); positions are therefore in the reference
 frame ROIs are stored in. The outlines are drawn through the chromatic affine of the frame on screen.
 """
 
@@ -45,11 +45,11 @@ from ...roi.shape_guess import guess_shape
 from ...selection import AreaSelectionModule, SelectionModule
 from ...storage.ui_state_keys import ARRAY_FIND_KEYS, read
 from ..ui_state import UiStateStore
-from .array_controls import find_array_icon
+from .array_find_icon import find_array_icon
 from .array_find_ghosts import EMPTY, MADE, STRAY, found_outlines
 from .array_find_panel import ArrayFindPanel
-from .array_star import PopupFrame
-from .array_star_ghosts import preview_alphas
+from .array import PopupFrame
+from .array_ghosts import preview_alphas
 from .general_group import style_general_icon_button
 from .popout_placer import PopoutPlacer
 from .sample_circles_item import SampleCirclesItem
@@ -117,7 +117,7 @@ class ArrayFindController(QObject):
         style_general_icon_button(self.button)
         self.button.toggled.connect(self._on_button_toggled)
 
-        self.popup = PopupFrame(host)  # a child of the Image panel, like the Array* pop-out
+        self.popup = PopupFrame(host)  # a child of the Image panel, like the Array pop-out
         self.popup.setObjectName("ArrayFindPopup")
         self.popup.hide()
         self.panel = ArrayFindPanel(geometry, self.popup)

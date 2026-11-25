@@ -119,7 +119,7 @@ def histogram_selection_icon(active: bool = True) -> QIcon:
 def histogram_reset_icon() -> QIcon:
     """The Histogram plot's "reset the highlight range" button (2026-11-23): the highlight-range icon (`histogram_selection_icon`, the bars
     with the blue middle) with a small circular-arrows badge in the top-right corner, where the outer bars leave room. The badge is a
-    light glyph with a thin black border (as `array_controls._find_array_icon`'s plus), readable on a dark or a light theme."""
+    light glyph with a thin black border (as `array_find_icon.find_array_icon`'s plus), readable on a dark or a light theme."""
     pixmap = histogram_selection_icon(True).pixmap(_RENDER_SIZE, _RENDER_SIZE).copy()
     painter = QPainter(pixmap)
     outline = load_tabler_icon("refresh", color="#000000", size=_RENDER_SIZE, stroke_width=4.6).pixmap(_RENDER_SIZE, _RENDER_SIZE)

@@ -1,15 +1,15 @@
-"""Array* (2026-11-25): build a regular array from the selected ROI(s), with a live preview on the canvas.
+"""Array (2026-11-25): build a regular array from the selected ROI(s), with a live preview on the canvas.
 
-Screen purpose: the ROIs tab's "Array*" section is one button. It opens a panel (`ArrayStarPanel`) that sits **inside the app window**, over the image, just under
+Screen purpose: the ROIs tab's "Array" section is one button. It opens a panel (`ArrayPanel`) that sits **inside the app window**, over the image, just under
 the button, like a context menu that stays open (it is a child widget of the Image panel, not a separate window, since 2026-11-25). While it is open the copies the
 settings would make are drawn as ghost outlines on the image, redrawn at every change; **Apply** makes them (`RoiToolbox.stamp_array`, one undo step) and **Cancel**
-or the Array* button closes it and makes nothing. It does not block the image: pan, zoom, change the wavelength or the selection and the preview follows.
+or the Array button closes it and makes nothing. It does not block the image: pan, zoom, change the wavelength or the selection and the preview follows.
 
-This file wires the pieces; the maths is `roi/array_layout.py`, the ROI command is `RoiToolbox.stamp_array`, the drawing of the ghosts is `array_star_ghosts.py`.
+This file wires the pieces; the maths is `roi/array_layout.py`, the ROI command is `RoiToolbox.stamp_array`, the drawing of the ghosts is `array_ghosts.py`.
 No ROI state lives here. Placing the nodes is a few array operations, so it runs on the GUI thread, once per ~30 ms at most (changes are coalesced).
 
-Why a new section beside the old Array group: the old one (`array_controls.py`) finds arrays in the image; this one stamps them from numbers. Both stay until
-the maintainer decides which to keep.
+History: this was "Array*", built beside the old Array group (Auto / Semi / Manual detector, Refine, Reorder menu). The maintainer retired the old group on 2026-11-25 and this
+one took its name and its place. Finding an array in the image is Find's job (`array_find.py`), and so is Auto rotate's (`auto_transforms.py`).
 """
 
 from __future__ import annotations
@@ -29,11 +29,11 @@ from ...image_tools.geometry.module import GeometryModule
 from ...roi import RoiToolbox
 from ...roi.array_layout import ArraySpec, array_layout
 from ...selection import SelectionModule
-from ...storage.ui_state_keys import ARRAY_STAR_KEYS, read
+from ...storage.ui_state_keys import ARRAY_KEYS, read
 from ..ui_state import UiStateStore
-from .array_star_ghosts import ghost_outlines, preview_alphas
-from .array_star_panel import ArrayStarPanel
-from .array_star_pictograms import pictogram_icon
+from .array_ghosts import ghost_outlines, preview_alphas
+from .array_panel import ArrayPanel
+from .array_pictograms import pictogram_icon
 from .general_group import style_general_icon_button
 from .sample_circles_item import SampleCirclesItem
 
@@ -55,7 +55,7 @@ class PopupFrame(QFrame):
         painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
 
 
-class ArrayStarController(QObject):
+class ArrayController(QObject):
     status = pyqtSignal(str)  # one line for the status bar
     opened_changed = pyqtSignal(bool)
 
@@ -80,9 +80,9 @@ class ArrayStarController(QObject):
 
         self.button = QToolButton(host)
         self.button.setCheckable(True)
-        self.button.setText("Array*")
+        self.button.setText("Array")
         self.button.setToolTip(
-            "Array*: repeat the selected ROI(s) as a regular array (rectangular or triangular), with a live preview on the image. "
+            "Array: repeat the selected ROI(s) as a regular array (rectangular or triangular), with a live preview on the image. "
             "Select the ROI(s) first; Apply makes the copies as one undo step."
         )
         style_general_icon_button(self.button)
@@ -91,9 +91,9 @@ class ArrayStarController(QObject):
         self._host = host
         self._open = False
         self.popup = PopupFrame(host)  # a child of the Image panel: in the app window, over the image, not a window of its own
-        self.popup.setObjectName("ArrayStarPopup")
+        self.popup.setObjectName("ArrayPopup")
         self.popup.hide()
-        self.panel = ArrayStarPanel(geometry, self.popup)
+        self.panel = ArrayPanel(geometry, self.popup)
         layout = QVBoxLayout(self.popup)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.panel)
@@ -137,7 +137,7 @@ class ArrayStarController(QObject):
         self.opened_changed.emit(True)
 
     def close(self) -> None:
-        """Close without making anything (Cancel, or the Array* button again)."""
+        """Close without making anything (Cancel, or the Array button again)."""
         if not self._open:
             return
         self._open = False
@@ -180,7 +180,7 @@ class ArrayStarController(QObject):
             self._position()
 
     def _position(self) -> None:
-        """Just under the Array* button, kept inside the Image panel."""
+        """Just under the Array button, kept inside the Image panel."""
         self.popup.adjustSize()
         spot = self.button.mapTo(self._host, QPoint(0, self.button.height() + 4))
         x = max(4, min(spot.x(), self._host.width() - self.popup.width() - 4))
@@ -265,7 +265,7 @@ class ArrayStarController(QObject):
         """Make the array (one undo step), say what was made, close the window."""
         self._recompute()  # what is made is what the last change showed, never an older picture
         if self._problem:
-            self.status.emit(f"Array*: nothing made. {self.panel.message()}".strip())
+            self.status.emit(f"Array: nothing made. {self.panel.message()}".strip())
             return
         ids = sorted(self._selection.selected_roi_ids())
         spec = self.panel.spec()
@@ -274,16 +274,16 @@ class ArrayStarController(QObject):
         except (ValueError, KeyError) as error:
             text = str(error).strip("'\"")
             self.panel.set_message(text, problem=True)
-            self.status.emit(f"Array*: nothing made. {text}")
+            self.status.emit(f"Array: nothing made. {text}")
             return
-        self.status.emit(f"Array*: added {len(new)} ROIs next to the {len(ids)} selected (Ctrl+Z undoes it).")
+        self.status.emit(f"Array: added {len(new)} ROIs next to the {len(ids)} selected (Ctrl+Z undoes it).")
         self.close()
 
     # -- remembering --------------------------------------------------------------------------------------------------
 
     def bind_ui_state(self, store: UiStateStore) -> None:
         """Put the settings back as last left, then save each later change."""
-        values = {name: read(store, key) for name, key in ARRAY_STAR_KEYS.items()}
+        values = {name: read(store, key) for name, key in ARRAY_KEYS.items()}
         try:
             spec = ArraySpec(
                 kind=str(values["kind"]), rows=int(values["rows"]), cols=int(values["cols"]),  # type: ignore[arg-type]
@@ -314,7 +314,7 @@ class ArrayStarController(QObject):
             "number_y": spec.number_start_y, "opacity": self.panel.opacity(),
         }
         for name, value in values.items():
-            self._store.set(ARRAY_STAR_KEYS[name].key, value)
+            self._store.set(ARRAY_KEYS[name].key, value)
 
     # -- look ---------------------------------------------------------------------------------------------------------
 

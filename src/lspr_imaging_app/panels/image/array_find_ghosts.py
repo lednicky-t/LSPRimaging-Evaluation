@@ -1,6 +1,6 @@
 """Outlines of what the array finder shows on the canvas (pure numpy, no Qt): the ROIs it would make, the empty nodes, the similar spots that are off the lattice.
 
-Like `array_star_ghosts`: stored centres (reference frame, pixel-index) go through the chromatic affine of the frame on screen and get the half-cell shift
+Like `array_ghosts`: stored centres (reference frame, pixel-index) go through the chromatic affine of the frame on screen and get the half-cell shift
 (`roi.overlay_geometry`). A circle is drawn as a circle of its diameter, a rectangle copy as the rectangle (the seed's, scaled), a pixel map as a circle of its nominal
 diameter (a preview, not its pixels).
 """

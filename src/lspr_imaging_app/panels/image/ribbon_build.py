@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
+    QApplication,
     QHBoxLayout,
     QToolButton,
     QWidget,
@@ -29,7 +30,9 @@ from .canvas_tools import style_bar_icon_button
 from .general_group import style_general_icon_button
 from .mask_tab import MaskTab
 from .array_find import ArrayFindController
-from .array_star import ArrayStarController
+from .array_reorder_preview import ArrayReorderPreview
+from .auto_transforms import AutoTransforms
+from .array import ArrayController
 from .roi_tab import RoiTab
 from .side_rails import LEFT, RIGHT, SideRail, SideRails
 from .view_ribbon import ViewRibbon
@@ -91,17 +94,13 @@ def build_mask_tab(panel: ImagePanel) -> QWidget:
 
 def build_roi_tab(panel: ImagePanel) -> QWidget:
     """Moved out of `ImagePanel._build_roi_tab` (2026-11-15). On the panel it
-    creates: `_roi_tab`, `_array_star`, `_array_find`
-    reads: `_array_action`, `_background`, `_chromatic`, `_dataset`, `_edit_target`, `_geometry`, `_roi_overlay`, `_roi_scope`,
+    creates: `_roi_tab`, `_array`, `_array_find`, `_reorder_preview`, `_auto_transforms`
+    reads: `_background`, `_chromatic`, `_dataset`, `_geometry`, `_roi_overlay`, `_roi_scope`,
     `_roi_toolbox`, `_selection`, `_transforms_section`
     calls its methods: `_on_auto_crop_readiness`, `_resolve_reference_frame`, `_draw_roi_overlay` and connects the handlers `_on_roi_overlay_changed`,
     `_on_roi_labels_toggled`, `_on_roi_label_placement_changed`, `_on_group_labels_changed`, `_on_tool_status`, `_on_transforms_navigate`
     """
-    panel._roi_tab = RoiTab(
-        panel._roi_overlay, panel._roi_scope, panel._geometry, panel._background, panel._chromatic, panel._dataset,
-        panel._roi_toolbox, panel._selection, panel._array_action, panel._edit_target,
-        panel._resolve_reference_frame, panel,
-    )
+    panel._roi_tab = RoiTab(panel._roi_overlay, panel._roi_scope, panel._roi_toolbox, panel._selection, panel)
     panel._roi_tab.overlay_changed.connect(panel._on_roi_overlay_changed)
     panel._roi_tab.labels_toggled.connect(panel._on_roi_labels_toggled)
     panel._roi_tab.links_visible_toggled.connect(lambda shown: _on_links_toggled(panel, shown))
@@ -110,13 +109,13 @@ def build_roi_tab(panel: ImagePanel) -> QWidget:
     panel._roi_tab.label_size_changed.connect(panel._roi_overlay.set_label_point_size)
     panel._roi_tab.group_labels_changed.connect(panel._on_group_labels_changed)
     panel._roi_tab.status.connect(panel._on_tool_status)
-    # Array* (manual array with a live preview on the canvas): the controller draws on the plot, the tab gives its button a place.
-    panel._array_star = ArrayStarController(
+    # Array (manual array with a live preview on the canvas): the controller draws on the plot, the tab gives its button a place.
+    panel._array = ArrayController(
         plot=panel._plot, toolbox=panel._roi_toolbox, selection=panel._selection, chromatic=panel._chromatic, geometry=panel._geometry,
         current_frame=lambda: (panel._current_cube(), panel._current_wavelength()), host=panel, parent=panel,
     )
-    panel._array_star.status.connect(panel._on_tool_status)
-    # Find* (the array finder, next to Array*): same place, its own pop-out; works on the reference-wavelength image of the cube on screen.
+    panel._array.status.connect(panel._on_tool_status)
+    # Find* (the array finder, next to Array): same place, its own pop-out; works on the reference-wavelength image of the cube on screen.
     panel._array_find = ArrayFindController(
         plot=panel._plot, toolbox=panel._roi_toolbox, selection=panel._selection, area_selection=panel._area_selection, image_shape=lambda: panel._last_image_shape,
         chromatic=panel._chromatic, geometry=panel._geometry, background=panel._background, mask=panel._mask, task=panel._array_find_task,
@@ -124,15 +123,34 @@ def build_roi_tab(panel: ImagePanel) -> QWidget:
         load_plane=panel._dataset.load_plane, has_dataset=lambda: bool(panel._dataset.spectral_cubes()), host=panel, parent=panel,
     )
     panel._array_find.status.connect(panel._on_tool_status)
-    panel._roi_tab.add_array_star(panel._array_star, panel._array_find)
+    panel._roi_tab.add_array(panel._array, panel._array_find)
+    # Reorder (the third icon of that section): while its pick-up is open the canvas shows the numbers the ROIs would get.
+    panel._reorder_preview = ArrayReorderPreview(
+        plot=panel._plot, overlay=panel._roi_overlay, toolbox=panel._roi_toolbox, selection=panel._selection,
+        view_centers=lambda: panel._roi_queries.view_centers(
+            (panel._current_cube(), panel._current_wavelength()), panel._chromatic.affine_for((panel._current_cube(), panel._current_wavelength()))
+        ),
+        button=panel._roi_tab.reorder_button, parent=panel,
+    )
     # Auto rotate and Auto crop (Image tools tab) act through the ROI tab, which owns the array tools; that
     # tab is built before this one. Auto crop also shows which of its dependencies are still missing, and its
     # menu rows lead to the tab that fixes them.
-    panel._transforms_section.auto_rotate_requested.connect(panel._roi_tab.auto_rotate)
-    panel._transforms_section.auto_crop_requested.connect(panel._roi_tab.auto_crop)
+    panel._auto_transforms = AutoTransforms(
+        toolbox=panel._roi_toolbox, selection=panel._selection, geometry=panel._geometry, background=panel._background, chromatic=panel._chromatic,
+        load_plane=panel._dataset.load_plane, has_dataset=lambda: bool(panel._dataset.spectral_cubes()), raw_plane_shape=panel._dataset.raw_plane_shape,
+        resolve_reference=panel._resolve_reference_frame,
+        finder_settings=lambda: panel._array_find.panel.settings(),  # the Find pop-out's own settings, as last set (dark / bright spots, mask, thresholds)
+        dialog_parent=panel, parent=panel,
+    )
+    panel._auto_transforms.status.connect(panel._on_tool_status)
+    app = QApplication.instance()
+    if app is not None:
+        app.aboutToQuit.connect(panel._auto_transforms.shutdown)
+    panel._transforms_section.auto_rotate_requested.connect(panel._auto_transforms.auto_rotate)
+    panel._transforms_section.auto_crop_requested.connect(panel._auto_transforms.auto_crop)
     panel._transforms_section.navigate_requested.connect(panel._on_transforms_navigate)
-    panel._roi_tab.auto_crop_readiness_changed.connect(panel._on_auto_crop_readiness)
-    panel._on_auto_crop_readiness(panel._roi_tab.auto_crop_readiness())
+    panel._auto_transforms.auto_crop_readiness_changed.connect(panel._on_auto_crop_readiness)
+    panel._on_auto_crop_readiness(panel._auto_transforms.auto_crop_readiness())
     return panel._roi_tab
 
 

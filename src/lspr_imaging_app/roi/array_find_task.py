@@ -1,6 +1,6 @@
 """Runs the array finder (`array_finder`) off the GUI thread: the slow search and the quick build.
 
-The same shape as `array_task.ArrayAction` (the old Array group's runner), with two jobs because the finder has two parts:
+Two jobs (the shape of the old Array group's runner, retired 2026-11-25) because the finder has two parts:
 
 - `search(...)`: load the reference-wavelength image of the cube on screen (processed space), find the candidates (`find_candidates`: ~0.1 s with a ROI, ~1 s
   without). Reports progress (`task_progress`, joined to the status-bar `TaskIndicator` by the Image panel's owner), can be cancelled, and ends with exactly one

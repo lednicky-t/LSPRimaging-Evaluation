@@ -14,7 +14,7 @@ do that now).
 
 **An entry whose prerequisite is not met is not in the menu** (maintainer, 2026-11-19; it used to be greyed): Unlink needs something linked, Delete / Deselect /
 Group / Make this ROI need a selected ROI, Ungroup a grouped one, and so on. The commands about the ROI selection come first, together: Add ROI, Delete, Select
-whole group, Deselect, Lock ROI selection; then the role and links, the groups, and last the cube edit.
+whole group, Select whole array, Deselect, Lock ROI selection; then the role and links, the groups, and last the cube edit.
 
 **Deselect area** (2026-11-19, maintainer): with no tool armed this is the menu the ROIs tab opens, and it had no way to drop the pixel (area) selection; it is offered while there is one (`can_deselect_area`), next to the ROI deselect.
 """
@@ -33,6 +33,7 @@ from ..roi_selection_lock import MENU_TEXT as LOCK_MENU_TEXT
 from ..roi_selection_lock import TIP as LOCK_TIP
 
 SELECT_GROUP = "select_group"
+SELECT_ARRAY = "select_array"  # select every ROI of the array the clicked ROI belongs to (2026-11-25)
 ADD_ROI = "add_roi"  # Add ROI > Circle (the name is older than the submenu)
 ADD_RECTANGLE = "add_rectangle"
 FIT_CIRCLE = "fit_circle"  # Add ROI > Circle fitted to selection (the area selection is one blob)
@@ -151,6 +152,8 @@ def show_roi_context_menu(
     can_remove_cube_edit: bool = False,
     clicked_group: tuple[str, int] | None = None,
     clicked_group_fully_selected: bool = False,
+    clicked_array: int | None = None,
+    clicked_array_fully_selected: bool = False,
     locked: bool = False,
     can_add_from_selection: bool = False,
     fit_to_blob: bool = False,
@@ -167,8 +170,9 @@ def show_roi_context_menu(
     """Pop the menu at the cursor. ``groups`` is ``(group_id, name)`` pairs.
     ``clicked_group`` is ``(name, member_count)`` when the ROI under the cursor
     is in a group: it adds "Select whole group" (left out once every member is already selected, or while the selection is locked). ``locked``: the ROI
-    selection is locked: the entries that would change it (Select whole group, Deselect) are left out and "Lock ROI selection" shows a check mark.
-    ``can_add``: the click is somewhere a circle or rectangle may be added; ``can_add_from_selection``: there is an area selection to make ROIs from (the
+    selection is locked: the entries that would change it (Select whole group, Select whole array, Deselect) are left out and "Lock ROI selection" shows a check mark.
+    ``clicked_array`` is the number of ROIs of the array the ROI under the cursor belongs to (Array, Find* or the detector made it): it adds "Select whole array"
+    (left out once every member is already selected, or while the selection is locked). ``can_add``: the click is somewhere a circle or rectangle may be added; ``can_add_from_selection``: there is an area selection to make ROIs from (the
     Add ROI submenu offers only what can be done, and is left out when neither). ``fit_to_blob``: the area selection is exactly one blob, so Circle and Rectangle are
     fitted to it (`add_shape_entries`). ``selected_roles``: how many of the selected ROIs are samples and
     how many references (the Make entry that already holds for all of them is checked). ``can_link`` / ``can_unlink``: the selection holds something to
@@ -209,6 +213,10 @@ def show_roi_context_menu(
     if clicked_group is not None and not clicked_group_fully_selected and not locked:
         group_name, member_count = clicked_group
         entry(menu, f"Select whole group \"{group_name}\" ({member_count} ROIs)", "select_rois", SELECT_GROUP)
+    if clicked_array is not None and not clicked_array_fully_selected and not locked:
+        entry(menu, f"Select whole array ({clicked_array} ROIs)", "select_rois", SELECT_ARRAY).setToolTip(
+            "Select every ROI of the array the clicked ROI belongs to (to group, reorder or delete the whole array)."
+        )
     if have_selection and not locked:
         entry(menu, f"Deselect {selected_count} ROI{plural}", "deselect", DESELECT)
     if can_deselect_area:

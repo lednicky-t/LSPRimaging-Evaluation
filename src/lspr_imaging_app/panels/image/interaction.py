@@ -58,6 +58,7 @@ from .roi_context_menu import (
     PASTE,
     REMOVE_CUBE_EDIT,
     RIM_TO_REFERENCE,
+    SELECT_ARRAY,
     SELECT_GROUP,
     TOGGLE_LOCK,
     TURN_RIM_OFF,
@@ -421,10 +422,13 @@ class CanvasInteraction:
         ids = tuple(sorted(self._selection.selected_roi_ids()))
         toolbox = self._roi_toolbox
         clicked_group = toolbox.group_for_roi(roi_id) if roi_id is not None else None
+        clicked_array = next((a for a in toolbox.array_groups() if roi_id in a.member_area_roi_ids), None) if roi_id is not None else None
         choice = show_roi_context_menu(
             self._menu_parent,
             clicked_group=(clicked_group.name, len(clicked_group.area_roi_ids)) if clicked_group else None,
             clicked_group_fully_selected=bool(clicked_group) and set(clicked_group.area_roi_ids) <= set(ids),
+            clicked_array=len(clicked_array.member_area_roi_ids) if clicked_array else None,
+            clicked_array_fully_selected=bool(clicked_array) and set(clicked_array.member_area_roi_ids) <= set(ids),
             selected_count=len(ids),
             groups=[(group.group_id, group.name) for group in toolbox.groups()],
             any_selected_grouped=any(toolbox.group_for_roi(selected) is not None for selected in ids),
@@ -452,6 +456,8 @@ class CanvasInteraction:
             return
         if choice.action == SELECT_GROUP and clicked_group is not None:
             self._selection.set_roi_selection(set(clicked_group.area_roi_ids))
+        elif choice.action == SELECT_ARRAY and clicked_array is not None:
+            self._selection.set_roi_selection(set(clicked_array.member_area_roi_ids))
         elif choice.action == ADD_ROI:  # Add ROI > Circle
             self._roi_creation.add_circle(x, y)
         elif choice.action == ADD_RECTANGLE:

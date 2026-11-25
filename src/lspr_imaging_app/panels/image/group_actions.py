@@ -2,7 +2,7 @@
 
 `GroupControls` (buttons) -> this -> `RoiToolbox.group_rois` / `create_group` / `group_rois_each` (one undo
 step each). The panel owns no group state. Group by rows / columns uses the selected ROIs, or all if none are
-selected, and the same row finding as Reorder IDs (`roi/ordering.grid_lines`); each group takes the next
+selected, and the same row finding as Reorder (`roi/ordering.grid_lines`); each group takes the next
 unused base colour of the palette (`roi/palette.py`).
 
 **Ctrl+G / Ctrl+Shift+G** (2026-11-19, `shortcuts.py` ``groups.group`` / ``groups.ungroup``) run the same two commands as the Group / Ungroup
