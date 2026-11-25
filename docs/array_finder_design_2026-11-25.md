@@ -1,8 +1,9 @@
 # Array finder ("Find*"): fill in an array from the image, guided by ROIs (design, 2026-11-25)
 
-Status: design agreed with the maintainer the same day; **built the same day, tested offscreen, not yet seen by eye** (see "What exists" at the end). The old Array group
-(`array_controls.py`, Auto / Semi / Manual) and the manual Array panel stay untouched; the maintainer wants to **compare the old and the new
-finder** before deciding which to keep. So the new code shares no logic with `roi/array_detection.py` (that module only gets thin public aliases).
+Status: design agreed with the maintainer the same day; **built the same day, tested offscreen, not yet seen by eye** (see "What exists" at the end). **Later the same day the old
+Array group (`array_controls.py`, Auto / Semi / Manual detector) was retired**: the Find* finder is now the only one (and drives Auto rotate); the manual panel took the
+name "Array" (see `array_manual_array_2026-11-25.md`, last section). Below, "Detect" and "the old finder" mean that retired detector; the text is kept as the
+record of the design and of the comparison that led to the choice. `roi/array_detection.py` keeps only the helpers the finder shares.
 
 ## What it is
 
@@ -33,7 +34,7 @@ the ROIs (one undo step), Cancel makes nothing. The guides narrow the search; th
 
 - Separate icon + pop-out in the Array section (not a mode of the manual panel).
 - Missing nodes: leave out by default; a toggle in the pop-out places them.
-- Keep both finders until compared.
+- Keep both finders until compared. (Compared; the old one was retired the same day.)
 - All four phases wanted.
 
 ## The mask (added 2026-11-25, maintainer: "one spot was not detected because of damage, but the damage is masked")

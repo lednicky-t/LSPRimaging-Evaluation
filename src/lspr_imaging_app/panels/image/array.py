@@ -18,7 +18,7 @@ from collections.abc import Callable
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import QEvent, QObject, QPoint, QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter
 from PyQt6.QtWidgets import QFrame, QToolButton, QVBoxLayout, QWidget
 
@@ -35,6 +35,7 @@ from .array_ghosts import ghost_outlines, preview_alphas
 from .array_panel import ArrayPanel
 from .array_pictograms import pictogram_icon
 from .general_group import style_general_icon_button
+from .popout_placer import PopoutPlacer
 from .sample_circles_item import SampleCirclesItem
 
 GHOST_Z = 25
@@ -88,7 +89,6 @@ class ArrayController(QObject):
         style_general_icon_button(self.button)
         self.button.toggled.connect(self._on_button_toggled)
 
-        self._host = host
         self._open = False
         self.popup = PopupFrame(host)  # a child of the Image panel: in the app window, over the image, not a window of its own
         self.popup.setObjectName("ArrayPopup")
@@ -97,11 +97,11 @@ class ArrayController(QObject):
         layout = QVBoxLayout(self.popup)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.panel)
-        host.installEventFilter(self)  # keep the panel inside the window when it is resized
+        self._placer = PopoutPlacer(self.popup, self.panel, self.button, host, self)  # under the button, inside the window, sized to the content
         self.panel.cancel_requested.connect(self.close)
         self.panel.apply_requested.connect(self.apply)
         self.panel.spec_changed.connect(self._on_spec_changed)
-        self.panel.advanced_toggled.connect(lambda _opened: self._fit_popup())
+        self.panel.advanced_toggled.connect(lambda _opened: self._placer.fit())
         self.panel.opacity_changed.connect(self._on_opacity)
 
         self._ghosts = SampleCirclesItem(GHOST_WIDTH)
@@ -129,7 +129,8 @@ class ArrayController(QObject):
         if not self._open:
             self._open = True
             self.popup.show()
-        self._fit_popup()  # (not just `_position`: the first size must come from an up-to-date layout, or the rows are squeezed together)
+        self._placer.set_active(True)
+        self._placer.fit()  # (the first size must come from an up-to-date layout, or the rows are squeezed together)
         self.popup.raise_()
         self._set_button_checked(True)
         self._ghosts.setVisible(True)
@@ -141,6 +142,7 @@ class ArrayController(QObject):
         if not self._open:
             return
         self._open = False
+        self._placer.set_active(False)
         self._timer.stop()
         self.popup.hide()
         self._ghosts.clear()
@@ -160,37 +162,6 @@ class ArrayController(QObject):
     def opacity(self) -> float:
         """The wedge position now (0 - 1; 0.5 = the usual look)."""
         return self.panel.opacity()
-
-    def _fit_popup(self) -> None:
-        """Grow or shrink the panel to its content (opening Advanced adds rows) and keep it where it belongs."""
-        # Qt re-lays-out a widget in a later event; the size is needed now, so update the inner layout first, then the frame's.
-        for layout in (self.panel.layout(), self.popup.layout()):
-            if layout is not None:
-                layout.invalidate()
-                layout.activate()
-        self._position()
-        QTimer.singleShot(0, self._settle_popup)  # again once the event loop has polished the widgets (fonts and paddings change the row heights)
-
-    def _settle_popup(self) -> None:
-        if self._open:
-            for layout in (self.panel.layout(), self.popup.layout()):
-                if layout is not None:
-                    layout.invalidate()
-                    layout.activate()
-            self._position()
-
-    def _position(self) -> None:
-        """Just under the Array button, kept inside the Image panel."""
-        self.popup.adjustSize()
-        spot = self.button.mapTo(self._host, QPoint(0, self.button.height() + 4))
-        x = max(4, min(spot.x(), self._host.width() - self.popup.width() - 4))
-        self.popup.move(x, spot.y())
-
-    def eventFilter(self, watched: QObject | None, event: QEvent | None) -> bool:
-        # `getattr`: Qt can still deliver an event while Python is tearing this object down (a host closing at the end of a test).
-        if getattr(self, "_open", False) and watched is self._host and event is not None and event.type() == QEvent.Type.Resize:
-            self._position()
-        return False
 
     def _on_button_toggled(self, checked: bool) -> None:
         if checked:

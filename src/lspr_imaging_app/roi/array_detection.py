@@ -372,7 +372,7 @@ def _parabolic(values: np.ndarray, i: int) -> float:
     return 0.0 if abs(denominator) < 1e-12 else float(np.clip(0.5 * (a - c) / denominator, -0.5, 0.5))
 
 
-# Public names of three helpers the array finder (`array_finder.py`) shares. Aliases only: the old finder's behaviour is unchanged (the two are to be compared).
+# Public names of three helpers the array finder (`array_finder.py`) shares (aliases of the underscore functions above; `prepare_contrast` is already public).
 scan_spot_radius = _scan_spot_radius
 matched_filter = _matched_filter
 refine_nodes = _refine_nodes

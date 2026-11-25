@@ -1,6 +1,6 @@
 """Keeps a pop-out panel (a child widget of the Image panel) sized to its content and just under its button, inside the window.
 
-The Find* pop-out uses it; the Array one carries the same few lines itself (`array.py`, built first). Qt re-lays-out a widget in a later event, but the size is
+The Array and Find* pop-outs use it (the Array one carried its own copy until the 2026-11-25 maintenance pass). Qt re-lays-out a widget in a later event, but the size is
 needed now, so the inner layouts are updated first and once more when the event loop has polished the widgets (fonts and paddings change the row heights).
 """
 

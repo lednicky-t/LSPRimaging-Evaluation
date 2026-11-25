@@ -1,6 +1,6 @@
 # ROI tab "Array" section: audit and proposed design (2026-10-08)
 
-Status: proposal, nothing built. Written for the maintainer to decide the open questions at the end.
+Status: **historical** (the old Auto / Semi / Manual Array group this proposed was built and then retired 2026-11-25; see `array_manual_array_2026-11-25.md` and `array_finder_design_2026-11-25.md`). Originally: proposal, nothing built. Written for the maintainer to decide the open questions at the end.
 Scope: circular sample disks plus reference rings only (as requested). Image panel, ROIs tab, rewrite generation.
 
 ## 1. What already exists
