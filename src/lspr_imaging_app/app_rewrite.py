@@ -1555,6 +1555,8 @@ def _build_status_bar(
         **{presenter.task.task_id: presenter.cancel for presenter in check_presenters},
     }
     task_indicator.cancel_requested.connect(lambda task_id: cancel_by_task[task_id]())
+    # The session autosave waits for the running tasks instead of landing in the middle of them (capture on the GUI thread + a write that holds the interpreter lock: +1-2 s on a fit run).
+    m.session_autosave.set_busy_check(task_indicator.has_running)
     # The File menu's state text ("Loading dataset from ...") shows as a transient
     # message on the bar's left side; the task indicator above is permanent, on the
     # right, so neither covers the other.

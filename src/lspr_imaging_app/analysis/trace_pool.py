@@ -30,10 +30,18 @@ back to the thread and the Sensorgram took 39 s; the cause was never seen). Now:
 ``0xC0000005`` = access violation; ``1`` = it raised while starting, and its traceback went to the console that launched the app). Each ``run`` logs
 one ``sensorgram.trace_run`` event: where it ran, the settings, and the time of each stage (``prep_ms`` / ``fit_ms`` / ``per_cube_ms``), plus, in the
 thread, how much of the wall time the thread was actually computing (``cpu_ms``; far below ``dur_ms`` = it waited for the interpreter lock).
+
+**Time outside the fits (2026-11-26).** ``prep_ms`` / ``fit_ms`` are summed over the workers' own clocks, so they do not add up to ``wall_ms``: the polynomial fit (1.7 s of fitting) took 3.0 s
+of wall time. In the process the run therefore also logs ``setup_ms`` (until the first task is submitted), ``send_ms`` / ``send_max_ms`` (task submitted -> worker has its arguments: pickling, the
+pipe, waiting for a free worker, a new worker's start-up; sum / slowest task), ``back_ms`` / ``back_max_ms`` (traces ready in the worker -> parent has them), ``payload_mb`` (arrays sent),
+``tasks``, ``pickle_one_ms`` / ``pickle_one_mb`` (one task pickled in the parent: the parent's own cost per task) and ``gil_lag_max_ms`` / ``gil_stalls`` (the longest wake-up of a sleeping thread of the app during the run, and how many took over
+``_STALL_MS``: ``_GilProbe``; only a stall means something, see there). First reading, 21 logged runs: the gap
+between wall time and fit work was 0.85-1.3 s with nothing else running and 1.7-3.7 s when ``session.capture`` / ``session.write`` overlapped the run (correlation 0.74). The sums over tasks overlap when several workers run, so compare ``send_max_ms`` with ``wall_ms``.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import faulthandler
 import logging
 import multiprocessing
@@ -42,6 +50,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from concurrent.futures import FIRST_COMPLETED, BrokenExecutor, Future, ProcessPoolExecutor, wait
+from multiprocessing.reduction import ForkingPickler  # what ProcessPoolExecutor pickles its tasks with
 
 import numpy as np
 from lspr_core.perf import get_runtime, lower_process_priority
@@ -59,6 +68,11 @@ _GIVE_UP_AFTER = 2  # failed starts / crashes of the helper process before this 
 TASK_KEY = "sensorgram.fits"  # the name `lspr_core.perf` keeps learned worker counts under
 _WORKER_BYTES = 250 * 1024 * 1024  # memory limit of one worker: measured 145 MB idle, 175 MB at the peak of a Voigt task (2026-11-26)
 _EXTRA_WORKER_PAYBACK_S = 3.0  # a process started now costs ~1-2 s of start-up (spawn + numpy / scipy imports): each extra one must get at least this much work
+TASK_ROWS = 6 * BATCH_ROWS
+"""Cubes handed to a worker in one task (the ROIs are grouped until they reach this: 4 ROIs of 2655 cubes). Every task costs several interpreter-lock hand-offs in the parent
+(submit, pickle, result), and each can wait a full switch interval (5 ms) while another thread of the app runs Python; with one ROI per task (160 tasks) a real run spent ~1.3 s of
+a 1.4 s wall time outside the fits (``fit="none"``, 2026-11-26 log). Standalone benchmark, 188 MB in 160 ROIs to 7 workers, parent thread hogging the lock: 16.4 s with 1 ROI per task,
+4.7 s with 4, 1.4 s with 23; idle parent: 0.28 s / 0.37 s / 0.44 s. Bigger tasks cost coarser progress and cancel and a worse tail (the last task runs alone), so not bigger than this."""
 _IDLE_SHRINK_S = 120.0  # seconds without a run after which the extra processes are released (the one warm helper stays)
 
 
@@ -84,21 +98,97 @@ def _ping() -> int:
 def _trace_task(
     chunk: list[tuple[int, TraceInput]], formula_key: str, metric: MetricSettings
 ) -> tuple[dict[int, np.ndarray], dict[str, float]]:
-    """The traces of one task and the stage times (``trace_fit.traces_from_inputs`` ``timings``)."""
+    """The traces of one task and the stage times (``trace_fit.traces_from_inputs`` ``timings``). Two clock stamps ride along under ``_recv`` / ``_done``
+    (``time.time()`` seconds: the parent reads the same system clock, ``perf_counter``'s zero is not promised to be shared between processes): the moment
+    the arguments had been unpickled here, and the moment the traces were ready to be sent back. The parent turns them into ``send_ms`` / ``back_ms``."""
+    received = time.time()
     timings: dict[str, float] = {}
     traces = traces_from_inputs([data for _roi_id, data in chunk], formula_key, metric, timings)
-    return {roi_id: trace for (roi_id, _data), trace in zip(chunk, traces)}, timings
+    out = {roi_id: trace for (roi_id, _data), trace in zip(chunk, traces)}
+    timings["_recv"], timings["_done"] = received, time.time()
+    return out, timings
 
 
 def _add_timings(total: dict[str, float], part: dict[str, float]) -> None:
     for key, value in part.items():
-        total[key] = total.get(key, 0.0) + value
+        if not key.startswith("_"):  # clock stamps (`_trace_task`), not durations: they are not summed or logged
+            total[key] = total.get(key, 0.0) + value
+
+
+def _payload_bytes(chunk: list[tuple[int, TraceInput]]) -> int:
+    """Bytes of the arrays one task sends to the helper process (what has to be pickled and pushed through the pipe)."""
+    return sum(
+        int(value.nbytes)
+        for _roi_id, data in chunk
+        for field in dataclasses.fields(data)
+        if isinstance(value := getattr(data, field.name), np.ndarray)
+    )
+
+
+class _GilProbe:
+    """Measures how late a sleeping thread of this process gets the interpreter lock back (2026-11-26). A thread that sleeps ``period_s`` and then needs the lock to
+    carry on is what the pool's own threads (submit, pickle, collect) do for every task; if another thread of the app is running Python (the window, the session autosave,
+    a plot) it has to wait for that thread to let go, up to a whole switch interval (5 ms), and a long call that never lets go (a big ``json.dumps``) blocks it completely.
+    The lateness of each wake-up is that wait.
+
+    **Only a stall means anything, not the mean (measured 2026-11-26).** On Windows a 5 ms wait comes back ~10 ms late *whatever else runs*: an idle machine with no workers read
+    mean 11.2 ms, p95 13.7 ms, and four busy worker processes with an idle parent read the same (10.3-10.6 ms); it follows the system timer's granularity, which other programs
+    change (the first run of a session read 1.2 ms). A first version reported the mean and p95 and they were read as "a thread keeps running Python": they were this. What does stand
+    out is a stall: the session autosave's write blocked the lock for 560-720 ms (the log of that run), against <= 43 ms when it did not run. Hence ``gil_lag_max_ms`` and the number
+    of wake-ups later than ``_STALL_MS``. The probe wakes ~65 times a second (cheap, but not free)."""
+
+    def __init__(self, period_s: float = 0.005) -> None:
+        self._period = period_s
+        self._stop = threading.Event()
+        self._lags_ms: list[float] = []
+        self._thread = threading.Thread(target=self._loop, name="gil-probe", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            t0 = time.perf_counter()
+            self._stop.wait(self._period)  # releases the lock; coming back needs it
+            if not self._stop.is_set():
+                self._lags_ms.append(max(0.0, (time.perf_counter() - t0 - self._period) * 1e3))
+
+    def stop(self) -> dict[str, float]:
+        """Stop and summarize: ``gil_lag_max_ms``, ``gil_stalls`` (wake-ups later than ``_STALL_MS``), ``gil_samples`` (empty dict when too short to have a sample)."""
+        self._stop.set()
+        self._thread.join(timeout=0.1)
+        return _summarize_lags(list(self._lags_ms))
+
+
+_STALL_MS = 50.0  # well above the ~10-16 ms a wake-up is late on Windows anyway (`_GilProbe`)
+
+
+def _summarize_lags(lags_ms: list[float]) -> dict[str, float]:
+    if not lags_ms:
+        return {}
+    return {
+        "gil_lag_max_ms": max(lags_ms),
+        "gil_stalls": float(sum(lag > _STALL_MS for lag in lags_ms)),
+        "gil_samples": float(len(lags_ms)),
+    }
+
+
+def _note_transfer(stage: dict[str, float], sent: float, task_timings: dict[str, float], received: float) -> None:
+    """Add one finished task to the transfer times. ``send`` = submit until the worker had the arguments (pickling, the pipe, waiting for a free worker,
+    unpickling; for the first task of a new process also its start-up); ``back`` = the worker had the traces until the parent had them (pickling, pipe, unpickling)."""
+    send = max(0.0, (task_timings.get("_recv", sent) - sent) * 1e3)
+    back = max(0.0, (received - task_timings.get("_done", received)) * 1e3)
+    stage["send_ms"] += send
+    stage["back_ms"] += back
+    stage["send_max_ms"] = max(stage["send_max_ms"], send)
+    stage["back_max_ms"] = max(stage["back_max_ms"], back)
+    stage["tasks"] += 1
 
 
 def _chunks(jobs: list[tuple[int, TraceInput]]) -> list[list[tuple[int, TraceInput]]]:
-    """The ROIs in tasks of about ``BATCH_ROWS`` cubes (several ROIs per task: a fit batch is cheapest per cube at that size, and one message
-    per ROI would be mostly overhead)."""
-    per_task = max(1, BATCH_ROWS // max(1, jobs[0][1].sample.shape[0]))
+    """The ROIs in tasks of about ``TASK_ROWS`` cubes (>= 1 ROI). The fits inside a task are still cut into batches of ``BATCH_ROWS`` cubes
+    (``trace_fit``), so the task size changes neither the numbers nor the fit speed: it only sets how many messages go back and forth."""
+    per_task = max(1, TASK_ROWS // max(1, jobs[0][1].sample.shape[0]))
     return [jobs[i : i + per_task] for i in range(0, len(jobs), per_task)]
 
 
@@ -273,7 +363,7 @@ class TracePool:
         progress: Callable[[int, int], None] | None = None,
     ) -> tuple[dict[int, np.ndarray], bool]:
         """The traces of ``jobs`` (ROI id, inputs): ``(finished traces, cancelled before the end)``. Fits run in the helper process; this thread only
-        waits (and so does not hold the interpreter lock). ROIs go in tasks of ~``BATCH_ROWS`` cubes; ``progress(done ROIs, total)`` after each task;
+        waits (and so does not hold the interpreter lock). ROIs go in tasks of ~``TASK_ROWS`` cubes; ``progress(done ROIs, total)`` after each task;
         ``cancelled()`` is looked at every 50 ms and the tasks not yet started are dropped (one already running finishes in the process and is
         ignored)."""
         done: dict[int, np.ndarray] = {}
@@ -354,19 +444,37 @@ class TracePool:
         pending: set[Future] = set()
         task_seconds: list[float] = []  # compute time of each finished task (the worker's own clock: no queueing, no pickling)
         next_task, peak = 0, 1
+        # Where the wall time goes outside the fits (2026-11-26: the polynomial fit took 1.7 s of fitting in 3.0 s of wall time): `setup_ms` = this call until the first
+        # submit (pool, worker count), `send_*` / `back_*` = the trip of each task to the worker and back (`_note_transfer`), `payload_mb` = what was pickled to the worker.
+        stage = {"send_ms": 0.0, "send_max_ms": 0.0, "back_ms": 0.0, "back_max_ms": 0.0, "payload_mb": 0.0, "tasks": 0.0}
+        sent_at: dict[Future, float] = {}
+        started, setup_ms = time.perf_counter(), None
+        probe = _GilProbe()
+        probe.start()
         try:
+            t_pickle = time.perf_counter()  # what the executor does to one task before it can send it (its feeder thread, here measured in this one): CPU of this process, or the lock
+            blob = ForkingPickler.dumps((_trace_task, chunks[0], formula_key, metric))
+            stage["pickle_one_ms"], stage["pickle_one_mb"] = (time.perf_counter() - t_pickle) * 1e3, memoryview(blob).nbytes / 1e6
             while next_task < len(chunks) or pending:
                 if cancelled is not None and cancelled():
                     return done, True
                 limit = self._in_flight_limit(run, executor, len(chunks) - len(task_seconds), task_seconds)
                 while next_task < len(chunks) and len(pending) < limit:
-                    pending.add(executor.submit(_trace_task, chunks[next_task], formula_key, metric))
+                    if setup_ms is None:
+                        setup_ms = (time.perf_counter() - started) * 1e3
+                    stamp = time.time()
+                    future = executor.submit(_trace_task, chunks[next_task], formula_key, metric)
+                    sent_at[future] = stamp
+                    stage["payload_mb"] += _payload_bytes(chunks[next_task]) / 1e6
+                    pending.add(future)
                     next_task += 1
                 peak = max(peak, len(pending))
                 finished, pending = wait(pending, timeout=_POLL_SECONDS, return_when=FIRST_COMPLETED)
+                received_at = time.time()
                 for future in finished:
                     traces, task_timings = future.result()  # an error inside a fit is raised here, to the caller
                     done.update(traces)
+                    _note_transfer(stage, sent_at.pop(future), task_timings, received_at)
                     _add_timings(timings, task_timings)
                     task_seconds.append(sum(task_timings.get(key, 0.0) for key in ("prep_ms", "fit_ms", "per_cube_ms")) / 1000.0)
                     if run is not None:
@@ -377,6 +485,9 @@ class TracePool:
             for future in pending:
                 future.cancel()
             timings["workers"] = peak  # the most tasks in flight at once = processes used (also for a cancelled run)
+            timings.update(stage)
+            timings.update(probe.stop())
+            timings["setup_ms"] = (time.perf_counter() - started) * 1e3 if setup_ms is None else setup_ms
         if run is not None:
             log_event(logger, "perf.run", logging.DEBUG, **run.finish().as_fields())
         return done, False

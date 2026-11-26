@@ -69,6 +69,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections import deque
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -77,13 +78,20 @@ from pathlib import Path
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 from ..frame_naming import FrameNamingScheme
-from ..applog import timed
+from ..applog import log_event, timed
 from .session import NewerSessionError, PreparedSession, SessionState, SessionWriter, prepare_session
 
 logger = logging.getLogger(__name__)
 
 AUTOSAVE_DEBOUNCE_MS = 2500
 """See the module docstring - the old app's own interval, kept."""
+
+HOLD_RECHECK_MS = 500
+"""While a background task runs, a save that is due waits and looks again this often (see `SessionAutosave.set_busy_check`)."""
+
+MAX_HOLD_S = 60.0
+"""The longest a due save waits for background tasks, counted from the first wait. Safety net: a task that never reports its end (or a scan of an hour)
+must not leave edits unsaved for that long; after this the save goes ahead while the task runs. Quit and dataset switches never wait at all."""
 
 FLUSH_TIMEOUT_S = 120.0
 """How long `flush()` (quit) waits for a running write before giving up with a warning. Generous: a first save of
@@ -197,13 +205,19 @@ class SessionAutosave(QObject):
         self._enabled = True
         self._dirty = False
         self._suspended = False
+        self._busy: Callable[[], bool] | None = None  # `set_busy_check`
+        self._held_since: float | None = None  # time.monotonic() of the first wait of the save that is due; None = not waiting
         self._failures: deque[tuple[Path, BaseException]] = deque()  # appended by the worker, drained on the GUI thread
         self._worker = _WriteWorker(lambda root, prepared: self._write(root, prepared), self._on_write_done)
         self._failure_pending.connect(self._drain_failures)
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setInterval(int(interval_ms))
-        self._timer.timeout.connect(self._save_now)
+        self._timer.timeout.connect(self._on_debounce)
+        self._hold_timer = QTimer(self)  # looks again while the save waits for a background task (a second timer: `QTimer.start(ms)` would change the debounce's interval)
+        self._hold_timer.setSingleShot(True)
+        self._hold_timer.setInterval(HOLD_RECHECK_MS)
+        self._hold_timer.timeout.connect(self._on_debounce)
 
     # -- which dataset is being saved --------------------------------------
 
@@ -229,6 +243,7 @@ class SessionAutosave(QObject):
         blank state - the one genuinely destructive thing this class could
         do."""
         self._timer.stop()
+        self._hold_timer.stop()
         self._save_now()
         self._root = None if root is None else Path(root)
         self._enabled = enabled
@@ -251,13 +266,45 @@ class SessionAutosave(QObject):
         if self._suspended or self._root is None or not self._enabled:
             return
         self._dirty = True
+        self._hold_timer.stop()  # a new edit starts the debounce again; the wait for a task (if any) resumes when it elapses
         self._timer.start()
+
+    def set_busy_check(self, busy: Callable[[], bool] | None) -> None:
+        """**Save after the computations, not during them** (2026-11-26). ``busy()`` says whether a background task is running (the app passes
+        ``TaskIndicator.has_running``: every fit, scan, export, load and check that reports there). When the debounce elapses while it is,
+        the save waits and looks again every `HOLD_RECHECK_MS`, up to `MAX_HOLD_S`. Why: the capture runs on the GUI thread (0.2-0.7 s) and the write holds
+        the interpreter lock for most of its 0.7-0.9 s (a 44 MB JSON); landing in the middle of a Sensorgram run they added 1-2 s to it (measured: the pool's
+        threads waited up to 0.7 s for the lock). Checkpoints (`flush`, `set_root`: quit, dataset switch) never wait. ``None`` = never wait (the default)."""
+        self._busy = busy
+
+    def _is_busy(self) -> bool:
+        if self._busy is None:
+            return False
+        try:
+            return bool(self._busy())
+        except Exception:  # noqa: BLE001 - a broken check must never be a reason not to save: fail open
+            logger.warning("Session autosave: the busy check failed; saving without waiting", exc_info=True)
+            return False
+
+    def _on_debounce(self) -> None:
+        """The debounce elapsed (or a wait is being re-checked): save now, unless a background task is running and the wait is not used up."""
+        if self._dirty and self._is_busy():
+            now = time.monotonic()
+            if self._held_since is None:
+                self._held_since = now
+                log_event(logger, "session.autosave_held", logging.DEBUG)
+            if now - self._held_since < MAX_HOLD_S:
+                self._hold_timer.start()
+                return
+            log_event(logger, "session.autosave_hold_expired", logging.INFO, max_hold_s=MAX_HOLD_S)  # saving while the task still runs
+        self._save_now()
 
     def flush(self) -> None:
         """Write now, if anything is pending, and **return once it is on disk**. Safe to call when nothing is
         loaded or nothing changed - both are no-ops, which is what makes it
         safe to hang off `aboutToQuit` unconditionally."""
         self._timer.stop()
+        self._hold_timer.stop()
         self._save_now()
         self.wait_until_written()
 
@@ -282,10 +329,15 @@ class SessionAutosave(QObject):
         if not self._dirty or self._root is None or not self._enabled:
             return
         root = self._root
+        self._hold_timer.stop()  # a re-check still pending has nothing left to wait for
+        held_ms = None if self._held_since is None else round((time.monotonic() - self._held_since) * 1e3)  # how long it waited for tasks (None = not at all)
+        self._held_since = None
         try:
             with timed(logger, "session.capture", root=root.name) as t:
                 prepared = prepare_session(self._capture(), self._naming())
                 t.set(masks=len(prepared.mask_changes))
+                if held_ms is not None:
+                    t.set(held_ms=held_ms)
         except Exception as exc:  # noqa: BLE001 - reported through `_report_failure`; `_dirty` stays set so the next edit retries
             # A failed capture must not take the application down, and must not be
             # silent either. `_dirty` stays set, so the next edit or the quit flush tries again.
@@ -348,6 +400,8 @@ class SessionAutosave(QObject):
         previous_suspended = self._suspended
         self._suspended = True
         self._timer.stop()
+        self._hold_timer.stop()
+        self._held_since = None
         try:
             yield
         finally:

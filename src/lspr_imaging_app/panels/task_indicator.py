@@ -301,6 +301,10 @@ class TaskIndicator(QWidget):
         )
         self._refresh()
 
+    def has_running(self) -> bool:
+        """Whether any task is running now (what the session autosave waits for: `SessionAutosave.set_busy_check`)."""
+        return bool(self._running)
+
     def history(self) -> list[TaskRecord]:
         """Finished runs, oldest first (capped)."""
         return list(self._history)
