@@ -8,11 +8,12 @@ Layout (a group of the Experimental plan tab, after "Edit"): two icon buttons, e
 
     Shrink steps                                   Offset steps
     All 12 steps / 3 selected steps                All 12 steps / 3 selected steps
-    Unit    [Cubes] [Time] [%]                     Unit    [Cubes] [Time]
-    Amount  [ 2 cubes ]                            Shift by [ -3 cubes ]       (+ later, - earlier)
-    From    [Start] [End] [Both]                   status: 12 steps will move; ...
+    Amount  [ 2 ] cubes                            Shift by [ -3 ] cubes       (+ later, - earlier)
+    From    (3 pictures)                           status: 12 steps will move; ...
     status: 9 steps will shrink; 3 too short ...                                    (cross) (tick)
                                                    (cross) (tick)
+
+  The unit ("cubes" / "s" / "%"; offset: no "%") is plain text after the number: the mouse wheel over it (or a click) changes it, `UnitScroller`.
 
 - **Which steps**: the steps selected on the plan bar; with none selected, all of them. The pop-up's first line says which. Select before opening: the pop-up closes on a click outside it.
 - **Live preview**: while a pop-up is open, every change of a setting asks the owner for a new preview (`preview_requested(spec)`); the plan bar draws the new edges. Closing the pop-up in
@@ -25,8 +26,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PyQt6.QtCore import QObject, pyqtSignal
-from PyQt6.QtWidgets import QButtonGroup, QDoubleSpinBox, QHBoxLayout, QLabel, QMenu, QPushButton, QToolButton, QVBoxLayout, QWidget, QWidgetAction
+from PyQt6.QtCore import QObject, QSize, Qt, pyqtSignal
+from PyQt6.QtGui import QIcon
+from PyQt6.QtWidgets import QButtonGroup, QDoubleSpinBox, QHBoxLayout, QLabel, QMenu, QToolButton, QVBoxLayout, QWidget, QWidgetAction
 
 from lspr_ui import get_active_theme
 
@@ -48,7 +50,7 @@ from ..icon_button_style import style_general_icon_button
 from ..image.array_pictograms import FlatIconButton, pictogram_icon
 from ..ui_state import UiStateStore
 from .edit_group import NO_STEPS_TIP
-from .plan_icons import offset_steps_icon, shrink_steps_icon
+from .plan_icons import offset_steps_icon, shrink_side_icon, shrink_steps_icon
 
 SHRINK_TIP = (
     "Shrink steps: every selected step (all steps when none is selected) loses the amount from its start, its end or both, so a gap opens between neighbouring steps. "
@@ -62,12 +64,13 @@ NEEDS_TRACES_TIP = "Batch edit: needs traces on the plot, an edge lands on the p
 
 _TITLES = {KIND_SHRINK: "Shrink steps", KIND_OFFSET: "Offset steps"}
 _AMOUNT_LABELS = {KIND_SHRINK: "Amount", KIND_OFFSET: "Shift by"}
-_UNIT_TEXT = {UNIT_CUBES: "Cubes", UNIT_TIME: "Time", UNIT_PERCENT: "%"}
+_UNIT_SUFFIX = {UNIT_CUBES: "cubes", UNIT_TIME: "s", UNIT_PERCENT: "%"}
 _UNIT_TIPS = {
-    UNIT_CUBES: "Count in cubes (the plotted points). Exact: the edge moves by whole cubes.",
-    UNIT_TIME: "Count in seconds. The edge lands on the nearest cube, so an amount under half a cube spacing moves nothing.",
-    UNIT_PERCENT: "A percentage of each step's own length (taken off in total: with Both, half from each side). The edge lands on the nearest cube.",
+    UNIT_CUBES: "Cubes: count in cubes (the plotted points). Exact: the edge moves by whole cubes.",
+    UNIT_TIME: "Seconds: the edge lands on the nearest cube, so an amount under half a cube spacing moves nothing.",
+    UNIT_PERCENT: "Percent: a percentage of each step's own length (taken off in total: with Both, half from each side). The edge lands on the nearest cube.",
 }
+_NUMBER_WIDTH = 84
 _SIDE_TEXT = {SIDE_START: "Start", SIDE_END: "End", SIDE_BOTH: "Both"}
 _SIDE_TIPS = {
     SIDE_START: "Take the amount off the start of each step.",
@@ -79,6 +82,67 @@ _DEFAULT_AMOUNTS = {
     KIND_OFFSET: {UNIT_CUBES: 1.0, UNIT_TIME: 10.0},
 }
 _MAX_AMOUNT = 99999.0
+
+
+_SIDE_ICON = 28
+_SIDE_ENDS = {SIDE_START: (True, False), SIDE_END: (False, True), SIDE_BOTH: (True, True)}  # (comes off the start, comes off the end)
+
+
+def _side_icon(side: str, theme) -> QIcon:
+    """The picture of one "From" choice with its three looks: not chosen (all muted), hovered and chosen (ink and the gold accent), so that no frame is needed to show the choice."""
+    from_start, from_end = _SIDE_ENDS[side]
+    size = QSize(_SIDE_ICON * 2, _SIDE_ICON * 2)
+    muted = shrink_side_icon(from_start, from_end, theme.text_dim, theme.text_dim).pixmap(size)
+    lit = shrink_side_icon(from_start, from_end, theme.text_primary, theme.accent_gold).pixmap(size)
+    icon = QIcon()
+    icon.addPixmap(muted, QIcon.Mode.Normal, QIcon.State.Off)
+    icon.addPixmap(lit, QIcon.Mode.Active, QIcon.State.Off)
+    icon.addPixmap(lit, QIcon.Mode.Normal, QIcon.State.On)
+    icon.addPixmap(lit, QIcon.Mode.Active, QIcon.State.On)
+    return icon
+
+
+class UnitScroller(QToolButton):
+    """The unit written after a number, as plain text that changes with the mouse wheel: wheel up = the unit before, wheel down = the next one (round the ring); a click goes to
+    the next one too. No box in any state. `chosen(unit)` is emitted by the user's change only; `set_unit` emits nothing. Its width fits the widest text, so the row never shifts."""
+
+    chosen = pyqtSignal(str)
+
+    def __init__(self, units, names: dict[str, str], tips: dict[str, str], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.units = tuple(units)
+        self._names, self._tips = names, tips
+        self._unit = self.units[0]
+        self.setAutoRaise(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        self.clicked.connect(lambda _checked=False: self._step(1))
+        widest = max(self.fontMetrics().horizontalAdvance(names[unit]) for unit in self.units)
+        self.setFixedWidth(widest + 14)
+        self.set_unit(self._unit)
+
+    def unit(self) -> str:
+        return self._unit
+
+    def set_unit(self, unit: str) -> None:
+        self._unit = unit
+        self.setText(self._names[unit])
+        self.setToolTip("Unit: scroll the mouse wheel over it (or click) to change it.\n" + self._tips[unit])
+
+    def choose(self, unit: str) -> None:
+        """What the user's wheel or click does: show `unit` and report it (nothing when it is already the unit)."""
+        if unit != self._unit:
+            self.set_unit(unit)
+            self.chosen.emit(unit)
+
+    def _step(self, direction: int) -> None:
+        self.choose(self.units[(self.units.index(self._unit) + direction) % len(self.units)])
+
+    def wheelEvent(self, event) -> None:  # type: ignore[override]
+        delta = event.angleDelta().y()
+        if delta:
+            self._step(-1 if delta > 0 else 1)
+        event.accept()
 
 
 class BatchToolPanel(QWidget):
@@ -98,24 +162,27 @@ class BatchToolPanel(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(10, 8, 10, 8)
         outer.setSpacing(6)
-        title = QLabel(_TITLES[kind], self)
-        title.setStyleSheet("font-weight: bold;")
-        outer.addWidget(title)
+        self._title = QLabel(_TITLES[kind], self)
+        outer.addWidget(self._title)
         self._target = QLabel("", self)
-        self._target.setStyleSheet(f"color: {get_active_theme().text_dim};")
         outer.addWidget(self._target)
+        self._captions: list[QLabel] = []
 
-        self._unit_buttons = self._choice_row(outer, "Unit", self._units, _UNIT_TEXT, _UNIT_TIPS, self._on_unit_clicked)
-        amount_row = QHBoxLayout()
+        amount_row = QHBoxLayout()  # one row: the caption, the number and its unit (a text that changes with the mouse wheel)
         amount_row.setContentsMargins(0, 0, 0, 0)
-        amount_row.addWidget(QLabel(_AMOUNT_LABELS[kind], self))
+        amount_row.setSpacing(10)
+        amount_row.addWidget(self._caption(_AMOUNT_LABELS[kind]))
         self._box = QDoubleSpinBox(self)
+        self._box.setFixedWidth(_NUMBER_WIDTH)
         amount_row.addWidget(self._box)
+        self._unit_text = UnitScroller(self._units, _UNIT_SUFFIX, _UNIT_TIPS, self)
+        self._unit_text.chosen.connect(self._on_unit_chosen)
+        amount_row.addWidget(self._unit_text)
         amount_row.addStretch(1)
         outer.addLayout(amount_row)
-        self._side_buttons: dict[str, QPushButton] = {}
+        self._side_buttons: dict[str, QToolButton] = {}
         if kind == KIND_SHRINK:
-            self._side_buttons = self._choice_row(outer, "From", SIDES, _SIDE_TEXT, _SIDE_TIPS, self._on_side_clicked)
+            self._side_buttons = self._choice_row(outer, "From", SIDES, _SIDE_TEXT, _SIDE_TIPS, self._on_side_clicked)  # pictures, no words (`refresh_theme`)
 
         self._status = QLabel("", self)
         self._status.setWordWrap(True)
@@ -132,23 +199,37 @@ class BatchToolPanel(QWidget):
         bottom.addWidget(self.apply_button)
         outer.addLayout(bottom)
 
-        self._unit_buttons[self._unit].setChecked(True)
+        self._unit_text.set_unit(self._unit)
         if self._side_buttons:
             self._side_buttons[self._side].setChecked(True)
         self._show_unit()
         self._box.valueChanged.connect(self._on_amount_changed)
         self.refresh_theme()
 
-    def _choice_row(self, outer: QVBoxLayout, text: str, keys, names: dict[str, str], tips: dict[str, str], on_click) -> dict[str, QPushButton]:
-        """A label and a row of exclusive flat buttons (a segmented choice)."""
+    def _caption(self, text: str) -> QLabel:
+        label = QLabel(text, self)
+        self._captions.append(label)
+        return label
+
+    def _choice_row(self, outer: QVBoxLayout, text: str, keys, names: dict[str, str], tips: dict[str, str], on_click) -> dict[str, QToolButton]:
+        """A caption and a row of exclusive choices drawn as pictures: no box in any state, the chosen one is drawn in the accent colour (see `refresh_theme`). `names` are the
+        buttons' accessible names; `tips` what hovering says."""
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
-        row.addWidget(QLabel(text, self))
+        row.setSpacing(14)
+        row.addWidget(self._caption(text))
         group = QButtonGroup(self)
         group.setExclusive(True)
-        buttons: dict[str, QPushButton] = {}
+        buttons: dict[str, QToolButton] = {}
         for key in keys:
-            button = QPushButton(names[key], self)
+            button = QToolButton(self)
+            button.setAccessibleName(names[key])
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+            button.setIconSize(QSize(_SIDE_ICON, _SIDE_ICON))
+            button.setFixedSize(_SIDE_ICON + 6, _SIDE_ICON + 6)
+            button.setAutoRaise(True)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setFocusPolicy(Qt.FocusPolicy.TabFocus)
             button.setCheckable(True)
             button.setToolTip(tips[key])
             group.addButton(button)
@@ -165,12 +246,11 @@ class BatchToolPanel(QWidget):
         return BatchSpec(self._kind, self._unit, float(self._box.value()), self._side)
 
     def _show_unit(self) -> None:
-        """The amount box for the current unit: decimals, step, suffix, range, and the value remembered for that unit. Emits nothing."""
+        """The amount box for the current unit: decimals, step, range, and the value remembered for that unit (the unit's own text is beside the box). Emits nothing."""
         unit, box = self._unit, self._box
         box.blockSignals(True)
         box.setDecimals(0 if unit == UNIT_CUBES else 1)
         box.setSingleStep(1.0)
-        box.setSuffix({UNIT_CUBES: " cubes", UNIT_TIME: " s", UNIT_PERCENT: " %"}[unit])
         smallest = 1.0 if unit == UNIT_CUBES else 0.1
         if self._kind == KIND_SHRINK:
             box.setRange(smallest, 100.0 if unit == UNIT_PERCENT else _MAX_AMOUNT)
@@ -183,7 +263,7 @@ class BatchToolPanel(QWidget):
         )
         box.blockSignals(False)
 
-    def _on_unit_clicked(self, unit: str) -> None:
+    def _on_unit_chosen(self, unit: str) -> None:
         if unit == self._unit:
             return
         self._unit = unit
@@ -219,7 +299,19 @@ class BatchToolPanel(QWidget):
         theme = get_active_theme()
         self.cancel_button.setIcon(pictogram_icon("cancel", accent=theme.text_secondary))
         self.apply_button.setIcon(pictogram_icon("apply", accent=theme.accent_green))
-        self._target.setStyleSheet(f"color: {theme.text_dim};")
+        self.setStyleSheet("QLabel { background: transparent; }")
+        self._title.setStyleSheet(f"color: {theme.text_primary}; font-weight: 600; background: transparent;")
+        self._target.setStyleSheet(f"color: {theme.text_secondary}; background: transparent;")
+        for caption in self._captions:
+            caption.setStyleSheet(f"color: {theme.text_muted}; background: transparent;")
+        for side, button in self._side_buttons.items():
+            button.setStyleSheet("QToolButton, QToolButton:hover, QToolButton:checked { border: none; background: transparent; padding: 0px; }")
+            button.setIcon(_side_icon(side, theme))
+        self._unit_text.setStyleSheet(  # the unit is coloured like a chosen option: it is the one thing in the row you can change by hand
+            f"QToolButton {{ border: none; background: transparent; padding: 2px 0px; color: {theme.accent_blue}; font-weight: 400; }}"
+            f"QToolButton:hover {{ color: {theme.text_primary}; background: transparent; }}"
+        )
+        self.update()
 
     # -- remembered state ---------------------------------------------------------------------------------------------------
 
@@ -235,7 +327,7 @@ class BatchToolPanel(QWidget):
                 self._amounts[name] = float(saved)
         if unit in self._units:
             self._unit = str(unit)
-            self._unit_buttons[self._unit].setChecked(True)
+            self._unit_text.set_unit(self._unit)
         if self._side_buttons and side in SIDES:
             self._side = str(side)
             self._side_buttons[self._side].setChecked(True)

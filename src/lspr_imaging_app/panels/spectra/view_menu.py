@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import QButtonGroup, QGridLayout, QHBoxLayout, QLabel, QMen
 
 from lspr_ui import get_active_theme, transparent_icon_button_stylesheet
 
+from ..icon_button_style import open_menu_on_right_click
 from ..ribbon_fields import style_ribbon_number_field
 from ..ribbon_icon_size import BUTTON_SIZE, ICON_SIZE
 from .plot import DEFAULT_POINT_SIZE, LINE_STYLES, POINT_SIZE_RANGE
@@ -168,6 +169,7 @@ class SpectraViewMenu(QToolButton):
         action.setDefaultWidget(panel)
         self._menu.addAction(action)
         self.setMenu(self._menu)
+        open_menu_on_right_click(self)
         self.refresh_theme()
 
     def refresh_theme(self) -> None:

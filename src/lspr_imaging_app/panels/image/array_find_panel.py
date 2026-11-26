@@ -19,7 +19,6 @@ Display only: this widget holds settings and reports them (`settings()` -> `roi.
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter
 from PyQt6.QtWidgets import QCheckBox, QDoubleSpinBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QSlider, QToolButton, QVBoxLayout, QWidget
 
 from lspr_ui import CompactWedgeSlider, get_active_theme, load_tabler_icon
@@ -198,9 +197,6 @@ class ArrayFindPanel(QWidget):
 
         self._ready = True
         self.refresh_theme()
-
-    def paintEvent(self, event) -> None:
-        QPainter(self).fillRect(self.rect(), QColor(get_active_theme().window_bg))  # the colour the fields have (as the Array panel)
 
     # -- construction helpers -------------------------------------------------------------------------------------
 

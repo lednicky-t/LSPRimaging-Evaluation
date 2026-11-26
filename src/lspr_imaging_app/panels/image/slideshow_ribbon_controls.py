@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import QMenu, QToolButton, QWidget
 
 from lspr_ui import get_active_theme, load_tabler_icon, transparent_icon_button_stylesheet
 
+from ..icon_button_style import open_menu_on_right_click
 from .canvas_tools import _BUTTON_SIZE, _ICON_SIZE
 from .mark_colors import EVENT_COLOR, MASK_COLOR, cube_color, roi_color, wavelength_color
 from .roi_icons import display_icon
@@ -95,6 +96,7 @@ class SlideshowModeButton(QToolButton):
             action.triggered.connect(lambda _checked=False, m=mode: self.mode_chosen.emit(m))
             self._actions[mode] = action
         self.setMenu(self._menu)
+        open_menu_on_right_click(self)
         self.set_mode(self._mode)
 
     def mode(self) -> str:

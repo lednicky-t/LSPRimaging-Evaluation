@@ -208,6 +208,27 @@ def shrink_steps_icon(color: str, accent: str) -> QIcon:
     return QIcon(pixmap)
 
 
+def shrink_side_icon(from_start: bool, from_end: bool, color: str, accent: str) -> QIcon:
+    """The Shrink pop-up's "From" choices (2026-11-27): the step as it was (a dashed box in ``color``), what is left of it (solid, ``accent``) and a chevron in ``accent`` on each
+    side the amount comes off. ``from_start`` only = Start, ``from_end`` only = End, both = Both (the same picture as `shrink_steps_icon`)."""
+    pixmap, painter = _canvas()
+    _step_rect(painter, QColor(color), 0.05, 0.22, 0.95, 0.78, ghost=True)
+    mark = QColor(accent)
+    _step_rect(painter, mark, 0.40 if from_start and not from_end else 0.28 if from_start else 0.05, 0.22, 0.60 if from_end and not from_start else 0.72 if from_end else 0.95, 0.78)
+    painter.setPen(_pen(mark))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    if from_start:
+        left = 0.11 if from_end else 0.17
+        painter.drawLine(_at(left, 0.40), _at(left + 0.08, 0.50))
+        painter.drawLine(_at(left + 0.08, 0.50), _at(left, 0.60))
+    if from_end:
+        right = 0.89 if from_start else 0.83
+        painter.drawLine(_at(right, 0.40), _at(right - 0.08, 0.50))
+        painter.drawLine(_at(right - 0.08, 0.50), _at(right, 0.60))
+    painter.end()
+    return QIcon(pixmap)
+
+
 def offset_steps_icon(color: str, accent: str) -> QIcon:
     """The Batch edit group's "offset steps" (``accent``: gold): the step where it was (dashed, ink, above), an arrow to the right and the step where it is now (solid, ``accent``,
     below, shifted along)."""
@@ -279,7 +300,7 @@ def evaluation_picture() -> PictureFor:
 
 
 def bulk_picture() -> PictureFor:
-    """The S_bulk menu: the symbol itself, a bold S with "bulk" as its subscript (maintainer, 2026-11-22; until then a frame with a fit line and three points). Also the ROI
+    """The S_bulk menu: the symbol itself, a bold S with "B" as its subscript (maintainer, 2026-11-22; "bulk" until 2026-11-27; before that a frame with a fit line and three points). Also the ROI
     table's S_bulk switch, so the symbol means the same in both places."""
 
     def draw_into(painter: QPainter, ink: QColor, theme) -> None:
@@ -288,11 +309,11 @@ def bulk_picture() -> PictureFor:
         big.setBold(True)
         big.setPixelSize(15)
         painter.setFont(big)
-        painter.drawText(QPointF(1.0, 14.5), "S")
+        painter.drawText(QPointF(3.0, 14.5), "S")
         small = QFont(big)
-        small.setPixelSize(7)
+        small.setPixelSize(10)
         painter.setFont(small)
-        painter.drawText(QPointF(9.5, 18.5), "bulk")  # the subscript: smaller, and lower than the S's baseline
+        painter.drawText(QPointF(11.5, 18.5), "B")  # the subscript (just "B": "bulk" was too small to read): smaller, and lower than the S's baseline
 
     return _picture(draw_into)
 

@@ -40,6 +40,7 @@ from PyQt6.QtWidgets import QCheckBox, QFormLayout, QHBoxLayout, QMenu, QSpinBox
 
 from lspr_ui import make_compact_spinbox
 
+from ..icon_button_style import open_menu_on_right_click
 from ...dataset import DatasetModule
 from ... import plane_reader
 from ...thread_priority import lower_current_thread_priority
@@ -152,6 +153,7 @@ class MaskScanControls(QWidget):
         action.setDefaultWidget(self._pop)
         menu.addAction(action)
         self._settings_button.setMenu(menu)
+        open_menu_on_right_click(self._settings_button)
         self._pop.changed.connect(self._refresh_summary)
         self._refresh_summary()
 

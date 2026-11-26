@@ -46,13 +46,14 @@ DEBOUNCE_MS = 30
 
 
 class PopupFrame(QFrame):
-    """The frame the panel sits in: the window colour (what the fields have) and a thin border, painted here so no style-sheet cascade can change it."""
+    """The frame the panel sits in: the same colour and border as every menu pop-up of the app (the theme's `QMenu` rule: `toolbar_bg`, `toolbar_border`; see `gui/app_theme.py` `popup_menu_stylesheet`), so the Array /
+    Find* pop-outs and the ribbon menus (Batch edit, LbL, Bulk ...) look like one element. Painted here so no style-sheet cascade can change it. The panel inside paints nothing."""
 
     def paintEvent(self, event) -> None:
         theme = get_active_theme()
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor(theme.window_bg))
-        painter.setPen(QColor(theme.control_border))
+        painter.fillRect(self.rect(), QColor(theme.toolbar_bg))
+        painter.setPen(QColor(theme.toolbar_border))
         painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
 
 

@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import QHBoxLayout, QMenu, QToolButton, QWidget, QWidgetAct
 
 from lspr_ui import get_active_theme, transparent_icon_button_stylesheet
 
+from ..icon_button_style import open_menu_on_right_click
 from ..hue_slider import color_for_hue, hue_of, make_hue_slider
 from .canvas_tools import _BUTTON_SIZE
 
@@ -136,6 +137,7 @@ class ColorSwatch(QToolButton):
         menu.addAction(holder)
         menu.aboutToShow.connect(lambda: self.popup.show_color(self._color()))
         self.setMenu(menu)
+        open_menu_on_right_click(self)
 
     def set_colors(self, colors: SliderColors) -> None:
         self._colors = colors

@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import QHBoxLayout, QMenu, QToolButton, QWidget, QWidgetAct
 
 from lspr_ui import get_active_theme, load_tabler_icon, transparent_icon_button_stylesheet
 
+from ..icon_button_style import open_menu_on_right_click
 from ..ribbon_drawer import RibbonDrawer
 from .canvas_tools import _BUTTON_SIZE, _ICON_SIZE
 from .frame_tools import FrameToolsWidget, captioned_group
@@ -82,6 +83,7 @@ class SliderRibbon(QWidget):
         holder.setDefaultWidget(self._settings_panel)
         self._menu.addAction(holder)
         self._settings_button.setMenu(self._menu)
+        open_menu_on_right_click(self._settings_button)
         self._settings_panel.changed.connect(self._on_panel_changed)
 
         self.roi_row_button = self._make_toggle(

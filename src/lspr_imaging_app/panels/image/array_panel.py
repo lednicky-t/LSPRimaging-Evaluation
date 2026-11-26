@@ -20,7 +20,6 @@ you get (rectangular: square on / rectangle off; triangular: equilateral on / lo
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter
 from PyQt6.QtWidgets import (
     QDoubleSpinBox,
     QFrame,
@@ -207,11 +206,6 @@ class ArrayPanel(QWidget):
         self._ready = True
         self.refresh_theme()
         self._refresh_locks()
-
-    def paintEvent(self, event) -> None:
-        """Fill with the window colour, the one the fields (spin boxes) have. Painted here, not by a style sheet rule: a plain `QWidget` subclass only
-        shows a style-sheet background with extra attributes, and the colour that showed through before was lighter than the fields (2026-11-25)."""
-        QPainter(self).fillRect(self.rect(), QColor(get_active_theme().window_bg))
 
     # -- construction helpers ---------------------------------------------------------------------------------------
 

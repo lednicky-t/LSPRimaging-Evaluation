@@ -108,6 +108,25 @@ def dock_separator_stylesheet(theme: GuiTheme | None = None) -> str:
     """
 
 
+def popup_menu_stylesheet(theme: GuiTheme | None = None) -> str:
+    """Every menu pop-up (ribbon menus, context menus) in the colour of the panels' interior (`toolbar_bg`), not the lighter window colour this app gives `window_bg`
+    (2026-11-26, maintainer: a menu should be as dark as a panel). The base `QWidget` rule fills every widget with `window_bg`, so a menu's panel and its labels would show as a
+    lighter box inside the menu: they are made transparent here, and only the entry fields (spin box, line edit, combo box) keep the window colour. The Array / Find* pop-outs
+    are drawn in the same colour (`image/array.py` `PopupFrame`)."""
+    theme = theme or get_active_theme()
+    return f"""
+    QMenu {{
+        background: {theme.toolbar_bg};
+    }}
+    QMenu QWidget {{
+        background: transparent;
+    }}
+    QMenu QAbstractSpinBox, QMenu QLineEdit, QMenu QComboBox {{
+        background-color: {theme.window_bg};
+    }}
+    """
+
+
 def combo_box_no_arrow_stylesheet() -> str:
     # Collapsing the drop-down subcontrol to zero width - rather than just
     # hiding the arrow image - is what actually frees up its reserved space,
@@ -169,4 +188,5 @@ def apply_app_theme(app: QApplication, theme: GuiTheme | None = None) -> None:
         + combo_box_no_arrow_stylesheet()
         + dock_separator_stylesheet(theme)
         + menu_bar_no_border_stylesheet()
+        + popup_menu_stylesheet(theme)
     )

@@ -30,6 +30,7 @@ from PyQt6.QtWidgets import QFileDialog, QMainWindow, QMenu, QMessageBox, QToolB
 
 from lspr_ui import get_active_theme, load_tabler_icon
 
+from .icon_button_style import open_menu_on_right_click
 from ..analysis.export_tables import Table
 from ..applog import log_event
 from ..storage.plot_export import write_plot_export
@@ -101,6 +102,7 @@ class PlotExportButton(QToolButton):
                 menu.addSeparator()
             menu.addAction(self.save_data_action)
         self.setMenu(menu)
+        open_menu_on_right_click(self)
         self.refresh_theme()
 
     def refresh_theme(self) -> None:

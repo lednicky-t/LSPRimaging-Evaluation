@@ -46,6 +46,7 @@ from PyQt6.QtWidgets import (
 
 from lspr_ui import get_active_theme
 
+from ..icon_button_style import open_menu_on_right_click
 from ...dataset import DatasetModule
 from ...image_tools import GeometryModule
 from ...image_tools.mask import feature_map as fm
@@ -323,6 +324,7 @@ class FeatureMapEditPanel(QWidget):
         action.setDefaultWidget(content)
         menu.addAction(action)
         button.setMenu(menu)
+        open_menu_on_right_click(button)
         return button
 
     # -- remembered state ---------------------------------------------------------------------------------
