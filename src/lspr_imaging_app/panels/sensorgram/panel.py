@@ -88,7 +88,7 @@ from ...analysis.settings import (
 )
 from ...analysis.settings_module import AnalysisSettingsModule
 from ...analysis.trace_pool import TracePool
-from ...applog import timed
+from ...applog import StageTimer, timed
 from ...dataset import DatasetModule
 from ...image_tools.mask.module import MaskModule
 from ...selection.experiment_plan_module import ExperimentPlanModule
@@ -916,9 +916,11 @@ class SensorgramPanel(QWidget):
         if self._gate.defer() or self._last is None:
             return
         job, series = self._last
+        stages = StageTimer()  # one DEBUG record per draw (`sensorgram.draw`): 2026-11-25 the 5 s between the compute's end and the task's end was not visible in the log
         self._sync_order_step(redraw=False)  # before the lines are drawn: the legend rows are put in order as they are written
         self._view_controls.set_line_count(len(series))  # the Points toggle shows itself off while more lines are drawn than the Dot limit (it reports no change)
         stale = self._stale_mask(job.stored)
+        stages.mark("prepare")
         label, x_axis = self._x_axis()
         self._plot.set_snap_grid(x_axis)
         stats = job.request.statistics
@@ -933,16 +935,20 @@ class SensorgramPanel(QWidget):
         anchors_method = stats.baseline_method == METHOD_ANCHORS
         drift_shown = anchors_method or uses_anchor_steps(stats)  # a curve through anchors: anchor points, or the Range method's marked steps
         self._plot.set_manual_order(self._view_controls.look.manual_order())  # which line lies over which: the Draw order (Auto / Legend / Manual)
+        marks = self._mask_marks(job.stored, series)
+        stages.mark("axes_and_marks")
         self._plot.show_series(  # the toggle hides the marks, never the points
-            series, stale if self._stale_toggle.isChecked() else None, self._mask_marks(job.stored, series),
+            series, stale if self._stale_toggle.isChecked() else None, marks,
             baseline_curves=drift_shown and not stats.baseline_enabled and self._plot.view().show_anchors,  # absolute traces: the dashed curve is what Subtract would take off (View tab: it can be hidden)
             # Hollow squares only for the Anchor points method, where they ARE the anchors (clicked, removable). The Range method's marked steps show
             # their anchor icon on the plan bar instead; a square in the middle of each step's trace was a second, confusing marker (maintainer, 2026-11-11).
             anchor_dots=("subtracted" if stats.baseline_enabled else "absolute") if anchors_method and self._plot.view().show_anchors else None,  # View tab: the squares can be hidden
         )
+        stages.mark("show_series")
         self._stale_toggle.set_note(self._stale_note(stale))
         self._view_controls.look.lines_changed()  # an open Line order table follows the lines
         self._view_controls.look.set_order_note(self._plot.legend_order_note())  # now that the lines (and their step values) are there
+        stages.mark("order_table")
         uncorrected = next((s.baseline_note for s in series if s.baseline_note), "") if drift_shown else ""
         self._drift.set_fit_summary(drift_summary(series) if drift_shown else [], uncorrected)
         self._plot.set_anchors_needed(self._drift.points_needed() if anchors_method else 0)  # the number beside the edit mode's cross-hair
@@ -952,8 +958,12 @@ class SensorgramPanel(QWidget):
             window = self._axis.default_baseline_window()  # where Subtract would put it; stored only once dragged, typed or subtracted
         self._plot.set_baseline_window(window if self._band_visible and not drift_shown else None, self._range_decimals())
         self._update_cursor()
+        stages.mark("drift_and_window")
         self._steps.refresh()
+        stages.mark("steps_refresh")
         self._status.setText(self._status_line(job, series, stale))
+        stages.mark("status")
+        stages.emit(logger, "sensorgram.draw", lines=len(series))
 
     def _export_data(self) -> ExportData | None:
         """What "Save data" writes (export what is drawn): the lines as plotted with the out-of-date cubes marked, and the step statistics table

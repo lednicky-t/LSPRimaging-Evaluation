@@ -31,7 +31,7 @@ from .scan_store import StoredScan
 from .scan_view import REFERENCE, SAMPLE, _primary_method
 from .baseline_drift import METHOD_ANCHORS, METHOD_WINDOW, DriftFit, regions_by_roi
 from .settings import MetricSettings, StatisticsSettings
-from .statistics import aggregate_traces, apply_statistics_with_fit
+from .statistics import aggregate_traces, apply_baseline_with_fit, filter_traces
 from .step_stats import LineStepValues, StepMembership, line_step_values, step_statistics
 from .query import formula_values
 from .response_shape import ResponseCalibration, ResponseError, calibrate, readout
@@ -292,8 +292,12 @@ def _build_lines(request: SensorgramRequest, traces: Mapping[int, np.ndarray], d
     anchors = anchor_regions_for(request)
     processed: dict[int, tuple[np.ndarray, float]] = {}
     fits: dict[int, DriftFit] = {}
-    for roi_id in request.roi_ids:
-        trace, value, fit = apply_statistics_with_fit(x, traces[roi_id], stats, request.segments, None if anchors is None else anchors.get(roi_id))
+    # Spike rejection + smoothing for all ROIs in one batch (one Savitzky-Golay call per plan step, not per step per ROI: 21 s -> well under 1 s for 160 ROIs on a
+    # 240-step plan), then each ROI's own baseline. Same numbers as `apply_statistics_with_fit` per ROI (pinned by test_lspri_analysis_scan_trace).
+    ids = list(request.roi_ids)
+    filtered = filter_traces(np.vstack([np.asarray(traces[r], dtype=np.float64) for r in ids]), stats, request.segments) if ids else np.empty((0, x.size))
+    for row, roi_id in enumerate(ids):
+        trace, value, fit = apply_baseline_with_fit(x, filtered[row], stats, None if anchors is None else anchors.get(roi_id))
         processed[roi_id] = (trace, value)
         if fit is not None:
             fits[roi_id] = fit

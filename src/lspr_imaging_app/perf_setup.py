@@ -77,7 +77,7 @@ def apply_saved_preferences(store: _Store) -> None:
     get_runtime().set_preferences(read_perf_preferences(store))
 
 
-_TASK_NAMES = {EXPORT_TASK_KEY: "export", "mask.scan.screen": "scan", "analysis.scan": "analysis"}
+_TASK_NAMES = {EXPORT_TASK_KEY: "export", "mask.scan.screen": "scan", "analysis.scan": "analysis", "sensorgram.fits": "Sensorgram fits"}
 
 
 def saved_count() -> int:

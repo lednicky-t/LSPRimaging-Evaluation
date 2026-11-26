@@ -41,7 +41,7 @@ import numpy as np
 
 from .fit_window import restrict_to_window
 from .gaussian_fit import solve_gaussian
-from .metric_range import range_centroid
+from .metric_range import range_centroid, trapezoid_weights  # (trapezoid_weights is used below and by the tests under this name)
 from .query import fit_and_metric, formula_spectrum, formula_values
 from .settings import MetricSettings
 from .spectral_passband import passband_vander
@@ -339,15 +339,6 @@ def sampled_curve(grid: np.ndarray, amplitude: np.ndarray, centre: np.ndarray, s
     return curve
 
 
-def trapezoid_weights(grid: np.ndarray) -> np.ndarray:
-    """``[len(grid), 2]``: ``curve @ w`` gives ``(trapezoid(curve, grid), trapezoid(curve * grid, grid))`` for every row of ``curve``."""
-    weights = np.zeros_like(grid, dtype=np.float64)
-    step = np.diff(grid)
-    weights[:-1] += step / 2.0
-    weights[1:] += step / 2.0
-    return np.stack([weights, weights * grid], axis=1)
-
-
 def _polynomial_group(x: np.ndarray, y: np.ndarray, metric: MetricSettings, moments: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray] | None:
     """Fit ``y[c]`` (one row per cube) against the shared ``x`` (ascending, >= 2 points) and read off the metric. ``moments`` (``[point, order + 1]``): the central moments
     of each point's measured band for the full-profile spectral correction (``spectral_passband``); the Vandermonde matrix is then the passband one and the polynomial
@@ -374,10 +365,11 @@ def _polynomial_group(x: np.ndarray, y: np.ndarray, metric: MetricSettings, mome
     found = np.full(y.shape[0], np.nan)
     if key == "centroid" and metric.ranged_centroid:
         grid = np.linspace(x_min, x_max, max(400, n))  # the grid the per-spectrum fit samples its curve on
-        curves = (np.polynomial.polynomial.polyvander((grid - middle) / half, degree) @ coef).T  # [cube, grid]
+        curves = coef.T @ np.polynomial.polynomial.polyvander((grid - middle) / half, degree).T  # [cube, grid], contiguous (the transposed product made every later pass strided)
         has = good & np.all(np.isfinite(curves), axis=1)
         if has.any():
-            found[has] = range_centroid(grid, curves[has], curves[has].min(axis=1), metric)
+            usable = curves if has.all() else curves[has]  # no copy of the batch when every cube has a curve (the normal case)
+            found[has] = range_centroid(grid, usable, usable.min(axis=1), metric)
         return good, found
     if key == "centroid":
         i0 = sum(coef[k] * (2.0 / (k + 1)) for k in range(0, degree + 1, 2))  # integral of p over [-1, 1]

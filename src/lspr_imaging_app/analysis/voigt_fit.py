@@ -66,11 +66,20 @@ def profile(energy: np.ndarray, centre: np.ndarray, sigma: np.ndarray, gamma: np
     ``sigma'^2 = sigma^2 + S^2``, and ``Re w`` carries a factor ``sigma / sigma'`` (the amplitude is defined through ``sigma``)."""
     band_var = _band_variance(band_sigma)
     if band_var is None:
-        z = (energy[None, :] - centre[:, None] + 1j * gamma[:, None]) / (_SQRT2 * sigma[:, None])
-        return wofz(z).real
-    sp = np.sqrt(sigma[:, None] ** 2 + band_var[None, :])
-    z = (energy[None, :] - centre[:, None] + 1j * gamma[:, None]) / (_SQRT2 * sp)
-    return (sigma[:, None] / sp) * wofz(z).real
+        scale, factor = _SQRT2 * sigma[:, None], None
+    else:
+        sp = np.sqrt(sigma[:, None] ** 2 + band_var[None, :])
+        scale, factor = _SQRT2 * sp, sigma[:, None] / sp
+    offset = energy[None, :] - centre[:, None]
+    lorentzian = gamma != 0.0  # a Lorentzian part: the Faddeeva function. Without one Re w(x) = exp(-x^2) exactly, ~10x cheaper (99.6 % of the cubes of the maintainer's scan end there)
+    if lorentzian.all():
+        shape = wofz((offset + 1j * gamma[:, None]) / scale).real  # the original expression: the same bits as before 2026-11-26
+    else:
+        x = offset / scale
+        shape = np.exp(-(x * x))  # every row (cheap), then the few with a Lorentzian part are replaced: no copies of the big array
+        if lorentzian.any():
+            shape[lorentzian] = wofz((offset[lorentzian] + 1j * gamma[lorentzian, None]) / scale[lorentzian]).real
+    return shape if factor is None else factor * shape
 
 
 def model(wavelength_nm: np.ndarray, params: np.ndarray) -> np.ndarray:

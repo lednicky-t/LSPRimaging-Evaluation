@@ -6,10 +6,16 @@ so a redraw of a thousand Qt calls froze for seconds while the Sensorgram was fi
 window at all. (The batch fits in ``trace_fit`` make the fits 10-100x shorter; the process is what keeps a fit that is still long - the "classic" Gaussian
 solver, a very narrow fit window, any future heavy fit - from freezing the window.)
 
-**One process, not a pool.** This is isolation, not fan-out: the work is one ROI after another and the batch fit is fast, so ``lspr_core.perf``
-tuning (which tunes the *number* of workers on measured throughput) has nothing to tune; a fan-out of the Gaussian fit over several processes is a
-possible later step and would take its count from ``lspr_core.perf`` like the scan does. The process starts once, on first use (``warm_up`` does it
-ahead of time, off the GUI thread), runs at low priority when Preferences says so (the window keeps its turn) and exits with the app.
+**One warm process, more when a run is long (2026-11-26).** The helper process starts once, on first use (``warm_up`` does it ahead of time, off the GUI thread), runs at low
+priority when Preferences says so (the window keeps its turn) and exits with the app. A *long* run (the Gaussian fit took 8.5 s and the Voigt fit 28 s for 160 ROIs x 2655 cubes
+on one process) fans out over several processes, the count coming from ``lspr_core.perf`` (``get_runtime().begin("sensorgram.fits", ...)``: Standard = every core but one,
+capped by free memory at ``_WORKER_BYTES`` per worker; Fixed and Tune automatically as in Preferences). The pool is made at that size but a process starts only when a task finds
+no idle one, so a short run (the polynomial fit: 1.5-2 s) stays on the one warm process: **extra workers are used only when the measured remaining work pays for their
+start-up** (~1-2 s each; ``_EXTRA_WORKER_PAYBACK_S`` of work per extra worker, from the compute time of the tasks finished so far; workers already running are free). Measured on the
+real 2655-cube scan (4 cores / 8 threads): Gaussian 8.5 s -> 5.4 s (2 workers) -> 3.8 s (4) -> 3.65 s (7); Voigt 28.2 -> 11.6 (4) -> 10.2 (7); the polynomial fit 2.06 -> 1.40 (2) -> 1.02 (4),
+not worth the start-up. The extra processes (~145 MB each) are released after ``_IDLE_SHRINK_S`` without a run and one warm helper is kept. The tasks are the same at any worker count
+(``_chunks`` does not look at it) and the results are collected by ROI id, so **the traces are identical at any count and in any completion order**
+(``tests/unit/test_lspri_analysis_trace_pool.py``).
 
 **Results never depend on where they are computed:** the process runs exactly ``trace_fit.traces_from_inputs`` on the same arrays, so its traces are
 equal to the in-thread ones (pinned by ``tests/unit/test_lspri_analysis_trace_pool.py``).
@@ -50,6 +56,10 @@ logger = logging.getLogger(__name__)
 
 _POLL_SECONDS = 0.05  # how often a waiting run looks at ``cancelled``
 _GIVE_UP_AFTER = 2  # failed starts / crashes of the helper process before this session stops using it
+TASK_KEY = "sensorgram.fits"  # the name `lspr_core.perf` keeps learned worker counts under
+_WORKER_BYTES = 250 * 1024 * 1024  # memory limit of one worker: measured 145 MB idle, 175 MB at the peak of a Voigt task (2026-11-26)
+_EXTRA_WORKER_PAYBACK_S = 3.0  # a process started now costs ~1-2 s of start-up (spawn + numpy / scipy imports): each extra one must get at least this much work
+_IDLE_SHRINK_S = 120.0  # seconds without a run after which the extra processes are released (the one warm helper stays)
 
 
 _fault_file = None  # in the helper process: kept open for as long as the process lives (faulthandler writes to it when the process crashes)
@@ -103,6 +113,8 @@ class TracePool:
         self._started = 0  # helper processes started this session (numbers the crash-dump file)
         self._fault_path: Path | None = None
         self._trace_runs = 0  # Sensorgram runs in progress (the Spectra fits stay in their thread meanwhile)
+        self._pool_size = 1  # most processes the executor may start (`lspr_core.perf`'s count when it was made)
+        self._shrink_timer: threading.Timer | None = None
 
     # -- the process --------------------------------------------------------------------------------------------------------------
 
@@ -115,11 +127,29 @@ class TracePool:
                 self._started += 1
                 system = current_log_system()
                 self._fault_path = None if system is None else system.log_path.with_name(f"{system.log_path.name}.pool{self._started}.log")
-                self._executor = ProcessPoolExecutor(
-                    max_workers=1, mp_context=multiprocessing.get_context("spawn"), initializer=_init_worker,
+                self._pool_size = self._wanted_pool_size()
+                self._executor = ProcessPoolExecutor(  # processes start only as tasks need them: warm_up and short runs use one
+                    max_workers=self._pool_size, mp_context=multiprocessing.get_context("spawn"), initializer=_init_worker,
                     initargs=(low_priority, None if self._fault_path is None else str(self._fault_path)),
                 )
             return self._executor
+
+    @staticmethod
+    def _wanted_pool_size() -> int:
+        """How many processes ``lspr_core.perf`` allows for the fits (Preferences, cores, free memory); 1 when it cannot say."""
+        try:
+            return max(1, int(get_runtime().begin(TASK_KEY, per_worker_bytes=_WORKER_BYTES).maximum))
+        except Exception:  # noqa: BLE001 - a missing / broken runtime must never stop the fits: one process is what it was before
+            logger.debug("could not ask lspr_core.perf for the fit worker count", exc_info=True)
+            return 1
+
+    @staticmethod
+    def _alive(executor: ProcessPoolExecutor | None) -> int:
+        """Processes the executor has started so far (at least 1). Reads a private attribute, like `_exit_report`; never raises."""
+        try:
+            return max(1, len(getattr(executor, "_processes", None) or {}))
+        except Exception:  # noqa: BLE001
+            return 1
 
     def _exit_report(self, executor: ProcessPoolExecutor | None) -> dict[str, object]:
         """Why the helper is gone: the exit code of its process (0xC0000005 = access violation, 0xC0000409 = stack buffer overrun / abort, 1 =
@@ -165,7 +195,33 @@ class TracePool:
         """Application is quitting: the process is told to exit; nothing waits for it."""
         with self._lock:
             self._closed = True
+            if self._shrink_timer is not None:
+                self._shrink_timer.cancel()
+                self._shrink_timer = None
         self._discard()
+
+    def _schedule_shrink(self) -> None:
+        """After a run: when more than one process was started, release the extra ones if nothing runs for ``_IDLE_SHRINK_S`` (each holds ~145 MB)."""
+        with self._lock:
+            if self._closed or self._executor is None or self._alive(self._executor) <= 1:
+                return
+            if self._shrink_timer is not None:
+                self._shrink_timer.cancel()
+            timer = threading.Timer(_IDLE_SHRINK_S, self._shrink_if_idle)
+            timer.daemon = True
+            self._shrink_timer = timer
+            timer.start()
+
+    def _shrink_if_idle(self) -> None:
+        """Timer thread: replace a pool of several processes by one warm helper, unless a run has started again."""
+        with self._lock:
+            self._shrink_timer = None
+            if self._closed or self._trace_runs > 0 or self._executor is None or self._alive(self._executor) <= 1:
+                return
+            executor, self._executor = self._executor, None
+            executor.shutdown(wait=False, cancel_futures=True)  # inside the lock: `run_spectra` submits under it, so it never meets a shut-down executor
+        log_event(logger, "sensorgram.pool_shrunk", logging.DEBUG, idle_s=_IDLE_SHRINK_S)
+        self.warm_up()  # one process back, ready for the next short run (this is the timer's own thread)
 
     # -- the Spectra panel's fits (one cube, several ROIs) -------------------------------------------------------------------------------
 
@@ -189,7 +245,11 @@ class TracePool:
             executor = self._get()
             if executor is None:
                 raise BrokenExecutor("the helper process is not available in this session")
-            out = executor.submit(fit_spectra, jobs, metric).result()  # an error inside a fit is raised here, to the caller
+            with self._lock:  # the idle shrink replaces the executor under this lock, so a submit never meets a shut-down one
+                future = executor.submit(fit_spectra, jobs, metric) if self._executor is executor else None
+            if future is None:
+                return fit_spectra(jobs, metric)  # the pool was just replaced: this once, in this thread
+            out = future.result()  # an error inside a fit is raised here, to the caller
             log_event(logger, "spectra.fit_run", logging.DEBUG, where="process", rois=len(jobs), wall_ms=round((time.perf_counter() - t0) * 1e3, 1))
             return out
         except (BrokenExecutor, OSError, EOFError) as exc:
@@ -221,11 +281,15 @@ class TracePool:
             return done, False
         with self._lock:
             self._trace_runs += 1
+            if self._shrink_timer is not None:
+                self._shrink_timer.cancel()
+                self._shrink_timer = None
         try:
             return self._run(jobs, formula_key, metric, cancelled, progress, done)
         finally:
             with self._lock:
                 self._trace_runs -= 1
+            self._schedule_shrink()
 
     def _run(self, jobs, formula_key, metric, cancelled, progress, done) -> tuple[dict[int, np.ndarray], bool]:
         timings: dict[str, float] = {}
@@ -265,26 +329,56 @@ class TracePool:
             cancelled=bool(was_cancelled), **{k: round(v, 1) for k, v in timings.items()},
         )
 
+    def _in_flight_limit(self, run, executor, tasks_left: int, task_seconds: list[float]) -> int:
+        """How many tasks to keep submitted now. One until a task has been timed (and always for a run of one task); then as many as ``lspr_core.perf`` allows, but extra processes
+        only when the work left pays for starting them: ``tasks_left x mean compute time of a task`` must give each extra worker ``_EXTRA_WORKER_PAYBACK_S`` of work (processes
+        already running cost nothing, so they are always used). The estimate comes from the tasks finished so far, so it needs no per-machine constants."""
+        if run is None or not task_seconds:
+            return 1
+        worth = int(tasks_left * (sum(task_seconds) / len(task_seconds)) / max(_EXTRA_WORKER_PAYBACK_S, 1e-6))  # (0 = every worker is worth it: the tests set that)
+        return max(1, min(run.workers, self._pool_size, max(self._alive(executor), worth), tasks_left))
+
     def _run_in_process(self, jobs, formula_key, metric, cancelled, progress, done, timings) -> tuple[dict[int, np.ndarray], bool]:
         executor = self._get()
         if executor is None:
             raise BrokenExecutor("the helper process is not available in this session")
-        futures: list[Future] = [executor.submit(_trace_task, chunk, formula_key, metric) for chunk in _chunks(jobs)]
-        pending = set(futures)
+        chunks = _chunks(jobs)
+        run = None
+        if len(chunks) > 1:  # one task is one process: nothing to fan out or tune
+            run = get_runtime().begin(TASK_KEY, total_units=len(chunks), per_worker_bytes=_WORKER_BYTES, max_useful=len(chunks))
+            if run.maximum > self._pool_size:  # Preferences allow more than the pool was made for: a bigger one (this costs the warm process)
+                self._discard()
+                executor = self._get()
+                if executor is None:
+                    raise BrokenExecutor("the helper process is not available in this session")
+        pending: set[Future] = set()
+        task_seconds: list[float] = []  # compute time of each finished task (the worker's own clock: no queueing, no pickling)
+        next_task, peak = 0, 1
         try:
-            while pending:
+            while next_task < len(chunks) or pending:
                 if cancelled is not None and cancelled():
                     return done, True
+                limit = self._in_flight_limit(run, executor, len(chunks) - len(task_seconds), task_seconds)
+                while next_task < len(chunks) and len(pending) < limit:
+                    pending.add(executor.submit(_trace_task, chunks[next_task], formula_key, metric))
+                    next_task += 1
+                peak = max(peak, len(pending))
                 finished, pending = wait(pending, timeout=_POLL_SECONDS, return_when=FIRST_COMPLETED)
                 for future in finished:
                     traces, task_timings = future.result()  # an error inside a fit is raised here, to the caller
                     done.update(traces)
                     _add_timings(timings, task_timings)
+                    task_seconds.append(sum(task_timings.get(key, 0.0) for key in ("prep_ms", "fit_ms", "per_cube_ms")) / 1000.0)
+                    if run is not None:
+                        run.unit_done(1)
                     if progress is not None:
                         progress(len(done), len(jobs))
         finally:
             for future in pending:
                 future.cancel()
+            timings["workers"] = peak  # the most tasks in flight at once = processes used (also for a cancelled run)
+        if run is not None:
+            log_event(logger, "perf.run", logging.DEBUG, **run.finish().as_fields())
         return done, False
 
     @staticmethod

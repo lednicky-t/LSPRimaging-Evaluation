@@ -89,6 +89,9 @@ def layout_is_global(settings: ScanSettings) -> bool:
     return bool(settings.background.flatten_background_enabled and settings.background.flatten_background_exclude_area_rois)
 
 
+PATTERNS_MAX = 64
+"""Most distinct per-cube mask patterns `cell_hashes` keeps (each holds one bytes object per ROI); normally a run has one or two, so the bound is only a guard."""
+
 MASK_BLOCK_PX = 16
 """Side of the blocks of the coarse occupancy grid of a mask (`_MaskFootprints`): a ROI whose window meets no occupied block needs no look at the pixels."""
 
@@ -184,6 +187,9 @@ def cell_hashes(plan: ScanPlan, *, local_masks: bool = True) -> np.ndarray:
     local = bool(local_masks) and not masks_are_global(plan.settings)
     geometry_key = geometry_cache_key(plan.settings.geometry) if local else None
     box_cache: dict[tuple, tuple[np.ndarray, ...]] = {}
+    window_ids: dict[tuple, int] = {}  # (mask key, box key) -> index into window_sets
+    window_sets: list[dict[int, bytes]] = []  # per distinct (mask, affine, layout): {roi position: digest of the mask pixels in its window}
+    pattern_tails: dict[tuple, list[bytes]] = {}  # (layout, the cube's sequence of (column, window set)) -> every ROI's tail bytes
     ignore_cache: dict[int, bytes] = {}  # one digest per distinct mask array (they are shared between frames)
     global_layout = layout_is_global(plan.settings)
     # Per ROI layout (cubes share one unless there is a ROI timeline): the bytes that follow a cube's digest in every one of its cells. Built once,
@@ -229,7 +235,7 @@ def cell_hashes(plan: ScanPlan, *, local_masks: bool = True) -> np.ndarray:
                 masked.append((column, frame, mask_key, packed_column))
             else:
                 cube.update(mask_key)  # the whole mask, as before
-        parts: dict[int, list[bytes]] = {}
+        seen_windows: list[tuple[bytes, int]] = []  # (column bytes, id of the frame's window set) of the frames whose mask meets some ROI's window, in frame order
         for _column, frame, mask_key, packed_column in masked:
             if frame.ignore is not None:
                 mask_of = lambda array=frame.ignore: np.asarray(array, dtype=bool)  # noqa: E731
@@ -240,21 +246,43 @@ def cell_hashes(plan: ScanPlan, *, local_masks: bool = True) -> np.ndarray:
                 if table[-1, -1] == 0:
                     continue  # an empty mask touches nobody
                 box_key = (job.rois.key, np.ascontiguousarray(frame.affine, dtype=np.float64).tobytes(), shape)
-                boxes = box_cache.get(box_key)
-                if boxes is None:
-                    boxes = box_cache[box_key] = roi_window_boxes(job.rois, np.asarray(frame.affine, dtype=np.float64), shape)
-                for j in np.flatnonzero(_MaskFootprints.touched(table, boxes)):
-                    box = (int(boxes[0][j]), int(boxes[1][j]), int(boxes[2][j]), int(boxes[3][j]))
-                    window = _FOOTPRINTS.crop_digest(mask_key, geometry_key, box, mask_of)
-                    if window != b"-":
-                        parts.setdefault(int(j), []).append(packed_column + window)
+                # What a frame adds to the ROIs depends only on (its mask, its affine, the ROI layout), and on a real run thousands of frames share all three (27 affines in
+                # 69,030 frames): work it out once per distinct triple, as ``{roi position: digest of the mask pixels in its window}``. Looking at it per frame cost 18 s
+                # (10.8 million `crop_digest` calls) when one mask touched 157 of 160 windows in every frame (2026-11-25).
+                window_id = window_ids.get((mask_key, box_key))
+                if window_id is None:
+                    boxes = box_cache.get(box_key)
+                    if boxes is None:
+                        boxes = box_cache[box_key] = roi_window_boxes(job.rois, np.asarray(frame.affine, dtype=np.float64), shape)
+                    windows: dict[int, bytes] = {}
+                    for j in np.flatnonzero(_MaskFootprints.touched(table, boxes)):
+                        box = (int(boxes[0][j]), int(boxes[1][j]), int(boxes[2][j]), int(boxes[3][j]))
+                        window = _FOOTPRINTS.crop_digest(mask_key, geometry_key, box, mask_of)
+                        if window != b"-":
+                            windows[int(j)] = window
+                    window_id = window_ids[(mask_key, box_key)] = len(window_sets)
+                    window_sets.append(windows)
+                if window_sets[window_id]:
+                    seen_windows.append((packed_column, window_id))
             except Exception:  # noqa: BLE001 - a mask that cannot be looked at counts as a whole, for every ROI of the cube: stale rather than wrong
                 logger.warning("could not look at an ignore mask for the cell hash; it counts for every ROI of its cube", exc_info=True)
                 cube.update(b"!" + mask_key)
         digest = cube.digest()
-        row_tails = tails["" if global_layout else job.rois.key]
-        if parts:
-            row_tails = [tail + b"".join(parts.get(r, ())) for r, tail in enumerate(row_tails)]
+        layout_key = "" if global_layout else job.rois.key
+        row_tails = tails[layout_key]
+        if seen_windows:
+            # The per-ROI bytes of a cube are a function of its sequence of (column, window set): cubes with the same sequence share them (all 2,655 of a run, normally).
+            pattern = (layout_key, tuple(seen_windows))
+            cached = pattern_tails.get(pattern)
+            if cached is None:
+                parts: dict[int, list[bytes]] = {}
+                for packed_column, window_id in seen_windows:  # frame order, as before: the ROI's bytes are its frames' (column + window digest) one after the other
+                    for j, window in window_sets[window_id].items():
+                        parts.setdefault(j, []).append(packed_column + window)
+                if len(pattern_tails) >= PATTERNS_MAX:
+                    pattern_tails.clear()
+                cached = pattern_tails[pattern] = [tail + b"".join(parts.get(r, ())) for r, tail in enumerate(row_tails)]
+            row_tails = cached
         out[p] = [
             int.from_bytes(hashlib.blake2b(digest + tail, digest_size=8).digest(), "little") or 1
             for tail in row_tails

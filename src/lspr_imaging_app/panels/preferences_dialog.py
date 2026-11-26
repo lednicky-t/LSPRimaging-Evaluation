@@ -55,7 +55,7 @@ class Preferences:
     """"full" (sharp) or "standard" (Windows draws the window at 100 % and stretches it: fewer pixels to hand to the screen, so faster on a
     4K screen, but softer; `display_options.py`). Saved here, applied at the next start."""
     perf: PerfPreferences = DEFAULT_PERF_PREFERENCES
-    """Parallel work (export, scans): standard, tune automatically or a fixed number of workers; cores kept free; low priority."""
+    """Parallel work (export, scans, Sensorgram fits): standard, tune automatically or a fixed number of workers; cores kept free; low priority."""
 
 
 DEFAULT_PREFERENCES = Preferences()
@@ -183,7 +183,7 @@ class PreferencesDialog(QDialog):
         memory_layout.addWidget(self.cache_status_label)
         memory_layout.addWidget(self.cache_environment_label)
 
-        parallel = QGroupBox("Parallel work (export and scans)", self)
+        parallel = QGroupBox("Parallel work (export, scans and fits)", self)
         self.perf_mode_combo = QComboBox(parallel)
         self.perf_mode_combo.addItem("Standard (every core but the free ones)", MODE_STANDARD)
         self.perf_mode_combo.addItem("Tune automatically (then remember)", MODE_AUTO)

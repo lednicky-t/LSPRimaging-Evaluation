@@ -155,6 +155,39 @@ def section_levels(
     return SectionLevels(low=float(low), median=float(median), high=float(high))
 
 
+def section_levels_per_step(
+    lines: Iterable[tuple[np.ndarray, np.ndarray]], bounds: Sequence[tuple[float, float]], *, low_pct: float = 2.0, high_pct: float = 98.0
+) -> list[SectionLevels | None]:
+    """`section_levels` of every ``(x_start, x_end)`` in `bounds`, the same numbers: the work per line is done once, then each step is a slice.
+
+    The per-step version filters every full-length line five times per step (240 steps x 16 lines = 19 000 numpy calls on 2655 points, 0.22 s, and 4.7 s while another
+    thread held the GIL: numpy lets go of it on arrays that long, so each call waits to get it back; 2026-11-25 log). Here a line is made finite and sorted by x once, and each
+    step is found with ``searchsorted`` (x >= start up to x < end, as before). The values of a step are the same set, so the percentiles are equal to the last bit."""
+    prepared: list[tuple[np.ndarray, np.ndarray]] = []
+    for x, y in lines:
+        x, y = np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64)
+        keep = np.isfinite(x) & np.isfinite(y)
+        x, y = x[keep], y[keep]
+        if x.size > 1 and not np.all(x[1:] >= x[:-1]):  # not in time order (a plot x is normally): sort once; a step's values are a set, their order does not matter
+            order = np.argsort(x, kind="stable")
+            x, y = x[order], y[order]
+        prepared.append((x, y))
+    starts = np.array([b[0] for b in bounds], dtype=np.float64)
+    ends = np.array([b[1] for b in bounds], dtype=np.float64)
+    usable = np.isfinite(starts) & np.isfinite(ends)  # a NaN bound holds no point (every comparison is False), as in `section_levels`
+    first = [np.searchsorted(x, starts, side="left") for x, _y in prepared]  # first point with x >= start
+    stop = [np.searchsorted(x, ends, side="left") for x, _y in prepared]  # first point with x >= end
+    result: list[SectionLevels | None] = []
+    for step in range(len(bounds)):
+        parts = [y[first[k][step]:stop[k][step]] for k, (_x, y) in enumerate(prepared) if usable[step] and stop[k][step] > first[k][step]]
+        if not parts:
+            result.append(None)
+            continue
+        low, median, high = np.percentile(np.concatenate(parts), [low_pct, 50.0, high_pct])
+        result.append(SectionLevels(low=float(low), median=float(median), high=float(high)))
+    return result
+
+
 # -- colours --------------------------------------------------------------------------------------------------------------
 
 
@@ -262,9 +295,11 @@ def build_bar_steps(
     line naming a step's refractive index (2026-11-12; None: no such line). `ri_value` + `show_ri`: write that RI in ( ) after the step's
     text (`with_ri`); a step with no RI keeps its text as it was."""
     colors = effective_colors(steps, separators)
+    bounds = [(axis.x_at(step.start_unix_ms), axis.x_at(step.end_unix_ms)) for step in steps]
+    levels = section_levels_per_step(lines, bounds)  # all steps in one pass over the lines (see there)
     out: list[PlanBarStep] = []
     for index, step in enumerate(steps):
-        x_start, x_end = axis.x_at(step.start_unix_ms), axis.x_at(step.end_unix_ms)
+        x_start, x_end = bounds[index]
         text = shown_label(step.label, text_mode, separators)
         if show_ri and ri_value is not None:
             text = with_ri(text, ri_value(step))
@@ -272,7 +307,7 @@ def build_bar_steps(
             PlanBarStep(
                 index=index, x_start=x_start, x_end=x_end, text=text,
                 color=colors[index], tooltip=_tooltip(step, x_start, x_end, time_mode, None if ri_text is None else ri_text(step)),
-                levels=section_levels(lines, x_start, x_end), edited=step.edited, roles=step.roles, added=step.is_added,
+                levels=levels[index], edited=step.edited, roles=step.roles, added=step.is_added,
             )
         )
     return out

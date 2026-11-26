@@ -50,6 +50,8 @@ From pixels to numbers, and how the numbers are shown.
 - [`poly_order_quality_study_2026-10-25.md`](poly_order_quality_study_2026-10-25.md): Polynomial order: what tells a good order from an over-fitted one (study, 2026-10-25)
 - [`shift_estimators_comparison_2026-10-25.md`](shift_estimators_comparison_2026-10-25.md): Ways to read a peak shift other than fit-then-compare (test, 2026-10-25)
 - [`spectral_outlier_detection_investigation.md`](spectral_outlier_detection_investigation.md): Spectral outlier detection: debris, splices, and real transitions
+- [`scan_check_and_fit_speed_2026-11-26.md`](scan_check_and_fit_speed_2026-11-26.md): staleness check's hash 18 s -> 1 s (same hashes), polynomial ranged-centroid fit 4x faster (2026-11-26)
+- [`sensorgram_series_batch_smoothing_2026-11-25.md`](sensorgram_series_batch_smoothing_2026-11-25.md): Sensorgram `build_series` 21 s -> 0.2 s (smoothing batched over ROIs), `sensorgram.draw` stage timing (2026-11-25)
 - [`sensorgram_panel_split_2026-10-26.md`](sensorgram_panel_split_2026-10-26.md): Sensorgram panel split (2026-10-26)
 - [`sensorgram_fit_freeze_2026-10-24.md`](sensorgram_fit_freeze_2026-10-24.md): Sensorgram fit froze the window (2026-10-24)
 - [`sensorgram_mask_marks_2026-10-24.md`](sensorgram_mask_marks_2026-10-24.md): Sensorgram mask marks (2026-10-24)

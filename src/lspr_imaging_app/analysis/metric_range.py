@@ -40,27 +40,59 @@ def curve_base(fit_method: str, coefficients: np.ndarray | None, curves: np.ndar
     return np.min(curves, axis=1)
 
 
+def trapezoid_weights(grid: np.ndarray) -> np.ndarray:
+    """``[len(grid), 2]``: ``curve @ w`` gives ``(trapezoid(curve, grid), trapezoid(curve * grid, grid))`` for every row of ``curve``."""
+    weights = np.zeros_like(grid, dtype=np.float64)
+    step = np.diff(grid)
+    weights[:-1] += step / 2.0
+    weights[1:] += step / 2.0
+    return np.stack([weights, weights * grid], axis=1)
+
+
+ROW_BLOCK = 256
+"""Curves handled at once by `range_centroid`: the working array (rows x grid points x 8 bytes, ~0.8 MB at 400 points) then stays in the processor's cache. One pass over
+a 2000-curve batch (6.4 MB) per step was memory-bound (2026-11-25 profile: 92 % of a 160-ROI x 2655-cube fit was this function and the curve sampling)."""
+
+
 def range_centroid(x: np.ndarray, curves: np.ndarray, base: np.ndarray, metric: MetricSettings) -> np.ndarray:
     """The centroid ``[n]`` of every curve over the part of it the metric range selects (see the module doc). ``metric.metric_range`` must be one of
-    ``top_fraction`` and ``manual``."""
+    ``top_fraction`` and ``manual``.
+
+    The two trapezoid integrals (of the weights and of the weights times x) are one matrix product with the trapezoid weights (`trapezoid_weights`): the same sums as
+    ``np.trapezoid`` in another order, so a centroid differs by rounding only (measured: <= 1e-12 nm), at a fraction of the time and memory traffic."""
     x = np.asarray(x, dtype=np.float64)
     y = np.asarray(curves, dtype=np.float64)
     base = np.asarray(base, dtype=np.float64)
-    with np.errstate(all="ignore"):
-        if metric.metric_range == "top_fraction":
-            fraction = min(max(float(metric.metric_top_fraction), 0.0), 1.0)
-            level = base + fraction * (np.max(y, axis=1) - base)
-            weights = np.clip(y - level[:, None], 0.0, None)
-        else:
-            keep = np.ones(x.size, dtype=bool)
-            if metric.metric_range_min is not None:
-                keep &= x >= float(metric.metric_range_min)
-            if metric.metric_range_max is not None:
-                keep &= x <= float(metric.metric_range_max)
-            weights = np.clip(y - base[:, None], 0.0, None) * keep[None, :]
-        area = np.trapezoid(weights, x, axis=1)
-        centroid = np.trapezoid(weights * x[None, :], x, axis=1) / area
-    out = np.full(y.shape[0], np.nan)
-    ok = np.isfinite(area) & (area > _MIN_AREA) & np.isfinite(centroid)
-    out[ok] = np.clip(centroid[ok], x[0], x[-1])
+    n = y.shape[0]
+    out = np.full(n, np.nan)
+    if n == 0:
+        return out
+    top_fraction = metric.metric_range == "top_fraction"
+    if top_fraction:
+        fraction = min(max(float(metric.metric_top_fraction), 0.0), 1.0)
+    else:
+        keep = np.ones(x.size, dtype=bool)
+        if metric.metric_range_min is not None:
+            keep &= x >= float(metric.metric_range_min)
+        if metric.metric_range_max is not None:
+            keep &= x <= float(metric.metric_range_max)
+    quadrature = trapezoid_weights(x)
+    for start in range(0, n, ROW_BLOCK):
+        block = slice(start, start + ROW_BLOCK)
+        rows, b = y[block], base[block]
+        with np.errstate(all="ignore"):
+            if top_fraction:
+                level = b + fraction * (np.max(rows, axis=1) - b)
+                weights = rows - level[:, None]
+            else:
+                weights = rows - b[:, None]
+            np.maximum(weights, 0.0, out=weights)  # NaN stays NaN, as np.clip did
+            if not top_fraction:
+                weights *= keep[None, :]
+            sums = weights @ quadrature  # [rows, 2]: area, and the first moment
+            area = sums[:, 0]
+            centroid = sums[:, 1] / area
+        ok = np.isfinite(area) & (area > _MIN_AREA) & np.isfinite(centroid)
+        found = out[block]
+        found[ok] = np.clip(centroid[ok], x[0], x[-1])
     return out

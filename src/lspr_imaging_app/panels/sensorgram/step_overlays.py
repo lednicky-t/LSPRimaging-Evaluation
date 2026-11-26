@@ -19,6 +19,7 @@ cache or the baseline: the panel gives it four callbacks (`drawn`, `x_axis`, `sc
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Sequence
 
 import numpy as np
@@ -26,6 +27,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtWidgets import QWidget
 
 from ...analysis.baseline_drift import uses_anchor_steps, window_step_regions
+from ...applog import StageTimer
 from ...analysis.scan_store import StoredScan
 from ...analysis.scan_trace import Series
 from ...analysis.settings_module import AnalysisSettingsModule
@@ -54,6 +56,8 @@ from .evaluation_group import EvaluationControls
 from .plan_group import PlanBarControls
 from .plot import LEGEND_MAX_HEIGHT_FRACTION, MAX_LEGEND_ENTRIES, MAX_LEGEND_SERIES, SensorgramPlot
 from .stats_group import StatsTableControls
+
+logger = logging.getLogger(__name__)
 
 # a step edit that moves where a step starts or ends, or changes which steps exist (not its note, colour or role)
 _STEP_TIME_CHANGES = (REASON_BOUNDARY, REASON_RESET, REASON_RESTORED, REASON_DATASET, REASON_STRUCTURE)
@@ -324,11 +328,14 @@ class StepOverlays(QObject):
     def refresh(self) -> None:
         """Convert the experiment steps to the plot's x axis and hand them to the plot, or hand it none (no steps, no traces, no timing); then the table. Cheap: a few steps and
         the series already drawn; it does not compute anything."""
+        stages = StageTimer()  # `sensorgram.steps_refresh`: with 241 steps the first call took 11 s (2026-11-25 log), later ones 0.3 s; not "cheap" at that size
         settings = self.plan_controls.settings()
         steps = () if self._plan is None else self._plan.steps()
         self.plan_controls.set_available(bool(steps))
         self._on_steps_available(bool(steps))
+        stages.mark("controls")
         found = self._plan_axis() if steps else None
+        stages.mark("plan_axis")
         if found is None:
             self._show_evaluation(steps, None)
             self._plot.set_plan((), settings)
@@ -343,17 +350,26 @@ class StepOverlays(QObject):
             lines.append((s.x, s.y))
             if s.band_low is not None and s.band_high is not None:
                 lines.extend(((s.x, s.band_low), (s.x, s.band_high)))
+        stages.mark("lines")
         bars = build_bar_steps(
             steps, axis, lines, text_mode=settings.text_mode, separators=settings.separators,
             time_mode=self._cube_display.effective_mode() == MODE_TIME, ri_text=self._ri_text,
             ri_value=self._ri_value, show_ri=settings.show_ri,
         )
+        stages.mark("build_bars")
         self._plot.set_plan(bars, settings)
+        stages.mark("plot_set_plan")
         self._plot.plan_bar().set_baseline_anchors(self.anchor_step_indices())  # a small anchor in the lower left corner of each
+        stages.mark("anchors")
         self._show_evaluation(steps, [bar.color for bar in bars])
+        stages.mark("evaluation")
         self.show_stats_table(bars, series, True)
+        stages.mark("stats_table")
         self._update_edit_tools(has_axis=True)
+        stages.mark("edit_tools")
         self.bulk_inputs_changed.emit()
+        stages.mark("bulk_inputs")
+        stages.emit(logger, "sensorgram.steps_refresh", steps=len(steps), lines=len(series))
 
     def _update_edit_tools(self, has_axis: bool | None = None) -> None:
         """The Edit group: which of add / remove / merge / split / restore can act on the steps selected on the bar and the cursor now. `has_axis`: the traces drawn give the plan an
@@ -428,6 +444,7 @@ class StepOverlays(QObject):
     def show_stats_table(self, bars: Sequence[PlanBarStep], series: list[Series], has_steps: bool) -> None:
         """The table of mean +/- SD per step and line, from the numbers the lines carry (computed with them, in the worker), or none: no steps, nothing drawn, the numbers
         not computed yet (a redraw is on its way), or too many lines for a legend (the rows are the legend's rows). Cheap: it only reshapes numbers already there."""
+        stages = StageTimer()
         settings = self.stats_controls.settings()
         table, note = None, ""
         if series and bars and settings.visible and has_steps:
@@ -443,5 +460,8 @@ class StepOverlays(QObject):
                     for s in series
                 ]
                 table = build_stats_table(bars, lines)
+        stages.mark("build_table")
         self.stats_controls.set_available(has_steps, note)
         self._plot.set_stats_table(table, settings)
+        stages.mark("plot_set_table")
+        stages.emit(logger, "sensorgram.stats_table", steps=len(bars), lines=len(series), shown=table is not None)

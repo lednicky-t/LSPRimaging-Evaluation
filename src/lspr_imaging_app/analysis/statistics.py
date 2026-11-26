@@ -263,21 +263,85 @@ def apply_statistics_with_fit(
     Subtract switch is off, so the Sensorgram can draw the curve it *would*
     subtract; the trace is corrected only when the switch is on."""
     y = np.asarray(y_values, dtype=np.float64)
-
-    if settings.spike_rejection_enabled:
-        method = str(settings.spike_rejection_method).strip().lower()
-        if method == "running_median":
-            y = reject_spikes_running_median(y, window=settings.spike_rejection_window)
-        else:
-            y = reject_spikes_hampel(
-                y, window=settings.spike_rejection_window, threshold=settings.spike_rejection_threshold
-            )
+    y = _reject_spikes(y, settings)
 
     method = str(settings.smoothing_method).strip().lower()
     if method == "savgol":
         y = _smooth_by_runs(y, lambda part: smooth_savgol(part, settings.smoothing_window, settings.smoothing_polyorder), segments)
     elif method == "moving_average":
         y = _smooth_by_runs(y, lambda part: smooth_moving_average(part, settings.smoothing_window), segments)
+    return apply_baseline_with_fit(x_values, y, settings, anchors)
+
+
+def _reject_spikes(y: np.ndarray, settings: StatisticsSettings) -> np.ndarray:
+    """Spike rejection of one trace as the settings ask (the trace itself when it is off)."""
+    if not settings.spike_rejection_enabled:
+        return y
+    method = str(settings.spike_rejection_method).strip().lower()
+    if method == "running_median":
+        return reject_spikes_running_median(y, window=settings.spike_rejection_window)
+    return reject_spikes_hampel(y, window=settings.spike_rejection_window, threshold=settings.spike_rejection_threshold)
+
+
+def _savgol_rows(block: np.ndarray, window: int, polyorder: int) -> np.ndarray:
+    """`smooth_savgol` of every row of ``block`` (``[row, point]``) in one `savgol_filter` call: the same window, order and NaN rule per row, but the filter's fixed cost
+    (it re-solves its edge fits on every call, ~0.4 ms) is paid once for all rows instead of once per row."""
+    block = np.asarray(block, dtype=np.float64)
+    n = block.shape[1]
+    if n < 3 or block.shape[0] == 0:
+        return block.copy()
+    finite = np.isfinite(block)
+    any_finite = finite.any(axis=1)
+    if not any_finite.any():
+        return block.copy()
+    filled = block.copy()
+    for row in np.flatnonzero(any_finite & ~finite.all(axis=1)):  # only the rows with gaps need the per-row fill
+        filled[row], _ = _fill_nans_by_interpolation(block[row])
+    window_length = _clamp_odd_window(window, n)
+    order = min(max(int(polyorder), 0), window_length - 1)
+    result = block.copy()
+    result[any_finite] = savgol_filter(filled[any_finite], window_length=window_length, polyorder=order, mode="interp", axis=1)
+    result[~finite] = np.nan
+    return result
+
+
+def filter_traces(matrix: np.ndarray, settings: StatisticsSettings, segments: np.ndarray | None = None) -> np.ndarray:
+    """Spike rejection and smoothing (the first two steps of `apply_statistics_with_fit`) of every row of ``matrix`` (``float64 [roi, cube]``), the baseline left out.
+
+    The numbers are those of calling `apply_statistics_with_fit` row by row; the speed is not. With "smooth inside steps" a row is cut into one run per plan step, and a
+    Savitzky-Golay call per run per ROI cost ~130 ms per ROI on a 240-step plan (2026-11-25 log: 21 s for 160 ROIs). Here the Savitzky-Golay smoothing makes one call per
+    run for all ROIs together. The moving average is cheap and stays row by row."""
+    matrix = np.asarray(matrix, dtype=np.float64)
+    if len(matrix) == 0:
+        return matrix.copy()
+    if settings.spike_rejection_enabled:
+        matrix = np.vstack([_reject_spikes(row, settings) for row in matrix])
+    method = str(settings.smoothing_method).strip().lower()
+    if method == "savgol":
+        smooth = lambda block: _savgol_rows(block, settings.smoothing_window, settings.smoothing_polyorder)  # noqa: E731 (a one-line closure over the settings)
+        if segments is None:
+            return smooth(matrix)
+        labels = np.asarray(segments)
+        if labels.shape != (matrix.shape[1],):
+            raise ValueError("segments must have one label per point of the trace")
+        cuts = np.flatnonzero(labels[1:] != labels[:-1]) + 1
+        smoothed = np.empty(matrix.shape, dtype=np.float64)
+        for low, high in zip(np.concatenate(([0], cuts)), np.concatenate((cuts, [labels.size]))):
+            smoothed[:, low:high] = smooth(matrix[:, low:high])
+        return smoothed
+    if method == "moving_average":
+        return np.vstack([_smooth_by_runs(row, lambda part: smooth_moving_average(part, settings.smoothing_window), segments) for row in matrix])
+    return matrix  # (a caller-owned array only when nothing above made a new one: callers pass a matrix they built for this call)
+
+
+def apply_baseline_with_fit(
+    x_values: np.ndarray,
+    y_filtered: np.ndarray,
+    settings: StatisticsSettings,
+    anchors: Sequence[np.ndarray] | None = None,
+) -> tuple[np.ndarray, float, DriftFit | None]:
+    """The last step of `apply_statistics_with_fit`, on a trace whose spikes and smoothing are done (`filter_traces`): the baseline."""
+    y = np.asarray(y_filtered, dtype=np.float64)
 
     # The anchors method, or the window ("Range") method with marked anchor steps (`anchors` then holds the steps' regions; empty when no cube is
     # left after the border offset). The window method without anchor steps (`anchors` None) is the window's mean, unchanged.
