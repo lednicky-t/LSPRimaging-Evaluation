@@ -143,6 +143,8 @@ class ProcessMapper:
         except BaseException:
             for future in pending:
                 future.cancel()
+            if run is not None:
+                run.close()  # a cancelled or failed stage gives its share of the cores back
             raise
         if run is not None:
             log_event(logger, "perf.run", logging.INFO, **run.finish().as_fields())

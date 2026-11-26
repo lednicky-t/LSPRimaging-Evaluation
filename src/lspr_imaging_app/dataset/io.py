@@ -1336,6 +1336,7 @@ def _export_ome_zarr_dataset_to_path(
             fill_pipeline()
     finally:
         executor.shutdown(wait=True)
+        perf_run.close()  # a cancelled or failed export gives its share of the cores back (a finished one is reported just below)
     if cancel_event is not None and cancel_event.is_set():
         raise RuntimeError("OME-Zarr export cancelled.")
     tuning = perf_run.finish()  # remembers the count this run settled on (automatic mode only)

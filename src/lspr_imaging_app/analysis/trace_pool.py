@@ -228,7 +228,7 @@ class TracePool:
     def _wanted_pool_size() -> int:
         """How many processes ``lspr_core.perf`` allows for the fits (Preferences, cores, free memory); 1 when it cannot say."""
         try:
-            return max(1, int(get_runtime().begin(TASK_KEY, per_worker_bytes=_WORKER_BYTES).maximum))
+            return max(1, int(get_runtime().plan(per_worker_bytes=_WORKER_BYTES).maximum))  # a size only: no share of the cores is taken
         except Exception:  # noqa: BLE001 - a missing / broken runtime must never stop the fits: one process is what it was before
             logger.debug("could not ask lspr_core.perf for the fit worker count", exc_info=True)
             return 1
@@ -484,6 +484,8 @@ class TracePool:
         finally:
             for future in pending:
                 future.cancel()
+            if run is not None:
+                run.close()  # a cancelled or failed run gives its share of the cores back (a finished one is reported below)
             timings["workers"] = peak  # the most tasks in flight at once = processes used (also for a cancelled run)
             timings.update(stage)
             timings.update(probe.stop())

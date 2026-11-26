@@ -154,9 +154,9 @@ class ScanTask(ThreadedTask):
 
         def work() -> None:
             try:
-                run = get_runtime().begin("analysis.scan", total_units=None, per_worker_bytes=_SCAN_WORKER_BYTES)
-                size, low_priority = run.maximum, run.low_priority
-                run.finish()
+                runtime = get_runtime()
+                size = runtime.plan(per_worker_bytes=_SCAN_WORKER_BYTES).maximum  # a size only: this warm-up takes no share of the cores
+                low_priority = runtime.preferences.low_priority
                 self.pool_state_changed.emit("starting", size)
                 started = time.perf_counter()
                 pids = warm.start(size, low_priority)

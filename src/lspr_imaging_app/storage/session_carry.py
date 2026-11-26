@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -39,6 +38,7 @@ from functools import cached_property
 from pathlib import Path
 
 import numpy as np
+from lspr_core.perf import get_runtime
 
 from ..image_tools.chromatic.model import (
     ChromaticLandmarkObservation,
@@ -63,9 +63,10 @@ ORIGIN_SCHEMA_NAME = "lspri_session_origin"
 ORIGIN_SCHEMA_VERSION = "1.0"
 
 _IDENTITY_TOLERANCE = 1e-9
-_CARRY_MASK_WORKERS = min(8, os.cpu_count() or 4)
-"""Threads that warp a session's masks (`carry_masks`). A small fixed pool, like the session's mask reads
-(`session._MASK_READ_WORKERS`, `docs/performance_tuning.md`, "deliberately not wired"): hundreds of few-millisecond jobs."""
+_CARRY_MASK_WORKERS_CAP = 8
+"""Most threads that warp a session's masks (`carry_masks`). A small fixed pool, like the session's mask reads
+(`session._MASK_READ_WORKERS_CAP`, `docs/performance_tuning.md`, "deliberately not tuned"): hundreds of few-millisecond jobs.
+The count comes from `lspr_core.perf` (`pool_threads`)."""
 
 
 # -- the transform ---------------------------------------------------------------------------------------------------------
@@ -380,7 +381,7 @@ def carry_masks(
     # Worked out once here, not raced for by the workers.
     _ = transform.moves_pixels, transform.stored_shape
     carried: list[MaskChange] = []
-    workers = max(1, min(len(usable), _CARRY_MASK_WORKERS))
+    workers = max(1, min(len(usable), get_runtime().pool_threads(_CARRY_MASK_WORKERS_CAP)))
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="carry-masks") as pool:
         futures = [pool.submit(carry_one, change) for change in usable]
         try:

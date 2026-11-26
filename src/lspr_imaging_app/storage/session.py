@@ -90,6 +90,7 @@ from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 
 import numpy as np
+from lspr_core.perf import get_runtime
 
 from ..analysis.provenance import (
     MaskSnapshotRef,
@@ -181,9 +182,10 @@ to their defaults, which is the correct reading of a session written before
 they could be configured at all."""
 
 _MASK_SCOPES = ("persistent", "individual")
-_MASK_READ_WORKERS = min(8, (os.cpu_count() or 4))
-"""Threads that decode a session's mask PNGs (`_decode_mask_changes`). Capped: beyond a handful the decode is
-waiting on the disk, and this runs while the user is waiting for the window."""
+_MASK_READ_WORKERS_CAP = 8
+"""Most threads that decode a session's mask PNGs (`_decode_mask_changes`). Capped: beyond a handful the decode is
+waiting on the disk, and this runs while the user is waiting for the window. The count itself comes from
+`lspr_core.perf` (`pool_threads`: the cores this process may use, minus the cores kept free), not from `os.cpu_count()`."""
 
 # MaskSettings' two np.ndarray fields are deliberately never persisted - see
 # image_tools/mask/module.py's finding 1: they are the old app's inert "New
@@ -796,7 +798,7 @@ def _decode_mask_changes(
             frame=(cube_index, wavelength_nm), scope=scope, mask=np.asarray(image, dtype=bool)
         ), ref.version
 
-    workers = max(1, min(len(specs), _MASK_READ_WORKERS))
+    workers = max(1, min(len(specs), get_runtime().pool_threads(_MASK_READ_WORKERS_CAP)))
     results: list[tuple[MaskChange, int] | Path] = []
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="session-masks") as pool:
         futures = [pool.submit(read, spec) for spec in specs]

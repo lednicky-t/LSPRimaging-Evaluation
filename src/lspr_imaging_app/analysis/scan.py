@@ -346,10 +346,15 @@ def scan_cubes(
     in_flight = (lambda: pool_size) if run is None else (lambda: run.workers)
     low_priority = True if run is None else run.low_priority
     run_number = next(_run_numbers)
-    if warm is not None:
-        pool = warm.acquire(pool_size, low_priority)
-    else:
-        pool = ProcessPoolExecutor(max_workers=pool_size, initializer=_init_process, initargs=(low_priority, _parent_info()))
+    try:
+        if warm is not None:
+            pool = warm.acquire(pool_size, low_priority)
+        else:
+            pool = ProcessPoolExecutor(max_workers=pool_size, initializer=_init_process, initargs=(low_priority, _parent_info()))
+    except BaseException:
+        if run is not None:
+            run.close()  # no pool, no work: the cores go back to the other jobs
+        raise
     try:
         queue = iter(tasks)
         pending: set = set()
@@ -397,6 +402,8 @@ def scan_cubes(
     finally:
         if warm is None:
             pool.shutdown(wait=True)  # a pool made for this scan: wait for the workers that are still running a task, then close it
+        if run is not None:
+            run.close()  # a failed or cancelled scan gives its share of the cores back (a finished one is reported just below)
     report = run.finish() if run is not None else None
     if on_finished is not None:
         on_finished(report)

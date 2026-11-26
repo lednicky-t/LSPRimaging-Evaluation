@@ -19,10 +19,10 @@ Frames that cannot be read are skipped and listed in `ScanResult.failed_frames`,
 from __future__ import annotations
 
 import logging
-import os
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -55,10 +55,11 @@ _STAGE_WEIGHTS = {"screen": 0.50, "expand": 0.05, "confirm": 0.37, "fill": 0.08}
 
 
 def _default_workers() -> int:
-    """Plain threads for each of the two pools: all but two of the cores, at most 6, at least 2. Measured on the 8-core test machine
-    (full scan, stride 3, 8164 frames): 4 workers 48 s, 6 workers 42 s, 8 workers 39 s - the last 3 s are not worth freezing the GUI
-    for, and the result is identical for every count."""
-    return max(2, min(6, (os.cpu_count() or 4) - 2))
+    """Plain threads for each of the two pools: all but two of the cores (the cores kept free, one more for the second pool), at most
+    6, at least 2. Measured on the 8-core test machine (full scan, stride 3, 8164 frames): 4 workers 48 s, 6 workers 42 s, 8 workers
+    39 s - the last 3 s are not worth freezing the GUI for, and the result is identical for every count. The cores come from
+    `lspr_core.perf` (the ones this process may use, minus those kept free), so with the default setting this is the number it always was."""
+    return get_runtime().pool_threads(6, extra_free=1, floor=2)
 
 
 @dataclass(frozen=True)
@@ -172,7 +173,13 @@ def scan_transients(
     with timed(logger, "mask.transient_scan", frames=len(order), stride=stride, cubes=len(cubes)) as timing:
         # Two pools of plain threads: one reads (decoding is the floor), one screens (cv2 / numpy release the GIL). Screening on the
         # scan's own thread measured 3.4 ms a frame, as much as the reading itself (2026-10-17).
-        with ThreadPoolExecutor(workers, initializer=worker_init) as pool, ThreadPoolExecutor(workers, initializer=worker_init) as compute:
+        # The third context gives the run's share of the cores back when the whole scan ends, however it ends (finished, cancelled, failed):
+        # the screening stage is reported earlier (`report()`), but the later stages run on the same threads and keep the share.
+        with (
+            ThreadPoolExecutor(workers, initializer=worker_init) as pool,
+            ThreadPoolExecutor(workers, initializer=worker_init) as compute,
+            perf_run if perf_run is not None else nullcontext(),
+        ):
             # -- 1. screen the checked frames, one wavelength at a time -----------------------------------------------
             stage_started = time.perf_counter()
             done = 0
@@ -208,7 +215,7 @@ def scan_transients(
             report("screen", 1.0, "screened")
             tuning = None
             if perf_run is not None:  # the later stages are not tuned; they keep the count the screening settled on
-                tuning = perf_run.finish()
+                tuning = perf_run.report()  # not `finish()`: the later stages still run on these threads, so the run keeps its share
                 perf_run.gate.set_limit(tuning.workers)
 
             # -- 2. the neighbours of the hits ------------------------------------------------------------------------
