@@ -138,6 +138,7 @@ from .rows import (
 )
 from . import toolbar_toggles
 from .step_controls import StepColumnControls, StepHost
+from .step_link import StepLink
 from .view import RoiTreeView, suggested_column_widths
 
 logger = logging.getLogger(__name__)
@@ -325,7 +326,10 @@ class RoiTablePanel(QWidget):
         # The step columns' controls (after a separator in the toolbar): `step_controls.py`.
         self._step_controls = StepColumnControls(
             self, self._steps, self._model, self._tree,
-            StepHost(rebuild=self._rebuild, group_only=lambda: self._group_only, deferred=self._gate.defer, notice=self._show_notice, store=lambda: self._store),
+            StepHost(
+                rebuild=self._rebuild, group_only=lambda: self._group_only, deferred=self._gate.defer, notice=self._show_notice, store=lambda: self._store,
+                sort_by=self._on_header_clicked,
+            ),
         )
         self.export_button = self._step_controls.export_button  # the app gives it the folder to save in, like the plots' buttons
         self._step_controls.add_menu_entries(self._view_menu)  # after the freeze entries: "Fit step columns to content"
@@ -374,7 +378,8 @@ class RoiTablePanel(QWidget):
         self._tree.selectionModel().selectionChanged.connect(self._on_view_selection_changed)
         self._tree.expanded.connect(lambda index: self._on_expansion_changed(index, True))
         self._tree.collapsed.connect(lambda index: self._on_expansion_changed(index, False))
-        self._tree.header().sectionClicked.connect(self._on_header_clicked)
+        self._tree.header().sort_requested.connect(self._on_header_clicked)  # (the left end of a header sorts; the rest selects the column: `view.py`)
+        self.step_link = StepLink(self, self._tree, lambda: self._gate.visible)  # the step columns' selection and the Sensorgram's plan bar's are one (`step_link.py`)
         self._tree.header().sectionResized.connect(self._on_section_resized)
         self._tree.header().customContextMenuRequested.connect(self._show_header_menu)
         self._tree.delete_requested.connect(self._delete_selected)

@@ -168,6 +168,7 @@ Measurements of where time or memory went.
 - [`play_prep_cost_2026-10-21.md`](play_prep_cost_2026-10-21.md): Play at 12-15 frames/s instead of 20-25 (2026-10-21)
 - [`testing7_playback_analysis_2026-10-14.md`](testing7_playback_analysis_2026-10-14.md): Slideshow preview test `testing7` - analysis (2026-10-14)
 - [`bulk_analysis_performance_investigation.md`](bulk_analysis_performance_investigation.md): Bulk analysis performance investigation: "Start analysis" slowness
+- [`roi_table_column_selection_2026-11-26.md`](roi_table_column_selection_2026-11-26.md): ROI table column selection (click header, Ctrl / Shift), sort moved to the header's left end; step columns and the Sensorgram plan bar share one selection
 - [`roi_table_performance_2026-11-19.md`](roi_table_performance_2026-11-19.md): ROI / Group table performance: selection 15 x, rebuild 6-10 x faster (in-place update, `selectedRows` cost), pixel-identical; `tools/roi_table_timing.py`
 - [`live_preview_analysis_slowdown_investigation.md`](live_preview_analysis_slowdown_investigation.md): "Live" preview slows down "Start analysis" - root cause (2026-09, not yet fixed)
 - [`roi_mask_cache_memory_investigation.md`](roi_mask_cache_memory_investigation.md): "Start analysis" RAM ballooning to several GB - root cause and fix (2026-09)

@@ -35,7 +35,8 @@ from .cell_marks import CellMarks, Edges
 from .cell_marks import edges as block_edges
 from .column_keys import ColumnKey
 from .column_keys import column_key as key_of_step_column
-from .delegate import CELL_ROOM, CHEVRON_ZONE, CHIP_SIZE, GROUP_INDENT, STRIP_WIDTH, first_column_collapsed, group_label_edge, tinted_text_color
+from .column_selection_controller import ColumnSelectionController
+from .delegate import CELL_ROOM, CHEVRON_ZONE, CHIP_SIZE, COLUMN_FRAME_WIDTH, GROUP_INDENT, STRIP_WIDTH, RoiTableDelegate, first_column_collapsed, group_label_edge, tinted_text_color
 from .model import ALL_SELECTED_ROLE, COLUMN_KIND_ROLE, DEPTH_ROLE, KIND_ROLE, STEP_TINT_ROLE, VALUES_ONLY_ROLE
 from .rows import (
     COLUMN_ANGLE,
@@ -75,6 +76,9 @@ class _RangeDrag:
     selected: frozenset[int]  # the selected ROIs: only these can be in a range
     last_id: int  # the ROI the range reached last (kept while the pointer is over a group header)
 _ARROW_ZONE = 20  # px at the left end of a comparison column's header: the arrow that opens its operation menu
+_SORT_ZONE = _ARROW_ZONE  # px at the left end of every other header: a click there sorts; a click on the rest of the header selects the column (2026-11-26)
+_COLUMN_SELECTED_ALPHA = 40  # the accent wash over a selected column's header (the cells have a fainter one: `delegate.py`)
+_COLUMN_SELECTED_BAR = 2  # px: the accent line along the bottom of a selected column's header
 _SORT_INDICATOR_ROOM = 22
 _CELL_PADDING = 16
 _FREEZE_MAX_SHARE = 0.6  # the frozen columns may fill at most this share of the view's width; more leaves too little to scroll
@@ -126,24 +130,47 @@ class SubscriptHeader(QHeaderView):
     subscript letters are far too small). Every other title is drawn as usual.
 
     A comparison column (μ_S1 − μ_B1 ...) has an arrow at the left end of its header: a click on it asks for the operation menu (`compare_menu_requested`) and is not a sort click;
-    a click anywhere else on the header sorts as for every column. Its title is drawn with subscripts (`_paint_math_section`), as many as it has; in a column too narrow for the whole
-    formula it is cut at the end with "..." like any title, still with its subscripts (never written with underscores)."""
+    a click anywhere else on the header selects the column (below). Its title is drawn with subscripts (`_paint_math_section`), as many as it has; in a column too narrow for the whole
+    formula it is cut at the end with "..." like any title, still with its subscripts (never written with underscores).
+
+    **A click on a header** (2026-11-26, as in a spreadsheet): in the left `_SORT_ZONE` px it sorts by the column (`sort_requested`; a comparison column has its menu there instead,
+    which also offers the sort); on the rest of the header it selects the column (`column_clicked`, with the keyboard modifiers: Ctrl adds, Shift extends). Dragging an edge still
+    resizes and a double-click on an edge still fits; neither is a click."""
 
     compare_menu_requested = pyqtSignal(int, QPoint)
     """(the section, where to open the menu in global coordinates)."""
     fit_requested = pyqtSignal(int)
     """A double-click on the edge of a step column's section (the section): the user wants the step columns fitted to their content."""
+    sort_requested = pyqtSignal(int)
+    """A click in the left end of a section (the section): sort by it, or reverse the sort."""
+    column_clicked = pyqtSignal(int, object)
+    """A click on the rest of a section (the section, the `Qt.KeyboardModifier` flags held): select the column."""
 
     def __init__(self, orientation: Qt.Orientation, parent: QWidget | None = None) -> None:
         super().__init__(orientation, parent)
         self._pinned: Callable[[], list[int]] = list  # the frozen sections, left to right (`RoiTreeView.pinned_columns`); none until the view says
+        self._frame_of: Callable[[int], tuple[bool, bool] | None] = lambda _section: None  # the frame sides of a selected column, None if it is not selected (`RoiTreeView.column_frame`)
         self._drag_shift = 0  # how far the mouse events of the press in progress are moved (see `_pin_shift`)
+        self._press_x = 0  # where in its section the press in progress hit, px from the section's left edge
+        self._press_modifiers = Qt.KeyboardModifier.NoModifier
+        self._indicator_at_press: tuple[int, Qt.SortOrder] = (-1, Qt.SortOrder.AscendingOrder)  # the sort arrow before the press in progress (see `_on_section_clicked`)
         self._in_double_click = False
         self._edge_double_clicked = -1  # the section whose edge the double-click in progress hit
         self.sectionHandleDoubleClicked.connect(self._on_edge_double_clicked)
+        self.sectionClicked.connect(self._on_section_clicked)  # (sent by Qt on release, only for a real click: not a resize, not a drag)
 
     def set_pin_source(self, pinned: Callable[[], list[int]]) -> None:
         self._pinned = pinned
+
+    def set_frame_source(self, frame_of: Callable[[int], tuple[bool, bool] | None]) -> None:
+        self._frame_of = frame_of
+
+    def _on_section_clicked(self, section: int) -> None:
+        if self._press_x <= _SORT_ZONE:
+            self.sort_requested.emit(section)  # (the panel puts the arrow where the sort is, once it has sorted)
+        else:
+            self.setSortIndicator(*self._indicator_at_press)  # Qt has already moved the arrow to the clicked section as for a sort; a click that selects sorts nothing
+            self.column_clicked.emit(section, self._press_modifiers)
 
     # -- frozen sections: painted again at their unscrolled places, mouse events moved to match ---------------------------------
 
@@ -216,6 +243,11 @@ class SubscriptHeader(QHeaderView):
                 self.compare_menu_requested.emit(section, self.mapToGlobal(QPoint(self.sectionViewportPosition(section) + self._drag_shift, self.height())))  # where the section is drawn
                 event.accept()
                 return
+            self._press_x = point.x() - self.sectionViewportPosition(section) if section >= 0 else 0
+            self._press_modifiers = event.modifiers()
+            self._indicator_at_press = (self.sortIndicatorSection(), self.sortIndicatorOrder())
+        else:
+            self._press_x, self._press_modifiers = 0, Qt.KeyboardModifier.NoModifier  # (Qt sends `sectionClicked` for a left click only; nothing of an earlier click is left over)
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
@@ -341,6 +373,18 @@ class SubscriptHeader(QHeaderView):
         return True
 
     def paintSection(self, painter: QPainter, rect: QRect, logicalIndex: int) -> None:  # type: ignore[override]
+        self._paint_section_content(painter, rect, logicalIndex)
+        frame = self._frame_of(logicalIndex)
+        if frame is not None:  # a selected column: a wash over the header, a frame round it (top, and left / right at the ends of a run of selected columns) and a heavier line along its bottom
+            accent = QColor(get_active_theme().accent_blue)
+            wash = QColor(accent)
+            wash.setAlpha(_COLUMN_SELECTED_ALPHA)
+            painter.fillRect(rect, wash)
+            painter.fillRect(QRect(rect.left(), rect.bottom() + 1 - _COLUMN_SELECTED_BAR, rect.width(), _COLUMN_SELECTED_BAR), accent)
+            left, right = frame
+            RoiTableDelegate.draw_block_edges(painter, rect, (True, right, False, left), QPen(accent, COLUMN_FRAME_WIDTH))
+
+    def _paint_section_content(self, painter: QPainter, rect: QRect, logicalIndex: int) -> None:
         tint = self._tint_of(logicalIndex)
         if tint is not None:
             self._paint_tinted_section(painter, rect, logicalIndex, tint)
@@ -408,6 +452,7 @@ class RoiTreeView(QTreeView):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.column_selection = ColumnSelectionController(self)  # the selected columns, by key (a click on a header: `SubscriptHeader.column_clicked`)
         self._frozen_upto = -1  # the last frozen column (a logical column number); -1 = nothing frozen
         self._selection_locked = False  # True: the ROI selection is locked; a selected row is framed, not tinted (`set_selection_locked`)
         self._label_only_highlight = False  # True: a selected row is tinted in its Label column only, not across every column (right-click menu)
@@ -425,6 +470,8 @@ class RoiTreeView(QTreeView):
         self._ants.timeout.connect(self._ants_tick)
         header = SubscriptHeader(Qt.Orientation.Horizontal, self)
         header.set_pin_source(self.pinned_columns)
+        header.set_frame_source(self.column_frame)
+        header.column_clicked.connect(self.column_selection.click)
         self.setHeader(header)
         self.setIndentation(0)
         self.setRootIsDecorated(False)
@@ -567,6 +614,21 @@ class RoiTreeView(QTreeView):
                 self.setColumnHidden(column, hidden)
         if self._marks.has_range():
             self.restrict_cell_range(self._marks.range_rows)  # a column that is not shown any more leaves the picked cells
+        if self.column_selection.has_keys():
+            self.column_selection.refresh()  # the step columns may have been renumbered, or the column hidden / shown
+
+    # -- selected columns (`column_selection_controller.py`) ----------------------------------------------------------------------
+
+    def is_column_selected(self, column: int) -> bool:
+        """Whether the column is selected (and shown). The painting asks this for every cell, so the view answers straight from the controller."""
+        return self.column_selection.is_selected(column)
+
+    def has_column_selection(self) -> bool:
+        return self.column_selection.has_selection()
+
+    def column_frame(self, column: int):
+        """The frame sides of a selected column (`ColumnSelectionController.frame_of`), or None."""
+        return self.column_selection.frame_of(column)
 
     def _collapse_first_column(self, collapsed: bool) -> None:
         header = self.header()
@@ -631,6 +693,20 @@ class RoiTreeView(QTreeView):
         columns = [c for c in (header.logicalIndex(v) for v in range(last + 1)) if not header.isSectionHidden(c)]
         width = sum(header.sectionSize(c) for c in columns)
         return columns if columns and width <= _FREEZE_MAX_SHARE * self.viewport().width() else []
+
+    def scroll_column_into_view(self, column: int) -> None:
+        """Scroll sideways so `column` (a logical column number) is fully visible, with its middle in the middle of the room right of the frozen columns (as far as the scroll range
+        allows: the first and last columns cannot be centred). Nothing for a hidden column, a frozen one, or one already fully in view: a column the user can see does not move
+        under their eyes. (`scrollTo` is no use here: it ignores the columns that are painted over the left edge, and would leave the column underneath them.)"""
+        header = self.header()
+        if not 0 <= column < header.count() or header.isSectionHidden(column):
+            return
+        left, width = header.sectionPosition(column), header.sectionSize(column)  # unscrolled positions
+        offset, pinned, view_width = self.horizontalScrollBar().value(), self.pinned_width(), self.viewport().width()
+        if column in self.pinned_columns() or (left >= offset + pinned and left + width <= offset + view_width):
+            return
+        room = view_width - pinned  # what is left for the scrolled columns
+        self.horizontalScrollBar().setValue(max(0, round(left + width / 2 - pinned - room / 2)))  # (the bar clamps it to its range)
 
     def pinned_width(self) -> int:
         """Width in px of the frozen columns (0 when none are held); the delegate keeps a group's name inside it."""

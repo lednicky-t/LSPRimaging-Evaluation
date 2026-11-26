@@ -197,6 +197,7 @@ ICONS: dict[str, str | Callable[[], QIcon]] = {
     "move_left": "chevron-left",
     "move_right": "chevron-right",
     "move": "sort-ascending-numbers",  # the Move submenus: the order (and numbers) change
+    "sort_column": "sort-ascending-numbers",  # a ROI table column's menu: sort the table by this column
     "move_top": "arrow-bar-to-up",
     "move_up": "arrow-up",
     "move_down": "arrow-down",

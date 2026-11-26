@@ -194,6 +194,8 @@ class SensorgramPanel(QWidget):
     _progress = pyqtSignal(int, int)  # (ROIs done, ROIs to do) - from the worker thread
     plan_bar_settings_changed = pyqtSignal()
     """The plan bar's display settings changed (text content and separators among them): the ROI table titles its step columns the same way."""
+    plan_steps_selected = pyqtSignal(object)
+    """The steps selected on the plan bar changed: a sorted tuple of step indices (empty: none). The ROI table scrolls to the newly selected step's column."""
 
     def __init__(
         self,
@@ -401,6 +403,7 @@ class SensorgramPanel(QWidget):
         self._view_controls.settings_changed.connect(self._on_view_changed)
         self._plot.legend_corner_note_changed.connect(self._view_controls.look.set_corner_note)  # the Corner row says when the step table keeps the legend at its edge
         self._plot.plan_bar().selection_changed.connect(lambda _indices: self._sync_order_step())  # the Legend menu's "At step" order reads the step selected on the bar
+        self._plot.plan_bar().selection_changed.connect(self.plan_steps_selected)
         self._plot.baseline_window_changed.connect(self._on_baseline_dragged)
         self._plot.y_label_double_clicked.connect(self._on_y_label_double_clicked)
         self._plot.x_label_double_clicked.connect(self._on_x_label_double_clicked)
@@ -527,6 +530,10 @@ class SensorgramPanel(QWidget):
     def lbl_controls(self):
         """The LbL button of the Evaluation group (`lbl_group.LblControls`); the floating LbL plot is wired in `app_rewrite._wire_lbl_plot`."""
         return self._steps.lbl
+
+    def select_plan_steps(self, indices) -> None:
+        """Select exactly these steps (by index) on the plan bar; a step that is not on the bar is left out. Sends `plan_steps_selected` when the selection changes."""
+        self._plot.plan_bar().select_many(tuple(indices), anchor=min(indices, default=None))
 
     def plan_bar_settings(self):
         """The plan bar's display settings as set now (`plan.bar_model.PlanBarSettings`): the text mode and separators decide how a step's note is written in a title."""

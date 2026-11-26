@@ -60,6 +60,8 @@ CELL_ROOM = 2 * _CELL_PAD + 4
 """Pixels a number needs around its text to show whole: `_CELL_PAD` on both sides, the 2 px more the right side keeps (`_paint_roi`, `_paint_group_steps`), and 2 px of slack."""
 _RANGE_TINT_ALPHA = 55  # the fill of the cells picked by dragging (of 255)
 _RANGE_EDGE_WIDTH = 2.0  # the border round them, px
+_COLUMN_TINT_ALPHA = 26  # the wash over the cells of a selected column (of 255); fainter than the picked cells', which sit inside it
+COLUMN_FRAME_WIDTH = 2.0  # px: the frame round a selected column (cells and header)
 _ANTS_WIDTH = 1.5  # the marching ants round the copied cells, px
 _ROW_LINE_ALPHA = 90
 _COLUMN_LINE_ALPHA = 55
@@ -206,6 +208,26 @@ class RoiTableDelegate(QStyledItemDelegate):
         return color
 
     @staticmethod
+    def _column_selected(view, column: int) -> bool:
+        """The column is selected (a click on its header, `RoiTreeView.is_column_selected`)."""
+        asker = getattr(view, "is_column_selected", None)
+        return bool(asker(column)) if callable(asker) else False
+
+    @staticmethod
+    def _paint_column_frame(painter: QPainter, rect: QRect, view, column: int, theme) -> None:
+        """The left / right side of the frame round the selected columns, on a cell at the end of a run of them (the header carries the top, `SubscriptHeader.paintSection`)."""
+        asker = getattr(view, "column_frame", None)
+        frame = asker(column) if callable(asker) else None
+        if frame is not None and (frame[0] or frame[1]):
+            RoiTableDelegate.draw_block_edges(painter, rect, (False, frame[1], False, frame[0]), QPen(QColor(theme.accent_blue), COLUMN_FRAME_WIDTH))
+
+    @staticmethod
+    def _column_tint(theme) -> QColor:
+        color = QColor(theme.accent_blue)
+        color.setAlpha(_COLUMN_TINT_ALPHA)
+        return color
+
+    @staticmethod
     def _label_only(view) -> bool:
         """The right-click choice "highlight selected rows in the Label column only" (`RoiTreeView.label_only_highlight`)."""
         asker = getattr(view, "label_only_highlight", None)
@@ -244,6 +266,8 @@ class RoiTableDelegate(QStyledItemDelegate):
         if wash is not None:
             painter.fillRect(rect, wash)  # the ROI's colour, which its dot would have shown in the hidden #/ROIs column
         self._paint_row_background(painter, option, index, theme)
+        if self._column_selected(option.widget, column):
+            painter.fillRect(rect, self._column_tint(theme))
         picked = option.widget.range_edges(index) if hasattr(option.widget, "range_edges") else None  # the cells picked by clicking a selected row again and dragging
         copied = option.widget.copied_edges(index) if hasattr(option.widget, "copied_edges") else None  # the cells just copied: the marching ants
         if picked is not None:
@@ -251,6 +275,7 @@ class RoiTableDelegate(QStyledItemDelegate):
             fill.setAlpha(_RANGE_TINT_ALPHA)
             painter.fillRect(rect, fill)
         self._paint_cell_borders(painter, rect, column, theme, self._last_column_on_screen(option.widget, index.model()))
+        self._paint_column_frame(painter, rect, option.widget, column, theme)
         if column == COLUMN_ID and rect.width() <= 0:
             return  # #/ROIs is hidden (collapsed to nothing): its dot would be drawn over the next column
         if column == COLUMN_SHAPE:
@@ -273,15 +298,15 @@ class RoiTableDelegate(QStyledItemDelegate):
         painter.setPen(color)
         painter.drawText(text_rect, alignment, option.fontMetrics.elidedText(text, _ELIDE_RIGHT, text_rect.width()))
         if picked is not None:
-            self._draw_block_edges(painter, rect, picked, QPen(QColor(theme.accent_blue), _RANGE_EDGE_WIDTH))
+            self.draw_block_edges(painter, rect, picked, QPen(QColor(theme.accent_blue), _RANGE_EDGE_WIDTH))
         if copied is not None:
             ants = QPen(QColor(theme.text_primary), _ANTS_WIDTH)
             ants.setDashPattern([3.0, 3.0])
             ants.setDashOffset(float(option.widget.ants_phase()))
-            self._draw_block_edges(painter, rect, copied, ants)
+            self.draw_block_edges(painter, rect, copied, ants)
 
     @staticmethod
-    def _draw_block_edges(painter: QPainter, rect: QRect, edges: tuple[bool, bool, bool, bool], pen: QPen) -> None:
+    def draw_block_edges(painter: QPainter, rect: QRect, edges: tuple[bool, bool, bool, bool], pen: QPen) -> None:
         """The sides of a cell that lie on the border of a block of cells (`cell_marks.edges`), drawn just inside the cell, clockwise (top left to right, right downwards, bottom right to
         left, left upwards), so a dashed line marches round the block."""
         top, right, bottom, left = edges
@@ -343,6 +368,7 @@ class RoiTableDelegate(QStyledItemDelegate):
         rect = option.rect
         painter.fillRect(rect, QColor(theme.toolbar_section_bg))
         self._paint_group_step_tints(painter, option, index)
+        self._paint_group_selected_columns(painter, option, theme)
         collapsed = first_column_collapsed(option.widget)
         wash = label_wash_of(index.data(COLOR_ROLE)) if collapsed else None
         if wash is not None:  # the group's colour, which its chip would have shown in the hidden #/ROIs column, behind the name (and the stretch the name may use)
@@ -386,6 +412,7 @@ class RoiTableDelegate(QStyledItemDelegate):
             metrics.elidedText(text, Qt.TextElideMode.ElideRight, name_rect.width()),
         )
         self._paint_group_steps(painter, option, index, theme)
+        self._paint_group_column_frames(painter, option, theme)
 
     @staticmethod
     def _paint_group_marks(painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex, theme, count_text: str) -> None:
@@ -431,11 +458,11 @@ class RoiTableDelegate(QStyledItemDelegate):
         return None
 
     @staticmethod
-    def _step_columns_on_screen(view) -> list[int]:
+    def _step_columns_on_screen(view, first_column: int = COLUMN_COUNT) -> list[int]:
         """The visible step columns that are within the viewport (2026-11-26). A group header is one cell spanning every column and Qt does not clip what the delegate draws
         in it, so drawing all step columns of every header on every paint cost 0.6-2 s with 241 step columns and 16 groups (log of 2026-11-26: `roi_table.slow_paint`); the
         ones outside the viewport are never seen. (A frozen table draws a header a second time, translated; the step columns are clipped away there, so the viewport's
-        range being a little off for that copy changes nothing.)"""
+        range being a little off for that copy changes nothing.) `first_column=0` gives the fixed columns on screen too."""
         if not isinstance(view, QTreeView):
             return []
         header = view.header()
@@ -446,9 +473,34 @@ class RoiTableDelegate(QStyledItemDelegate):
         columns = []
         for visual in range(first, last + 1):
             logical = header.logicalIndex(visual)
-            if logical >= COLUMN_COUNT and not header.isSectionHidden(logical):
+            if logical >= first_column and not header.isSectionHidden(logical):
                 columns.append(logical)
         return columns
+
+    def _paint_group_selected_columns(self, painter: QPainter, option: QStyleOptionViewItem, theme) -> None:
+        """A group header spans every column, so the wash of the selected columns (fixed and step ones) is painted here too, at the places the columns have. Nothing is asked of
+        the columns when none is selected, which is nearly always."""
+        view = option.widget
+        if not getattr(view, "has_column_selection", lambda: False)():
+            return
+        tint = self._column_tint(theme)
+        for column in self._step_columns_on_screen(view, 0):
+            if view.is_column_selected(column):
+                painter.fillRect(self._group_column_rect(option, column), tint)
+
+    def _paint_group_column_frames(self, painter: QPainter, option: QStyleOptionViewItem, theme) -> None:
+        """The same columns' frame sides inside a group header, painted last so no tint of the header goes over them."""
+        view = option.widget
+        if not getattr(view, "has_column_selection", lambda: False)():
+            return
+        for column in self._step_columns_on_screen(view, 0):
+            self._paint_column_frame(painter, self._group_column_rect(option, column), view, column, theme)
+
+    @staticmethod
+    def _group_column_rect(option: QStyleOptionViewItem, column: int) -> QRect:
+        """Where a column is inside a group header (one cell spanning every column): relative to the spanned cell, whatever the scroll position."""
+        view = option.widget
+        return QRect(option.rect.left() + view.header().sectionPosition(column), option.rect.top(), view.columnWidth(column), option.rect.height())
 
     def _paint_group_step_tints(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
         """A group header spans every column, so the background of its step columns is painted here too, before the selection / hover tint goes over it. Like the numbers

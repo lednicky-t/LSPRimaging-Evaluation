@@ -122,21 +122,6 @@ def expand_mask(roi_mask: RoiMask, image_shape: tuple[int, int]) -> np.ndarray:
     return out
 
 
-def expand_mask_to_patch(
-    roi_mask: RoiMask,
-    patch_origin_xy: tuple[int, int],
-    patch_shape: tuple[int, int],
-) -> np.ndarray:
-    """Same as `expand_mask`, but into an array local to a patch that starts at
-    `patch_origin_xy` in full-image coordinates — mirrors
-    `transformed_*_mask_for_patch` below.
-    """
-    out = np.zeros((int(patch_shape[0]), int(patch_shape[1])), dtype=bool)
-    px0, py0 = int(patch_origin_xy[0]), int(patch_origin_xy[1])
-    _blit(out, roi_mask, offset_x=-px0, offset_y=-py0)
-    return out
-
-
 # -- mask geometry: reach-box-limited affine warp (2026-09-21) --------------
 # The mask-geometry counterpart to annulus_reach_box/_annulus_mask_in_box
 # below - built once circle/annulus's own reach-box pattern made clear what

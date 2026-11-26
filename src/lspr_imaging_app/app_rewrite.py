@@ -1605,9 +1605,39 @@ def _wire_session_carry_prompt(window: QMainWindow, m: _Modules) -> None:
     m.session_carry.carried.connect(_ask)
 
 
-def _follow_plan_bar(sensorgram_panel: SensorgramPanel, step_table: StepTableModule, roi_table_panel: RoiTablePanel) -> None:
+def _follow_plan_bar(sensorgram_panel: SensorgramPanel, step_table: StepTableModule, roi_table_panel: RoiTablePanel, plan: ExperimentPlanModule) -> None:
     """The step columns of the ROI table look as the Sensorgram's plan bar looks, now and whenever the user changes it there: the same part of each step's note as the title
-    (whole note or the solution before the separator, and which separators), and the same fill (the step's colour at the bar's opacity)."""
+    (whole note or the solution before the separator, and which separators), and the same fill (the step's colour at the bar's opacity).
+
+    **The step selection is one** (2026-11-26): steps selected on the bar are the selected step columns of the table and the other way round (`panels/roi_table/step_link.py`).
+    Selecting a step on the bar also scrolls the table to its column (the newly selected one when several are selected; nothing when the table is hidden, and nothing when the
+    selection came from a click in the table itself)."""
+
+    selected: set[int] = set()
+    from_table = False  # the bar's selection is being set because the user clicked a column header: the table shows it already, no scrolling
+
+    def on_bar(indices: object) -> None:
+        now = {int(i) for i in indices}  # type: ignore[attr-defined]
+        added = sorted(now - selected)  # a step dropped from the selection moves nothing
+        selected.clear()
+        selected.update(now)
+        steps = plan.steps()
+        link = roi_table_panel.step_link
+        link.set_selected([steps[i].ref for i in sorted(now) if i < len(steps)])
+        if added and not from_table and added[0] < len(steps):
+            link.reveal(steps[added[0]].ref)
+
+    def on_table(refs: object) -> None:
+        nonlocal from_table
+        position = {step.ref: i for i, step in enumerate(plan.steps())}
+        from_table = True
+        try:
+            sensorgram_panel.select_plan_steps(sorted(position[ref] for ref in refs if ref in position))  # type: ignore[attr-defined]
+        finally:
+            from_table = False
+
+    sensorgram_panel.plan_steps_selected.connect(on_bar)
+    roi_table_panel.step_link.selected.connect(on_table)
 
     def apply() -> None:
         settings = sensorgram_panel.plan_bar_settings()
@@ -2168,7 +2198,7 @@ def build_main_window(
     image_panel.playback_changed.connect(sensorgram_panel.follow_play)
     image_panel.play_frame_showing.connect(sensorgram_panel.show_play_frame)
     image_panel.play_frame_shown.connect(sensorgram_panel.repaint_after_play_frame)  # the cursor strip, just before the image view repaints
-    _follow_plan_bar(sensorgram_panel, m.step_table, roi_table_panel)  # the table's step columns are titled and coloured as the Sensorgram's plan bar titles and colours its steps
+    _follow_plan_bar(sensorgram_panel, m.step_table, roi_table_panel, m.experiment_plan)  # the table's step columns are titled and coloured as the Sensorgram's plan bar titles and colours its steps
     app_instance = QApplication.instance()
     if app_instance is not None:  # after the panels' own shutdowns (connected in their constructors): nothing may still be fitting when the helper process ends
         app_instance.aboutToQuit.connect(m.trace_store.shutdown)

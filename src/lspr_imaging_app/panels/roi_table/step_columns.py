@@ -69,11 +69,6 @@ def shows_spread(mode: str) -> bool:
     return mode != DISPLAY_MEAN
 
 
-def spread_word(mode: str) -> str:
-    """Which spread a mode shows: ``"sd"`` or ``"sem"`` (``"sd"`` also for the mean-only mode, which has no spread but is rounded by the SD)."""
-    return "sem" if mode in _SEM_MODES else "sd"
-
-
 def spread_of(value: CellValue, mode: str) -> float:
     if is_excess(mode):
         return value.excess_u

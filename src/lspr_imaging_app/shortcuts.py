@@ -151,6 +151,14 @@ BINDINGS: tuple[Binding, ...] = (
         "Pick cells: click a number of an already selected row again and drag over the numbers (Geometry view). Then copy them; right-click for the menu",
         gesture="Click again and drag", scope=_ROI_TABLE,
     ),
+    Binding(
+        "mouse.roi_table.select_column", "Mouse: ROI table",
+        "Select the column (Ctrl+click adds or removes one, Shift+click extends to it). Selected step columns are the steps selected on the Sensorgram's plan bar, and the other way round",
+        gesture="Click a column header", scope=_ROI_TABLE,
+    ),
+    Binding(
+        "mouse.roi_table.sort", "Mouse: ROI table", "Sort the table by the column; again to reverse", gesture="Click the left end of a column header", scope=_ROI_TABLE,
+    ),
     # -- tools of the Image view -----------------------------------------------------------------
     Binding(
         "tools.cancel", "Image tools",

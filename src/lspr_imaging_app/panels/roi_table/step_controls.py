@@ -91,6 +91,7 @@ class StepHost:
     deferred: Callable[[], bool]  # the panel is hidden: skip work, the panel catches up when shown
     notice: Callable[..., None]  # (text, *, error=...): a line in the dock's title bar and the status bar
     store: Callable[[], UiStateStore | None]
+    sort_by: Callable[[int], None]  # (column): sort by it, or reverse the sort when it is the sort column (what a click on the left end of its header does)
 
 
 class StepColumnControls(QObject):
@@ -387,6 +388,7 @@ class StepColumnControls(QObject):
         uid = column.ref[1]  # type: ignore[index]
         if column.op == OP_BULK:  # nothing to choose: the column is the S_bulk set's slope
             menu = QMenu(self._tree)
+            give_icon(menu.addAction("Sort by this column"), "sort_column").triggered.connect(lambda _checked=False: self._host.sort_by(section))
             give_icon(menu.addAction("Remove this column"), "delete").triggered.connect(lambda _checked=False: self.remove_compare(uid))
             menu.exec(pos)
             menu.deleteLater()
@@ -402,10 +404,16 @@ class StepColumnControls(QObject):
             f"QToolButton {{ background: transparent; border: none; padding: 4px 6px; text-align: left; color: {theme.text_primary}; }}"
             f"QToolButton:hover {{ background: {theme.control_bg_hover}; }}"
         )
+        sort = QToolButton(pick)
+        sort.setText("Sort by this column")
+        sort.setAutoRaise(True)
+        sort.setStyleSheet(remove.styleSheet())
+        pick.add_footer(sort)
         pick.add_footer(remove)
         pick.finish()
         pick.setCurrentIndex(pick.findData(column.op))
         pick.currentIndexChanged.connect(lambda _index: self.set_compare_op(uid, str(pick.currentData())))
+        sort.clicked.connect(lambda _checked=False: (pick.close_menu(), self._host.sort_by(section)))
         remove.clicked.connect(lambda _checked=False: (pick.close_menu(), self.remove_compare(uid)))
         pick.popup_at(pos)
         pick.deleteLater()
