@@ -147,6 +147,19 @@ class _StepLineEdit(QLineEdit):
         super().keyPressEvent(event)
 
 
+def group_label_edge(view, model, left: int, end: int, pin_inset: int = 0) -> int:
+    """The x (one past the last pixel) where the stretch of a group header that holds its name ends: `end` (one past the end of the row), the first step column (the name stops where
+    the step numbers begin) or the frozen columns' right edge (less `pin_inset`), whichever comes first. `left`: where the header's spanned cell begins."""
+    edge = end
+    first_step = RoiTableDelegate._first_step_column(view, model)
+    if first_step is not None:
+        edge = min(edge, left + view.header().sectionPosition(first_step))
+    pinned = view.pinned_width() if hasattr(view, "pinned_width") else 0
+    if pinned:
+        edge = min(edge, left + pinned - pin_inset)
+    return edge
+
+
 class RoiTableDelegate(QStyledItemDelegate):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -192,9 +205,27 @@ class RoiTableDelegate(QStyledItemDelegate):
         color.setAlpha(70)
         return color
 
+    @staticmethod
+    def _label_only(view) -> bool:
+        """The right-click choice "highlight selected rows in the Label column only" (`RoiTreeView.label_only_highlight`)."""
+        asker = getattr(view, "label_only_highlight", None)
+        return bool(asker()) if callable(asker) else False
+
+    @staticmethod
+    def _locked(view) -> bool:
+        """The ROI selection is locked: a selected row is framed by the view (`RoiTreeView._draw_locked_selection_frame`), not tinted."""
+        asker = getattr(view, "selection_locked", None)
+        return bool(asker()) if callable(asker) else False
+
     def _paint_row_background(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex, theme) -> None:
         if option.state.value & _STATE_SELECTED:
-            painter.fillRect(option.rect, self._selected_tint(theme))
+            if self._locked(option.widget):
+                return
+            # With the choice on, only the row's label cells are tinted: #/ROIs and Label, whichever the view mode shows (Geometry shows #/ROIs, Simple both). If neither has any
+            # width (the user hid them) the row is tinted whole, or a selection would show nowhere.
+            view = option.widget
+            if index.column() in (COLUMN_ID, COLUMN_NAME) or not self._label_only(view) or (view.columnWidth(COLUMN_ID) <= 0 and view.columnWidth(COLUMN_NAME) <= 0):
+                painter.fillRect(option.rect, self._selected_tint(theme))
         elif self._hovered(option, index):
             hover = QColor(theme.control_bg_hover)
             hover.setAlpha(150)
@@ -317,8 +348,13 @@ class RoiTableDelegate(QStyledItemDelegate):
         if wash is not None:  # the group's colour, which its chip would have shown in the hidden #/ROIs column, behind the name (and the stretch the name may use)
             painter.fillRect(QRect(rect.left(), rect.top(), max(0, self._group_label_edge(option, index) - rect.left()), rect.height()), wash)
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
-        if selected or index.data(ALL_SELECTED_ROLE):
-            painter.fillRect(rect, self._selected_tint(theme))
+        if (selected or index.data(ALL_SELECTED_ROLE)) and self._locked(option.widget):
+            pass  # locked: framed by the view, not tinted
+        elif selected or index.data(ALL_SELECTED_ROLE):
+            if self._label_only(option.widget):  # the header's own stretch (chevron, count, name), not the step numbers on the right
+                painter.fillRect(QRect(rect.left(), rect.top(), max(0, self._group_label_edge(option, index) - rect.left()), rect.height()), self._selected_tint(theme))
+            else:
+                painter.fillRect(rect, self._selected_tint(theme))
         elif self._hovered(option, index):
             hover = QColor(theme.control_bg_hover)
             hover.setAlpha(110)
@@ -382,13 +418,43 @@ class RoiTableDelegate(QStyledItemDelegate):
 
     @staticmethod
     def _step_columns_of(view, model) -> list[int]:
+        """Every visible step column. Only for what needs all of them; painting uses `_step_columns_on_screen`."""
         return [c for c in range(COLUMN_COUNT, model.columnCount()) if not view.isColumnHidden(c)] if isinstance(view, QTreeView) else []
+
+    @staticmethod
+    def _first_step_column(view, model) -> int | None:
+        """The first step column that is not hidden (where a group header's name stops), without listing them all."""
+        if isinstance(view, QTreeView):
+            for column in range(COLUMN_COUNT, model.columnCount()):
+                if not view.isColumnHidden(column):
+                    return column
+        return None
+
+    @staticmethod
+    def _step_columns_on_screen(view) -> list[int]:
+        """The visible step columns that are within the viewport (2026-11-26). A group header is one cell spanning every column and Qt does not clip what the delegate draws
+        in it, so drawing all step columns of every header on every paint cost 0.6-2 s with 241 step columns and 16 groups (log of 2026-11-26: `roi_table.slow_paint`); the
+        ones outside the viewport are never seen. (A frozen table draws a header a second time, translated; the step columns are clipped away there, so the viewport's
+        range being a little off for that copy changes nothing.)"""
+        if not isinstance(view, QTreeView):
+            return []
+        header = view.header()
+        first = header.visualIndexAt(0)  # (viewport coordinates: the header adds its scroll offset itself)
+        last = header.visualIndexAt(view.viewport().width() - 1)
+        first = 0 if first < 0 else first
+        last = header.count() - 1 if last < 0 else last
+        columns = []
+        for visual in range(first, last + 1):
+            logical = header.logicalIndex(visual)
+            if logical >= COLUMN_COUNT and not header.isSectionHidden(logical):
+                columns.append(logical)
+        return columns
 
     def _paint_group_step_tints(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
         """A group header spans every column, so the background of its step columns is painted here too, before the selection / hover tint goes over it. Like the numbers
         (`_paint_group_steps`) it is placed relative to the spanned cell, whatever the scroll position."""
         view = option.widget
-        for column in self._step_columns_of(view, index.model()):
+        for column in self._step_columns_on_screen(view):
             tint = step_tint_of(index.siblingAtColumn(column))
             if tint is not None:
                 left = option.rect.left() + view.header().sectionPosition(column)
@@ -398,7 +464,7 @@ class RoiTableDelegate(QStyledItemDelegate):
         """A group header spans every column, so its numbers in the step columns are painted here, over the spanned cell, at the places the columns have."""
         view = option.widget
         painter.setFont(QFont(option.font))
-        for column in self._step_columns_of(view, index.model()):
+        for column in self._step_columns_on_screen(view):
             cell = index.siblingAtColumn(column)
             text = str(cell.data(Qt.ItemDataRole.DisplayRole) or "")
             if not text:
@@ -447,18 +513,8 @@ class RoiTableDelegate(QStyledItemDelegate):
 
     @staticmethod
     def _group_label_edge(option: QStyleOptionViewItem, index: QModelIndex, *, pin_inset: int = 0) -> int:
-        """The x (one past the last pixel) where the stretch of a group header that holds its name ends: the end of the row, the first step column (the name stops where the
-        step numbers begin) or the frozen columns' right edge (less `pin_inset`), whichever comes first."""
-        rect = option.rect
-        view = option.widget
-        edge = rect.right() + 1
-        steps = RoiTableDelegate._step_columns_of(view, index.model())
-        if steps:
-            edge = min(edge, rect.left() + view.header().sectionPosition(steps[0]))
-        pinned = view.pinned_width() if hasattr(view, "pinned_width") else 0
-        if pinned:
-            edge = min(edge, rect.left() + pinned - pin_inset)
-        return edge
+        """`group_label_edge` for the cell being painted."""
+        return group_label_edge(option.widget, index.model(), option.rect.left(), option.rect.right() + 1, pin_inset)
 
     # -- editing --------------------------------------------------------------------
 

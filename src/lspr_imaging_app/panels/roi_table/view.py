@@ -35,8 +35,8 @@ from .cell_marks import CellMarks, Edges
 from .cell_marks import edges as block_edges
 from .column_keys import ColumnKey
 from .column_keys import column_key as key_of_step_column
-from .delegate import CELL_ROOM, CHEVRON_ZONE, CHIP_SIZE, GROUP_INDENT, STRIP_WIDTH, first_column_collapsed, tinted_text_color
-from .model import COLUMN_KIND_ROLE, DEPTH_ROLE, KIND_ROLE, STEP_TINT_ROLE, VALUES_ONLY_ROLE
+from .delegate import CELL_ROOM, CHEVRON_ZONE, CHIP_SIZE, GROUP_INDENT, STRIP_WIDTH, first_column_collapsed, group_label_edge, tinted_text_color
+from .model import ALL_SELECTED_ROLE, COLUMN_KIND_ROLE, DEPTH_ROLE, KIND_ROLE, STEP_TINT_ROLE, VALUES_ONLY_ROLE
 from .rows import (
     COLUMN_ANGLE,
     COLUMN_AREA,
@@ -409,6 +409,8 @@ class RoiTreeView(QTreeView):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._frozen_upto = -1  # the last frozen column (a logical column number); -1 = nothing frozen
+        self._selection_locked = False  # True: the ROI selection is locked; a selected row is framed, not tinted (`set_selection_locked`)
+        self._label_only_highlight = False  # True: a selected row is tinted in its Label column only, not across every column (right-click menu)
         self._mode_columns: frozenset[int] = frozenset(range(COLUMN_COUNT))  # the fixed columns the view mode shows (`set_view_mode`)
         self._hidden_keys: frozenset = frozenset()  # the columns the user hid, by key (`column_keys.py`)
         self._first_width = 0  # the width #/ROIs had before it was hidden (collapsed to nothing, see `refresh_column_visibility`); 0 = not known yet
@@ -586,6 +588,26 @@ class RoiTreeView(QTreeView):
             return
         self.setColumnWidth(column, width)
 
+    def label_only_highlight(self) -> bool:
+        """Whether a selected row is tinted in its Label column only (the delegate asks, per cell, so it is a plain attribute read)."""
+        return self._label_only_highlight
+
+    def selection_locked(self) -> bool:
+        """Whether the ROI selection is locked: selected rows then show a frame instead of a tint (the delegate asks, per cell)."""
+        return self._selection_locked
+
+    def set_selection_locked(self, on: bool) -> None:
+        if on != self._selection_locked:
+            self._selection_locked = on
+            self.setAllColumnsShowFocus(not (on or self._label_only_highlight))  # Qt's faint tint of the current row, across every column, would undo the frame-only look
+            self.viewport().update()
+
+    def set_label_only_highlight(self, on: bool) -> None:
+        if on != self._label_only_highlight:
+            self._label_only_highlight = on
+            self.setAllColumnsShowFocus(not (on or self._selection_locked))  # the current row's faint focus tint is Qt's, across every column: it would undo this
+            self.viewport().update()
+
     # -- frozen columns (see the module docstring) ------------------------------------------------------------------------------
 
     def set_frozen_upto(self, column: int) -> None:
@@ -642,11 +664,62 @@ class RoiTreeView(QTreeView):
 
     def drawRow(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:  # type: ignore[override]
         super().drawRow(painter, option, index)
-        if self._frozen_upto < 0 or self.header().offset() <= 0:
+        if self._frozen_upto >= 0 and self.header().offset() > 0:
+            columns = self.pinned_columns()
+            if columns:
+                self._draw_pinned_cells(painter, option, index, columns)
+        if self._label_only_highlight:
+            self._draw_label_focus(painter, option, index)
+        if self._selection_locked:
+            self._draw_locked_selection_frame(painter, option, index)
+
+    def _draw_locked_selection_frame(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
+        """While the selection is locked a selected row (a group header too when all of its ROIs are selected) has a frame in the highlight colour and no tint: round the label cells
+        when only the label is highlighted, else round the row."""
+        selection = self.selectionModel()
+        if not ((selection is not None and selection.isSelected(index)) or index.data(ALL_SELECTED_ROLE)):
             return
-        columns = self.pinned_columns()
-        if columns:
-            self._draw_pinned_cells(painter, option, index, columns)
+        if self._label_only_highlight:
+            rect = self.label_focus_rect(index, option.rect.top(), option.rect.height())
+        else:
+            rect = QRect(self.columnViewportPosition(self.header().logicalIndex(0)), option.rect.top(), self.header().length(), option.rect.height())
+        painter.save()
+        painter.setPen(QPen(QColor(get_active_theme().highlight_color), 1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(rect.adjusted(0, 0, -1, -1))
+        painter.restore()
+
+    def label_focus_rect(self, index: QModelIndex, top: int, height: int) -> QRect:
+        """Where the current row's focus frame goes while only the label is highlighted: round the row's label cells (#/ROIs and Label, whichever have width), or a group header's name
+        stretch (up to its step numbers or the frozen columns' edge); the whole row if no label cell has any width. Where the cells are *drawn*: a frozen column at its unscrolled place."""
+        if self.isFirstColumnSpanned(index.row(), index.parent()):
+            left = self.columnViewportPosition(self.header().logicalIndex(0))
+            if self.pinned_columns() and self.header().offset() > 0:
+                left += self.header().offset()  # the part of the header that stays is drawn unscrolled
+            end = group_label_edge(self, self.model(), left, left + self.header().length())
+            return QRect(left, top, max(0, end - left), height)
+        rect = QRect()
+        for column in (COLUMN_ID, COLUMN_NAME):
+            cell = self.visualRect(index.siblingAtColumn(column))
+            if cell.width() > 0:
+                rect = rect.united(QRect(cell.left(), top, cell.width(), height))
+        if rect.isNull():
+            rect = QRect(self.columnViewportPosition(self.header().logicalIndex(0)), top, self.header().length(), height)
+        return rect
+
+    def _draw_label_focus(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
+        """The faint frame Qt draws round the current row of a view with focus, over the label cells only (Qt's own spans every column: `setAllColumnsShowFocus` is off while only the
+        label is highlighted, so what it would draw across the row is not drawn). The same frame as `_draw_pinned_cells` draws for the frozen part."""
+        current = self.currentIndex()
+        if not (self.hasFocus() and current.isValid() and current.row() == index.row() and current.parent() == index.parent()):
+            return
+        focus = QStyleOptionFocusRect()
+        focus.initFrom(self)
+        focus.state |= QStyle.StateFlag.State_KeyboardFocusChange  # (Fusion draws the frame only for a focus that came from the keyboard)
+        focus.rect = self.label_focus_rect(index, option.rect.top(), option.rect.height())
+        selection = self.selectionModel()
+        focus.backgroundColor = self.palette().color(QPalette.ColorRole.Highlight if selection is not None and selection.isSelected(current) else QPalette.ColorRole.Window)
+        QApplication.style().drawPrimitive(QStyle.PrimitiveElement.PE_FrameFocusRect, focus, painter, self)
 
     def _draw_pinned_cells(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex, columns: list[int]) -> None:
         """Paint the frozen cells of a row again over the scrolled ones, at the places they have when the table is not scrolled. The delegate is handed the rectangles Qt

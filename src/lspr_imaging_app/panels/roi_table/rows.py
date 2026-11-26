@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from ...domain.roi_model import AreaRoi, AreaRoiDetectionSettings, AreaRoiGroup
 from ...domain.roi_shapes import Border, Circle, MaskShape, Rectangle, Shape, effective_border, shape_area_px
 from ...roi.palette import DEFAULT_ROI_COLOR_HEX
+from .number_format import ColumnDisplay, format_value
 
 COLUMN_ID, COLUMN_NAME, COLUMN_X, COLUMN_Y, COLUMN_SAMPLE, COLUMN_RIM_OFFSET, COLUMN_RIM_THICKNESS = range(7)
 """Columns 5 and 6 are the rim: its **offset** from the shape's edge and its **thickness**, the same two numbers for a circle, a rectangle and a pixel map (2026-11-19; they were the circle's inner and outer ring diameters d_r / D_r: the numbers every saved column key and frozen column holds still name the same columns)."""
@@ -44,9 +45,9 @@ VIEW_GEOMETRY = "geometry"
 VIEW_MODES = (VIEW_SIMPLE, VIEW_GEOMETRY)
 VIEW_MODE_COLUMNS = {
     VIEW_SIMPLE: (COLUMN_ID, COLUMN_NAME),
-    VIEW_GEOMETRY: (COLUMN_ID, COLUMN_X, COLUMN_Y, COLUMN_SHAPE, COLUMN_AREA, COLUMN_SAMPLE, *RIM_COLUMNS, *RECTANGLE_COLUMNS),
+    VIEW_GEOMETRY: (COLUMN_ID, COLUMN_NAME, COLUMN_X, COLUMN_Y, COLUMN_SHAPE, COLUMN_AREA, COLUMN_SAMPLE, *RIM_COLUMNS, *RECTANGLE_COLUMNS),
 }
-"""Which columns each view mode shows, left to right on screen is the model order; the rest are hidden."""
+"""Which columns each view mode shows, left to right on screen is the model order; the rest are hidden. (2026-11-26, maintainer: Geometry shows Label too, so the group names have their header.)"""
 
 FIELD_NAMES = {
     COLUMN_X: "x", COLUMN_Y: "y", COLUMN_SAMPLE: "D_s", COLUMN_RIM_OFFSET: "offset", COLUMN_RIM_THICKNESS: "thickness",
@@ -172,9 +173,14 @@ def from_display(value: float, unit: LengthUnit) -> float:
     return value if unit.um_per_px is None else value / unit.um_per_px
 
 
-def format_length(px: float, unit: LengthUnit) -> str:
-    """What a cell shows: one decimal for px, none for µm (the stored value is always px)."""
-    return f"{to_display(px, unit):.1f}" if unit.um_per_px is None else f"{to_display(px, unit):.0f}"
+def length_decimals(unit: LengthUnit) -> int:
+    """The decimals a length cell shows without a setting of the user's: one for px, none for µm."""
+    return 1 if unit.um_per_px is None else 0
+
+
+def format_length(px: float, unit: LengthUnit, display: ColumnDisplay | None = None) -> str:
+    """What a cell shows: one decimal for px, none for µm (the stored value is always px). `display`: the column's own setting, if the user made one (`number_format`)."""
+    return format_value(to_display(px, unit), length_decimals(unit), display)
 
 
 def edit_text(px: float, unit: LengthUnit) -> str:
@@ -215,11 +221,13 @@ def to_display_area(area_px: float, unit: LengthUnit) -> float:
     return area_px if unit.um_per_px is None else area_px * unit.um_per_px ** 2
 
 
-def format_area(area_px: float, unit: LengthUnit) -> str:
+def area_decimals(unit: LengthUnit) -> int:
+    return 0 if unit.um_per_px is None else 1
+
+
+def format_area(area_px: float, unit: LengthUnit, display: ColumnDisplay | None = None) -> str:
     """What the Area cell shows: a count of pixels with no decimals, or µm^2 with one (the stored value is always px^2). Display only; an area is never typed in."""
-    if unit.um_per_px is None:
-        return f"{area_px:.0f}"
-    return f"{to_display_area(area_px, unit):.1f}"
+    return format_value(to_display_area(area_px, unit), area_decimals(unit), display)
 
 
 def area_tooltip(row: RoiRow, unit: LengthUnit) -> str:
@@ -237,9 +245,12 @@ def area_tooltip(row: RoiRow, unit: LengthUnit) -> str:
     return text
 
 
-def format_angle(degrees: float) -> str:
+ANGLE_DECIMALS = 1
+
+
+def format_angle(degrees: float, display: ColumnDisplay | None = None) -> str:
     """What a cell shows: one decimal, as a length in px does."""
-    return f"{degrees:.1f}"
+    return format_value(degrees, ANGLE_DECIMALS, display)
 
 
 def angle_edit_text(degrees: float) -> str:

@@ -25,7 +25,7 @@ from collections.abc import Callable
 from typing import Any
 
 from PyQt6.QtCore import QPointF, Qt
-from PyQt6.QtGui import QAction, QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
+from PyQt6.QtGui import QAction, QColor, QFont, QFontMetrics, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PyQt6.QtWidgets import QMenu
 
 from lspr_ui import get_active_theme, load_tabler_icon
@@ -110,6 +110,43 @@ def _mask_to_selection() -> QIcon:
     return mask_to_selection_icon(get_active_theme().text_primary)  # the Mask tab's Selection from mask button
 
 
+def _number_template(*lines: str) -> Callable[[], QIcon]:
+    """An icon that is a number-format template written out, as spreadsheets and ``DecimalFormat`` name them: ``#.##`` a plain number, ``#.##`` over ``E0`` scientific (the digit, the
+    point and the decimals, then the exponent). One line per argument; the letters are the largest that fit the square."""
+
+    def paint() -> QIcon:
+        side = _RENDER_SIZE
+        pixmap = QPixmap(side, side)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        font = QFont()
+        font.setBold(True)
+        size = side * (0.62 if len(lines) == 1 else 0.44)
+        while size > 6:
+            font.setPixelSize(int(size))
+            metrics = QFontMetrics(font)
+            if max(metrics.horizontalAdvance(line) for line in lines) <= side * 0.94 and metrics.height() * len(lines) <= side * 0.98:
+                break
+            size -= 1
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        painter.setFont(font)
+        painter.setPen(QColor(get_active_theme().text_primary))
+        painter.drawText(pixmap.rect(), int(Qt.AlignmentFlag.AlignCenter), chr(10).join(lines))
+        painter.end()
+        icon = QIcon()
+        icon.addPixmap(pixmap, QIcon.Mode.Normal)
+        return icon
+
+    return paint
+
+
+def _dimensions() -> QIcon:
+    """The ROI table's Geometry button picture (`roi_table/geometry_icon.py`): the dimension lines of a technical drawing."""
+    from .roi_table.geometry_icon import dimensions_picture
+
+    return QIcon(dimensions_picture()(get_active_theme().text_primary))
+
+
 def _plan_step(name: str, accent: str) -> Callable[[], QIcon]:
     """One of the plan bar's step icons (`sensorgram/plan_icons.py`), coloured as the ribbon's Edit group colours it
     (new = green, removed = red, restored = blue, split = gold; ``"none"`` for the one with no accent)."""
@@ -190,12 +227,19 @@ ICONS: dict[str, str | Callable[[], QIcon]] = {
     "lock": "lock",
     "unlock": "lock-open",
     "groups_only": "list",
+    "highlight_label": "table",  # "Highlight only label"
     # the ROI table's columns and views
     "view_simple": "list",
-    "view_geometry": "ruler-measure",
+    "view_geometry": _dimensions,  # the same picture as the table's Geometry button
     "linked_view": "link",
     "hide_column": "eye-off",
     "show_column": "eye",
+    "column_display": _number_template("#.##"),  # "Display" (number format of a column)
+    "decimals_more": "plus",
+    "decimals_fewer": "minus",
+    "decimals_auto": "reload",  # back to the table's own decimals (the icon of "reset")
+    "notation_normal": _number_template("#.##"),
+    "notation_scientific": _number_template("#.##", "E0"),
     "freeze": "snowflake",
     "unfreeze": "snowflake-off",
     "fit_columns": "arrow-autofit-width",

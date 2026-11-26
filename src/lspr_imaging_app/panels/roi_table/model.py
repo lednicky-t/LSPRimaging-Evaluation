@@ -12,7 +12,9 @@ did not accept.)
 from __future__ import annotations
 
 import json
-from collections.abc import Collection, Sequence
+import math
+from collections.abc import Collection, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 from PyQt6.QtCore import QAbstractItemModel, QMimeData, QModelIndex, Qt, pyqtSignal
@@ -52,7 +54,9 @@ from .rows import (
     RoiRow,
     Section,
     StepSort,
+    ANGLE_DECIMALS,
     angle_edit_text,
+    area_decimals,
     area_tooltip,
     build_linked_sections,
     build_roi_rows,
@@ -62,8 +66,14 @@ from .rows import (
     format_area,
     has_cell,
     format_length,
+    length_decimals,
     sort_rows,
+    to_display,
+    to_display_area,
 )
+from .column_keys import ColumnKey, column_key
+from .number_format import DEFAULT_DISPLAY, NORMAL, ColumnDisplay
+from .number_format import shown_decimals as _digits_shown
 from .step_columns import DEFAULT_DECIMALS, DISPLAY_BOTH, DISPLAY_MEAN, cell_tooltip, format_cell, is_excess, sort_value, table_decimals
 
 KIND_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -206,9 +216,14 @@ class RoiTreeModel(QAbstractItemModel):
         self._grouped = False
         self._linked = False  # the Linked view (`rows.build_linked_sections`): the tree has headers but they are not groups
         self._step_columns: tuple[StepColumn, ...] = ()
+        self._layout_pass = False  # True only inside `layout_pass()`: `index` then answers for the fixed columns alone
         self._cells: StepCells | None = None
         self._display = DISPLAY_BOTH
         self._decimals = DEFAULT_DECIMALS
+        self._decimals_key: tuple | None = None  # what `_decimals` was worked out from (`_refresh_decimals`): the same again, the same answer
+        self._numbers_version = 0  # up by one whenever the step numbers may have changed (`mark_numbers_changed`)
+        self._column_display: dict[ColumnKey, ColumnDisplay] = {}  # the user's per-column number format, by column key (`column_keys.py`)
+        self._display_of: dict[int, ColumnDisplay] = {}  # the same by column number, for the cells (`_make_display_map`)
         self._sort_ref: object | None = None  # the step a step column sort is on, by reference: the columns are renumbered when steps change
         self._tint_alpha = DEFAULT_TINT_ALPHA  # the plan bar's opacity: how strongly a step column is coloured
         self._tints: tuple[QColor | None, ...] = ()  # one per step column (`_make_tints`), so `data()` does not build a colour per cell
@@ -246,7 +261,9 @@ class RoiTreeModel(QAbstractItemModel):
         step (by reference) to its new column, or falls back to the ``#`` order when the step is gone."""
         self._step_columns = tuple(columns) if cells is not None else ()
         self._cells = cells
+        self._numbers_version += 1
         self._tints = self._make_tints()
+        self._display_of = self._make_display_map()
         if self._sort_ref is not None:
             refs = [c.ref for c in self._step_columns]
             if self._sort_ref in refs:
@@ -266,9 +283,10 @@ class RoiTreeModel(QAbstractItemModel):
         column = self._step_columns[position]
         mode = self._mode_of(column)
         decimals = self._decimals if column.decimals is None else column.decimals
-        texts = [format_cell(self._cells.roi_cell(row.roi_id, column.ref), mode, decimals) for row in self._rows]
+        display = self._display_of.get(COLUMN_COUNT + position)
+        texts = [format_cell(self._cells.roi_cell(row.roi_id, column.ref), mode, decimals, display) for row in self._rows]
         if self._grouped and not self._linked:
-            texts += [format_cell(self._cells.group_cell(key, sorted(members), column.ref), mode, decimals) for key, members in self._members_by_group().items()]
+            texts += [format_cell(self._cells.group_cell(key, sorted(members), column.ref), mode, decimals, display) for key, members in self._members_by_group().items()]
         return [text for text in texts if text]
 
     def set_step_tint_alpha(self, alpha: float) -> None:
@@ -307,16 +325,120 @@ class RoiTreeModel(QAbstractItemModel):
     def step_display(self) -> str:
         return self._display
 
+    # -- the user's number format per column (`number_format.py`) ---------------------------------
+
+    def _make_display_map(self) -> dict[int, ColumnDisplay]:
+        """The user's settings by column number: a fixed column by its number, a step column by where its step is now (the settings are kept by column key, which survives renumbering)."""
+        mapping = {key: display for key, display in self._column_display.items() if isinstance(key, int)}
+        for position, column in enumerate(self._step_columns):
+            display = self._column_display.get(column_key(column))
+            if display is not None:
+                mapping[COLUMN_COUNT + position] = display
+        return mapping
+
+    def column_display(self, column: int) -> ColumnDisplay:
+        return self._display_of.get(column, DEFAULT_DISPLAY)
+
+    def column_displays(self) -> dict[ColumnKey, ColumnDisplay]:
+        """Every setting the user made, by column key (a setting for a step this experiment does not have is kept: it is the user's, for the experiment it belongs to)."""
+        return dict(self._column_display)
+
+    def set_column_display(self, key: ColumnKey, display: ColumnDisplay) -> None:
+        """Write one column's numbers another way (the default display removes the setting)."""
+        self.set_column_displays({**self._column_display, key: display})
+
+    def set_column_displays(self, displays: Mapping[ColumnKey, ColumnDisplay]) -> None:
+        """Replace every setting (restoring the remembered ones). Only the cells whose column's setting changed are drawn again."""
+        new = {key: display for key, display in displays.items() if not display.is_default}
+        if new == self._column_display:
+            return
+        before = self._display_of
+        self._column_display = new
+        self._display_of = self._make_display_map()
+        for column in sorted(set(before) | set(self._display_of)):
+            if before.get(column) != self._display_of.get(column):
+                self._repaint_column(column)
+
+    def _repaint_column(self, column: int) -> None:
+        if column >= self.columnCount():
+            return
+        top = self._root.children
+        for node in top:
+            for item in (node, *node.children):
+                index = self.createIndex(item.position, column, item)
+                self.dataChanged.emit(index, index, [VALUES_ONLY_ROLE])  # (only what the cell says: nothing to lay out again)
+
+    def plain_decimals(self, column: int) -> int | None:
+        """The decimals a column shows without a setting of the user's, or None for a column that holds no number to format."""
+        if column >= COLUMN_COUNT:
+            position = column - COLUMN_COUNT
+            if not 0 <= position < len(self._step_columns):
+                return None
+            return self._decimals if self._step_columns[position].decimals is None else self._step_columns[position].decimals
+        if column == COLUMN_AREA:
+            return area_decimals(self._unit)
+        if column == COLUMN_ANGLE:
+            return ANGLE_DECIMALS
+        return length_decimals(self._unit) if column in LENGTH_COLUMNS else None
+
+    def shown_decimals(self, column: int) -> int | None:
+        """The digits after the point the column writes now: what a "More / Fewer decimals" step starts from. Normal notation and an explicit setting need no number; automatic scientific
+        notation writes the digits the number needs, so the first number the column holds decides (None if it holds none)."""
+        plain = self.plain_decimals(column)
+        if plain is None:
+            return None
+        display = self.column_display(column)
+        if display.notation == NORMAL or display.decimals is not None:
+            return _digits_shown(1.0, plain, display)
+        number = self._first_number(column)
+        return None if number is None else _digits_shown(number, plain, display)
+
+    def _first_number(self, column: int) -> float | None:
+        """The number in the first row that has one in this column (as the cell shows it: in the display unit)."""
+        for row in self._rows:
+            number = self._number_of(row, column)
+            if number is not None and math.isfinite(number):
+                return number
+        return None
+
+    def _number_of(self, row: RoiRow, column: int) -> float | None:
+        unit = self._unit
+        if column >= COLUMN_COUNT:
+            position = column - COLUMN_COUNT
+            if self._cells is None or not 0 <= position < len(self._step_columns):
+                return None
+            step = self._step_columns[position]
+            return sort_value(self._cells.roi_cell(row.roi_id, step.ref), self._mode_of(step))
+        if column in (COLUMN_X, COLUMN_Y):
+            return to_display(row.x if column == COLUMN_X else row.y, unit)
+        if column == COLUMN_AREA:
+            return to_display_area(row.area_px, unit)
+        if column in RECTANGLE_COLUMNS:
+            if column not in SHAPE_FIELDS[row.shape]:
+                return None
+            return row.angle if column == COLUMN_ANGLE else to_display(row.width if column == COLUMN_WIDTH else row.height, unit)
+        if column in RIM_COLUMNS:
+            return to_display(row.rim_offset if column == COLUMN_RIM_OFFSET else row.rim_thickness, unit) if row.has_rim else None
+        if column == COLUMN_SAMPLE and not row.is_mask and column in SHAPE_FIELDS[row.shape]:
+            return to_display(row.sample, unit)
+        return None
+
     def sorts_by_step(self) -> bool:
         return self._sort_column >= COLUMN_COUNT
 
     def refresh_numbers(self) -> None:
         """The numbers behind the step cells changed (a calculation finished, a row went out of date): format them again, and sort again when a step column sorts."""
+        self._numbers_version += 1
         if self.sorts_by_step():
             self._rebuild()  # (which also formats again)
         else:
             self._refresh_decimals()
             self._repaint_steps()
+
+    def mark_numbers_changed(self) -> None:
+        """The step table says its numbers changed, whether or not the table is showing them now (a hidden panel does no work, `StepColumnControls._on_numbers_changed`): the common number of
+        decimals is worked out again at the next rebuild instead of being taken from before."""
+        self._numbers_version += 1
 
     def _repaint_steps(self) -> None:
         if not self._step_columns:
@@ -344,7 +466,16 @@ class RoiTreeModel(QAbstractItemModel):
                 yield self._cells.group_cell(key, sorted(members), column.ref)
 
     def _refresh_decimals(self) -> None:
-        self._decimals = table_decimals(self._all_cells(), self._display)
+        """The one number of decimals of the step columns: the median spread of every step cell (`table_decimals`), about 42 000 cell lookups for 160 ROIs and 241 step columns. Worked out
+        again only when something it depends on may have changed (2026-11-26): the numbers (`_numbers_version`: the step table's own signal, also while the panel is hidden, or a new set of
+        step columns), what is shown (the display mode), or which cells there are (rows, groups, roles, the step columns). A ROI that only moved changes none of these."""
+        key = (
+            self._numbers_version, self._display, self._grouped, self._linked,
+            tuple(column.ref for column in self._step_columns), tuple((row.roi_id, row.group_id, row.role) for row in self._rows),
+        )
+        if key != self._decimals_key:
+            self._decimals = table_decimals(self._all_cells(), self._display)
+            self._decimals_key = key
 
     def _mode_of(self, column: StepColumn) -> str:
         """What a column shows: the chosen display, except a column with no spread (signal to noise) which has only its value, whatever is chosen."""
@@ -600,10 +731,27 @@ class RoiTreeModel(QAbstractItemModel):
     # -- QAbstractItemModel ------------------------------------------------------------
 
     def index(self, row: int, column: int, parent: QModelIndex = QModelIndex()) -> QModelIndex:
-        if not self.hasIndex(row, column, parent):
+        # The same answers as `hasIndex` + `createIndex`, without `hasIndex` (it calls `rowCount` and `columnCount` back in Python): Qt asks for every cell of every row while it
+        # lays the tree out, 44 000 times for 160 ROIs and 241 step columns (2026-11-26, `tools/roi_table_timing.py`).
+        columns = COLUMN_COUNT if self._layout_pass else COLUMN_COUNT + len(self._step_columns)
+        if row < 0 or column < 0 or column >= columns or parent.column() > 0:
             return QModelIndex()
         parent_node = parent.internalPointer() if parent.isValid() else self._root
-        return self.createIndex(row, column, parent_node.children[row])
+        children = parent_node.children
+        if row >= len(children):
+            return QModelIndex()
+        return self.createIndex(row, column, children[row])
+
+    @contextmanager
+    def layout_pass(self):
+        """While Qt lays the tree out (`expandAll`), answer only for the fixed columns. Qt takes a row's height as the largest size hint of its cells and asks every column,
+        however far off screen; the delegate says 0 for all but column 0 (which alone decides a row's height: `RoiTableDelegate.sizeHint`), so the step columns cannot change the
+        answer, and with 241 of them asking cost 0.25-0.7 s. Used by `RoiTablePanel._rebuild` only, around `expandAll`; nothing is drawn or edited while it is on."""
+        self._layout_pass = True
+        try:
+            yield
+        finally:
+            self._layout_pass = False
 
     def parent(self, index: QModelIndex) -> QModelIndex:  # type: ignore[override]
         if not index.isValid():
@@ -681,7 +829,7 @@ class RoiTreeModel(QAbstractItemModel):
                 return "", False, False, _ALIGN_RIGHT, None
             step = self._step_columns[column - COLUMN_COUNT]
             value = self._cells.roi_cell(row.roi_id, step.ref)
-            text = format_cell(value, self._mode_of(step), self._decimals if step.decimals is None else step.decimals)
+            text = format_cell(value, self._mode_of(step), self._decimals if step.decimals is None else step.decimals, self._display_of.get(column))
             return text or "", False, value is not None and not value.current, _ALIGN_RIGHT, self._tint_of(column)
         text = self._cell_value(row, column)[0]
         dim = (column in RIM_COLUMNS and row.rim_inherited and row.has_rim) or (row.is_mask and text == "mask")
@@ -760,7 +908,7 @@ class RoiTreeModel(QAbstractItemModel):
             value = self._cells.roi_cell(row.roi_id, step.ref)
             row_text, is_group = f"ROI {row.roi_id}", False
         if role == Qt.ItemDataRole.DisplayRole:
-            return format_cell(value, self._mode_of(step), self._decimals if step.decimals is None else step.decimals)
+            return format_cell(value, self._mode_of(step), self._decimals if step.decimals is None else step.decimals, self._display_of.get(column))
         if role == Qt.ItemDataRole.ToolTipRole:
             return cell_tooltip(row_text, step, value, is_group=is_group)
         if role == STEP_STALE_ROLE:
@@ -776,28 +924,28 @@ class RoiTreeModel(QAbstractItemModel):
             return "", ""  # labels belong to groups; a ROI has its id
         if column in (COLUMN_X, COLUMN_Y):
             value = row.x if column == COLUMN_X else row.y
-            return format_length(value, unit), edit_text(value, unit)
+            return format_length(value, unit, self._display_of.get(column)), edit_text(value, unit)
         if column == COLUMN_SHAPE:
             return TYPE_LABELS[row.type_icon], ""
         if column == COLUMN_AREA:
-            return format_area(row.area_px, unit), ""  # derived from the shape: nothing to edit
+            return format_area(row.area_px, unit, self._display_of.get(column)), ""  # derived from the shape: nothing to edit
         if column in RECTANGLE_COLUMNS:
             if column not in SHAPE_FIELDS[row.shape]:
                 return "", ""  # only a rectangle has a width, a height and an angle
             if column == COLUMN_ANGLE:
-                return format_angle(row.angle), angle_edit_text(row.angle)
+                return format_angle(row.angle, self._display_of.get(column)), angle_edit_text(row.angle)
             value = row.width if column == COLUMN_WIDTH else row.height
-            return format_length(value, unit), edit_text(value, unit)
+            return format_length(value, unit, self._display_of.get(column)), edit_text(value, unit)
         if column in RIM_COLUMNS:
             if not row.has_rim:
                 return "", ""  # a reference has no rim, nor has a ROI whose rim is switched off
             value = row.rim_offset if column == COLUMN_RIM_OFFSET else row.rim_thickness
-            return format_length(value, unit), edit_text(value, unit)
+            return format_length(value, unit, self._display_of.get(column)), edit_text(value, unit)
         if row.is_mask:
             return "mask", ""
         if column not in SHAPE_FIELDS[row.shape]:
             return "", ""  # this shape has no such number
-        return format_length(row.sample, unit), edit_text(row.sample, unit)
+        return format_length(row.sample, unit, self._display_of.get(column)), edit_text(row.sample, unit)
 
     def _tooltip(self, row: RoiRow, column: int) -> str | None:
         unit = self._unit.label

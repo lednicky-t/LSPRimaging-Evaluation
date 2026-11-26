@@ -16,6 +16,7 @@ from collections.abc import Callable, Iterable
 
 from ...selection.step_table_module import CellValue, StepColumn
 from ...plan.stats_table import PLUS_MINUS, choose_decimals
+from .number_format import ColumnDisplay, format_value
 
 DISPLAY_MEAN, DISPLAY_STD, DISPLAY_BOTH, DISPLAY_SEM, DISPLAY_MEAN_SEM = "mean", "std", "both", "sem", "mean_sem"
 DISPLAY_EXCESS, DISPLAY_EXCESS_U, DISPLAY_EXCESS_Z = "excess", "excess_u", "excess_z"  # measured minus the bulk prediction (2026-11-12)
@@ -163,33 +164,34 @@ def widest_text(texts: Iterable[str], advance: Callable[[str], int]) -> int:
     return max((advance(text) for text in longest), default=0)
 
 
-def format_cell(value: CellValue | None, mode: str, decimals: int) -> str:
-    """The text of a cell; empty for a row with no number in the step. ``mean ± spread`` falls back to the mean alone where there is no spread (a single cube, a single ROI)."""
+def format_cell(value: CellValue | None, mode: str, decimals: int, display: ColumnDisplay | None = None) -> str:
+    """The text of a cell; empty for a row with no number in the step. ``mean ± spread`` falls back to the mean alone where there is no spread (a single cube, a single ROI).
+    `decimals` is the column's own number (or the table's); `display` is what the user chose for this column, if anything (`number_format`)."""
     if value is None:
         return ""
     if is_excess(mode):
-        return _excess_text(value, mode, decimals)
+        return _excess_text(value, mode, decimals, display)
     spread = spread_of(value, mode)
     if not shows_mean(mode):
-        return f"{spread:.{decimals}f}" if math.isfinite(spread) else ""
+        return format_value(spread, decimals, display) if math.isfinite(spread) else ""
     if not math.isfinite(value.mean):
         return ""
     if shows_spread(mode) and math.isfinite(spread):
-        return f"{value.mean:.{decimals}f} {PLUS_MINUS} {spread:.{decimals}f}"
-    return f"{value.mean:.{decimals}f}"
+        return f"{format_value(value.mean, decimals, display)} {PLUS_MINUS} {format_value(spread, decimals, display)}"
+    return format_value(value.mean, decimals, display)
 
 
-def _excess_text(value: CellValue, mode: str, decimals: int) -> str:
+def _excess_text(value: CellValue, mode: str, decimals: int, display: ColumnDisplay | None = None) -> str:
     """A cell in an excess mode: signed, so a positive excess reads as one; NA where the column could have one but does not (no RI, no S_bulk); empty where it never
     has one (the S_bulk and S/N columns)."""
     e, u = value.excess, value.excess_u
     if not math.isfinite(e):
         return NA_TEXT if value.excess_note else ""
     if mode == DISPLAY_EXCESS_Z:
-        return f"{e / u:+.1f}" if math.isfinite(u) and u > 0 else NA_TEXT
+        return format_value(e / u, 1, display, signed=True) if math.isfinite(u) and u > 0 else NA_TEXT  # (a ratio: one decimal, unless the user chose another)
     if mode == DISPLAY_EXCESS_U and math.isfinite(u):
-        return f"{e:+.{decimals}f} {PLUS_MINUS} {u:.{decimals}f}"
-    return f"{e:+.{decimals}f}"
+        return f"{format_value(e, decimals, display, signed=True)} {PLUS_MINUS} {format_value(u, decimals, display)}"
+    return format_value(e, decimals, display, signed=True)
 
 
 def excess_number(value: CellValue | None, mode: str) -> float | None:

@@ -50,7 +50,7 @@ import logging
 from collections.abc import Callable
 
 from PyQt6.QtCore import QItemSelection, QItemSelectionModel, QMimeData, QModelIndex, QPersistentModelIndex, QPoint, QRect, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QActionGroup, QColor, QCursor, QIcon, QKeySequence, QLinearGradient, QPainter
+from PyQt6.QtGui import QAction, QActionGroup, QColor, QCursor, QIcon, QKeySequence
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -80,6 +80,7 @@ from ...storage.ui_state_keys import (
     ROI_TABLE_COLLAPSED,
     ROI_TABLE_COLUMN_WIDTHS,
     ROI_TABLE_GROUP_ONLY,
+    ROI_TABLE_LABEL_ONLY_HIGHLIGHT,
     ROI_TABLE_LINKED,
     ROI_TABLE_SORT,
     ROI_TABLE_VIEW_MODE,
@@ -96,6 +97,7 @@ from ..unit_toggle import UnitToggle
 from .cell_clipboard import MIME_TYPE, CellBlock, block_from_payload, block_to_payload, block_to_text, names_of, plan_paste
 from .delegate import RoiTableDelegate
 from .dialogs import ShiftDialog
+from .column_display import ColumnDisplayMenu
 from .freeze import FreezeColumns
 from .geometry_icon import dimensions_picture
 from .hide_columns import HideColumns
@@ -134,6 +136,7 @@ from .rows import (
     step_target_index,
     step_text,
 )
+from . import toolbar_toggles
 from .step_controls import StepColumnControls, StepHost
 from .view import RoiTreeView, suggested_column_widths
 
@@ -230,6 +233,8 @@ class RoiTablePanel(QWidget):
             self._rebuild(lambda: self._model.set_sort(saved_sort[0], saved_sort[1]))
         if store.get(ROI_TABLE_GROUP_ONLY) is True:
             self.set_group_only(True)
+        if store.get(ROI_TABLE_LABEL_ONLY_HIGHLIGHT) is True:
+            self._tree.set_label_only_highlight(True)
         if store.get(ROI_TABLE_LINKED) is True:
             self._linked_action.setChecked(True)  # (its handler rebuilds the table)
         collapsed = store.get(ROI_TABLE_COLLAPSED)
@@ -250,6 +255,7 @@ class RoiTablePanel(QWidget):
             self._apply_widths()
         self._hide.restore_ui_state(store)
         self._freeze.restore_ui_state(store)
+        self._column_display.restore_ui_state(store)
         self._step_controls.restore_ui_state(store)
 
     # -- construction -----------------------------------------------------------------
@@ -272,21 +278,25 @@ class RoiTablePanel(QWidget):
         self._stack.addWidget(self._tree)
         self._stack.addWidget(self._hint)
 
-        self._group_button = self._tool_button("group-rois", self._group_selected_or_new)
-        self._ungroup_button = self._tool_button("ungroup-rois", self._ungroup_selected)
-        self._color_button = self._tool_button("droplet", self._color_selected)
         self._up_button = self._tool_button("arrow-up", lambda: self._move_selected(-1))
         self._down_button = self._tool_button("arrow-down", lambda: self._move_selected(1))
-        self._delete_button = self._tool_button("trash", self._delete_selected)
+        self._lock_toggle = self._tool_button("lock-open", lambda: self._selection.set_roi_selection_locked(self._lock_toggle.isChecked()), checkable=True)  # the ROIs tab's lock button: one switch (`SelectionModule`)
+        self._lock_toggle.setToolTip(roi_selection_lock.TIP)
         self._view_toggle = self._tool_button("dimensions", self._toggle_view_mode, checkable=True)  # Geometry (on, accent) <-> Simple; the header menu's choice, same setting (painted icon)
         self._sync_view_toggle()
+        self._selection.roi_selection_lock_changed.connect(lambda locked: toolbar_toggles.show_lock(self._lock_toggle, self._tree, locked, self._style_tool_button))
+        toolbar_toggles.show_lock(self._lock_toggle, self._tree, self._selection.roi_selection_locked(), self._style_tool_button)
+        self._group_only_toggle = self._tool_button("list", lambda: self.set_group_only(not self._group_only), checkable=True)  # the right-click menu's "Groups-only view" (same icon, accent while on)
+        self.group_only_changed.connect(lambda on: toolbar_toggles.show_group_only(self._group_only_toggle, on, self._style_tool_button))
+        self.group_only_changed.connect(lambda on: toolbar_toggles.enable_geometry_controls(self._view_toggle, self._view_actions.values(), on))
+        toolbar_toggles.show_group_only(self._group_only_toggle, self._group_only, self._style_tool_button)
         self._view_menu = QMenu(self)  # opened by a right-click on the column headers (`_show_header_menu`)
         self._view_actions: dict[str, QAction] = {}
         action_group = QActionGroup(self)
         action_group.setExclusive(True)
         for mode, text, icon_key in (
             (VIEW_SIMPLE, "Simple view (ID and group label)", "view_simple"),
-            (VIEW_GEOMETRY, "Geometry view (position, shape, diameters)", "view_geometry"),
+            (VIEW_GEOMETRY, "Geometry view (label, position, shape, diameters)", "view_geometry"),
         ):
             action = give_persistent_icon(self._view_menu.addAction(text), icon_key)
             action.setCheckable(True)
@@ -307,8 +317,10 @@ class RoiTablePanel(QWidget):
         self._view_actions[VIEW_SIMPLE].setToolTip("Only the ID and the group labels.")
         self._hide = HideColumns(self, self._tree, self._view_menu, self._show_notice, lambda: self._store, self._on_column_hidden)  # after the view choice: Hide / Show hidden columns
         self._freeze = FreezeColumns(self, self._tree, self._view_menu, self._show_notice, lambda: self._store)  # then: Freeze / Unfreeze columns
+        self._column_display = ColumnDisplayMenu(self, self._tree, self._model, self._view_menu, lambda: self._store, self._on_column_display_changed)  # then: Display (decimals, notation)
         self._tree.header().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._unit_toggle = UnitToggle(self._geometry, self)  # px <-> µm for x, y and the diameters
+        toolbar_toggles.enable_geometry_controls(self._view_toggle, self._view_actions.values(), self._group_only)
 
         # The step columns' controls (after a separator in the toolbar): `step_controls.py`.
         self._step_controls = StepColumnControls(
@@ -322,18 +334,12 @@ class RoiTablePanel(QWidget):
         toolbar = QHBoxLayout()
         toolbar.setContentsMargins(6, 4, 6, 4)
         toolbar.setSpacing(2)
-        self._group_slot = QStackedWidget(self)  # one place for Group / Ungroup: whichever fits the selection
-        self._group_slot.addWidget(self._group_button)
-        self._group_slot.addWidget(self._ungroup_button)
-        toolbar.addWidget(self._group_slot)
-        toolbar.addWidget(self._color_button)
-        toolbar.addSpacing(8)
-        for button in (self._up_button, self._down_button):
+        # (2026-11-26, maintainer: no Group / Ungroup, colour or Delete buttons here: they are in the right-click menu and on their keys)
+        for button in (self._up_button, self._down_button, self._lock_toggle):
             toolbar.addWidget(button)
         toolbar.addSpacing(8)
-        toolbar.addWidget(self._delete_button)
-        toolbar.addSpacing(8)
         toolbar.addWidget(self._view_toggle)
+        toolbar.addWidget(self._group_only_toggle)
         self._step_controls.add_to_toolbar(toolbar)
         toolbar.addStretch(1)
         toolbar.addWidget(self._unit_toggle)
@@ -431,10 +437,9 @@ class RoiTablePanel(QWidget):
         the accent colour, as the ribbon's toggles are."""
         theme = get_active_theme()
         style_general_icon_button(button)
-        if button is self._color_button:
-            button.setIcon(self._rainbow_icon(icon_name))
-            return
         on = button.isCheckable() and button.isChecked()
+        if button is self._lock_toggle:  # an open padlock while the selection is free, a closed one in the accent colour while locked (as on the ROIs tab)
+            icon_name = "lock" if on else "lock-open"
         if button is self._view_toggle:  # the dimension lines of a technical drawing (a painted picture, `geometry_icon.py`), in the accent colour while the Geometry view is on
             button.setIcon(QIcon(dimensions_picture()(theme.accent_blue if on else theme.text_secondary)))
             return
@@ -443,28 +448,6 @@ class RoiTablePanel(QWidget):
                 icon_name, color=theme.accent_blue if on else theme.text_secondary, size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH
             )
         )
-
-    @staticmethod
-    def _rainbow_icon(icon_name: str) -> QIcon:
-        """The icon's shape, filled solid, with a rainbow gradient (it is drawn white, then the gradient is painted
-        only where the icon has pixels), so the colour button reads as "colours"."""
-        pixmap = load_tabler_icon(
-            icon_name, color="#ffffff", fill="#ffffff", size=_RENDER_SIZE, stroke_width=_STROKE_WIDTH
-        ).pixmap(
-            _RENDER_SIZE, _RENDER_SIZE
-        )
-        # Span the gradient over the droplet itself (it covers only the middle of the icon square), so the whole
-        # spectrum shows inside the shape rather than just the middle hues.
-        w, h = pixmap.width(), pixmap.height()
-        gradient = QLinearGradient(0.32 * w, 0.12 * h, 0.68 * w, 0.88 * h)
-        steps = 12
-        for i in range(steps + 1):  # full hue circle, red -> magenta, vivid
-            gradient.setColorAt(i / steps, QColor.fromHsvF(0.85 * i / steps, 0.9, 1.0))
-        painter = QPainter(pixmap)
-        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
-        painter.fillRect(pixmap.rect(), gradient)
-        painter.end()
-        return QIcon(pixmap)
 
     # -- refresh --------------------------------------------------------------------------
 
@@ -531,7 +514,8 @@ class RoiTablePanel(QWidget):
         if reset:
             self._restoring_view = True
             try:
-                self._tree.expandAll()
+                with self._model.layout_pass():  # (Qt asks every cell of every row for its height: with many step columns that was most of a rebuild)
+                    self._tree.expandAll()
                 for header in self._model.group_headers():
                     self._tree.setFirstColumnSpanned(header.row(), QModelIndex(), True)
                     if self._group_only or self._group_key_of(header) in self._collapsed:
@@ -746,8 +730,14 @@ class RoiTablePanel(QWidget):
         section = header.section_at(pos.x())
         self._hide.prepare(section)
         self._freeze.prepare(section)
+        self._column_display.prepare(section)
         self._step_controls.prepare_menu()
         self._view_menu.exec(header.mapToGlobal(pos))
+
+    def _on_column_display_changed(self, column: int) -> None:
+        """A column's decimals or notation changed: the step columns that fit their content follow the new text."""
+        if column >= COLUMN_COUNT:
+            self._step_controls.fit_if_auto()
 
     def _on_column_hidden(self, column: int) -> None:
         """A column was hidden: a table sorted by it goes back to the ``#`` order (a sort the user can no longer see is a puzzle), as when a view mode hides it."""
@@ -869,18 +859,6 @@ class RoiTablePanel(QWidget):
         group_ids = selected_groups if not _rois else []
         moving_groups = bool(group_ids) and self._model.is_grouped_view()
 
-        self._group_button.setToolTip(
-            f"Group the {len(ids)} selected ROI{'' if len(ids) == 1 else 's'} ({self._key_text('groups.group')}; each gets its own tint of the group colour)"
-            if ids else f"New empty group ({self._key_text('groups.group')})"
-        )
-        selected = set(ids)  # (made once: inside the loop it was made for every row, 160 x 160 ids)
-        in_group = any(row.group_id is not None for row in rows if row.roi_id in selected)
-        self._group_slot.setCurrentWidget(self._ungroup_button if selected_groups or in_group else self._group_button)
-        self._ungroup_button.setToolTip(f"Ungroup ({self._key_text('groups.ungroup')}): take the selected ROIs or groups out of their groups (the ROIs stay).")
-        self._color_button.setEnabled(bool(ids) or bool(headers))
-        self._color_button.setToolTip(
-            "Recolour the group (every member gets a new tint)." if headers and not _rois else "Set the colour of the selected ROIs."
-        )
         for button, word, step in ((self._up_button, "up", -1), (self._down_button, "down", 1)):
             if moving_groups:
                 button.setEnabled(True)
@@ -894,10 +872,6 @@ class RoiTablePanel(QWidget):
                 button.setToolTip("Select ROIs from a single group to reorder them.")
             else:
                 button.setToolTip(f"Move the selected ROIs {word} one place (Alt+{'Up' if step < 0 else 'Down'}).")
-        self._delete_button.setEnabled(bool(ids) or bool(headers))
-        self._delete_button.setToolTip(
-            "Delete the selected groups together with all their ROIs (Delete)." if headers and not _rois else "Delete the selected ROIs (Delete)."
-        )
 
     # -- editing a cell -----------------------------------------------------------------------
 
@@ -1352,6 +1326,8 @@ class RoiTablePanel(QWidget):
             self._fill_roi_menu(menu)
         if not menu.isEmpty():
             menu.addSeparator()
+        if index.isValid():
+            self._column_display.add_to(menu, self._tree.column_at(pos.x()))  # (a number cell: its column's decimals and notation; nothing for any other)
         lock_selection = give_icon(menu.addAction(roi_selection_lock.MENU_TEXT), "lock")
         lock_selection.setCheckable(True)
         lock_selection.setChecked(self._selection.roi_selection_locked())
@@ -1362,8 +1338,17 @@ class RoiTablePanel(QWidget):
         lock.setCheckable(True)
         lock.setChecked(self._group_only)
         lock.triggered.connect(lambda _checked=False: self.set_group_only(not self._group_only))
+        label_only = give_icon(menu.addAction("Highlight only label"), "highlight_label")
+        label_only.setCheckable(True)
+        label_only.setChecked(self._tree.label_only_highlight())
+        label_only.triggered.connect(self._set_label_only_highlight)
         menu.exec(self._tree.viewport().mapToGlobal(pos))
         menu.deleteLater()  # (a child of this panel: one would be left behind per right-click, with its icons)
+
+    def _set_label_only_highlight(self, on: bool) -> None:
+        self._tree.set_label_only_highlight(on)
+        if self._store is not None:
+            self._store.set(ROI_TABLE_LABEL_ONLY_HIGHLIGHT, on)
 
     def _group_selected_or_new_empty(self) -> None:
         name, accepted = QInputDialog.getText(

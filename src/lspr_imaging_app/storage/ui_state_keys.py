@@ -276,6 +276,7 @@ ROI_TABLE_VIEW_MODE = "roi_table/view_mode"  # "simple" | "geometry"
 ROI_TABLE_SORT = "roi_table/sort"  # [column, descending]; a column of the view mode it was saved in
 ROI_TABLE_COLLAPSED = "roi_table/collapsed"  # sorted group ids
 ROI_TABLE_GROUP_ONLY = "roi_table/group_only"  # bool: the Groups-only view (every group stays collapsed)
+ROI_TABLE_LABEL_ONLY_HIGHLIGHT = "roi_table/label_only_highlight"  # bool: a selected row is tinted in its Label column only (right-click menu); absent = the whole row
 ROI_TABLE_LINKED = "roi_table/linked_view"  # bool: the Linked view (each sample with its references)
 SHORTCUTS_DIALOG_SIZE = "shortcuts_dialog/size"  # [width, height] of Help -> Keyboard shortcuts
 SHORTCUTS_DIALOG_COLLAPSED = "shortcuts_dialog/collapsed"  # sorted section names the user collapsed there
@@ -291,6 +292,7 @@ ROI_TABLE_STEP_DISPLAY = "roi_table/step_display"  # "mean" | "std" | "both" (me
 ROI_TABLE_STEP_WIDTH_MANUAL = "roi_table/step_width_manual"  # int: the width the user gave every step column by dragging an edge; None or absent = each step column fits its content (the old key "roi_table/step_width" was written automatically and is ignored)
 ROI_TABLE_HIDDEN_COLUMNS = "roi_table/hidden_columns"  # list of the columns the user hid (header right-click): a fixed column's number (1-7), a step's reference as a JSON object, or {"compare": [pair, operation]}; see panels/roi_table/column_keys.py
 ROI_TABLE_FROZEN_UPTO ="roi_table/frozen_upto"  # int: the last frozen column (a fixed column's number, 0-7; -1 or absent = none); the columns up to it stay in view when the table scrolls sideways
+ROI_TABLE_COLUMN_DISPLAY = "roi_table/column_display"  # [{"key": a column key payload (panels/roi_table/column_keys.py), "decimals": int or null (automatic), "notation": "normal" | "scientific"}, ...]: the number format the user chose per column (right-click a column header -> Display)
 ROI_TABLE_COMPARE_COLUMNS = "roi_table/compare_columns"  # [[evaluation pair, "difference" | "snr"], ...]: the comparison columns after the step columns
 
 IMAGE_VIEW_RANGE = "image/view_range"

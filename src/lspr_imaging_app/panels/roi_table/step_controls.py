@@ -320,6 +320,7 @@ class StepColumnControls(QObject):
         self._model.set_step_columns(self._steps.columns(), self._steps)
 
     def _on_numbers_changed(self) -> None:
+        self._model.mark_numbers_changed()  # (also while nothing is shown: the common number of decimals must not be taken from before when the table catches up)
         if not self._on or self._host.deferred():
             return
         if self._model.sorts_by_step():
