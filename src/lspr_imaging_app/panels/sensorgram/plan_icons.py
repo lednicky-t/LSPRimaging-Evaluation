@@ -5,7 +5,8 @@ not vendored icon files (``lspr_ui/ICONS.md``), a plot frame with a bar of steps
 ``text_content_picture`` the whole note or only the solution before the separator; ``align_picture`` what the text position is measured against (the bar, or the data of the step);
 ``evaluation_picture`` the Evaluation menu (a baseline bar and a signal bar over a stepped trace); ``add_step_at_cursor_icon`` / ``add_step_before_icon`` / ``add_step_after_icon`` /
 ``remove_step_icon`` / ``merge_steps_icon`` / ``split_step_icon`` / ``restore_steps_icon`` the buttons of the Edit group (2026-11-10), each a few outlined boxes standing for steps;
-the step that a command changes is in an accent colour (add green, remove red, restore blue; split has two ink halves and a gold cut line, merge is all ink).
+the step that a command changes is in an accent colour (add green, remove red, restore blue; split has two ink halves and a gold cut line, merge is all ink);
+``shrink_steps_icon`` / ``offset_steps_icon`` the Batch edit group's two buttons (2026-11-26): the step as it was (dashed ink) and as it becomes (solid gold).
 """
 
 from __future__ import annotations
@@ -186,6 +187,39 @@ def merge_steps_icon(color: str) -> QIcon:
     painter.drawLine(_at(0.50, 0.62), _at(0.39, 0.51))
     painter.drawLine(_at(0.50, 0.62), _at(0.61, 0.51))
     _step_rect(painter, ink, 0.05, 0.70, 0.95, 0.94)
+    painter.end()
+    return QIcon(pixmap)
+
+
+def shrink_steps_icon(color: str, accent: str) -> QIcon:
+    """The Batch edit group's "shrink steps" (``accent``: gold): the step as it was (a dashed box in ink) and the shorter step inside it (solid, ``accent``) with a chevron pointing
+    in from each side."""
+    pixmap, painter = _canvas()
+    _step_rect(painter, QColor(color), 0.05, 0.22, 0.95, 0.78, ghost=True)
+    mark = QColor(accent)
+    _step_rect(painter, mark, 0.28, 0.22, 0.72, 0.78)
+    painter.setPen(_pen(mark))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawLine(_at(0.11, 0.40), _at(0.19, 0.50))
+    painter.drawLine(_at(0.19, 0.50), _at(0.11, 0.60))
+    painter.drawLine(_at(0.89, 0.40), _at(0.81, 0.50))
+    painter.drawLine(_at(0.81, 0.50), _at(0.89, 0.60))
+    painter.end()
+    return QIcon(pixmap)
+
+
+def offset_steps_icon(color: str, accent: str) -> QIcon:
+    """The Batch edit group's "offset steps" (``accent``: gold): the step where it was (dashed, ink, above), an arrow to the right and the step where it is now (solid, ``accent``,
+    below, shifted along)."""
+    pixmap, painter = _canvas()
+    _step_rect(painter, QColor(color), 0.05, 0.14, 0.55, 0.40, ghost=True)
+    mark = QColor(accent)
+    _step_rect(painter, mark, 0.45, 0.60, 0.95, 0.86)
+    painter.setPen(_pen(mark))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawLine(_at(0.30, 0.50), _at(0.70, 0.50))
+    painter.drawLine(_at(0.62, 0.42), _at(0.70, 0.50))
+    painter.drawLine(_at(0.62, 0.58), _at(0.70, 0.50))
     painter.end()
     return QIcon(pixmap)
 

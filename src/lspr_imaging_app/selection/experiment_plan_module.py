@@ -17,6 +17,8 @@ commands below; they keep no step state of their own.
   `set_role` names the baseline or the signal step of an evaluation pair (reason ``"roles"``, cosmetic); `clear_pair` empties both roles of a pair in one undo step. **Other panels read the steps and the roles from here**: `steps()` (each
   has ``order``, the number the user sees, and ``ref``, which stays the same when steps are added or removed), `step_by_ref`, `baseline_step(pair)` / `signal_step(pair)`, and
   `cubes_of(step)`, the whole cubes of a step. A role whose step is removed is cleared and `notice(text)` says so.
+- **Batch edits (2026-11-26)**: `plan_batch` (what a shrink or an offset of many steps would do: the preview) and `apply_batch` (one undo step, reason ``"boundary"``); the rules are in
+  `plan/batch_edit.py`. Steps may overlap afterwards.
 - **The S_bulk set (2026-11-12)**: the steps of the bulk sensitivity fit (`bulk_steps()`, any number, chip ``Sb``). `add_to_bulk` / `remove_from_bulk` / `clear_bulk` are
   undoable, reason ``"roles"`` like the pairs (the numbers are derived from the step means already computed).
 - **Refractive indices (2026-11-12)**: the second saved value, `ri_table()` (the session's ``"refractive_index"`` block; `plan/refractive_index.py`),
@@ -48,7 +50,7 @@ from lspr_core import ImagingPlan
 from ..analysis.step_stats import StepMembership, assign_cubes
 from ..dataset.module import DatasetModule
 from ..diagnostics import instrumented
-from ..plan import edits
+from ..plan import batch_edit, edits
 from ..plan import refractive_index as ri
 from ..plan.axis_map import AxisMap
 from ..plan.edits import AppliedPlan, Edge, EffectiveStep, Role, Side
@@ -502,6 +504,22 @@ class ExperimentPlanModule(QObject):
             return None
         self._commit("Split step", REASON_STRUCTURE, new)
         return ref
+
+    def plan_batch(self, spec: batch_edit.BatchSpec, indices: Sequence[int], grid_unix_ms: np.ndarray) -> batch_edit.BatchPlan:
+        """What a batch edit (`batch_edit.BatchSpec`: shrink or offset) would do to the steps at `indices`, without changing anything: the live preview. Cheap (a few steps)."""
+        grid = np.asarray(grid_unix_ms, dtype=np.float64)
+        return batch_edit.plan_batch(self.steps(), indices, spec, grid, self._min_step_length(grid))
+
+    @instrumented("ExperimentPlanModule.apply_batch")
+    def apply_batch(self, spec: batch_edit.BatchSpec, indices: Sequence[int], grid_unix_ms: np.ndarray) -> batch_edit.BatchPlan:
+        """Shrink or offset the steps at `indices` (positions in `steps()`) as one undo step. A step that cannot take it stays as it is; the notice says how many. Returns the plan
+        that was applied (its `changes` are empty when nothing moved)."""
+        plan = self.plan_batch(spec, indices, grid_unix_ms)
+        if plan.changes:
+            label = "Shrink steps" if spec.kind == batch_edit.KIND_SHRINK else "Offset steps"
+            self._commit(label, REASON_BOUNDARY, batch_edit.apply_batch(self.steps(), self._state, plan))
+        self.notice.emit(batch_edit.status_text(plan, spec, done=True))
+        return plan
 
     @staticmethod
     def _min_step_length(grid: np.ndarray) -> int:

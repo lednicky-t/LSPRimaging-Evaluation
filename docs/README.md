@@ -64,6 +64,7 @@ From pixels to numbers, and how the numbers are shown.
 - [`step_stats_size_cap_2026-10-26.md`](step_stats_size_cap_2026-10-26.md): Step stats table: the size box seems dead (2026-10-26)
 - [`experimental_plan_steps_inventory_2026-10-25.md`](experimental_plan_steps_inventory_2026-10-25.md): Experimental plan steps - what exists, what is missing, what can be reused (2026-10-25)
 - [`experimental_plan_bar_design_2026-10-26.md`](experimental_plan_bar_design_2026-10-26.md): Sensorgram "Experimental plan" bar - design proposal (2026-10-26)
+- [`plan_batch_edit_2026-11-26.md`](plan_batch_edit_2026-11-26.md): Batch edit group: shrink / offset many plan steps with a live preview (2026-11-26)
 - [`plan_steps_as_ranges_2026-10-29.md`](plan_steps_as_ranges_2026-10-29.md): The plan's steps are the app's ranges (2026-10-29): analysis and proposal
 
 ## ROIs and groups

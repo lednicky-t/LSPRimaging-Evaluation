@@ -7,6 +7,8 @@ The steps come from ``ExperimentPlanModule`` (the dataset's measured steps with 
 - the group "Edit" (`PlanEditControls`, 2026-11-10): add (at the cursor, in front of / behind the selected step) / remove / merge / split / restore buttons, the same commands as that
   menu plus add at the cursor and split at the cursor (through `PlanBarActions`); their
   enabled state follows the selection and the plan (`_update_edit_tools`);
+- the group "Batch edit" (`BatchEditControls`, 2026-11-26): two pop-ups that shrink or offset the selected steps (all when none is selected). While one is open the new edges are previewed on the
+  bar (`_on_batch_preview`, `PlanBarItem.set_preview`); the tick applies one undo step (`_on_batch_apply`); rules in `plan/batch_edit.py`;
 - the group "Evaluation" (`EvaluationControls`): one icon whose pop-up holds a picker per baseline / signal step of each evaluation pair (B1, S1, B2, S2 ...), which write the plan
   module's roles; taking the last pair out clears its roles in the module;
 - the **table of mean +/- SD per step** and its "Stats" menu on the View tab (`StatsTableControls`);
@@ -34,6 +36,7 @@ from ...analysis.settings_module import AnalysisSettingsModule
 from ...analysis.step_stats import StepMembership, assign_cubes, membership_segments
 from ...dataset import DatasetModule
 from ...plan.bar_model import PlanBarStep, build_bar_steps
+from ...plan.batch_edit import BatchSpec, status_text
 from ...plan.edits import EffectiveStep
 from ...plan.refractive_index import solution_of
 from ...selection.experiment_plan_module import (
@@ -48,6 +51,7 @@ from ...plan.stats_table import StatsLine, build_stats_table
 from ...selection import CubeDisplayModule
 from ...selection.cube_display_module import MODE_TIME
 from ..ui_state import UiStateStore
+from .batch_group import BatchEditControls
 from .edit_group import PlanEditControls
 from .plan_actions import PlanAxisContext, PlanBarActions
 from .bulk_group import BulkControls
@@ -114,12 +118,16 @@ class StepOverlays(QObject):
         self.lbl = LblControls(parent)  # the LbL series (2026-11-22): start step + steps per cycle
         self.actions = None if experiment_plan is None else PlanBarActions(experiment_plan, plot, self.plan_context, self, cursor=self.cursor_unix_ms)
         self.edit_controls = PlanEditControls(parent)  # add / remove / merge steps (2026-11-10): the right-click menu's commands on the steps selected on the bar
+        self.batch_controls = BatchEditControls(parent)  # shrink / offset many steps with a live preview on the bar (2026-11-26)
         if self.actions is not None:
             self.edit_controls.add_requested.connect(self._on_add_requested)
             self.edit_controls.remove_requested.connect(self.actions.remove_selected)
             self.edit_controls.merge_requested.connect(self.actions.merge_selected)
             self.edit_controls.split_requested.connect(self.actions.split_at_cursor)
             self.edit_controls.restore_requested.connect(self.actions.restore_removed)
+            self.batch_controls.preview_requested.connect(self._on_batch_preview)
+            self.batch_controls.preview_cleared.connect(self._on_batch_preview_cleared)
+            self.batch_controls.apply_requested.connect(self._on_batch_apply)
             plot.plan_bar().selection_changed.connect(lambda _indices: self._update_edit_tools())
             plot.plan_bar().selection_changed.connect(lambda _indices: self._show_bulk())
             self.bulk.add_requested.connect(lambda: self._plan.add_to_bulk(self.actions.selected_steps()))
@@ -141,11 +149,13 @@ class StepOverlays(QObject):
         self.plan_controls.restore_ui_state(store)
         self.stats_controls.restore_ui_state(store)
         self.evaluation.restore_ui_state(store)
+        self.batch_controls.restore_ui_state(store)
         self.bulk.restore_ui_state(store)
         self.lbl.restore_ui_state(store)
 
     def refresh_theme(self) -> None:
         self.edit_controls.refresh_theme()
+        self.batch_controls.refresh_theme()
         self.plan_controls.refresh_theme()
         self.stats_controls.refresh_theme()
         self.evaluation.refresh_theme()
@@ -376,6 +386,7 @@ class StepOverlays(QObject):
         axis (a new boundary snaps to their cubes); None asks. Cheap (a few steps), so it runs at every refresh and every change of the selection."""
         if self._plan is None or self.actions is None:
             self.edit_controls.set_state(False, 0, False, False, False)
+            self.batch_controls.set_state(False, "")
             return
         if has_axis is None:
             has_axis = self._plan_axis() is not None
@@ -385,6 +396,53 @@ class StepOverlays(QObject):
             self._plan.has_steps(), len(self.actions.selected_steps()), has_axis, self.actions.can_merge_selected(), self._plan.has_removed(),
             can_add_at_cursor=on_plot, can_split=inside,
         )
+        self.batch_controls.set_state(self._plan.has_steps(), self._batch_target_text(), has_axis=has_axis)
+
+    # -- the ribbon's Batch edit group (2026-11-26) -------------------------------------------------------------------------------
+
+    def _batch_targets(self) -> list[int]:
+        """The steps a batch edit acts on: the ones selected on the bar, or every step when none is selected."""
+        selected = self.actions.selected_steps()
+        return selected if selected else list(range(len(self._plan.steps())))
+
+    def _batch_target_text(self) -> str:
+        selected, total = len(self.actions.selected_steps()), len(self._plan.steps())
+        if selected:
+            return f"{selected} selected step" + ("" if selected == 1 else "s")
+        return f"All {total} step" + ("" if total == 1 else "s")
+
+    def _on_batch_preview(self, spec: BatchSpec) -> None:
+        """A Batch edit pop-up opened or one of its settings changed: work out what the edit would do and draw the new edges over the bar (nothing is changed). A few steps, so
+        it runs on the GUI thread; the statistics and the curves are not recomputed until Apply."""
+        bar = self._plot.plan_bar()
+        self.batch_controls.set_target(spec.kind, self._batch_target_text())
+        context = self.plan_context()
+        if context is None:
+            bar.set_preview(())
+            self.batch_controls.set_status(spec.kind, "Needs traces on the plot: an edge lands on the plotted cubes.", problem=True, can_apply=False)
+            return
+        result = self._plan.plan_batch(spec, self._batch_targets(), context.grid_unix_ms)
+        bar.set_preview([(context.axis.x_at(c.start_unix_ms), context.axis.x_at(c.end_unix_ms)) for c in result.changes])
+        text = status_text(result, spec)
+        if not bar.is_shown():
+            text += " Turn the plan bar on (Steps menu, View tab) to see the preview."
+        self.batch_controls.set_status(spec.kind, text, problem=not result.changes, can_apply=bool(result.changes))
+
+    def _on_batch_preview_cleared(self) -> None:
+        self._plot.plan_bar().set_preview(())
+
+    def _on_batch_apply(self, spec: BatchSpec) -> None:
+        """The tick: apply the edit as one undo step. The steps that were selected stay selected (an offset can change their order, and the bar's selection is by position)."""
+        context = self.plan_context()
+        if context is None:
+            return
+        steps = self._plan.steps()
+        refs = [steps[i].ref for i in self.actions.selected_steps()]
+        self._plot.plan_bar().set_preview(())  # the pop-up closing clears it as well; this does not wait for that
+        self._plan.apply_batch(spec, self._batch_targets(), context.grid_unix_ms)
+        if refs:
+            moved = [found.order - 1 for found in (self._plan.step_by_ref(ref) for ref in refs) if found is not None]
+            self._plot.plan_bar().select_many(moved)
 
     def _cursor_flags(self, has_axis: bool) -> tuple[bool, bool]:
         """(the cube cursor is on the plot, the cursor is strictly inside a step): what the Add at cursor and Split buttons need. A look-up of one cube and a pass over a few steps."""

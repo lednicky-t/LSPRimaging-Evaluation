@@ -364,6 +364,7 @@ class SensorgramPanel(QWidget):
         # The Edit group's buttons are on this tab, so they are reachable only here by themselves.
         self._plan_ribbon = RibbonRow(self)
         self._plan_ribbon.add_group("Edit", *self._steps.edit_controls.widgets())  # add / remove / merge / restore steps (2026-11-10)
+        self._plan_ribbon.add_group("Batch edit", *self._steps.batch_controls.widgets())  # shrink / offset many steps, with a preview on the bar (2026-11-26)
         self._plan_ribbon.add_group("Evaluation", *self._steps.evaluation.widgets(), *self._steps.bulk.widgets(), *self._steps.lbl.widgets())  # the pairs, then S_bulk (2026-11-12), then LbL (2026-11-22)
         self.checks_controls = ChecksControls(self)  # the data-quality checks (2026-11-07): the button only; `checks_presenter.py` is what the app connects to it
         self._plan_ribbon.add_group("Checks", *self.checks_controls.widgets())

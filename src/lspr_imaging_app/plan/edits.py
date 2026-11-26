@@ -267,6 +267,12 @@ def move_edge(
     return result
 
 
+def set_bounds(state: PlanEditsState, step: EffectiveStep, start_unix_ms: int, end_unix_ms: int) -> PlanEditsState:
+    """Both edges of `step` set at once (the batch edits, `batch_edit.py`). No snapping and no neighbour rule here: the caller has chosen the times. A value equal to the measured
+    one is stored as no edit."""
+    return _updated(state, step, start=int(start_unix_ms), end=int(end_unix_ms))
+
+
 def set_label(state: PlanEditsState, step: EffectiveStep, text: str) -> PlanEditsState:
     """The user's note for `step`. Empty text, or text equal to the measured note, goes back to the measured note."""
     cleaned = text.strip()

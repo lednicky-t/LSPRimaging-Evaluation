@@ -30,7 +30,7 @@ from PyQt6.QtCore import QPoint, QPointF, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QIcon, QPainter, QPainterPath, QPen, QTransform
 from PyQt6.QtWidgets import QApplication
 
-from lspr_ui import load_tabler_icon
+from lspr_ui import get_active_theme, load_tabler_icon
 
 from ...plan.bar_model import (
     ALIGN_DATA,
@@ -107,6 +107,7 @@ class PlanBarItem(DeviceSpaceItem):
         self._baseline_anchors: frozenset[int] = frozenset()  # steps marked as Range baseline anchors: a small anchor in their lower left corner
         self._anchor_icons: dict[tuple[str, int], QIcon] = {}  # (colour, size in px) -> the anchor mark, made once (a handful: one per step colour)
         self._bulk_grays: dict[int, str] = {}  # step index -> the grey of its Sb chip, made from ALL the steps of the plan (so it does not change while panning or zooming)
+        self._preview: tuple[tuple[float, float], ...] = ()  # the batch edit's proposed extents (data x), drawn over the bar while a Batch edit pop-up is open
         self._keep_out = (0.0, 0.0)  # pixels at the top / bottom edge of the plot that the stats table takes: the names of a Full bar stay out of them (`set_keep_out`)
         self.setZValue(Z_VALUE)
 
@@ -122,6 +123,16 @@ class PlanBarItem(DeviceSpaceItem):
         if any(index not in present for index in self._selected):
             self._set_selection(tuple(i for i in self._selected if i in present), self._anchor if self._anchor in present else None)  # a step is gone (another dataset, no traces)
         self.update()
+
+    def set_preview(self, extents: tuple[tuple[float, float], ...] | list[tuple[float, float]]) -> None:
+        """The batch edit's preview (2026-11-26): `(x start, x end)` in data x of each step as it would be after the edit; empty clears it. Drawing only (`_paint_preview`)."""
+        extents = tuple((float(a), float(b)) for a, b in extents)
+        if extents != self._preview:
+            self._preview = extents
+            self.update()
+
+    def preview(self) -> tuple[tuple[float, float], ...]:
+        return self._preview
 
     def set_keep_out(self, top_px: float, bottom_px: float) -> None:
         """The band at the top / bottom edge of the plot that the step stats table (with the legend) takes, in pixels: the names of a Full bar, whose strip is the whole plot, are
@@ -461,6 +472,7 @@ class PlanBarItem(DeviceSpaceItem):
             for x in (item.left_edge, item.right_edge):  # solid bars on the left and right edge of every selected step; no frame along the top and bottom
                 if x is not None:
                     painter.drawRect(QRectF(x - 1.2, item.rect.top(), 2.4, item.rect.height()))  # 2.4 px wide (was 6, 60 % thinner, maintainer 2026-10-26)
+        self._paint_preview(painter, to_device, drawn[0].rect)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         for item in drawn:
             if item.text_rect is not None:
@@ -469,6 +481,23 @@ class PlanBarItem(DeviceSpaceItem):
         self._paint_role_chips(painter, drawn, area)
         self._paint_baseline_anchors(painter, drawn)
         painter.restore()
+
+    def _paint_preview(self, painter: QPainter, to_device: QTransform, strip: QRectF) -> None:
+        """The batch edit's preview (`set_preview`): each step's proposed extent as a gold, dashed-outlined box over the bar (the bar underneath keeps the step as it is now). `strip`:
+        any drawn step's segment, for the bar's top and bottom."""
+        if not self._preview:
+            return
+        gold = QColor(get_active_theme().accent_gold)
+        fill = QColor(gold)
+        fill.setAlpha(80)
+        pen = QPen(gold, 1.6)
+        pen.setStyle(Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+        painter.setBrush(fill)
+        for x_start, x_end in self._preview:
+            x0, x1 = to_device.map(QPointF(x_start, 0.0)).x(), to_device.map(QPointF(x_end, 0.0)).x()
+            if x1 > x0:
+                painter.drawRect(QRectF(x0, strip.top() + 1.0, x1 - x0, max(strip.height() - 2.0, 1.0)))
 
     def _paint_baseline_anchors(self, painter: QPainter, drawn: list[DrawnStep]) -> None:
         """A small anchor (Tabler's) in the lower left corner of every step marked as a Range baseline anchor, in the colour that reads on the step's fill."""
