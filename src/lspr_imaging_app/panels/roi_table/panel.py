@@ -714,6 +714,7 @@ class RoiTablePanel(QWidget):
         if on == self._group_only:
             return
         self._group_only = on
+        self._show_view_columns()
         self._tree.setAutoExpandDelay(-1 if on else 500)  # no opening a group by hovering a drag over it
         self._rebuild(lambda: None, reveal=not on, restore_view=True)  # (the open / closed groups are what changed)
         if self._store is not None:
@@ -792,14 +793,20 @@ class RoiTablePanel(QWidget):
         mode = VIEW_GEOMETRY if self._view_toggle.isChecked() else VIEW_SIMPLE
         self._on_view_mode_chosen(mode)
 
+    def _show_view_columns(self) -> None:
+        """Put the columns on screen: the chosen view mode's, but the Simple ones while the Groups-only view is on (no ROI rows, so geometry columns would be empty and, with the
+        Geometry / Simple switch greyed, could not be turned off). `_view_mode` keeps the user's choice; leaving Groups-only brings its columns back."""
+        shown = VIEW_SIMPLE if self._group_only else self._view_mode
+        self._tree.set_view_mode(shown)
+        self._apply_widths()  # a column hidden at start-up never got its saved width
+        self._unit_toggle.setVisible(shown == VIEW_GEOMETRY)  # the unit only matters for the geometry columns
+
     def _apply_view_mode(self, mode: str) -> None:
         """Show the columns of ``mode``. A sort by a column the new mode hides goes back to the ``#`` order."""
         self._view_mode = mode
-        self._tree.set_view_mode(mode)
-        self._apply_widths()  # a column hidden at start-up never got its saved width
+        self._show_view_columns()
         self._view_actions[mode].setChecked(True)
         self._sync_view_toggle()  # (the button follows a choice made in the menu or restored at start-up)
-        self._unit_toggle.setVisible(mode == VIEW_GEOMETRY)  # the unit only matters for the geometry columns
         if self._model.sort_state()[0] not in VIEW_MODE_COLUMNS[mode] and not self._model.sorts_by_step():
             self._rebuild(lambda: self._model.set_sort(COLUMN_ID, False), reveal=False)
             if self._store is not None:

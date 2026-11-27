@@ -1801,7 +1801,7 @@ def _wire_roi_table_title(dock: PanelContainer, panel: RoiTablePanel) -> None:
     dock.set_title_choices(
         (
             TitleChoice("ROI", "Show the ROIs of every group (leaves the Groups-only view)."),
-            TitleChoice("Groups", "Double-click: Groups-only view, every group stays collapsed.", on_double_click=True),
+            TitleChoice("Groups", "Groups-only view, every group stays collapsed."),
         ),
         current=1 if panel.group_only() else 0,
     )
