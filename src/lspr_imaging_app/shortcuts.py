@@ -157,7 +157,7 @@ BINDINGS: tuple[Binding, ...] = (
         gesture="Click a column header", scope=_ROI_TABLE,
     ),
     Binding(
-        "mouse.roi_table.sort", "Mouse: ROI table", "Sort the table by the column; again to reverse", gesture="Click the left end of a column header", scope=_ROI_TABLE,
+        "mouse.roi_table.sort", "Mouse: ROI table", "Sort the table by the column; again to reverse", gesture="Click a column header's sort end (right for a left-aligned title, left for a right-aligned one)", scope=_ROI_TABLE,
     ),
     # -- tools of the Image view -----------------------------------------------------------------
     Binding(

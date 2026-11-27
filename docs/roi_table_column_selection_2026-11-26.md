@@ -4,7 +4,7 @@
 step columns are the steps selected on the Sensorgram's plan bar, **one shared selection**: select steps on the bar and their columns light up (the table also scrolls to the newly
 selected one); click step column headers and the same steps are selected on the bar.
 
-**Sorting moved.** A click in the left ~20 px (`view._SORT_ZONE`) of a header sorts (again = reverse); the rest of the header selects. A comparison column already had its menu arrow
+**Sorting moved.** A click in the ~20 px (`view._SORT_ZONE`) at the **sort end** of a header sorts (again = reverse); the rest of the header selects. **Sort end (2026-11-27): the end opposite the title's alignment** (`SubscriptHeader.sort_zone_on_right`): the right end for a left-aligned title (Label), the left end for a right-aligned one (numbers, steps, comparison columns). The sort triangle is drawn by the header itself at that end (never by the style, which has one fixed end; a comparison column's is at its right end, its menu arrow has the left), so every header title is now drawn by hand (`_paint_plain_section`): semi-bold, muted, as the style sheet gives it. Unseen by eye: the tests pin where the triangle's pixels are, not how it looks. A comparison column already had its menu arrow
 in that zone; its menu now also has "Sort by this column". Icon key `sort_column` in `panels/menu_icons.py`.
 
 **Where it lives (engineering priority 3-4: readable, testable; display only, no domain state).**

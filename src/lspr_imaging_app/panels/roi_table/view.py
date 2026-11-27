@@ -76,7 +76,7 @@ class _RangeDrag:
     selected: frozenset[int]  # the selected ROIs: only these can be in a range
     last_id: int  # the ROI the range reached last (kept while the pointer is over a group header)
 _ARROW_ZONE = 20  # px at the left end of a comparison column's header: the arrow that opens its operation menu
-_SORT_ZONE = _ARROW_ZONE  # px at the left end of every other header: a click there sorts; a click on the rest of the header selects the column (2026-11-26)
+_SORT_ZONE = _ARROW_ZONE  # px at the end of every other header that is opposite its title's alignment (`SubscriptHeader.sort_zone_on_right`): a click there sorts; a click on the rest of the header selects the column (2026-11-26, side 2026-11-27)
 _COLUMN_SELECTED_ALPHA = 40  # the accent wash over a selected column's header (the cells have a fainter one: `delegate.py`)
 _COLUMN_SELECTED_BAR = 2  # px: the accent line along the bottom of a selected column's header
 _SORT_INDICATOR_ROOM = 22
@@ -84,8 +84,8 @@ _CELL_PADDING = 16
 _FREEZE_MAX_SHARE = 0.6  # the frozen columns may fill at most this share of the view's width; more leaves too little to scroll
 _FREEZE_EDGE_ALPHA = 130
 _SECTION_PADDING = 6  # px left and right of a header title: what the header's style sheet (`panel.py`, `_apply_theme`) gives a section, copied by `_paint_tinted_section`
-_SORT_ARROW_WIDTH = 7  # px: the sort triangle a coloured step header draws at its left end
-_SORT_ARROW_ROOM = 12  # px the title keeps clear of it (the title is right-aligned: it only matters for a long one)
+_SORT_ARROW_WIDTH = 7  # px: the sort triangle every header draws itself (`SubscriptHeader._paint_sort_arrow`), at the end where a click sorts
+_SORT_ARROW_ROOM = 12  # px the title keeps clear of it (the title is at the other end: it only matters for a long one)
 
 
 _SUBSCRIPT_SCALE = 0.8  # subscript size relative to the header font (not a true ratio: smaller was unreadable)
@@ -133,16 +133,18 @@ class SubscriptHeader(QHeaderView):
     a click anywhere else on the header selects the column (below). Its title is drawn with subscripts (`_paint_math_section`), as many as it has; in a column too narrow for the whole
     formula it is cut at the end with "..." like any title, still with its subscripts (never written with underscores).
 
-    **A click on a header** (2026-11-26, as in a spreadsheet): in the left `_SORT_ZONE` px it sorts by the column (`sort_requested`; a comparison column has its menu there instead,
-    which also offers the sort); on the rest of the header it selects the column (`column_clicked`, with the keyboard modifiers: Ctrl adds, Shift extends). Dragging an edge still
-    resizes and a double-click on an edge still fits; neither is a click."""
+    **A click on a header** (2026-11-26, as in a spreadsheet): in the `_SORT_ZONE` px at the end opposite the title's alignment it sorts by the column (`sort_requested`): the right end
+    for a left-aligned title (Label), the left end for a right-aligned one (numbers, steps) (`sort_zone_on_right`, 2026-11-27); a comparison column has its menu at the left end instead,
+    which also offers the sort. On the rest of the header a click selects the column (`column_clicked`, with the keyboard modifiers: Ctrl adds, Shift extends). The sort triangle is drawn
+    by the header itself (never the style: it cannot be moved) at the same end as the sort zone (a comparison column: the right end). Dragging an edge still resizes and a double-click
+    on an edge still fits; neither is a click."""
 
     compare_menu_requested = pyqtSignal(int, QPoint)
     """(the section, where to open the menu in global coordinates)."""
     fit_requested = pyqtSignal(int)
     """A double-click on the edge of a step column's section (the section): the user wants the step columns fitted to their content."""
     sort_requested = pyqtSignal(int)
-    """A click in the left end of a section (the section): sort by it, or reverse the sort."""
+    """A click in a section's sort zone (the section; the end opposite its title's alignment): sort by it, or reverse the sort."""
     column_clicked = pyqtSignal(int, object)
     """A click on the rest of a section (the section, the `Qt.KeyboardModifier` flags held): select the column."""
 
@@ -151,7 +153,7 @@ class SubscriptHeader(QHeaderView):
         self._pinned: Callable[[], list[int]] = list  # the frozen sections, left to right (`RoiTreeView.pinned_columns`); none until the view says
         self._frame_of: Callable[[int], tuple[bool, bool] | None] = lambda _section: None  # the frame sides of a selected column, None if it is not selected (`RoiTreeView.column_frame`)
         self._drag_shift = 0  # how far the mouse events of the press in progress are moved (see `_pin_shift`)
-        self._press_x = 0  # where in its section the press in progress hit, px from the section's left edge
+        self._press_in_sort_zone = False  # whether the press in progress hit its section's sort zone
         self._press_modifiers = Qt.KeyboardModifier.NoModifier
         self._indicator_at_press: tuple[int, Qt.SortOrder] = (-1, Qt.SortOrder.AscendingOrder)  # the sort arrow before the press in progress (see `_on_section_clicked`)
         self._in_double_click = False
@@ -166,7 +168,7 @@ class SubscriptHeader(QHeaderView):
         self._frame_of = frame_of
 
     def _on_section_clicked(self, section: int) -> None:
-        if self._press_x <= _SORT_ZONE:
+        if self._press_in_sort_zone:
             self.sort_requested.emit(section)  # (the panel puts the arrow where the sort is, once it has sorted)
         else:
             self.setSortIndicator(*self._indicator_at_press)  # Qt has already moved the arrow to the clicked section as for a sort; a click that selects sorts nothing
@@ -232,6 +234,52 @@ class SubscriptHeader(QHeaderView):
         painter.drawPolygon(QPolygonF([QPointF(cx - 3.5, cy - 2.0), QPointF(cx + 3.5, cy - 2.0), QPointF(cx, cy + 2.5)]))
         painter.restore()
 
+    # -- where a column sorts: the end opposite its title's alignment (2026-11-27) -----------------------------------------------------
+
+    def _title_alignment(self, section: int) -> int:
+        """How the model aligns the title of `section` (right when it does not say: the step columns' and the numbers' way)."""
+        model = self.model()
+        alignment = model.headerData(section, self.orientation(), Qt.ItemDataRole.TextAlignmentRole) if model is not None else None
+        return int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter) if alignment is None else int(alignment)
+
+    def sort_zone_on_right(self, section: int) -> bool:
+        """True when a click at the right end of `section`'s header sorts: the title is aligned left (Label), so the zone is the opposite end. A right-aligned title (numbers, steps) has it
+        at the left end; so does a comparison column (its menu arrow is there)."""
+        return not self._is_compare(section) and bool(self._title_alignment(section) & int(Qt.AlignmentFlag.AlignLeft))
+
+    def _in_sort_zone(self, section: int, x: int) -> bool:
+        """Whether `x` px from the left edge of `section` is in its sort zone."""
+        return self.sectionSize(section) - x <= _SORT_ZONE if self.sort_zone_on_right(section) else x <= _SORT_ZONE
+
+    def _arrow_on_right(self, section: int) -> bool:
+        """The end the sort triangle is drawn at: the sort zone's, except a comparison column (left end = its menu arrow) which has it at the right end."""
+        return self._is_compare(section) or self.sort_zone_on_right(section)
+
+    def _is_sorted(self, section: int) -> bool:
+        return self.isSortIndicatorShown() and self.sortIndicatorSection() == section
+
+    def _text_rect(self, rect: QRect, section: int) -> QRect:
+        """Where a title is drawn: `_SECTION_PADDING` from both ends and the line under the header, and clear of the sort triangle while it is there."""
+        room = _SORT_ARROW_ROOM if self._is_sorted(section) else 0
+        left, right = (0, room) if self._arrow_on_right(section) else (room, 0)
+        return rect.adjusted(_SECTION_PADDING + left, 0, -(_SECTION_PADDING + right), -1)
+
+    def _paint_sort_arrow(self, painter: QPainter, rect: QRect, section: int, color: QColor) -> None:
+        """The sort triangle (up = ascending) of the sorted section, drawn here and not by the style, which can only put it at one end."""
+        if not self._is_sorted(section):
+            return
+        ascending = self.sortIndicatorOrder() == Qt.SortOrder.AscendingOrder
+        half = _SORT_ARROW_WIDTH / 2
+        cx = rect.right() + 1 - _SECTION_PADDING - half if self._arrow_on_right(section) else rect.left() + _SECTION_PADDING + half
+        cy = rect.center().y() + 0.5
+        tip, flat = (cy - 2.5, cy + 2.0) if ascending else (cy + 2.5, cy - 2.0)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        painter.drawPolygon(QPolygonF([QPointF(cx - half, flat), QPointF(cx + half, flat), QPointF(cx, tip)]))
+        painter.restore()
+
     def mousePressEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
         self._drag_shift = self._pin_shift(event.position().x())  # a press, and the drag that follows it, belong to the layer the press started in
         event = self._moved(event, self._drag_shift)
@@ -243,11 +291,11 @@ class SubscriptHeader(QHeaderView):
                 self.compare_menu_requested.emit(section, self.mapToGlobal(QPoint(self.sectionViewportPosition(section) + self._drag_shift, self.height())))  # where the section is drawn
                 event.accept()
                 return
-            self._press_x = point.x() - self.sectionViewportPosition(section) if section >= 0 else 0
+            self._press_in_sort_zone = section >= 0 and self._in_sort_zone(section, point.x() - self.sectionViewportPosition(section))
             self._press_modifiers = event.modifiers()
             self._indicator_at_press = (self.sortIndicatorSection(), self.sortIndicatorOrder())
         else:
-            self._press_x, self._press_modifiers = 0, Qt.KeyboardModifier.NoModifier  # (Qt sends `sectionClicked` for a left click only; nothing of an earlier click is left over)
+            self._press_in_sort_zone, self._press_modifiers = False, Qt.KeyboardModifier.NoModifier  # (Qt sends `sectionClicked` for a left click only; nothing of an earlier click is left over)
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
@@ -298,46 +346,43 @@ class SubscriptHeader(QHeaderView):
         painter.fillRect(rect, tint)
         painter.setPen(QColor(theme.toolbar_border))
         painter.drawLine(rect.bottomLeft(), rect.bottomRight())
-        sorted_here = self.isSortIndicatorShown() and self.sortIndicatorSection() == logical_index
-        if sorted_here:  # a small triangle of our own at the left end (what a style draws depends on the platform's style): up = ascending. The right-aligned title stays where it is
-            ascending = self.sortIndicatorOrder() == Qt.SortOrder.AscendingOrder
-            cx, cy = rect.left() + _SECTION_PADDING + _SORT_ARROW_WIDTH / 2, rect.center().y() + 0.5
-            tip, flat = (cy - 2.5, cy + 2.0) if ascending else (cy + 2.5, cy - 2.0)
-            arrow_color = QColor(text_color)
-            arrow_color.setAlpha(210)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(arrow_color)
-            half = _SORT_ARROW_WIDTH / 2
-            painter.drawPolygon(QPolygonF([QPointF(cx - half, flat), QPointF(cx + half, flat), QPointF(cx, tip)]))
+        arrow_color = QColor(text_color)
+        arrow_color.setAlpha(210)
+        self._paint_sort_arrow(painter, rect, logical_index, arrow_color)  # (a step title is right-aligned: the triangle is at the left end, the title stays where it is)
         font = QFont(self.font())
         font.setWeight(QFont.Weight.DemiBold)  # the sheet's font-weight: 600
         painter.setFont(font)
         painter.setPen(text_color)
-        text_rect = rect.adjusted(_SECTION_PADDING + (_SORT_ARROW_ROOM if sorted_here else 0), 0, -_SECTION_PADDING, -1)
-        alignment = self.model().headerData(logical_index, self.orientation(), Qt.ItemDataRole.TextAlignmentRole)
-        alignment = int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter) if alignment is None else int(alignment)
+        text_rect = self._text_rect(rect, logical_index)
         title = str(self.model().headerData(logical_index, self.orientation(), Qt.ItemDataRole.DisplayRole) or "")
-        painter.drawText(text_rect, alignment, QFontMetrics(font).elidedText(title, Qt.TextElideMode.ElideRight, text_rect.width()))
+        painter.drawText(text_rect, self._title_alignment(logical_index), QFontMetrics(font).elidedText(title, Qt.TextElideMode.ElideRight, text_rect.width()))
         painter.restore()
 
     def _paint_section_background(self, painter: QPainter, rect: QRect, logical_index: int) -> None:
-        """Let the style draw the background and sort arrow of a section, with the text left out (the caller draws it)."""
+        """Let the style draw the background of a section (the sheet's colour and the line under it), with the text and the sort triangle left out (the caller draws them)."""
         option = QStyleOptionHeader()
         self.initStyleOption(option)
         option.rect = rect
         option.section = logical_index
         option.text = ""
         option.icon = QIcon()
-        if self.isSortIndicatorShown() and self.sortIndicatorSection() == logical_index:
-            order = self.sortIndicatorOrder()
-            option.sortIndicator = (
-                QStyleOptionHeader.SortIndicator.SortDown if order == Qt.SortOrder.DescendingOrder
-                else QStyleOptionHeader.SortIndicator.SortUp
-            )
-        else:
-            option.sortIndicator = QStyleOptionHeader.SortIndicator.None_
+        option.sortIndicator = QStyleOptionHeader.SortIndicator.None_
         self.style().drawControl(QStyle.ControlElement.CE_Header, option, painter, self)
+
+    def _paint_plain_section(self, painter: QPainter, rect: QRect, logical_index: int, title: str) -> None:
+        """A title with no subscript: the style's background, then the title as the sheet gives it (semi-bold, muted, `_SECTION_PADDING` from the ends, aligned as the model says) and
+        the sort triangle at the sort zone's end. Drawn by hand like the step headers: the style's own triangle sits at one end whatever the title's alignment."""
+        self._paint_section_background(painter, rect, logical_index)
+        font = QFont(self.font())
+        font.setWeight(QFont.Weight.DemiBold)  # the sheet's font-weight: 600
+        color = QColor(get_active_theme().text_muted)  # the sheet's colour
+        text_rect = self._text_rect(rect, logical_index)
+        painter.save()
+        painter.setFont(font)
+        painter.setPen(color)
+        painter.drawText(text_rect, self._title_alignment(logical_index), QFontMetrics(font).elidedText(title, Qt.TextElideMode.ElideRight, text_rect.width()))
+        painter.restore()
+        self._paint_sort_arrow(painter, rect, logical_index, color)
 
     def _paint_math_section(self, painter: QPainter, rect: QRect, logical_index: int, title: str) -> bool:
         """A comparison column's title with real subscripts (``μ_S1 − μ_B1``: μ, then S1 small and low, ...). Placed as the style sheet places the other step titles: right-aligned,
@@ -355,8 +400,9 @@ class SubscriptHeader(QHeaderView):
         def advance(text: str, sub: bool) -> int:
             return (small_metrics if sub else metrics).horizontalAdvance(text)
 
-        runs = elide_runs(runs, advance, rect.width() - _SECTION_PADDING - _ARROW_ZONE - 2)
-        right = rect.right() + 1 - _SECTION_PADDING
+        sorted_room = _SORT_ARROW_ROOM if self._is_sorted(logical_index) else 0  # (the sort triangle of a comparison column is at the right end: the menu arrow has the left)
+        runs = elide_runs(runs, advance, rect.width() - _SECTION_PADDING - _ARROW_ZONE - 2 - sorted_room)
+        right = rect.right() + 1 - _SECTION_PADDING - sorted_room
         left = right - sum(advance(text, sub) for text, sub in runs)
         self._paint_section_background(painter, rect, logical_index)
         baseline = rect.top() + (rect.height() - 1 + metrics.ascent() - metrics.descent()) // 2  # (centred above the 1 px line under the header)
@@ -370,6 +416,7 @@ class SubscriptHeader(QHeaderView):
             x += advance(text, sub)
         painter.restore()
         self._paint_arrow(painter, rect)
+        self._paint_sort_arrow(painter, rect, logical_index, QColor(get_active_theme().text_muted))
         return True
 
     def paintSection(self, painter: QPainter, rect: QRect, logicalIndex: int) -> None:  # type: ignore[override]
@@ -393,7 +440,7 @@ class SubscriptHeader(QHeaderView):
         if self._is_compare(logicalIndex) and isinstance(title, str) and self._paint_math_section(painter, rect, logicalIndex, title):
             return
         if not isinstance(title, str) or "_" not in title or logicalIndex >= COLUMN_COUNT:  # a step's title is the user's note (30perEG_-_ch2 ...): no subscripts
-            super().paintSection(painter, rect, logicalIndex)
+            self._paint_plain_section(painter, rect, logicalIndex, title if isinstance(title, str) else "")
             if self._is_compare(logicalIndex):
                 self._paint_arrow(painter, rect)
             return
@@ -403,7 +450,8 @@ class SubscriptHeader(QHeaderView):
         small = _subscript_font(font)
         metrics = QFontMetrics(font)
         total = metrics.horizontalAdvance(base) + QFontMetrics(small).horizontalAdvance(sub)
-        text_area = rect.adjusted(0, 0, -_SORT_INDICATOR_ROOM // 2, 0)  # keep clear of the sort arrow
+        side = _SORT_INDICATOR_ROOM // 2  # keep clear of the sort arrow, at the end of the sort zone
+        text_area = rect.adjusted(0, 0, -side, 0) if self._arrow_on_right(logicalIndex) else rect.adjusted(side, 0, 0, 0)
         x = text_area.left() + max(0, (text_area.width() - total) // 2)
         baseline = rect.top() + (rect.height() + metrics.ascent() - metrics.descent()) // 2
         painter.save()
@@ -413,6 +461,7 @@ class SubscriptHeader(QHeaderView):
         painter.setFont(small)
         painter.drawText(x + metrics.horizontalAdvance(base), baseline + round(metrics.height() * _SUBSCRIPT_DROP), sub)
         painter.restore()
+        self._paint_sort_arrow(painter, rect, logicalIndex, QColor(get_active_theme().text_muted))
 
 
 def suggested_column_widths(metrics: QFontMetrics) -> list[int]:
