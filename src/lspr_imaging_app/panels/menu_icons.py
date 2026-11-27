@@ -177,6 +177,9 @@ ICONS: dict[str, str | Callable[[], QIcon]] = {
     "rename": "pencil",  # Rename, Edit text
     "colour": "droplet",
     "colour_clear": "droplet-off",  # Clear colour, Default colour
+    "guide_add": "plus",  # Sensorgram: "Add guide here" (a reference line at the pointer's y)
+    "guide_from_step": "ruler-measure",  # plan bar: "Add guide from step" (at the step's mean)
+    "show_value": "eye",  # a guide: "Show y value"
     "reset": "reload",  # back to the measured / default value
     "restore_edit": "eraser",  # "Remove this cube's edit": forget one edit
     "settings": "settings",

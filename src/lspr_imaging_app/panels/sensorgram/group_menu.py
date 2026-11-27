@@ -167,6 +167,10 @@ class GroupMenuButton(QToolButton):
         if label is not None:
             label.setVisible(visible)
 
+    def set_heading_text(self, index: int, text: str) -> None:
+        """Change the text of the `index`-th heading row (a heading that names something that changes, e.g. the quantity an axis shows)."""
+        self._headings[index].setText(text)
+
     def refresh_theme(self) -> None:
         theme = get_active_theme()
         style_general_icon_button(self)

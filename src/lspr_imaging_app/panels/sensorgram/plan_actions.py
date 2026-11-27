@@ -168,6 +168,9 @@ class PlanBarActions(QObject):
         give_icon(menu.addAction("Colour..."), "colour").triggered.connect(lambda _checked=False: self._choose_colour(index, targets))
         if any(self._has_own_colour(steps[i]) for i in targets):
             give_icon(menu.addAction("Default colour"), "colour_clear").triggered.connect(lambda _checked=False: self._plan.set_colors(targets, None))
+        if self._plot.step_guides(targets):  # a reference line at the step's mean (2026-11-27); only while the step table has a number for a step
+            guide = give_icon(menu.addAction("Add guides from steps" if many else "Add guide from step"), "guide_from_step")
+            guide.triggered.connect(lambda _checked=False: self._plot.request_guides_from_steps(targets))
         menu.addSeparator()
         if any(steps[i].edited for i in targets):
             reset = give_icon(menu.addAction("Reset steps to measured" if many else "Reset step to measured"), "reset")

@@ -92,6 +92,7 @@ from ...applog import StageTimer, timed
 from ...dataset import DatasetModule
 from ...image_tools.mask.module import MaskModule
 from ...selection.experiment_plan_module import ExperimentPlanModule
+from ...selection.plot_axes_module import PlotAxesModule
 from ...selection.plot_line_order_module import PLOT_SENSORGRAM, PlotLineOrderModule
 from ...roi import RoiToolbox
 from ...selection import CubeDisplayModule, SelectionModule
@@ -127,6 +128,10 @@ from .mask_marks_toggle import MaskMarksToggle
 from .stale_marks_toggle import StaleMarksToggle
 from .stat_icons import band_picture, center_picture, display_picture, smoothing_picture, spikes_icon, subtract_icon, within_steps_icon
 from .text_link import TextSizeLink
+from .axis_break_icons import breaks_icon
+from .axis_controls import AxisControls
+from ...domain.guide_lines import Guide
+from .guide_controls import GuideControls
 from .line_order_dialog import LineRow
 from .view_controls import SensorgramViewControls
 from .step_overlays import StepOverlays
@@ -135,11 +140,17 @@ from .plot import SensorgramPlot
 logger = logging.getLogger(__name__)
 
 TASK_ID = "sensorgram.compute"
-PLOT_TAB = "Plot"  # the control row's first tab: how the traces are made (display, statistic, smoothing, baseline)
+PLOT_TAB = "Data"  # the control row's first tab: how the traces are made (display, statistic, smoothing, baseline); called "Plot" until 2026-11-27, when the View tab got a group of that name
 VIEW_TAB = "View"  # its second (2026-11-13): how everything is drawn: the marks, points and lines, the legend, the plan bar and the step table (`view_controls.py`)
 PLAN_TAB = "Experimental plan"  # its third: the baseline / signal steps, the editing of the plan, the evaluation and the checks; the plan bar's structure tools are live only here
 MASK_MARKS_KEY = "sensorgram/mask_marks"
 STALE_MARKS_KEY = "sensorgram/stale_marks"
+BREAKS_KEY = "sensorgram/view_breaks"
+BREAKS_TIP = (
+    "Show the axis breaks: the stretches of the x axis you left out, drawn as a small gap with the usual // marks and a handle to slide each one. Off = the axis is continuous and "
+    "uncompressed again. The breaks are kept either way (Plot menu)."
+)
+BREAKS_OFF_TIP = "There are no breaks to show: add some in the Plot menu (Breaks, the pencil)."
 BAND_HEIGHT_KEY = "sensorgram/baseline_band_height"
 BAND_FONT_KEY = "sensorgram/baseline_readout_font_size"
 _REDRAW_COALESCE_MS = 100  # sketch §8
@@ -214,6 +225,7 @@ class SensorgramPanel(QWidget):
         trace_store: TraceStore | None = None,
         axis: SensorgramAxis | None = None,
         line_order: PlotLineOrderModule | None = None,
+        plot_axes: PlotAxesModule | None = None,
     ) -> None:
         """`image_busy`: True while the Image panel has a frame in flight; a computation then waits for it (`ImageFirst`). `trace_in_process`: the
         fits run in a helper process (`TracePool`), so they never compete with the window for the interpreter lock; False computes them in the worker
@@ -285,6 +297,8 @@ class SensorgramPanel(QWidget):
             "the y axis label.",
             self,
         )
+        self._breaks_toggle = IconToggle(breaks_icon, BREAKS_TIP, self)  # the Show group's switch for the axis breaks (2026-11-27)
+        self._breaks_toggle.setChecked(True)
         self._mask_toggle = MaskMarksToggle(self)
         self._mask_toggle.setChecked(True)
         self._stale_toggle = StaleMarksToggle(self)
@@ -320,6 +334,8 @@ class SensorgramPanel(QWidget):
         self._status.setWordWrap(True)
         self._status.setStyleSheet(f"color: {get_active_theme().text_dim};")
         self._plot = SensorgramPlot(self)
+        # The View tab's Plot group (2026-11-27): tick spacing, display range and grid, saved in the session per quantity an axis shows (`axis_controls.py`).
+        self._axis_controls = AxisControls(self, plot_axes, PLOT_SENSORGRAM, lambda: self._plot.axis_labels(), lambda: self._plot.visible_range(), object_prefix="sensorgram_axes", breaks=True, zero_steps=self._zero_step_choices)
         self._axis.set_range_fallback(self._plot.x_range)  # a default baseline window on an axis with fewer than two points goes where the plot is looking
         self._steps = StepOverlays(
             self, experiment_plan=experiment_plan, plot=self._plot, dataset=dataset, settings=analysis_settings, cube_display=cube_display, drawn=self._drawn, x_axis=self._x_axis,
@@ -352,10 +368,12 @@ class SensorgramPanel(QWidget):
         # The View tab (2026-11-13) holds every option of how the plot is drawn, as the Image panel's View tab does: what is shown (the band, the anchors, the mask and out-of-date
         # marks), the points and lines, the legend, and the two groups that were on the Experimental plan tab until now, the plan bar's and the step table's.
         self._view_ribbon = RibbonRow(self)
-        self._view_ribbon.add_group("Show", self._view_controls.band, self._view_controls.anchors, self._mask_toggle, self._stale_toggle)
+        self._view_ribbon.add_group("Show", self._view_controls.band, self._view_controls.anchors, self._mask_toggle, self._stale_toggle, self._breaks_toggle)
         self._view_ribbon.add_group("Points & lines", self._view_controls.lines_menu)
         self._view_ribbon.add_group("Legend", self._view_controls.legend_menu)
         self._view_ribbon.add_group("Steps", *self._steps.plan_controls.widgets())  # the plan bar's menu
+        self._guide_controls = GuideControls(self, self._axis_controls.module, PLOT_SENSORGRAM, lambda: self._plot.axis_labels(), object_prefix="sensorgram_guides")
+        self._view_ribbon.add_group("Plot", self._axis_controls.menu, self._guide_controls.menu)  # tick spacing, display range and grid of the axes (2026-11-27)
         self._view_ribbon.add_group("Evaluation", *self._steps.plan_controls.evaluation_widgets())  # the markers B1 / S1 / Sb on the bar: shown, where, in what colour (2026-11-13)
         self._view_ribbon.add_group("Stats", *self._steps.stats_controls.widgets())  # the step table's menu
         self._view_ribbon.add_stretch()
@@ -402,6 +420,20 @@ class SensorgramPanel(QWidget):
         self._mask_toggle.toggled.connect(lambda _on: self._draw_last())
         self._stale_toggle.toggled.connect(lambda _on: self._draw_last())
         self._view_controls.settings_changed.connect(self._on_view_changed)
+        self._plot.axis_labels_changed.connect(self._axis_controls.labels_changed)
+        self._plot.axis_labels_changed.connect(self._guide_controls.labels_changed)  # another quantity on an axis: its own options
+        self._plot.guide_moved.connect(self._guide_controls.move_guide)  # the guides' gestures on the plot (2026-11-27): the table is the one place that changes them
+        self._plot.guide_menu_requested.connect(self._guide_controls.show_menu)
+        self._plot.guide_add_requested.connect(lambda y: self._guide_controls.add_guide(Guide(y, "", None, "dash", True)))
+        self._plot.guides_add_requested.connect(self._guide_controls.add_guides)
+        self._axis_controls.axes_changed.connect(lambda: self._plot.set_axes(self._axis_controls.axes()))
+        self._plot.set_axes(self._axis_controls.axes())
+        self._axis_controls.axes_changed.connect(self._sync_breaks_toggle)
+        self._plot.breaks_changed.connect(self._axis_controls.set_x_breaks)  # a handle dragged, a span edited, a break added or removed: kept in the session, then set back on the plot
+        self._plot.break_edit_changed.connect(self._axis_controls.set_break_edit_state)
+        self._axis_controls.break_edit_requested.connect(self._on_break_edit_requested)
+        self._breaks_toggle.toggled.connect(self._plot.set_breaks_visible)
+        self._sync_breaks_toggle()
         self._plot.legend_corner_note_changed.connect(self._view_controls.look.set_corner_note)  # the Corner row says when the step table keeps the legend at its edge
         self._plot.plan_bar().selection_changed.connect(lambda _indices: self._sync_order_step())  # the Legend menu's "At step" order reads the step selected on the bar
         self._plot.plan_bar().selection_changed.connect(self.plan_steps_selected)
@@ -486,6 +518,8 @@ class SensorgramPanel(QWidget):
 
     def restore_ui_state(self, store: UiStateStore) -> None:
         store.bind(MASK_MARKS_KEY, self._mask_toggle)
+        store.bind(BREAKS_KEY, self._breaks_toggle)
+        self._plot.set_breaks_visible(self._breaks_toggle.isChecked())  # a restored position arrives without the plot hearing it
         store.bind(STALE_MARKS_KEY, self._stale_toggle)
         self._text_link.begin_restore()  # the legend's, the stats' and the step names' text sizes are restored one after the other: no size is copied between them until all are back
         self._view_controls.restore_ui_state(store)  # also hands the restored options to the plot
@@ -515,6 +549,19 @@ class SensorgramPanel(QWidget):
         self._ribbon_tabs.category_changed.connect(lambda label: store.set(SENSORGRAM_RIBBON_TAB.key, label))
         self._drift.set_point_scope(str(read(store, SENSORGRAM_ANCHOR_POINT_SCOPE)))
         self._drift.scope_changed = lambda scope: store.set(SENSORGRAM_ANCHOR_POINT_SCOPE.key, scope)
+
+    def _sync_breaks_toggle(self) -> None:
+        """The Show group's breaks switch means something only while the x axis has breaks (it keeps its position meanwhile)."""
+        has = bool(self._axis_controls.axes().x.breaks)
+        self._breaks_toggle.setEnabled(has)
+        self._breaks_toggle.setToolTip(BREAKS_TIP if has else f"{BREAKS_TIP}\n\n{BREAKS_OFF_TIP}")
+
+    def _on_break_edit_requested(self, on: bool) -> None:
+        """The Plot menu's edit toggle: start or end the plot's break edit mode; the plot refuses while the anchor-point edit is on (the toggle goes back and says why)."""
+        self._axis_controls.say("")
+        if not self._plot.set_break_edit(on):
+            self._axis_controls.set_break_edit_state(False)
+            self._axis_controls.say("Finish the anchor-point edit first (Data tab, Baseline): only one edit mode at a time.")
 
     def set_panel_visible(self, visible: bool) -> None:
         """Connected to the dock's ``visibilityChanged``: a hidden panel does no work and catches up once when shown."""
@@ -554,6 +601,9 @@ class SensorgramPanel(QWidget):
         self._baseline.refresh_theme()
         self._drift.refresh_theme()
         self._view_controls.refresh_theme()
+        self._axis_controls.refresh_theme()
+        self._guide_controls.refresh_theme()
+        self._breaks_toggle.refresh_theme()
         self._band_controls.refresh_theme(get_active_theme())
         self._band_edit.refresh_theme()
         self._band_menu.refresh_theme(get_active_theme())
@@ -695,6 +745,10 @@ class SensorgramPanel(QWidget):
         self._schedule_redraw()  # the shared trace store and the axis empty themselves on the same signal
 
     # -- the x axis -----------------------------------------------------------------------------------------------------------------
+
+    def _zero_step_choices(self) -> list[tuple[str, float]]:
+        """The plan bar's steps as (label, x of the start) for the Plot menu's "Zero at" list."""
+        return [(f"{i} · {step.text}" if step.text else str(i), step.x_start) for i, step in enumerate(self._plot.plan_steps(), start=1)]
 
     def _x_axis(self) -> tuple[str, np.ndarray]:
         """(axis label, x per cube of the file): time in seconds, or the cube number. The shared axis object keeps it (``selection/sensorgram_axis.py``)."""

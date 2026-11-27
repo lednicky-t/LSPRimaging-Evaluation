@@ -60,7 +60,12 @@ from .plot_window_draw import (
     stack_lines,
     style_legend,
 )
+from ...selection.plot_axes_module import PlotAxesModule
 from ...selection.plot_line_order_module import PLOT_LBL, PlotLineOrderModule
+from .axis_apply import AxisStyler
+from .axis_controls import AxisControls
+from .guide_controls import GuideControls
+from .guide_items import GuideLines
 from .view_settings import LINE_SPLINE, UNCERTAINTY_BAND, SensorgramViewSettings, UncertaintyLook
 from .plot_look import LINES_SENSORGRAM, WINDOW_LOOK_DEFAULTS, PlotLookControls, PlotLookKeys, UncertaintyControls, UncertaintyKeys, lines_pick_menu, restore_pick
 from .window_look_icons import accumulated_picture, cycle_picture
@@ -98,7 +103,7 @@ class LblPlotWindow(QWidget):
     lines_mode_changed = pyqtSignal(str)
     closed = pyqtSignal()
 
-    def __init__(self, parent: QWidget | None = None, line_order: PlotLineOrderModule | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, line_order: PlotLineOrderModule | None = None, plot_axes: PlotAxesModule | None = None) -> None:
         super().__init__(parent, Qt.WindowType.Window)
         self.setWindowTitle("LbL series")
         self.resize(640, 440)
@@ -109,12 +114,21 @@ class LblPlotWindow(QWidget):
         self._lines: list[BulkLine] = []
         self._steps: list[LblStep] = []
         self._y_label = "Step mean (nm)"
+        self._labels = ("", "")  # the quantities the axes show, as the last redraw named them (the Plot menu keeps its options per quantity)
+        self._drawing = False
         self._note = ""
         self._drawn: list[tuple[BulkLine, list[LblPoint]]] = []
         self._last_entries: list[LegendEntry] = []  # the lines drawn now: the Line order table's rows
         self._state: DrawnState | None = None  # what was drawn last, for a change that only re-orders (None: draw everything again)
         self.look.attach_line_order(line_order, PLOT_LBL, "LbL series", lambda: rows_of(self._last_entries))  # the Manual draw order's list is the session's
 
+        self._plot = pg.PlotWidget(parent=self)
+        self._plot.showGrid(x=True, y=True, alpha=0.15)
+        self._styler = AxisStyler(self._plot.getPlotItem())  # the Plot menu's tick spacing, grid and display range (2026-11-27)
+        self.axes = AxisControls(self, plot_axes, PLOT_LBL, lambda: self._labels, lambda: self._visible_range(), object_prefix="lbl_axes")
+        self.guides = GuideControls(self, self.axes.module, PLOT_LBL, lambda: self._labels, object_prefix="lbl_guides")
+        self._guide_lines = GuideLines(self._plot.getPlotItem())  # drawn after every redraw: `PlotItem.clear()` takes them out
+        self._guide_lines.moved.connect(self.guides.move_guide)  # dragged with the mouse: the table keeps it
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 8, 8, 8)
         outer.setSpacing(6)
@@ -130,14 +144,12 @@ class LblPlotWindow(QWidget):
         self._shift_pick.setToolTip("Which shift is plotted.")
         bar.addWidget(self._shift_pick)
         bar.addWidget(_separator(self))
-        for menu in (self.look.lines_menu, self.uncertainty.menu, self.look.legend_menu):
+        for menu in (self.look.lines_menu, self.uncertainty.menu, self.look.legend_menu, self.axes.menu, self.guides.menu):
             bar.addWidget(menu)
         bar.addStretch(1)
         self.export_button = PlotExportButton("lbl_series", lambda: self._plot.getPlotItem(), self.export_data, self)
         bar.addWidget(self.export_button)
         outer.addLayout(bar)
-        self._plot = pg.PlotWidget(parent=self)
-        self._plot.showGrid(x=True, y=True, alpha=0.15)
         self._legend = make_legend(self._plot.getPlotItem())
         self._cursor = StepCursor(self._plot.getPlotItem(), CURSOR_KEY, self)  # the cycle the legend's "Value at step" order reads (jumps from cycle to cycle)
         self._cursor.moved.connect(self._look_changed)
@@ -153,6 +165,7 @@ class LblPlotWindow(QWidget):
         self.calculate_button.clicked.connect(lambda _checked=False: self.calculate_requested.emit())
         self.look.settings_changed.connect(self._look_changed)
         self.uncertainty.settings_changed.connect(self._look_changed)
+        self.axes.axes_changed.connect(self._axes_changed)
         self.refresh_theme()
 
     # -- what it shows ------------------------------------------------------------------------------------------------------------
@@ -174,6 +187,24 @@ class LblPlotWindow(QWidget):
         index = self._shift_pick.findData(mode)
         if index >= 0:
             self._shift_pick.setCurrentIndex(index)
+
+    def _visible_range(self) -> tuple[tuple[float, float], tuple[float, float]]:
+        (x_low, x_high), (y_low, y_high) = self._plot.getPlotItem().getViewBox().viewRange()
+        return (float(x_low), float(x_high)), (float(y_low), float(y_high))
+
+    def _axes_changed(self) -> None:
+        """The Plot menu's options changed (or an axis shows another quantity): ticks and grid at once; a range is shown by drawing the plot again."""
+        new = self.axes.axes()
+        old = self._styler.axes()
+        only_guides, redraw_needed = old.only_guides_differ(new), old.needs_redraw(new)
+        self._styler.set_axes(new)
+        if only_guides:  # a guide was added, edited or removed: the lines are put right without drawing the plot again
+            self._guide_lines.set_guides(new.y.guides)
+            return
+        if not redraw_needed:  # a new step value, the minor step, the grid: the styler applied it at once; only a range or a step set / cleared needs the items drawn again
+            return
+        if not self._drawing and self.isVisible():
+            self.redraw()
 
     def _look_changed(self, *_args: object) -> None:
         """A look option changed, or the cursor moved. When that only re-orders (`DrawnState.can_reorder`: the legend's order, the Draw order, the legend's corner, the cursor) the lines stay and
@@ -208,6 +239,7 @@ class LblPlotWindow(QWidget):
     def redraw(self) -> None:
         self._state = None
         item = self._plot.getPlotItem()
+        self._styler.release_unpinned()
         item.clear()
         self._cursor.readd()  # `clear()` took its line out of the plot
         self._legend.clear()
@@ -221,8 +253,13 @@ class LblPlotWindow(QWidget):
         unit = self._unit()
         item.setLabel("bottom", "Cycle (bilayers; 0 = the start step)")
         item.setLabel("left", _SHIFT_NAME[mode] + (f" ({unit})" if unit else ""))
+        self._drawing, self._labels = True, (item.getAxis("bottom").labelText, item.getAxis("left").labelText)
+        self.axes.labels_changed()
+        self.guides.labels_changed()
+        self._drawing = False
         axis = item.getAxis("bottom")
-        axis.setTicks([[(k, str(k)) for k in range(len(self._steps))]] if 0 < len(self._steps) <= MAX_TICKED_CYCLES else None)
+        if not self._styler.ticks_are_pinned("x"):  # a tick step of the Plot menu replaces the one-tick-per-cycle labels (pyqtgraph would draw these over it)
+            axis.setTicks([[(k, str(k)) for k in range(len(self._steps))]] if 0 < len(self._steps) <= MAX_TICKED_CYCLES else None)
         notes = [self._note] if self._note else []
         if len(self._steps) < 2:
             notes.append("Set the start step and the steps per cycle in the LbL pop-up: the series needs at least two cycles inside the plan.")
@@ -242,6 +279,8 @@ class LblPlotWindow(QWidget):
         self._apply_order(entries, view, groups)
         self._state = DrawnState(view, unc, entries, groups)
         self.status.setText(" ".join(notes))
+        self._guide_lines.set_guides(self.axes.axes().y.guides)
+        self._styler.pin_ranges(autoscale_first=True)  # the Plot menu's display range replaces the autoscale
 
     def _apply_order(self, entries: list[LegendEntry], view: SensorgramViewSettings, groups: dict[int, list]) -> None:
         """The legend rows in the order the Legend menu asks for, which line lies over which (the Draw order), and the step cursor (drawn only while the order reads the value at a step)."""
@@ -325,6 +364,8 @@ class LblPlotWindow(QWidget):
             axis.setPen(pg.mkPen(theme.text_muted))
             axis.setTextPen(pg.mkPen(theme.text_muted))
         self.export_button.refresh_theme()
+        self._guide_lines.refresh_theme()
+        self.guides.refresh_theme()
         self._cursor.refresh_theme()
         self.look.refresh_theme()
         self.uncertainty.refresh_theme()

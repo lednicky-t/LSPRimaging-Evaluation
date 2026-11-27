@@ -58,7 +58,7 @@ class SvgPart:
 # the listed ones. A kind with the name of its section ("Axes", "Other") holds its parts directly.
 SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Plot area", (
-        "Grid", "Experimental plan", "Baseline window", "Fit window", "Highlight range", "Regions", "Bands", "Error bars",
+        "Grid", "Experimental plan", "Baseline window", "Fit window", "Highlight range", "Regions", "Guides", "Bands", "Error bars",
         "Lines", "Spectra", "Curves", "Fits", "Points", "Out-of-date marks", "Mask marks", "Metric markers", "Value tick", "Items", "Cursor",
     )),
     ("Annotations", ("Step statistics", "Legend")),

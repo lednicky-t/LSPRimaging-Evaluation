@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from PyQt6.QtCore import QPointF, QRectF, Qt
 from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QTransform
@@ -75,6 +75,8 @@ class StepStatsItem(DeviceSpaceItem):
     # Class-level defaults: pyqtgraph's constructor already asks for `boundingRect`, before `__init__` below has set
     # these - that printed "no attribute '_table'" tracebacks (2026-11-15).
     _table: StatsTable | None = None
+    _data_table: StatsTable | None = None
+    _x_map = None  # the plot's `BreakMap` while its x axis has breaks (`set_x_map`)
     _settings = StatsTableSettings()
 
     def __init__(self) -> None:
@@ -88,9 +90,21 @@ class StepStatsItem(DeviceSpaceItem):
 
     def set_table(self, table: StatsTable | None, settings: StatsTableSettings) -> None:
         self.prepareGeometryChange()
-        self._table = table
+        self._data_table = table
+        self._table = self._drawn(table)
         self._settings = settings
         self.update()
+
+    def set_x_map(self, x_map) -> None:
+        """The plot's axis has breaks (2026-11-27, `domain/axis_breaks.BreakMap`; None or an inactive one: none): the columns are given in data x and drawn at their drawn x."""
+        self._x_map = x_map
+        self.set_table(self._data_table, self._settings)
+
+    def _drawn(self, table: StatsTable | None) -> StatsTable | None:
+        if table is None or self._x_map is None or not self._x_map.active:
+            return table
+        columns = tuple(replace(c, x_start=float(self._x_map.forward(c.x_start)), x_end=float(self._x_map.forward(c.x_end))) for c in table.columns)
+        return replace(table, columns=columns)
 
     def set_row_source(self, source: Callable[[], LegendRows | None] | None) -> None:
         """Where the rows go: a function returning the legend's current row positions (None: it has none). Asked at every paint."""

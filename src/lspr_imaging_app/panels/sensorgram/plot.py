@@ -18,16 +18,20 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
+from functools import partial
+from dataclasses import replace
 
 import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import QPoint, QPointF, QRectF, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QCursor, QFont, QFontMetricsF, QGuiApplication, QPainter, QPen, QPixmap
+from PyQt6.QtGui import QAction, QColor, QCursor, QFont, QFontMetricsF, QGuiApplication, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import QApplication, QGraphicsItem, QVBoxLayout, QWidget
 
 from lspr_ui import get_active_theme
 
 from ...analysis.scan_trace import Series
+from ...domain.axis_breaks import AxisBreak, BreakMap, normalized
+from ...domain.plot_axes import PlotAxes
 from ...plan.bar_model import ALIGN_DATA, POSITION_TOP, PlanBarSettings, PlanBarStep, label_headroom_px, reserved_range
 from ...plan.stats_table import StatsTable, StatsTableSettings
 from ...selection.sensorgram_axis import snap_window  # (snap_to_grid and snap_window moved to the shared axis module, 2026-11-05)
@@ -35,6 +39,11 @@ from ..axis_cursor import AxisCursor
 from ..image.mark_colors import MASK_COLOR, STALE_COLOR, cube_color
 from ..plot_item_pool import PlotItemPool
 from ..svg_layers import SvgPart
+from .axis_apply import AxisStyler
+from .broken_axis import BreakRegions, BrokenAxisItem
+from ...domain.guide_lines import Guide, rounded_for_span
+from ..menu_icons import give_persistent_icon
+from .guide_items import GuideLines
 from .baseline_selector_menu import DEFAULT_ALPHA, DEFAULT_COLOR, BaselineRangeReadout
 from .plan_bar import PlanBarItem
 from .plan_text_editor import StepTextEditor
@@ -134,22 +143,62 @@ class _Legend(pg.LegendItem):
 
 
 def _finite_runs(*arrays: np.ndarray) -> list[tuple[int, int]]:
-    """[start, stop) of the stretches where every array is finite: a band is drawn per stretch (a gap stays a gap)."""
+    """[start, stop) of the stretches (at least two points) where every array is finite: a band is drawn per stretch (a gap stays a gap). Vectorised (2026-11-27: the Python loop over
+    every point cost ~100 ms for 160 lines of 3000 points)."""
     ok = np.ones(len(arrays[0]), dtype=bool)
     for a in arrays:
         ok &= np.isfinite(a)
-    runs, start = [], None
-    for i, flag in enumerate(ok):
-        if flag and start is None:
-            start = i
-        elif not flag and start is not None:
-            runs.append((start, i))
-            start = None
-    if start is not None:
-        runs.append((start, len(ok)))
-    return [(a, b) for a, b in runs if b - a >= 2]
+    edges = np.diff(np.concatenate(([0], ok.view(np.int8), [0])))
+    starts, stops = np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)
+    return [(int(a), int(b)) for a, b in zip(starts, stops) if b - a >= 2]
 
 
+def _pick_kept(values, *, keep: np.ndarray, n: int):
+    """`values` without the points a break removed (`keep`), when it is a per-point array of the line (length `n`); anything else as it is."""
+    return values[keep] if values is not None and len(values) == n else values
+
+
+def _split_runs(runs: list[tuple[int, int]], cuts: np.ndarray) -> list[tuple[int, int]]:
+    """The runs [start, stop) cut after each index in `cuts` (the segment from point c to c + 1 is removed): a band does not cross a break whose lines are not joined."""
+    out: list[tuple[int, int]] = []
+    for a, b in runs:
+        start = a
+        for c in cuts:
+            if a <= c < b - 1:
+                if c + 1 - start >= 2:
+                    out.append((start, int(c) + 1))
+                start = int(c) + 1
+        if b - start >= 2:
+            out.append((start, b))
+    return out
+
+
+def _with_gaps(x: np.ndarray, y: np.ndarray, cuts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """`x`, `y` with a NaN point after each index in `cuts`: drawn with ``connect="finite"`` the line ends there and starts again at the next point."""
+    at = np.asarray(cuts, dtype=np.intp) + 1
+    return np.insert(np.asarray(x, dtype=np.float64), at, np.nan), np.insert(np.asarray(y, dtype=np.float64), at, np.nan)
+
+
+def _smooth_pieces(x: np.ndarray, y: np.ndarray, cuts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """`smooth_line` of each piece between the cuts, a NaN between two pieces (the smoothed curve must not run across a break whose lines are not joined)."""
+    at = np.asarray(cuts, dtype=np.intp) + 1
+    xs: list[np.ndarray] = []
+    ys: list[np.ndarray] = []
+    for piece_x, piece_y in zip(np.split(np.asarray(x, dtype=np.float64), at), np.split(np.asarray(y, dtype=np.float64), at)):
+        if not piece_x.size:
+            continue
+        smooth_x, smooth_y = smooth_line(piece_x, piece_y)
+        if not smooth_x.size:
+            smooth_x, smooth_y = piece_x, piece_y
+        if xs:
+            xs.append(np.array([np.nan]))
+            ys.append(np.array([np.nan]))
+        xs.append(smooth_x)
+        ys.append(smooth_y)
+    return (np.concatenate(xs), np.concatenate(ys)) if xs else (np.empty(0), np.empty(0))
+
+
+_NO_CUTS = np.empty(0, dtype=np.intp)
 _ANCHOR_HIT_PX = 10.0  # anchor edit: a right click this close (screen px) to an anchor square removes it; farther away it opens the anchor menu
 _CURSOR_SIZE, _CURSOR_HOT = 36, 10  # logical px: the anchor cursor's picture and its cross-hair centre (the click point)
 
@@ -196,11 +245,20 @@ class _MiddlePanViewBox(pg.ViewBox):
 
     claim_right_click = None  # set by the plot: a function (scene position) -> bool, True where the plan bar wants the right-click
     anchor_right_click = None  # set by the plot: a function (scene position) -> bool, True when the anchor-edit mode took the right-click (no menu)
+    guide_right_click = None  # set by the plot: a function (scene position, screen position) -> bool, True when the right-click was on a guide (its own menu opens)
+    last_menu_scene_pos = None  # where the right-click that opened the view's menu was (the menu's "Add guide here" puts the guide at its y)
+
+    def raiseContextMenu(self, ev):
+        self.last_menu_scene_pos = ev.scenePos()
+        super().raiseContextMenu(ev)
 
     def mouseClickEvent(self, ev):
         """pyqtgraph hands a right-click to the ViewBox before any item and the ViewBox accepts it (its own menu). Over a step of the plan bar the click is declined
         here, so that the bar (and its menu) gets it. In the anchor-edit mode a right-click elsewhere goes to the anchors (remove the square under it, or the
         anchor menu) instead of opening the view's menu."""
+        if ev.button() == Qt.MouseButton.RightButton and self.guide_right_click is not None and self.guide_right_click(ev.scenePos(), ev.screenPos()):
+            ev.accept()  # a right-click on a guide opens the guide's menu, not the view's
+            return
         if ev.button() == Qt.MouseButton.RightButton and self.claim_right_click is not None and self.claim_right_click(ev.scenePos()):
             ev.ignore()
             return
@@ -224,15 +282,43 @@ class SensorgramPlot(QWidget):
     plan_text_committed = pyqtSignal(int, str)  # (step index, new text) from the in-place editor
     anchor_point_added = pyqtSignal(float)  # anchor-edit mode: a left click on the plot, at this data x (the cube cursor does not move)
     anchor_point_remove_requested = pyqtSignal(float)  # anchor-edit mode: a right click on an anchor square, at its data x
+    breaks_changed = pyqtSignal(object)  # the user changed the axis breaks (a handle dragged, a span edited, one added or removed): the new tuple of `AxisBreak`; the owner saves it and sets it back with `set_axes`
+    break_edit_changed = pyqtSignal(bool)  # the plot left the break edit mode by itself (the anchor edit started): the toggle follows
+    axis_labels_changed = pyqtSignal()  # an axis shows another quantity (cube number <-> time, position <-> shift, another metric): the Plot menu shows that quantity's options
     legend_corner_note_changed = pyqtSignal(str)  # the step table went on or off: the Legend menu's Corner row says whether it has an effect ("" = it has)
+    guide_moved = pyqtSignal(int, float)  # a guide was dragged: (its index among the guides, its new y); the owner saves it and sets the guides back with `set_axes`
+    guide_menu_requested = pyqtSignal(int, QPoint)  # a right-click on a guide: its index, the screen position for its menu
+    guide_add_requested = pyqtSignal(float)  # the view menu's "Add guide here": the y under the pointer, rounded to a thousandth of the view
+    guides_add_requested = pyqtSignal(object)  # "Add guide from step": a list of `Guide`
     anchor_menu_requested = pyqtSignal(float, QPoint)  # anchor-edit mode: a right click away from every square: data x, screen position for the menu
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._widget = pg.PlotWidget(parent=self, viewBox=_MiddlePanViewBox())
+        self._widget = pg.PlotWidget(parent=self, viewBox=_MiddlePanViewBox(), axisItems={"bottom": BrokenAxisItem("bottom")})
         self._widget.setMinimumHeight(100)
         self._item = self._widget.getPlotItem()
         self._item.showGrid(x=True, y=True, alpha=0.15)
+        self._guides = GuideLines(self._item)  # the Plot group's guides: horizontal reference lines behind the traces
+        self._styler = AxisStyler(self._item)  # the Plot menu's tick spacing, grid and display range (2026-11-27); automatic until `set_axes`
+        # Axis breaks (2026-11-27, `domain/axis_breaks.py`): stretches of the x axis left out and drawn as a small gap. Every item is placed at its *drawn* x (`self._breaks.forward`); what the plot
+        # reports and is given is always in data x. `_break_list` is what the user set; `_breaks` the map in use now (identity while the breaks are hidden or being edited).
+        self._join_lines = True  # a line continues across a break (the Plot menu's choice)
+        self._autoscales = 0  # how many times the view was ranged (`set_axes` ranges it only when no redraw did)
+        self._break_list: tuple[AxisBreak, ...] = ()
+        self._breaks_shown = True
+        self._break_edit = False
+        self._breaks = BreakMap()
+        self._map_key: tuple = ((), None)
+        self._extent: tuple[float, float] | None = None  # the data's lowest and highest x of the last `show_series`: the gap's size follows it
+        self._last_show: tuple | None = None  # the arguments of the last `show_series`, to draw again when the layout changes
+        self._cursor_x: float | None = None
+        self._window_data: tuple[float, float] | None = None
+        self._break_delta = 0.0
+        self._axis_x: BrokenAxisItem = self._item.getAxis("bottom")
+        self._axis_x.break_dragged.connect(self._on_break_dragged)
+        self._axis_x.break_drag_finished.connect(self._on_break_drag_finished)
+        self._regions = BreakRegions(self._item.getViewBox(), self)
+        self._regions.edited.connect(self._on_regions_edited)
         self._legend: _Legend | None = None
         self._corner_note = ""  # what the Legend menu's Corner row says now (`legend_corner_note`); `legend_corner_note_changed` fires when it changes
         self._legend_items: list[tuple[pg.PlotCurveItem, str]] = []  # every line's (marker, text), in the lines' order
@@ -248,14 +334,16 @@ class SensorgramPlot(QWidget):
         self._view = SensorgramViewSettings()  # how the lines, band, dots, anchors and legend are drawn (the View tab); `set_view`
         self._pool = PlotItemPool(self._item)
         self._axis_cursor = AxisCursor(self._item, cube_color(), self)
-        self._axis_cursor.dragged.connect(self.x_clicked)
+        self._axis_cursor.dragged.connect(lambda v: self.x_clicked.emit(self._data_x(v)))  # the circle and the line are placed in drawn x
         self._cursor = self._axis_cursor.line
         # While Play runs only the cursor strip is repainted, once per frame, together with the image (`play_repaint.py`).
         self._play_repaint = PlayCursorRepaint(self._widget, self._item.scene(), (self._axis_cursor.line, self._axis_cursor.handle), self)
         self._plan_bar = PlanBarItem()
         self._item.addItem(self._plan_bar, ignoreBounds=True)  # behind the traces; not part of the auto-range
-        self._item.getViewBox().claim_right_click = self._plan_bar.claims_scene_pos
+        self._item.getViewBox().claim_right_click = lambda pos: self._plan_bar.claims_scene_pos(pos) or self._regions.claims_scene_pos(pos)
         self._item.getViewBox().anchor_right_click = self._on_anchor_right_click
+        self._item.getViewBox().guide_right_click = self._on_guide_right_click
+        self._guides.moved.connect(self.guide_moved)
         self._anchor_mode = False
         self._drag_defaults: tuple[float, int] | None = None  # the scene's click-vs-drag limits, restored when the anchor edit ends
         self._anchors_needed = 0  # anchor points the shape still needs, shown beside the edit mode's cross-hair
@@ -279,6 +367,12 @@ class SensorgramPlot(QWidget):
         self._item.autoBtn.clicked.connect(self.reset_view)
         if view_box.menu is not None:
             view_box.menu.viewAll.triggered.connect(self.reset_view)  # after the menu's own auto-range: the same full view as the "A" button
+            self._add_guide_action = QAction("Add guide here", view_box.menu)  # the view menu's first entry: a reference line at the pointer's y (2026-11-27)
+            give_persistent_icon(self._add_guide_action, "guide_add")
+            self._add_guide_action.triggered.connect(self._on_add_guide_here)
+            first = view_box.menu.actions()[0] if view_box.menu.actions() else None
+            view_box.menu.insertAction(first, self._add_guide_action)
+            view_box.menu.insertSeparator(first)
         self._window = pg.LinearRegionItem(values=(0.0, 1.0), movable=True, span=BASELINE_BAND_SPAN)
         self._window.setZValue(-5)
         self.set_baseline_style(QColor(DEFAULT_COLOR), DEFAULT_ALPHA)
@@ -305,6 +399,7 @@ class SensorgramPlot(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._widget)
         self._axis_labels: tuple[str, str] = ("", "")
+        self._labels_told: tuple[str, str] = ("", "")  # the labels `axis_labels_changed` last announced
         self.set_axis_labels("Cube (#)", "Peak position (nm)")
         # The cube cursor moves at every frame of Play and Qt repaints what it crosses: the plan bar, the table and the axes were painted
         # again each time (~24 ms of 31 per move, offscreen, 2026-11-02). Qt keeps them as pictures instead and redraws a picture only
@@ -325,7 +420,7 @@ class SensorgramPlot(QWidget):
         ]
         if self._window_in_scene:
             parts.append(SvgPart("Baseline window", "Baseline window", self._window))
-        return parts
+        return parts + self._guides.parts()
 
     def plot_item(self) -> pg.PlotItem:
         """The pyqtgraph plot (for the export button: figures are drawn from it)."""
@@ -335,6 +430,9 @@ class SensorgramPlot(QWidget):
         """pyqtgraph draws its own canvas and ignores Qt stylesheets: called at construction and on every live theme switch."""
         theme = get_active_theme()
         self._widget.setBackground(theme.toolbar_bg)
+        self._axis_x.set_background(QColor(theme.toolbar_bg))
+        self._guides.refresh_theme()
+        self._regions.set_color(QColor(theme.accent_blue))
         self._axis_cursor.set_color(cube_color())
         self._range_readout.refresh_theme(theme)
         self._plan_bar.set_theme(theme.text_primary, theme.toolbar_bg, theme.accent_blue)
@@ -352,8 +450,15 @@ class SensorgramPlot(QWidget):
             self._view_kept = False
         self._item.setLabel("bottom", x_label)
         self._item.setLabel("left", y_label)
+        if (x_label, y_label) != self._labels_told:
+            self._labels_told = (x_label, y_label)
+            self.axis_labels_changed.emit()
 
     # -- the view: full, or the user's own zoom ----------------------------------------------------------------------------------
+
+    def axis_labels(self) -> tuple[str, str]:
+        """The quantities the x and y axes show now (their labels)."""
+        return self._axis_labels
 
     def view_is_kept(self) -> bool:
         """True while the user's own zoom or pan is kept: a redraw then leaves the ranges alone."""
@@ -366,8 +471,7 @@ class SensorgramPlot(QWidget):
     def reset_view(self, *_args: object) -> None:
         """Back to the full view: all the data, plus the room the plan bar and the step statistics table need. Ends a kept zoom."""
         self._view_kept = False
-        self._item.getViewBox().autoRange()
-        self._apply_room()
+        self._autoscale()
         self._item.autoBtn.hide()  # as pyqtgraph does after its own click; it comes back on hover
 
     def forget_view(self) -> None:
@@ -416,6 +520,13 @@ class SensorgramPlot(QWidget):
         Drawing cost (2026-11-02, ``docs/spectra_sensorgram_draw_cost_2026-11-02.md``): the items are reused (`PlotItemPool`), the lines are 1 px
         (Qt's fast path; 1.5 px was 8-11x slower to paint) and the dots on the points are drawn only up to the View tab's Dot limit (`view.dots_max_lines`, 10 at first: 64,000 dots
         for 160 ROIs cost ~1 s per redraw and cannot be told apart anyway). The Points toggle shows itself off while the limit holds (`points_toggle.py`)."""
+        self._last_show = (series, stale, mask_marks, baseline_curves, anchor_dots)
+        original = series
+        self._note_extent(series)
+        self._refresh_map(redraw=False)  # the gap's size follows the data's extent: a changed layout reaches the bar, the table, the cursor and the window before the lines are drawn
+        cuts: list[np.ndarray] | None = None  # per line: the points after which a line ends (a break whose lines are not joined)
+        if self._breaks.active:
+            series, stale, mask_marks, cuts = self._through_breaks(series, stale, mask_marks)
         pool = self._pool
         pool.begin()
         self._svg_parts: list[SvgPart] = []  # names for a layered SVG export (svg_layers.py): one per drawn item
@@ -450,13 +561,18 @@ class SensorgramPlot(QWidget):
             parts_from = len(self._svg_parts)
             color = QColor(s.color)
             finite = np.isfinite(s.y) & np.isfinite(s.x)
-            line_x, line_y = smooth_line(s.x, s.y) if spline else (s.x, s.y)  # the dots, marks and statistics stay on the measured points; only the line between them is smoothed
+            cut = cuts[line_index] if cuts is not None else None
+            gapped = cut is not None and cut.size > 0
+            if gapped:  # a break whose lines are not joined: the line ends before it and starts again after it
+                line_x, line_y = _smooth_pieces(s.x, s.y, cut) if spline else _with_gaps(s.x, s.y, cut)
+            else:
+                line_x, line_y = smooth_line(s.x, s.y) if spline else (s.x, s.y)  # the dots, marks and statistics stay on the measured points; only the line between them is smoothed
             if not line_x.size:
                 line_x, line_y = s.x, s.y  # nothing finite to smooth
             # A hidden line keeps its (invisible) item: it still gives the view its extent, which the dots, drawn out of the auto-range, do not.
             pen = _line_pen(color, view.line_width) if view.show_lines else _INVISIBLE_PEN
             line = self._take_stacked(placed, "line", lambda: pg.PlotCurveItem(antialias=True), _Z_LINE, dz)
-            if finite.all():  # no gap to keep: one polyline, and pyqtgraph need not look for NaN again
+            if finite.all() and not gapped:  # no gap to keep: one polyline, and pyqtgraph need not look for NaN again
                 line.setData(line_x, line_y, pen=pen, connect="all", skipFiniteCheck=True, name=s.label if named else None)
             else:  # a NaN stays a gap in the line
                 line.setData(line_x, line_y, pen=pen, connect="finite", skipFiniteCheck=False, name=s.label if named else None)
@@ -470,7 +586,8 @@ class SensorgramPlot(QWidget):
                 dashed = self._take_stacked(placed, "baseline_curve", lambda: pg.PlotCurveItem(antialias=True), _Z_LINE - 0.5, dz, ignore_bounds=True)
                 pen = _line_pen(color, view.line_width)
                 pen.setStyle(Qt.PenStyle.DashLine)
-                dashed.setData(s.x, s.baseline_curve, pen=pen, connect="finite", skipFiniteCheck=False)
+                base_x, base_y = _with_gaps(s.x, s.baseline_curve, cut) if gapped else (s.x, s.baseline_curve)
+                dashed.setData(base_x, base_y, pen=pen, connect="finite", skipFiniteCheck=False)
                 self._svg_parts.append(SvgPart("Baseline curves", s.label, dashed))
             if anchor_dots is not None and s.anchor_x is not None and s.anchor_y is not None and s.anchor_x.size:
                 ay = s.anchor_y if anchor_dots == "absolute" or s.anchor_base is None else s.anchor_y - s.anchor_base
@@ -485,15 +602,22 @@ class SensorgramPlot(QWidget):
             if view.show_band and s.band_low is not None and s.band_high is not None:
                 brush = QColor(color)
                 brush.setAlpha(_BAND_ALPHA)
-                for a, b in _finite_runs(s.x, s.band_low, s.band_high):
+                runs = _finite_runs(s.x, s.band_low, s.band_high)
+                for a, b in _split_runs(runs, cut) if gapped else runs:
                     low = pool.take("band_edge", lambda: pg.PlotDataItem(pen=_INVISIBLE_PEN))
                     high = pool.take("band_edge", lambda: pg.PlotDataItem(pen=_INVISIBLE_PEN))
                     band_x, low_y, high_y = s.x[a:b], s.band_low[a:b], s.band_high[a:b]
                     if spline:  # the band follows the smoothed line: both edges on the same denser x
                         band_x, low_y = smooth_run(band_x, low_y)
                         high_y = smooth_run(s.x[a:b], high_y)[1]
+                    # A pooled edge is still joined to the fill it had: every `setData` would make that fill work out its path again (3 times per band; ~0.45 s of a 160-line redraw,
+                    # 2026-11-27). Silenced while the data go in; `setCurves` below works the path out once.
+                    low.blockSignals(True)
+                    high.blockSignals(True)
                     low.setData(band_x, low_y)
                     high.setData(band_x, high_y)
+                    low.blockSignals(False)
+                    high.blockSignals(False)
                     # The fill's own bounding rectangle reaches far outside the band (the y range of an average ran from -32 to 641 nm for peaks near 595 nm),
                     # so it stays out of the auto-range; the two invisible edge curves, which are only data, give the band's real extent.
                     fill = self._take_stacked(placed, "band_fill", lambda: pg.FillBetweenItem(low, high), _Z_BAND, dz, ignore_bounds=True)  # noqa: B023 (called at once)
@@ -501,8 +625,9 @@ class SensorgramPlot(QWidget):
                     fill.setZValue(_Z_BAND + dz)  # `setCurves` puts the fill just under its curves (z = -1): the band is stacked with its own line, behind every line (`restack` does the same)
                     fill.setBrush(pg.mkBrush(brush))
                     self._svg_parts += [SvgPart("Bands", s.label, fill), SvgPart("Bands", f"{s.label} (edges)", low), SvgPart("Bands", f"{s.label} (edges)", high)]
-            if stale is not None and stale.any():
-                mask = np.asarray(stale, dtype=bool) & finite
+            stale_here = stale[line_index] if isinstance(stale, list) else stale  # with breaks: one array per line (the points inside a break are gone)
+            if stale_here is not None and stale_here.any():
+                mask = np.asarray(stale_here, dtype=bool) & finite
                 if mask.any():
                     hollow = self._take_stacked(placed, "stale", lambda: pg.ScatterPlotItem(), _Z_RINGS, dz)
                     hollow.setData(s.x[mask], s.y[mask], symbol="d", size=10, brush=None, pen=pg.mkPen(STALE_COLOR, width=1.5))
@@ -519,11 +644,10 @@ class SensorgramPlot(QWidget):
             self._line_items[line_index] = placed
             self._line_parts[line_index] = self._svg_parts[parts_from:]
         pool.end()
-        self._drawn_series, self._drawn_view = tuple(series), view
+        self._drawn_series, self._drawn_view = tuple(original), view  # the lines as given: `can_restack` compares them
         self._rebuild_legend(series, [slot for slot in legend_slots if slot is not None], legend_rank)
         if not self._view_kept:  # the user's own zoom stays over a redraw (a recompute, another selection); `reset_view` brings the full view back
-            self._item.getViewBox().autoRange()
-            self._apply_room()
+            self._autoscale()
 
     def _take_stacked(self, placed: list, kind: str, factory, base: float, dz: float, *, ignore_bounds: bool = False):
         """An item from the pool at z = `base` + the line's place in the stack `dz`; `placed` remembers it with its `base`, so `restack` can give it another `dz`."""
@@ -728,8 +852,82 @@ class SensorgramPlot(QWidget):
         """Range the view again, with the room made, when what the bar, its labels and the table need beyond the traces is not what the view was ranged with.
         Not while the user's own zoom is kept: `reset_view` makes the room then."""
         if not self._view_kept and self._room() != self._room_applied:
-            self._item.getViewBox().autoRange()
-            self._apply_room()
+            self._autoscale()
+
+    def _autoscale(self) -> None:
+        """The full view: all the data, the room the bar and the table need, and then the ranges the Plot menu pins (a pinned end is exactly what was typed: no room is added to it)."""
+        self._autoscales += 1
+        self._item.getViewBox().autoRange()
+        self._apply_room()
+        self._styler.pin_ranges()
+
+    def set_axes(self, axes: PlotAxes) -> None:
+        """Draw the ticks, the grid and the display range of the Plot menu. Setting a range is a request for that view, so it ends the user's own zoom."""
+        previous = self._styler.axes()
+        if previous.only_guides_differ(axes):  # a guide was added, edited or removed: nothing else moves, and the user's zoom stays
+            self._styler.set_axes(axes)
+            self._guides.set_guides(axes.y.guides)
+            return
+        rerange = previous.needs_rerange(axes)  # a tick step, the grid or the breaks' switches do not change which part of the data is in view: the user's zoom stays and nothing is ranged again
+        self._styler.set_axes(axes)
+        self._guides.set_guides(axes.y.guides)
+        self._axis_x.set_zero(axes.x.zero)  # the numbers printed on the x axis count from here; nothing drawn moves
+        if rerange:
+            self._view_kept = False
+        ranged = self._autoscales
+        self._set_breaks(axes.x.breaks, axes.x.join_lines)  # a changed layout draws the lines again, which ranges the view itself
+        if rerange and self._autoscales == ranged:
+            self._autoscale()
+
+    # -- guides on the plot (2026-11-27) ---------------------------------------------------------------------------------------------
+
+    def _on_guide_right_click(self, scene_pos, screen_pos) -> bool:
+        """A right-click on a guide asks for its menu (`guide_menu_requested`). Not while an edit mode owns the right button (anchor points, break spans)."""
+        if self._anchor_mode or self._break_edit:
+            return False
+        index = self._guides.index_at(scene_pos)
+        if index is None:
+            return False
+        self.guide_menu_requested.emit(index, QPoint(int(screen_pos.x()), int(screen_pos.y())))
+        return True
+
+    def _on_add_guide_here(self) -> None:
+        pos = self._item.getViewBox().last_menu_scene_pos
+        if pos is None:
+            return
+        y = float(self._item.getViewBox().mapSceneToView(pos).y())
+        self.guide_add_requested.emit(rounded_for_span(y, self._guides.view_span()))
+
+    def step_guides(self, indices: Sequence[int]) -> list[Guide]:
+        """A guide for each of the steps `indices` (the plan bar's `PlanBarStep.index`): at the mean of the plotted lines' means in the step, labelled with the step, writing its value. A step
+        no line has a number for gives none. Empty while the step table has not been computed (no line is drawn)."""
+        table = self._stats.table()
+        if table is None:
+            return []
+        out: list[Guide] = []
+        for index in indices:
+            column = next((c for c in table.columns if c.index == index), None)
+            if column is None:
+                continue
+            means = [float(row.mean[index]) for row in table.lines if index < len(row.mean) and math.isfinite(float(row.mean[index]))]
+            if means:
+                out.append(Guide(rounded_for_span(float(np.mean(means)), self._guides.view_span()), column.title, None, "dash", True))
+        return out
+
+    def request_guides_from_steps(self, indices: Sequence[int]) -> None:
+        """The plan bar's "Add guide from step": asks the owner (`guides_add_requested`) to add these steps' guides."""
+        guides = self.step_guides(indices)
+        if guides:
+            self.guides_add_requested.emit(guides)
+
+    def plan_steps(self) -> tuple[PlanBarStep, ...]:
+        """The steps of the plan bar now (data x), e.g. for the Plot menu's "Zero at" list."""
+        return self._plan_bar.steps()
+
+    def visible_range(self) -> tuple[tuple[float, float], tuple[float, float]]:
+        """The ((x low, x high), (y low, y high)) on screen now (the Plot menu's "Use view")."""
+        (x_low, x_high), (y_low, y_high) = self._item.getViewBox().viewRange()
+        return (self._data_x(float(x_low)), self._data_x(float(x_high))), (float(y_low), float(y_high))
 
     def _apply_room(self) -> None:
         """Widen the ranges the auto-range just set, so the bar (and the Data-mode labels and the step statistics table) take free space instead of hiding traces:
@@ -842,11 +1040,222 @@ class SensorgramPlot(QWidget):
     def close_plan_text_editor(self) -> None:
         self._text_editor.close_without_saving()
 
+    # -- axis breaks (2026-11-27) -------------------------------------------------------------------------------------------------
+
+    def _drawn_x(self, x: float) -> float:
+        """The drawn x of data `x` (the same number while the axis has no break)."""
+        return float(self._breaks.forward(float(x)))
+
+    def _data_x(self, v: float) -> float:
+        """The data x of drawn `v`: what the plot reports for a click, a handle or a pointer."""
+        return float(self._breaks.inverse(float(v)))
+
+    def breaks(self) -> tuple[AxisBreak, ...]:
+        """The breaks the user set for the quantity on the x axis now (whether they are shown or not)."""
+        return self._break_list
+
+    def breaks_active(self) -> bool:
+        """True while the axis is drawn with its breaks (they are set, shown, and the plot is not in the edit mode)."""
+        return self._breaks.active
+
+    def set_breaks_visible(self, shown: bool) -> None:
+        """Show the breaks, or draw the axis continuous and uncompressed (the Show group's toggle). The breaks are kept either way."""
+        if bool(shown) != self._breaks_shown:
+            self._breaks_shown = bool(shown)
+            self._relayout()
+
+    def breaks_visible(self) -> bool:
+        return self._breaks_shown
+
+    def break_edit(self) -> bool:
+        return self._break_edit
+
+    def set_break_edit(self, on: bool) -> bool:
+        """The edit mode: the axis is drawn continuous again with each break as a shaded span whose edges and body can be dragged; a click on the plot adds a break, a right-click on a span
+        removes it. The plan bar's gestures wait (as in the anchor edit). Returns False, and does nothing, when the anchor edit is on (one edit mode at a time: a click means one thing);
+        starting the anchor edit ends this one (`break_edit_changed(False)`)."""
+        on = bool(on)
+        if on and self._anchor_mode:
+            return False
+        if on == self._break_edit:
+            return True
+        self._break_edit = on
+        self._plan_bar.set_locked(self._anchor_mode or self._break_edit)
+        if on:
+            self._plan_bar.clear_selection()
+            self._regions.set_breaks(self._break_list)
+        else:
+            self._regions.clear()
+        self._relayout()
+        self.break_edit_changed.emit(on)
+        return True
+
+    def _set_breaks(self, breaks: tuple[AxisBreak, ...], join_lines: bool = True) -> None:
+        """Take the breaks the owner holds for this x quantity (a restored session, an edit, another quantity on the axis) and whether a line continues across them."""
+        breaks, join_lines = tuple(breaks), bool(join_lines)
+        joined_changed = join_lines != self._join_lines
+        self._join_lines = join_lines
+        if breaks == self._break_list:
+            if joined_changed and self._breaks.active and self._last_show is not None:
+                self.show_series(*self._last_show)  # only how the lines cross the gaps: the layout, the view and the zoom stay
+            return
+        self._break_list = breaks
+        if self._break_edit:
+            self._regions.set_breaks(breaks)
+        self._relayout()
+
+    def lines_join(self) -> bool:
+        """True while a line continues across a break (False: it ends before the break and starts again after it)."""
+        return self._join_lines
+
+    def _note_extent(self, series: Sequence[Series]) -> None:
+        """The data's lowest and highest x: the size of a gap is a fixed fraction of what is kept between them. Unchanged when the lines have no finite x."""
+        low, high = math.inf, -math.inf
+        for s in series:
+            finite = s.x[np.isfinite(s.x)] if s.x.size else s.x
+            if finite.size:
+                low, high = min(low, float(finite.min())), max(high, float(finite.max()))
+        if low < high:
+            self._extent = (low, high)
+
+    def _refresh_map(self, *, redraw: bool) -> bool:
+        """Build the map from the breaks, the switch, the edit mode and the extent; when it changed, give it to the axis, the bar, the table, the cursor and the baseline window, and (with
+        `redraw`) draw the lines again. Returns whether it changed."""
+        in_use = self._breaks_shown and not self._break_edit
+        key = (self._break_list if in_use else (), self._extent if in_use else None)
+        if key == self._map_key:
+            return False
+        self._map_key = key
+        self._breaks = BreakMap(*key)
+        self._axis_x.set_map(self._breaks)
+        self._plan_bar.set_x_map(self._breaks)
+        self._stats.set_x_map(self._breaks)
+        self._styler.set_x_map(self._breaks)
+        self._view_kept = False  # a kept zoom is in drawn units that no longer mean the same
+        self._push_cursor()
+        if self._window_data is not None and self._window_in_scene:
+            self.set_baseline_window(self._window_data, self._decimals)
+        if redraw and self._last_show is not None:
+            self.show_series(*self._last_show)
+        return True
+
+    def _relayout(self) -> None:
+        """The breaks, their switch or the edit mode changed: lay everything out again (and range the view, in the new units)."""
+        self._refresh_map(redraw=True)  # a changed map draws the lines again, and that ranges the view (the zoom was given up with the old units)
+        if self._last_show is None:  # nothing was drawn: range the empty plot itself
+            self._autoscale()
+
+    def _push_cursor(self) -> None:
+        x = self._cursor_x
+        hidden = x is None or not math.isfinite(x) or bool(self._breaks.inside(x))
+        self._axis_cursor.set_x(None if hidden else self._drawn_x(x))
+
+    def _through_breaks(self, series: Sequence[Series], stale, mask_marks):
+        """The lines as they are drawn with breaks: a point inside a break is left out (so the line runs across the gap from the last point before it to the first after it, or, when the
+        lines are not joined, ends there: `cuts`), every other x is its drawn x. Every per-point array (y, the band, the baseline curve, the out-of-date flags, the mask marks) loses the
+        same points. Copies: the lines as given are not touched. The lines of a plot nearly always share one x: what depends on x alone (which points stay, where they are drawn, where the
+        lines end) is worked out once per distinct x (2026-11-27: 160 lines of 3000 points, 330 -> ~10 ms).
+        Returns (lines, stale per line, mask marks, cuts per line or None)."""
+        bm = self._breaks
+        out: list[Series] = []
+        stale_out: list[np.ndarray | None] = []
+        marks_out: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        cuts_out: list[np.ndarray] = []
+        by_x: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []  # (x as given, points kept, their drawn x, cuts)
+        anchors_by_x: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []  # (anchor x as given, anchors kept, their drawn x)
+
+        def x_work(x: np.ndarray):
+            for seen, keep_seen, drawn_seen, cuts_seen in by_x:
+                if seen is x or (seen.shape == x.shape and np.array_equal(seen, x, equal_nan=True)):
+                    return keep_seen, drawn_seen, cuts_seen
+            keep_new = ~np.asarray(bm.inside(x), dtype=bool)
+            kept = x[keep_new]
+            cuts_new = self._cuts_after(kept) if not self._join_lines else _NO_CUTS
+            by_x.append((x, keep_new, bm.forward(kept), cuts_new))
+            return by_x[-1][1:]
+
+        def anchor_work(x: np.ndarray):
+            for seen, keep_seen, drawn_seen in anchors_by_x:
+                if seen is x or (seen.shape == x.shape and np.array_equal(seen, x, equal_nan=True)):
+                    return keep_seen, drawn_seen
+            keep_new = ~np.asarray(bm.inside(x), dtype=bool)
+            anchors_by_x.append((x, keep_new, bm.forward(x[keep_new])))
+            return anchors_by_x[-1][1:]
+
+        for s in series:
+            keep, drawn_x, cuts = x_work(s.x)
+
+            pick = partial(_pick_kept, keep=keep, n=len(s.x))
+
+            changes = dict(x=drawn_x, y=pick(s.y), band_low=pick(s.band_low), band_high=pick(s.band_high), baseline_curve=pick(s.baseline_curve))
+            if s.anchor_x is not None:
+                anchor_keep, anchor_drawn = anchor_work(s.anchor_x)
+                changes.update(
+                    anchor_x=anchor_drawn, anchor_y=None if s.anchor_y is None else s.anchor_y[anchor_keep],
+                    anchor_base=None if s.anchor_base is None else s.anchor_base[anchor_keep],
+                )
+            out.append(replace(s, **changes))
+            cuts_out.append(cuts)
+            stale_out.append(None if stale is None else pick(np.asarray(stale)))
+            marks = None if mask_marks is None else mask_marks.get(s.key)
+            if marks is not None:
+                marks_out[s.key] = (pick(np.asarray(marks[0])), pick(np.asarray(marks[1])))
+        return out, (None if stale is None else stale_out), (None if mask_marks is None else marks_out), (cuts_out if not self._join_lines else None)
+
+    def _cuts_after(self, kept_x: np.ndarray) -> np.ndarray:
+        """Where a line ends because of a break (lines not joined): the index of the last point before each break, when a point after it follows. `kept_x`: the data x of the points kept."""
+        cuts: list[int] = []
+        for item in self._breaks.breaks:
+            before = np.flatnonzero(kept_x <= item.start)
+            if before.size:
+                last = int(before[-1])
+                if last + 1 < kept_x.size and bool((kept_x[last + 1 :] >= item.end).any()):
+                    cuts.append(last)
+        return np.unique(np.asarray(cuts, dtype=np.intp)) if cuts else _NO_CUTS
+
+    def _add_break_at(self, x: float) -> None:
+        """Edit mode: a click made a break centred on `x`: 5 % of the data's length long, kept inside the data (a break that reaches an end is a range, not a break)."""
+        if self._extent is None:
+            return
+        low, high = self._extent
+        length = 0.05 * (high - low)
+        start = min(max(x - length / 2.0, low + length * 0.1), high - length * 1.1)
+        added = normalized([*self._break_list, AxisBreak(start, start + length)], self._extent)
+        if added != self._break_list:
+            self.breaks_changed.emit(added)
+
+    def _on_regions_edited(self, breaks) -> None:
+        self.breaks_changed.emit(normalized(breaks, self._extent))
+
+    def _on_break_dragged(self, index: int, delta: float) -> None:
+        """A handle is held: the break would move by `delta` (drawn units = data units here: moving a break changes neither the length kept nor the gap). Only the handle moves
+        meanwhile; the data are laid out again when the mouse goes up."""
+        self._break_delta = float(delta)
+
+    def _on_break_drag_finished(self, index: int) -> None:
+        delta, self._break_delta = self._break_delta, 0.0
+        breaks = list(self._breaks.breaks)  # the breaks in use (sorted, inside the data): the handle's index is into these
+        if self._extent is None or not 0 <= index < len(breaks):
+            self._axis_x.set_map(self._breaks)  # puts the handle back
+            return
+        item = breaks[index]
+        length = item.end - item.start
+        low = breaks[index - 1].end if index > 0 else self._extent[0]
+        high = breaks[index + 1].start if index + 1 < len(breaks) else self._extent[1]
+        room = 0.002 * (self._extent[1] - self._extent[0])  # stops just short of a neighbour or of the data's end: touching would merge the breaks, reaching the end would make it a range
+        start = min(max(item.start + delta, low + room), high - length - room)
+        moved = normalized([*breaks[:index], AxisBreak(start, start + length), *breaks[index + 1 :]], self._extent)
+        if moved != tuple(breaks):
+            self.breaks_changed.emit(moved)
+        else:
+            self._axis_x.set_map(self._breaks)
+
     # -- the cursor and the baseline window -------------------------------------------------------------------------------------------
 
     def set_current_x(self, x: float | None) -> None:
-        """The dashed line and the slider-style circle at the current cube (None hides them)."""
-        self._axis_cursor.set_x(x)
+        """The dashed line and the slider-style circle at the current cube (None hides them). With breaks, a cube inside a break has no place on the axis: the cursor is hidden."""
+        self._cursor_x = None if x is None else float(x)
+        self._push_cursor()
 
     def begin_play_repaints(self) -> None:
         """Play started: from now on the plot repaints the cursor strip once per frame (`repaint_play_cursor`), not on every scene change."""
@@ -864,6 +1273,7 @@ class SensorgramPlot(QWidget):
         """Show the baseline window (low, high) in x units, or hide it (None). Setting it here never emits ``baseline_window_changed``.
         ``decimals``: how many the start / end fields above it show (whole cubes, or tenths of a second)."""
         if window is None:
+            self._window_data = None
             if self._window_in_scene:
                 self._item.removeItem(self._window)
                 self._window_in_scene = False
@@ -873,9 +1283,10 @@ class SensorgramPlot(QWidget):
         if not self._window_in_scene:
             self._item.addItem(self._window, ignoreBounds=True)
             self._window_in_scene = True
+        self._window_data = (float(window[0]), float(window[1]))
         self._setting_window = True
         try:
-            self._window.setRegion(window)
+            self._window.setRegion((self._drawn_x(window[0]), self._drawn_x(window[1])))
         finally:
             self._setting_window = False
         self._window.update()
@@ -928,21 +1339,22 @@ class SensorgramPlot(QWidget):
         if not self._window_in_scene:
             return None
         low, high = self._window.getRegion()
-        return float(low), float(high)
+        return self._data_x(float(low)), self._data_x(float(high))
 
     def x_range(self) -> tuple[float, float]:
         low, high = self._item.getViewBox().viewRange()[0]
-        return float(low), float(high)
+        return self._data_x(float(low)), self._data_x(float(high))
 
     def _on_window_moving(self) -> None:
         """A drag in progress: the edges are put on the nearest data points, the fields above the band follow."""
         if not self._setting_window:
             low, high = self._window.getRegion()
+            low, high = self._data_x(float(low)), self._data_x(float(high))  # the edges are snapped to data points, so in data x
             snapped = snap_window(self._grid, low, high)
-            if snapped != (float(low), float(high)):
+            if snapped != (low, high):
                 self._setting_window = True
                 try:
-                    self._window.setRegion(snapped)
+                    self._window.setRegion((self._drawn_x(snapped[0]), self._drawn_x(snapped[1])))
                 finally:
                     self._setting_window = False
                 low, high = snapped
@@ -969,7 +1381,7 @@ class SensorgramPlot(QWidget):
         if self._setting_window:
             return
         low, high = self._window.getRegion()
-        self.baseline_window_changed.emit(float(low), float(high))
+        self.baseline_window_changed.emit(self._data_x(float(low)), self._data_x(float(high)))
 
     def _on_y_label(self, scene_pos) -> bool:
         label = self._item.getAxis("left").label  # a rotated text item: its scene rectangle is the vertical strip the text occupies
@@ -999,7 +1411,10 @@ class SensorgramPlot(QWidget):
         view_box = self._item.getViewBox()
         if not view_box.sceneBoundingRect().contains(event.scenePos()):
             return
-        x = float(view_box.mapSceneToView(event.scenePos()).x())
+        x = self._data_x(float(view_box.mapSceneToView(event.scenePos()).x()))
+        if self._break_edit:
+            self._add_break_at(x)  # the axis is continuous while editing: a click makes a break there, it does not move the cube
+            return
         if self._anchor_mode:
             self.anchor_point_added.emit(x)
             return
@@ -1013,7 +1428,9 @@ class SensorgramPlot(QWidget):
         (`anchor_point_remove_requested`) and a right click anywhere else asks for the anchor menu (`anchor_menu_requested`); the cube cursor, the plot's own right-click menu and every gesture of the plan bar (select, resize, retype, its menu) wait until it is off. A cross-hair
         pointer shows the mode."""
         self._anchor_mode = bool(on)
-        self._plan_bar.set_locked(self._anchor_mode)  # no step edits while anchors are edited: every click is an anchor click
+        if self._anchor_mode and self._break_edit:
+            self.set_break_edit(False)  # one edit mode at a time: a click means one thing
+        self._plan_bar.set_locked(self._anchor_mode or self._break_edit)  # no step edits while anchors are edited: every click is an anchor click
         if self._anchor_mode:
             self._plan_bar.clear_selection()
         self._apply_anchor_cursor()
@@ -1060,7 +1477,7 @@ class SensorgramPlot(QWidget):
             self.anchor_point_remove_requested.emit(hit)
         else:
             point = screen_pos.toPoint() if screen_pos is not None else QPoint()
-            self.anchor_menu_requested.emit(float(view_box.mapSceneToView(scene_pos).x()), point)
+            self.anchor_menu_requested.emit(self._data_x(float(view_box.mapSceneToView(scene_pos).x())), point)
         return True
 
     def anchor_square_at(self, scene_pos) -> float | None:
@@ -1078,4 +1495,4 @@ class SensorgramPlot(QWidget):
                 distance = float(np.hypot(at.x() - scene_pos.x(), at.y() - scene_pos.y()))
                 if distance <= best:
                     best, best_x = distance, float(x)
-        return best_x
+        return None if best_x is None else self._data_x(best_x)

@@ -24,7 +24,7 @@ The hit area (`shape`) is the strip of the bar, widened by the boundary toleranc
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from PyQt6.QtCore import QPoint, QPointF, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QIcon, QPainter, QPainterPath, QPen, QTransform
@@ -92,9 +92,13 @@ class PlanBarItem(DeviceSpaceItem):
     menu_requested = pyqtSignal(int, QPoint)  # step index, where on the screen
     selection_changed = pyqtSignal(object)  # the selected steps' indices, a sorted tuple (empty: none)
 
+    _x_map = None  # the plot's `BreakMap` while its x axis has breaks (`set_x_map`); a class default because pyqtgraph's constructor reaches into the item first
+
     def __init__(self) -> None:
         super().__init__()
-        self._steps: tuple[PlanBarStep, ...] = ()
+        self._steps: tuple[PlanBarStep, ...] = ()  # as drawn: x in the plot's drawn units (`set_x_map`)
+        self._data_steps: tuple[PlanBarStep, ...] = ()  # as given: x in data units
+        self._data_preview: tuple[tuple[float, float], ...] = ()
         self._settings = PlanBarSettings()
         self._text_color = "#e6edf3"  # text drawn on the plot background (the Data mode), and the colour of the boundary lines
         self._background = "#1b1f24"  # the plot background, for the text colour on a transparent fill
@@ -113,9 +117,23 @@ class PlanBarItem(DeviceSpaceItem):
 
     # -- what to draw ---------------------------------------------------------------------------------------------------
 
+    def set_x_map(self, x_map) -> None:
+        """The plot's axis has breaks (2026-11-27, `domain/axis_breaks.BreakMap`; None or an inactive map: none): the steps and the preview are given in data x and drawn at their drawn x,
+        and a dragged edge is reported in data x again. The bar keeps both, so a changed map re-draws them without being asked for the steps again."""
+        self._x_map = x_map
+        self.set_plan(self._data_steps, self._settings)
+        self.set_preview(self._data_preview, force=True)
+
+    def _drawn_x(self, x: float) -> float:
+        return x if self._x_map is None else float(self._x_map.forward(x))
+
+    def _data_x(self, v: float) -> float:
+        return v if self._x_map is None else float(self._x_map.inverse(v))
+
     def set_plan(self, steps: tuple[PlanBarStep, ...] | list[PlanBarStep], settings: PlanBarSettings) -> None:
         self.prepareGeometryChange()
-        self._steps = tuple(steps)
+        self._data_steps = tuple(steps)
+        self._steps = tuple(replace(step, x_start=self._drawn_x(step.x_start), x_end=self._drawn_x(step.x_end)) for step in self._data_steps) if self._x_map is not None and self._x_map.active else self._data_steps
         self._settings = settings
         # the S_bulk steps' greys, from dark (lowest level) to white (highest), judged over every step of the plan, not only those in view
         self._bulk_grays = bulk_grays({s.index: None if s.levels is None else s.levels.median for s in self._steps if BULK_CHIP in s.roles})
@@ -124,15 +142,16 @@ class PlanBarItem(DeviceSpaceItem):
             self._set_selection(tuple(i for i in self._selected if i in present), self._anchor if self._anchor in present else None)  # a step is gone (another dataset, no traces)
         self.update()
 
-    def set_preview(self, extents: tuple[tuple[float, float], ...] | list[tuple[float, float]]) -> None:
+    def set_preview(self, extents: tuple[tuple[float, float], ...] | list[tuple[float, float]], *, force: bool = False) -> None:
         """The batch edit's preview (2026-11-26): `(x start, x end)` in data x of each step as it would be after the edit; empty clears it. Drawing only (`_paint_preview`)."""
         extents = tuple((float(a), float(b)) for a, b in extents)
-        if extents != self._preview:
-            self._preview = extents
+        if extents != self._data_preview or force:
+            self._data_preview = extents
+            self._preview = tuple((self._drawn_x(a), self._drawn_x(b)) for a, b in extents)
             self.update()
 
     def preview(self) -> tuple[tuple[float, float], ...]:
-        return self._preview
+        return self._data_preview
 
     def set_keep_out(self, top_px: float, bottom_px: float) -> None:
         """The band at the top / bottom edge of the plot that the step stats table (with the legend) takes, in pixels: the names of a Full bar, whose strip is the whole plot, are
@@ -347,7 +366,7 @@ class PlanBarItem(DeviceSpaceItem):
             return
         ev.accept()
         index, edge = self._dragging
-        self.edge_dragged.emit(index, edge, float(ev.pos().x()), self._drag_together or bool(ev.modifiers() & Qt.KeyboardModifier.ShiftModifier))
+        self.edge_dragged.emit(index, edge, self._data_x(float(ev.pos().x())), self._drag_together or bool(ev.modifiers() & Qt.KeyboardModifier.ShiftModifier))
         if ev.isFinish():
             self._dragging = None
             self._drag_together = False

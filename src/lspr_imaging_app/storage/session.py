@@ -79,6 +79,7 @@ that.
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import logging
 import os
@@ -131,7 +132,11 @@ from ..domain.roi_shapes import NO_BORDER, Border, Circle, MaskShape, Rectangle,
 logger = logging.getLogger(__name__)
 
 SESSION_SCHEMA_NAME = "lspri_rewrite_session"
-SESSION_SCHEMA_VERSION = "1.16"
+SESSION_SCHEMA_VERSION = "1.17"
+# 1.17 (2026-11-27): optional top-level "plot_axes" block - the axis options of the Sensorgram, LbL and S_bulk plots: {plot: {"grid_alpha": a, "axes": [{"side": "x" | "y", "label": the quantity the axis
+# shows, "major", "minor", "low", "high": numbers, "grid": false}, ...]}} (selection/plot_axes_module.py, domain/plot_axes.py). Only what differs from automatic is written, and only when some plot has
+# something, so a session that never used it is written exactly as before; a 1.16 file has none and loads with every plot automatic (migration: none needed, the block is additive). An older build
+# ignores the block. Display only: no number depends on it.
 # 1.16 (2026-11-22): optional top-level "plot_line_order" block - the stacking order the user set by hand in the Sensorgram, LbL and S_bulk plots: {"sensorgram": [names], "lbl": [names],
 # "bulk": [names]}, first = in front (selection/plot_line_order_module.py). Written only when some plot has a list, so a session that never used it is written exactly as before; a 1.15
 # file has none and loads with every plot at its own order (migration: none needed, the block is additive). An older build ignores the block. Display only: no number depends on it.
@@ -539,6 +544,7 @@ class SessionState:
     refractive_index: RiTable | None = None  # the imported RIs.txt (None: none imported)
     spectral_correction: dict | None = None  # the "spectral_correction" block as plain data (schema 1.13); None: no table
     plot_line_order: dict | None = None  # the "plot_line_order" block as plain data (schema 1.16): {plot: [names]}, first = in front; None: none set
+    plot_axes: dict | None = None  # the "plot_axes" block as plain data (schema 1.17), see `PlotAxesModule.state`; None: none set
     mask_versions: dict[MaskChange, int] = field(default_factory=dict)
     """Only filled by `load_session`: which file version each mask change was read from, for
     `SessionWriter.seed`. Not part of the saved format, and empty in a state captured from the modules (it says
@@ -887,6 +893,7 @@ def prepare_session(state: SessionState, naming: FrameNamingScheme) -> PreparedS
         **({} if state.refractive_index is None else {"refractive_index": state.refractive_index.to_payload()}),
         **({} if state.spectral_correction is None else {"spectral_correction": dict(state.spectral_correction)}),
         **({} if not state.plot_line_order else {"plot_line_order": {plot: list(names) for plot, names in state.plot_line_order.items()}}),
+        **({} if not state.plot_axes else {"plot_axes": copy.deepcopy(state.plot_axes)}),
         "mask_pointers": None,  # filled in by `SessionWriter.write` from `PreparedSession.mask_pointers`
         "selection": {
             "cube_index": int(state.selected_cube),
@@ -1006,6 +1013,7 @@ def load_session(
         refractive_index=_decode_ri_table(payload.get("refractive_index")),
         spectral_correction=_decode_spectral_block(payload.get("spectral_correction")),
         plot_line_order=_decode_line_order(payload.get("plot_line_order")),
+        plot_axes=payload.get("plot_axes") if isinstance(payload.get("plot_axes"), dict) else None,  # the module reads it leniently and says what it left out
     )
 
 

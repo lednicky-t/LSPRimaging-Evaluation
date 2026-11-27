@@ -38,7 +38,12 @@ from ...analysis.export_tables import Table
 from ...analysis.step_table import BulkPoint, RowNumbers, bulk_values
 from ..plot_export_button import ExportData, PlotExportButton
 from ..ui_state import UiStateStore
+from ...selection.plot_axes_module import PlotAxesModule
 from ...selection.plot_line_order_module import PLOT_BULK, PlotLineOrderModule
+from .axis_apply import AxisStyler
+from .axis_controls import AxisControls
+from .guide_controls import GuideControls
+from .guide_items import GuideLines
 from .plot_window_draw import (
     LegendEntry,
     PlotAreaButton,
@@ -110,7 +115,7 @@ class BulkPlotWindow(QWidget):
     lines_mode_changed = pyqtSignal(str)
     closed = pyqtSignal()
 
-    def __init__(self, parent: QWidget | None = None, line_order: PlotLineOrderModule | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, line_order: PlotLineOrderModule | None = None, plot_axes: PlotAxesModule | None = None) -> None:
         super().__init__(parent, Qt.WindowType.Window)
         self.setWindowTitle("Bulk sensitivity")
         self.resize(600, 440)
@@ -122,6 +127,8 @@ class BulkPlotWindow(QWidget):
         self._steps: list[PlotStep] = []
         self._weighting = bs.WEIGHT_INVERSE_VARIANCE
         self._y_label = "Step mean (nm)"
+        self._labels = ("", "")  # the quantities the axes show, as the last redraw named them (the Plot menu keeps its options per quantity)
+        self._drawing = False
         self._x_range: tuple[float, float] | None = None  # the RI range last set, so a zoom of the user's is kept until the RIs change
         self._wavelength_nm: float | None = None
         self._note = ""
@@ -130,6 +137,13 @@ class BulkPlotWindow(QWidget):
         self._state: DrawnState | None = None  # what was drawn last, for a change that only re-orders (None: draw everything again)
         self.look.attach_line_order(line_order, PLOT_BULK, "S_bulk", lambda: rows_of(self._last_entries))  # the Manual draw order's list is the session's
 
+        self._plot = pg.PlotWidget(parent=self)
+        self._plot.showGrid(x=True, y=True, alpha=0.15)
+        self._styler = AxisStyler(self._plot.getPlotItem())  # the Plot menu's tick spacing, grid and display range (2026-11-27)
+        self.axes = AxisControls(self, plot_axes, PLOT_BULK, lambda: self._labels, lambda: self._visible_range(), object_prefix="bulk_axes")
+        self.guides = GuideControls(self, self.axes.module, PLOT_BULK, lambda: self._labels, object_prefix="bulk_guides")
+        self._guide_lines = GuideLines(self._plot.getPlotItem())  # drawn after every redraw: `PlotItem.clear()` takes them out
+        self._guide_lines.moved.connect(self.guides.move_guide)  # dragged with the mouse: the table keeps it
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 8, 8, 8)
         outer.setSpacing(6)
@@ -138,14 +152,12 @@ class BulkPlotWindow(QWidget):
         self._lines_pick = lines_pick_menu(self)
         bar.addWidget(self._lines_pick)
         bar.addWidget(_separator(self))
-        for menu in (self.look.lines_menu, self.uncertainty.menu, self.look.legend_menu):
+        for menu in (self.look.lines_menu, self.uncertainty.menu, self.look.legend_menu, self.axes.menu, self.guides.menu):
             bar.addWidget(menu)
         bar.addStretch(1)
         self.export_button = PlotExportButton("s_bulk", lambda: self._plot.getPlotItem(), self.export_data, self)
         bar.addWidget(self.export_button)
         outer.addLayout(bar)
-        self._plot = pg.PlotWidget(parent=self)
-        self._plot.showGrid(x=True, y=True, alpha=0.15)
         self._legend = make_legend(self._plot.getPlotItem())
         self._cursor = StepCursor(self._plot.getPlotItem(), CURSOR_KEY, self)  # the step (its refractive index) the legend's "Value at step" order reads
         self._cursor.moved.connect(self._look_changed)
@@ -160,6 +172,7 @@ class BulkPlotWindow(QWidget):
         self.calculate_button.clicked.connect(lambda _checked=False: self.calculate_requested.emit())
         self.look.settings_changed.connect(self._look_changed)
         self.uncertainty.settings_changed.connect(self._look_changed)
+        self.axes.axes_changed.connect(self._axes_changed)
         self.refresh_theme()
 
     # -- what it shows ------------------------------------------------------------------------------------------------------------
@@ -172,6 +185,27 @@ class BulkPlotWindow(QWidget):
         index = self._lines_pick.findData(mode)
         if index >= 0:
             self._lines_pick.setCurrentIndex(index)  # reports, as a pick does (a restore does not)
+
+    def _visible_range(self) -> tuple[tuple[float, float], tuple[float, float]]:
+        (x_low, x_high), (y_low, y_high) = self._plot.getPlotItem().getViewBox().viewRange()
+        return (float(x_low), float(x_high)), (float(y_low), float(y_high))
+
+    def _axes_changed(self) -> None:
+        """The Plot menu's options changed (or an axis shows another quantity): ticks and grid at once; a range is shown by drawing the plot again (the RI span of the x axis is then ranged
+        afresh, as after new steps)."""
+        new = self.axes.axes()
+        old = self._styler.axes()
+        only_guides, redraw_needed = old.only_guides_differ(new), old.needs_redraw(new)
+        self._styler.set_axes(new)
+        if only_guides:  # a guide was added, edited or removed: the lines are put right without drawing the plot again
+            self._guide_lines.set_guides(new.y.guides)
+            return
+        if not redraw_needed:  # a new step value, the minor step, the grid: the styler applied it at once; only a range or a step set / cleared needs the items drawn again
+            return
+        if not self._drawing:
+            self._x_range = None
+            if self.isVisible():
+                self.redraw()
 
     def _look_changed(self, *_args: object) -> None:
         """A look option changed, or the cursor moved. When that only re-orders (`DrawnState.can_reorder`: the legend's order, the Draw order, the legend's corner, the cursor) the lines stay and
@@ -207,6 +241,7 @@ class BulkPlotWindow(QWidget):
     def redraw(self) -> None:
         self._state = None
         item = self._plot.getPlotItem()
+        self._styler.release_unpinned()
         item.clear()
         self._cursor.readd()  # `clear()` took its line out of the plot
         self._legend.clear()
@@ -221,6 +256,10 @@ class BulkPlotWindow(QWidget):
         wl = f", at {self._wavelength_nm:g} nm" if self._wavelength_nm else ""
         item.setLabel("bottom", f"Refractive index (RIU{wl})")
         item.setLabel("left", self._y_label)
+        self._drawing, self._labels = True, ("Refractive index (RIU)", self._y_label)  # the wavelength is not part of the quantity: the options stay when it changes
+        self.axes.labels_changed()
+        self.guides.labels_changed()
+        self._drawing = False
         in_set = [s for s in self._steps if s.in_set]
         notes = [self._note] if self._note else []
         if len(in_set) < 2:
@@ -273,6 +312,8 @@ class BulkPlotWindow(QWidget):
         self._apply_order(entries, view, groups)
         self._state = DrawnState(view, unc, entries, groups)
         self.status.setText(" ".join(notes))
+        self._guide_lines.set_guides(self.axes.axes().y.guides)
+        self._styler.pin_ranges(autoscale_first=True)  # the Plot menu's display range replaces the autoscale
 
     def _mean_of(self, line: BulkLine, ri: float | None) -> float:
         """A line's number for the legend's Value order: the mean of its step means over every step drawn (`ri` None), or at the steps whose refractive index is `ri` (the cursor's:
@@ -392,6 +433,8 @@ class BulkPlotWindow(QWidget):
             axis.setPen(pg.mkPen(theme.text_muted))
             axis.setTextPen(pg.mkPen(theme.text_muted))
         self.export_button.refresh_theme()
+        self._guide_lines.refresh_theme()
+        self.guides.refresh_theme()
         self._cursor.refresh_theme()
         self.look.refresh_theme()
         self.uncertainty.refresh_theme()
