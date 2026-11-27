@@ -216,7 +216,6 @@ class RoiTreeModel(QAbstractItemModel):
         self._grouped = False
         self._linked = False  # the Linked view (`rows.build_linked_sections`): the tree has headers but they are not groups
         self._step_columns: tuple[StepColumn, ...] = ()
-        self._layout_pass = False  # True only inside `layout_pass()`: `index` then answers for the fixed columns alone
         self._cells: StepCells | None = None
         self._display = DISPLAY_BOTH
         self._decimals = DEFAULT_DECIMALS
@@ -224,6 +223,7 @@ class RoiTreeModel(QAbstractItemModel):
         self._numbers_version = 0  # up by one whenever the step numbers may have changed (`mark_numbers_changed`)
         self._column_display: dict[ColumnKey, ColumnDisplay] = {}  # the user's per-column number format, by column key (`column_keys.py`)
         self._display_of: dict[int, ColumnDisplay] = {}  # the same by column number, for the cells (`_make_display_map`)
+        self._layout_column: int | None = None  # inside `layout_pass()`: the one step column `index` answers for (the fixed columns always answer)
         self._sort_ref: object | None = None  # the step a step column sort is on, by reference: the columns are renumbered when steps change
         self._tint_alpha = DEFAULT_TINT_ALPHA  # the plan bar's opacity: how strongly a step column is coloured
         self._tints: tuple[QColor | None, ...] = ()  # one per step column (`_make_tints`), so `data()` does not build a colour per cell
@@ -733,9 +733,10 @@ class RoiTreeModel(QAbstractItemModel):
     def index(self, row: int, column: int, parent: QModelIndex = QModelIndex()) -> QModelIndex:
         # The same answers as `hasIndex` + `createIndex`, without `hasIndex` (it calls `rowCount` and `columnCount` back in Python): Qt asks for every cell of every row while it
         # lays the tree out, 44 000 times for 160 ROIs and 241 step columns (2026-11-26, `tools/roi_table_timing.py`).
-        columns = COLUMN_COUNT if self._layout_pass else COLUMN_COUNT + len(self._step_columns)
-        if row < 0 or column < 0 or column >= columns or parent.column() > 0:
+        if row < 0 or column < 0 or column >= COLUMN_COUNT + len(self._step_columns) or parent.column() > 0:
             return QModelIndex()
+        if self._layout_column is not None and COLUMN_COUNT <= column != self._layout_column:
+            return QModelIndex()  # (inside `layout_pass`)
         parent_node = parent.internalPointer() if parent.isValid() else self._root
         children = parent_node.children
         if row >= len(children):
@@ -743,15 +744,17 @@ class RoiTreeModel(QAbstractItemModel):
         return self.createIndex(row, column, children[row])
 
     @contextmanager
-    def layout_pass(self):
-        """While Qt lays the tree out (`expandAll`), answer only for the fixed columns. Qt takes a row's height as the largest size hint of its cells and asks every column,
-        however far off screen; the delegate says 0 for all but column 0 (which alone decides a row's height: `RoiTableDelegate.sizeHint`), so the step columns cannot change the
-        answer, and with 241 of them asking cost 0.25-0.7 s. Used by `RoiTablePanel._rebuild` only, around `expandAll`; nothing is drawn or edited while it is on."""
-        self._layout_pass = True
+    def layout_pass(self, first_shown_column: int):
+        """While Qt lays the tree out (`expandAll`), answer for the fixed columns and for `first_shown_column` only (a logical column: the first one the view shows at its left edge).
+        Qt takes a row's height as the largest size hint over the columns **from the first one on screen to the last one** (a shown tree; a tree not shown asks them all): at the
+        left edge of 241 step columns that is 44 000 `sizeHint` calls, ~1 s. Every column gives the same height (`RoiTableDelegate.sizeHint`), so one valid column is enough, and it
+        must be one Qt asks: the first shown one always is (2026-11-27; the 2026-11-26 version dropped every step column, and a table scrolled to them got height 0 for every row).
+        Used by `RoiTablePanel._rebuild` only, around `expandAll`; nothing is drawn or edited while it is on."""
+        self._layout_column = first_shown_column
         try:
             yield
         finally:
-            self._layout_pass = False
+            self._layout_column = None
 
     def parent(self, index: QModelIndex) -> QModelIndex:  # type: ignore[override]
         if not index.isValid():

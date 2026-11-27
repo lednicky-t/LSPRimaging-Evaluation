@@ -169,15 +169,13 @@ class RoiTableDelegate(QStyledItemDelegate):
 
     def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:  # type: ignore[override]
         # Only the height matters: the header sizes every column itself (stretch /
-        # interactive, never "resize to contents"), and Qt takes a row's height as
-        # the largest over its columns - so column 0 alone decides it. Not asking
-        # the base class (which formats every cell's text again) nor the other
-        # columns made `expandAll()` on 1500 ROIs 1.3 s -> 0.2 s (2026-10-07).
+        # interactive, never "resize to contents"). Not asking the base class (which
+        # formats every cell's text again) made `expandAll()` on 1500 ROIs 1.3 s -> 0.2 s
+        # (2026-10-07).
         #
-        # Exception (2026-11-06): while #/ROIs is hidden it has zero width and Qt skips it - it asks the columns from the first one *with width* on - so column 0 alone would
-        # leave every row at height 0 (a table that looked fine until its next rebuild, then showed nothing). The columns Qt does ask answer then.
-        if index.column() != 0 and not first_column_collapsed(option.widget or self.parent()):
-            return QSize(0, 0)
+        # **Every column answers with the real height** (2026-11-27). Qt takes a row's height as the largest answer over the columns it asks, and it asks only the columns on
+        # screen: while the table is scrolled sideways, column 0 is not one of them, and an answer of 0 from the others made every row 0 px high after a rebuild (a sort):
+        # a blank table until the view was scrolled back to the start. The same happened while #/ROIs is hidden (2026-11-06). A column that says 0 can never be safe.
         metrics = option.fontMetrics
         height = group_row_height(metrics) if index.data(KIND_ROLE) == "group" else row_height(metrics)
         return QSize(0, height)

@@ -23,7 +23,25 @@ nearly every repaint (hover, selection). One structural `roi_table.rebuild` took
 
 The session itself saw 0.8-2.5 s per paint and 715 ms for the view part (more headers on screen, a cold start); the tool's table is the same size but lighter.
 
-## Structural rebuild (same day)
+## Correction 2026-11-27: blank table after a sort while scrolled sideways; `layout_pass` reworked
+
+Bug: sorting (any rebuild that resets the model) while the table was scrolled sideways left the table blank until it was scrolled back to the start (maintainer's report; logs
+showed `reset=True` rebuilds, no error). Cause, checked with a spy on `sizeHint` (shown tree, 241 step columns): **a *shown* tree asks the columns from the first one on screen to the
+LAST one for a row's height** (offset 0: all 253 = 44 500 asks; first shown column 34: 34-252; 124: 124-252; scrolled to the end: the last 6); a tree that is not shown asks all.
+The delegate answered 0 for every column but 0, and the 2026-11-26 `layout_pass()` made `index()` invalid for every step column, so scrolled to the step columns every row got height
+0. The 2026-11-06 hidden-`#/ROIs` incident was the same bug in another costume. (My first correction here said "only the columns on screen"; the probe showed it is first-shown to last.)
+
+Now: `RoiTableDelegate.sizeHint` gives the real height for **every** column (rule: a column never answers a row height of 0), and `RoiTreeModel.layout_pass(first_shown_column)` makes
+`index()` answer for the fixed columns plus that one step column (the header's first shown one, `RoiTablePanel._expand_all`); one valid column is enough because all give the same
+height. Safety net: if the first row still has height 0 after it, `_expand_all` logs WARNING `roi_table.layout_pass_failed` and lays out again with every column (slow, right).
+Measured (headless, shown, 160 ROIs, 241 steps, all selected, a sort of `x`, quiet machine not guaranteed): `view_ms` at the left edge 1000-1300 ms with no layout pass (the first
+fix, all columns answering) -> 290-400 ms; scrolled to the middle 500 -> 190-250 ms; `sizeHint` calls per sort 22 000 -> 176. What is left is Qt calling `model.index` for each column
+(~23 000 Python calls) inside `expandAll`; not reducible without Qt asking fewer columns. The 2.8 s per sort in the 2026-11-27 log is not reproduced here (3.2 s was the whole rebuild,
+with a busy GUI thread); not explained. Tests: `test_lspri_roi_table_performance.py::LayoutPassTest` (the layout pass's scope and its end after an error; a sort at the left edge,
+middle and right end keeps every row's height, asks at most the fixed columns + 1 per row, and logs no fall-back; fails on the old delegate) and
+`test_lspri_roi_table_hide_columns.py` (same height from every column).
+
+## Structural rebuild (same day; the `layout_pass` part is superseded by the correction above)
 
 Profile of `expandAll`: ~44 000 `sizeHint` calls per call (every row x every column; Qt asks all of them, shown or not), each also costing Python `model.index` / `hasIndex` /
 `rowCount`. Two changes in `model.py`: `index()` no longer goes through `hasIndex` (same answers, pinned by a test against `hasIndex` over a grid including out-of-range

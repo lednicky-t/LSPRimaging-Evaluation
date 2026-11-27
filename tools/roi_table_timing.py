@@ -196,12 +196,7 @@ run("set_content only (model reset)", lambda: model.set_content(toolbox.rois_at(
 from lspr_imaging_app.panels.roi_table.rows import build_roi_rows
 
 run("build_roi_rows only (pure)", lambda: build_roi_rows(toolbox.rois_at(0), toolbox.groups(), toolbox.detection_settings()), repeat=15)
-def _expand_all():
-    with model.layout_pass():
-        tree.expandAll()
-
-
-run("expandAll + spans (view part of rebuild)", lambda: (_expand_all(), [tree.setFirstColumnSpanned(h.row(), tree.rootIndex(), True) for h in model.group_headers()]))
+run("expandAll + spans (view part of rebuild)", lambda: (panel._expand_all(), [tree.setFirstColumnSpanned(h.row(), tree.rootIndex(), True) for h in model.group_headers()]))
 run("rebuild with view reset (restore_view)", lambda: panel._rebuild(lambda: None, restore_view=True), repeat=7)  # the structural path: expandAll, spans, selection put back
 run("refresh_column_visibility", tree.refresh_column_visibility, repeat=15)
 run("fit_if_auto (step columns)", panel._step_controls.fit_if_auto, repeat=15)

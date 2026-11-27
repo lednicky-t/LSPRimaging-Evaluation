@@ -504,6 +504,19 @@ class RoiTablePanel(QWidget):
             return micrometers(self._geometry.microns_per_pixel_scalar())
         return PIXELS
 
+    def _expand_all(self) -> None:
+        """Open every group and lay the rows out. Qt asks the columns from the first one on screen to the last for each row's height (44 000 asks with 241 step columns at the left
+        edge, ~1 s), so the model answers for one of them only (`RoiTreeModel.layout_pass`). Safety net: should the row heights still come out 0 (the one column named was not one
+        Qt asks) the table would be blank, so it is laid out again with every column answering, slow but right, and a WARNING says so."""
+        header = self._tree.header()
+        first_shown = header.logicalIndex(max(header.visualIndexAt(0), 0))
+        with self._model.layout_pass(first_shown):
+            self._tree.expandAll()
+        rows = self._model.rowCount()
+        if rows and self._tree.visualRect(self._model.index(0, 0)).height() <= 0:
+            logger.warning("roi_table.layout_pass_failed first_shown_column=%d: laying the rows out again with every column", first_shown)
+            self._tree.expandAll()
+
     def _rebuild(self, change: Callable[[], None], *, reveal: bool = True, restore_view: bool = False) -> None:
         """Apply ``change`` to the model, then put back what a model reset
         throws away: group expansion, scroll position, selection. With
@@ -519,8 +532,7 @@ class RoiTablePanel(QWidget):
         if reset:
             self._restoring_view = True
             try:
-                with self._model.layout_pass():  # (Qt asks every cell of every row for its height: with many step columns that was most of a rebuild)
-                    self._tree.expandAll()
+                self._expand_all()
                 for header in self._model.group_headers():
                     self._tree.setFirstColumnSpanned(header.row(), QModelIndex(), True)
                     if self._group_only or self._group_key_of(header) in self._collapsed:
