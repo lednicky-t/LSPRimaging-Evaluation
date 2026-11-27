@@ -8,7 +8,7 @@ Layout of the panel (one block per axis, then the shared rows)::
     X axis: Cube (#)                <- the quantity the axis shows now
     Ticks      [ auto ] [ auto ]    <- major step, minor step (a minor step needs a major one)
     Range      [ auto ] [ auto ] [Use view]   <- lowest and highest value shown (in the numbers the axis prints)
-    Zero at    [ none ] [Step...]  <- the x value printed as 0 (the Sensorgram's x axis only)
+    Zero at    [ none ] [Step...]  <- the x value printed as 0 (all three plots)
     Grid       [x] show
     Breaks     [pencil] [Clear] 2 breaks     <- the Sensorgram's x axis only
     Lines      [Continue] [Break]            <- a line goes on across a break, or ends before it and starts again after it

@@ -65,7 +65,8 @@ from ...selection.plot_line_order_module import PLOT_LBL, PlotLineOrderModule
 from .axis_apply import AxisStyler
 from .axis_controls import AxisControls
 from .guide_controls import GuideControls
-from .guide_items import GuideLines
+from .broken_axis import BrokenAxisItem
+from .guide_items import GuideGestures, GuideLines, GuideViewBox
 from .view_settings import LINE_SPLINE, UNCERTAINTY_BAND, SensorgramViewSettings, UncertaintyLook
 from .plot_look import LINES_SENSORGRAM, WINDOW_LOOK_DEFAULTS, PlotLookControls, PlotLookKeys, UncertaintyControls, UncertaintyKeys, lines_pick_menu, restore_pick
 from .window_look_icons import accumulated_picture, cycle_picture
@@ -122,13 +123,14 @@ class LblPlotWindow(QWidget):
         self._state: DrawnState | None = None  # what was drawn last, for a change that only re-orders (None: draw everything again)
         self.look.attach_line_order(line_order, PLOT_LBL, "LbL series", lambda: rows_of(self._last_entries))  # the Manual draw order's list is the session's
 
-        self._plot = pg.PlotWidget(parent=self)
+        self._plot = pg.PlotWidget(parent=self, viewBox=GuideViewBox(), axisItems={"bottom": BrokenAxisItem("bottom")})  # the bottom axis counts from the Plot menu's zero
         self._plot.showGrid(x=True, y=True, alpha=0.15)
         self._styler = AxisStyler(self._plot.getPlotItem())  # the Plot menu's tick spacing, grid and display range (2026-11-27)
-        self.axes = AxisControls(self, plot_axes, PLOT_LBL, lambda: self._labels, lambda: self._visible_range(), object_prefix="lbl_axes")
+        self.axes = AxisControls(self, plot_axes, PLOT_LBL, lambda: self._labels, lambda: self._visible_range(), object_prefix="lbl_axes", zero_steps=self._zero_step_choices)
         self.guides = GuideControls(self, self.axes.module, PLOT_LBL, lambda: self._labels, object_prefix="lbl_guides")
         self._guide_lines = GuideLines(self._plot.getPlotItem())  # drawn after every redraw: `PlotItem.clear()` takes them out
         self._guide_lines.moved.connect(self.guides.move_guide)  # dragged with the mouse: the table keeps it
+        self._guide_gestures = GuideGestures(self._plot.getPlotItem(), self._guide_lines, self.guides, lambda text: self.status.setText(text))  # right-click: add a guide here, a guide's menu
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 8, 8, 8)
         outer.setSpacing(6)
@@ -202,6 +204,8 @@ class LblPlotWindow(QWidget):
             self._guide_lines.set_guides(new.y.guides)
             return
         if not redraw_needed:  # a new step value, the minor step, the grid: the styler applied it at once; only a range or a step set / cleared needs the items drawn again
+            if old.x.zero != new.x.zero:
+                self._set_cycle_ticks()  # the one-tick-per-cycle labels count from the zero
             return
         if not self._drawing and self.isVisible():
             self.redraw()
@@ -233,6 +237,20 @@ class LblPlotWindow(QWidget):
         if self.isVisible():
             self.redraw()
 
+    def _set_cycle_ticks(self) -> None:
+        """One tick per cycle, labelled with the cycle's number counted from the Plot menu's zero (the cycle itself when there is none). A tick step of the Plot menu replaces these
+        (pyqtgraph would draw them over it); then the axis counts from the zero by itself."""
+        axis = self._plot.getPlotItem().getAxis("bottom")
+        if self._styler.ticks_are_pinned("x") or not 0 < len(self._steps) <= MAX_TICKED_CYCLES:
+            axis.setTicks(None)
+            return
+        zero = self._styler.axes().x.zero or 0.0
+        axis.setTicks([[(k, f"{round(k - zero, 9) + 0.0:g}") for k in range(len(self._steps))]])
+
+    def _zero_step_choices(self) -> list[tuple[str, float]]:
+        """The cycles as (label, x) for the Plot menu's "Zero at" list: the x of a cycle is its number."""
+        return [(f"{k} · {step.name}" if step.name else str(k), float(k)) for k, step in enumerate(self._steps)]
+
     def _unit(self) -> str:
         return self._y_label.split("(")[-1].rstrip(")") if "(" in self._y_label else ""
 
@@ -257,9 +275,7 @@ class LblPlotWindow(QWidget):
         self.axes.labels_changed()
         self.guides.labels_changed()
         self._drawing = False
-        axis = item.getAxis("bottom")
-        if not self._styler.ticks_are_pinned("x"):  # a tick step of the Plot menu replaces the one-tick-per-cycle labels (pyqtgraph would draw these over it)
-            axis.setTicks([[(k, str(k)) for k in range(len(self._steps))]] if 0 < len(self._steps) <= MAX_TICKED_CYCLES else None)
+        self._set_cycle_ticks()
         notes = [self._note] if self._note else []
         if len(self._steps) < 2:
             notes.append("Set the start step and the steps per cycle in the LbL pop-up: the series needs at least two cycles inside the plan.")

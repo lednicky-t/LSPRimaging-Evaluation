@@ -17,14 +17,18 @@ takes every item out), `refresh_theme` after a theme switch, and gives `parts()`
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pyqtgraph as pg
-from PyQt6.QtCore import QObject, QPointF, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor
+from PyQt6.QtCore import QObject, QPoint, QPointF, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QAction, QColor
 
 from lspr_ui import get_active_theme
 
 from ...domain.guide_lines import Guide, rounded_for_span
+from ..menu_icons import give_persistent_icon
 from ..svg_layers import SvgPart
+from .guide_controls import FULL_NOTE, GuideControls
 
 GUIDE_Z = -8.0  # above the bands (-10), below the baseline window (-5) and every trace (0)
 HIT_PX = 5.0  # a pointer this close (screen pixels) to a guide is on it
@@ -65,6 +69,69 @@ class GuideLine(pg.InfiniteLine):
         super().mouseClickEvent(ev)
         if not ev.isAccepted():
             ev.ignore()  # a plain click on the line is a click on the plot behind it (the cube cursor goes there)
+
+
+class GuideViewBox(pg.ViewBox):
+    """A ViewBox that lets a right-click on a guide open the guide's own menu, and remembers where the click that opened its menu was ("Add guide here" needs the y of that click).
+    pyqtgraph hands a right-click to the ViewBox before any item, so this is the only place that can give it to a guide."""
+
+    guide_right_click = None  # set by the owner: a function (scene position, screen position) -> bool, True when the right-click was on a guide (its menu opens)
+    last_menu_scene_pos = None  # where the right-click that opened the view's menu was
+
+    def raiseContextMenu(self, ev):
+        self.last_menu_scene_pos = ev.scenePos()
+        super().raiseContextMenu(ev)
+
+    def takes_guide_click(self, ev) -> bool:
+        """True (and the click accepted) when `ev` is a right-click on a guide, whose menu has been asked for."""
+        if ev.button() == Qt.MouseButton.RightButton and self.guide_right_click is not None and self.guide_right_click(ev.scenePos(), ev.screenPos()):
+            ev.accept()
+            return True
+        return False
+
+    def mouseClickEvent(self, ev):
+        if not self.takes_guide_click(ev):
+            super().mouseClickEvent(ev)
+
+
+class GuideGestures(QObject):
+    """The guide gestures of the LbL and S_bulk windows (the Sensorgram has its own, with its edit modes): the plot's right-click menu gets "Add guide here" (a guide at the y of the click,
+    no label, showing its value), and a right-click on a guide opens the guide's menu. Only reports to the window's `GuideControls`, the one place that changes guides. Needs the plot to be
+    made with a `GuideViewBox`."""
+
+    def __init__(self, item: pg.PlotItem, lines: GuideLines, controls: GuideControls, report: Callable[[str], None]) -> None:
+        """`report(text)`: where a refusal is said (the window's status line); the pop-up's own note says it too."""
+        super().__init__(item)
+        self._item, self._lines, self._controls, self._report = item, lines, controls, report
+        view_box = item.getViewBox()
+        view_box.guide_right_click = self._on_right_click
+        self._add_action = None
+        if view_box.menu is not None:
+            self._add_action = QAction("Add guide here", view_box.menu)
+            give_persistent_icon(self._add_action, "guide_add")
+            self._add_action.triggered.connect(self._on_add_here)
+            first = view_box.menu.actions()[0] if view_box.menu.actions() else None
+            view_box.menu.insertAction(first, self._add_action)
+            view_box.menu.insertSeparator(first)
+
+    def add_action(self) -> QAction | None:
+        return self._add_action
+
+    def _on_right_click(self, scene_pos, screen_pos) -> bool:
+        index = self._lines.index_at(scene_pos)
+        if index is None:
+            return False
+        self._controls.show_menu(index, QPoint(int(screen_pos.x()), int(screen_pos.y())))
+        return True
+
+    def _on_add_here(self) -> None:
+        view_box = self._item.getViewBox()
+        pos = view_box.last_menu_scene_pos
+        if pos is None:
+            return
+        y = rounded_for_span(float(view_box.mapSceneToView(pos).y()), self._lines.view_span())
+        if not self._controls.add_guide(Guide(y, "", None, "dash", True)):
+            self._report(FULL_NOTE)
 
 
 class GuideLines(QObject):

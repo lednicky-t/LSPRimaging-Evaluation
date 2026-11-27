@@ -17,6 +17,7 @@ from __future__ import annotations
 import pyqtgraph as pg
 
 from ...domain.plot_axes import AxisOptions, PlotAxes, pinned_range
+from .broken_axis import BrokenAxisItem
 
 _SIDE_AXIS = {"x": "bottom", "y": "left"}
 
@@ -39,6 +40,9 @@ class AxisStyler:
         """Draw with `axes` from now on: ticks and grid at once. The range is left to the owner (`pin_ranges`), which knows when it ranges the plot."""
         self._axes = axes.sanitized()
         self._item.showGrid(x=self._axes.x.grid, y=self._axes.y.grid, alpha=self._axes.grid_alpha)
+        x_axis = self._item.getAxis("bottom")
+        if isinstance(x_axis, BrokenAxisItem):
+            x_axis.set_zero(self._axes.x.zero)  # the numbers printed on the x axis count from here; nothing drawn moves
         for side in ("x", "y"):
             self._drawn[side] = ("forced",)  # something may have replaced the ticks (LbL's own): put them right whatever was drawn before
             self._apply_ticks(side)

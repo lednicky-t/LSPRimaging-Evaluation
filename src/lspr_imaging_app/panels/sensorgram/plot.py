@@ -43,7 +43,7 @@ from .axis_apply import AxisStyler
 from .broken_axis import BreakRegions, BrokenAxisItem
 from ...domain.guide_lines import Guide, rounded_for_span
 from ..menu_icons import give_persistent_icon
-from .guide_items import GuideLines
+from .guide_items import GuideLines, GuideViewBox
 from .baseline_selector_menu import DEFAULT_ALPHA, DEFAULT_COLOR, BaselineRangeReadout
 from .plan_bar import PlanBarItem
 from .plan_text_editor import StepTextEditor
@@ -234,7 +234,7 @@ def _anchor_cursor(needed: int) -> QCursor:
     return QCursor(pixmap, _CURSOR_HOT, _CURSOR_HOT)
 
 
-class _MiddlePanViewBox(pg.ViewBox):
+class _MiddlePanViewBox(GuideViewBox):
     """pyqtgraph pans with the left button by default; here only the middle button pans (the left one is left free for clicking a cube)."""
 
     def mouseDragEvent(self, ev, axis=None):
@@ -245,20 +245,13 @@ class _MiddlePanViewBox(pg.ViewBox):
 
     claim_right_click = None  # set by the plot: a function (scene position) -> bool, True where the plan bar wants the right-click
     anchor_right_click = None  # set by the plot: a function (scene position) -> bool, True when the anchor-edit mode took the right-click (no menu)
-    guide_right_click = None  # set by the plot: a function (scene position, screen position) -> bool, True when the right-click was on a guide (its own menu opens)
-    last_menu_scene_pos = None  # where the right-click that opened the view's menu was (the menu's "Add guide here" puts the guide at its y)
-
-    def raiseContextMenu(self, ev):
-        self.last_menu_scene_pos = ev.scenePos()
-        super().raiseContextMenu(ev)
 
     def mouseClickEvent(self, ev):
         """pyqtgraph hands a right-click to the ViewBox before any item and the ViewBox accepts it (its own menu). Over a step of the plan bar the click is declined
         here, so that the bar (and its menu) gets it. In the anchor-edit mode a right-click elsewhere goes to the anchors (remove the square under it, or the
         anchor menu) instead of opening the view's menu."""
-        if ev.button() == Qt.MouseButton.RightButton and self.guide_right_click is not None and self.guide_right_click(ev.scenePos(), ev.screenPos()):
-            ev.accept()  # a right-click on a guide opens the guide's menu, not the view's
-            return
+        if self.takes_guide_click(ev):
+            return  # a right-click on a guide opens the guide's menu, not the view's
         if ev.button() == Qt.MouseButton.RightButton and self.claim_right_click is not None and self.claim_right_click(ev.scenePos()):
             ev.ignore()
             return
@@ -871,7 +864,6 @@ class SensorgramPlot(QWidget):
         rerange = previous.needs_rerange(axes)  # a tick step, the grid or the breaks' switches do not change which part of the data is in view: the user's zoom stays and nothing is ranged again
         self._styler.set_axes(axes)
         self._guides.set_guides(axes.y.guides)
-        self._axis_x.set_zero(axes.x.zero)  # the numbers printed on the x axis count from here; nothing drawn moves
         if rerange:
             self._view_kept = False
         ranged = self._autoscales

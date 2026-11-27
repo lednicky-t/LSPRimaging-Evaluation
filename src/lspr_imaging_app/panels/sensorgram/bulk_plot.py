@@ -43,7 +43,8 @@ from ...selection.plot_line_order_module import PLOT_BULK, PlotLineOrderModule
 from .axis_apply import AxisStyler
 from .axis_controls import AxisControls
 from .guide_controls import GuideControls
-from .guide_items import GuideLines
+from .broken_axis import BrokenAxisItem
+from .guide_items import GuideGestures, GuideLines, GuideViewBox
 from .plot_window_draw import (
     LegendEntry,
     PlotAreaButton,
@@ -137,13 +138,14 @@ class BulkPlotWindow(QWidget):
         self._state: DrawnState | None = None  # what was drawn last, for a change that only re-orders (None: draw everything again)
         self.look.attach_line_order(line_order, PLOT_BULK, "S_bulk", lambda: rows_of(self._last_entries))  # the Manual draw order's list is the session's
 
-        self._plot = pg.PlotWidget(parent=self)
+        self._plot = pg.PlotWidget(parent=self, viewBox=GuideViewBox(), axisItems={"bottom": BrokenAxisItem("bottom")})  # the bottom axis counts from the Plot menu's zero
         self._plot.showGrid(x=True, y=True, alpha=0.15)
         self._styler = AxisStyler(self._plot.getPlotItem())  # the Plot menu's tick spacing, grid and display range (2026-11-27)
-        self.axes = AxisControls(self, plot_axes, PLOT_BULK, lambda: self._labels, lambda: self._visible_range(), object_prefix="bulk_axes")
+        self.axes = AxisControls(self, plot_axes, PLOT_BULK, lambda: self._labels, lambda: self._visible_range(), object_prefix="bulk_axes", zero_steps=self._zero_step_choices)
         self.guides = GuideControls(self, self.axes.module, PLOT_BULK, lambda: self._labels, object_prefix="bulk_guides")
         self._guide_lines = GuideLines(self._plot.getPlotItem())  # drawn after every redraw: `PlotItem.clear()` takes them out
         self._guide_lines.moved.connect(self.guides.move_guide)  # dragged with the mouse: the table keeps it
+        self._guide_gestures = GuideGestures(self._plot.getPlotItem(), self._guide_lines, self.guides, lambda text: self.status.setText(text))  # right-click: add a guide here, a guide's menu
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 8, 8, 8)
         outer.setSpacing(6)
@@ -189,6 +191,10 @@ class BulkPlotWindow(QWidget):
     def _visible_range(self) -> tuple[tuple[float, float], tuple[float, float]]:
         (x_low, x_high), (y_low, y_high) = self._plot.getPlotItem().getViewBox().viewRange()
         return (float(x_low), float(x_high)), (float(y_low), float(y_high))
+
+    def _zero_step_choices(self) -> list[tuple[str, float]]:
+        """The plan's steps that have a refractive index, as (label, RI) for the Plot menu's "Zero at" list: the x of a step is its RI."""
+        return [(f"{s.name} · {s.ri:g}" if s.name else f"{s.ri:g}", float(s.ri)) for s in self._steps if math.isfinite(s.ri)]
 
     def _axes_changed(self) -> None:
         """The Plot menu's options changed (or an axis shows another quantity): ticks and grid at once; a range is shown by drawing the plot again (the RI span of the x axis is then ranged
