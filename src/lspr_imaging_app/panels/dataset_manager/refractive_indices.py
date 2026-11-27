@@ -136,6 +136,10 @@ class RefractiveIndexView(QWidget):
         if self._stale:
             self.refresh()
 
+    def refresh_theme(self) -> None:
+        """The table's amber / grey marks and its notes are drawn in the theme's colours: redraw now if shown, else when next shown."""
+        self._mark_stale()
+
     def _mark_stale(self) -> None:
         self._stale = True
         if self.isVisible() and not self._in_commit:  # a commit from this table redraws it afterwards (the table is not rebuilt inside its own signal)

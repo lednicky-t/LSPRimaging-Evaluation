@@ -43,7 +43,7 @@ sit at a familiar scale next to vendored icons) scaled onto a
 `_RENDER_SIZE`-px pixmap (2x, crisper than a native bitmap - matching this
 ribbon's own `_RENDER_SIZE = _ICON_SIZE * 2` convention), then wrapped in a
 `QIcon` sized down by Qt's own icon-size handling at display time.
-`functools.lru_cache` avoids re-painting the same icon on every theme
+`_per_theme_cache` (an `lru_cache` that also keys on the theme's brightness) avoids re-painting the same icon on every theme
 refresh/menu rebuild, matching `load_tabler_icon`'s own caching.
 """
 
@@ -54,16 +54,40 @@ import functools
 from PyQt6.QtCore import QRect, QRectF, Qt
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 
-from lspr_ui import load_tabler_icon
+from lspr_ui import get_active_theme, load_tabler_icon
 
 _DESIGN_SIZE = 24
 _RENDER_SIZE = 48  # 2x _DESIGN_SIZE
 
-_MUTED = "#8b95a3"  # GuiTheme.text_dim - fixed literal, see module docstring ("static, not theme-dependent")
+
+
+def _muted() -> str:
+    """The muted grey of the unselected bars: the theme's `text_dim` (dark ``#8b95a3``, the literal these icons always had; Bright ``#7a8291``).
+    Only this grey follows the theme; the coloured parts stay fixed, as the module docstring says."""
+    return get_active_theme().text_dim
+
+
+def _morphology_shape() -> str:
+    """The Morphology icon's shape: the theme's `text_muted` (dark ``#b4bdc9``, as before; on Bright a dark grey, the light one vanished on white)."""
+    return get_active_theme().text_muted
+
+
+def _per_theme_cache(func):
+    """`functools.lru_cache` that also keys on the active theme's brightness, so a drawn icon is reused until the theme switches."""
+    cache: dict = {}
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        key = (get_active_theme().is_light, args, tuple(sorted(kwargs.items())))
+        if key not in cache:
+            cache[key] = func(*args, **kwargs)
+        return cache[key]
+
+    return wrapper
+
 _SELECTED = "#38bdf8"  # GuiTheme.accent_blue, the app's standard blue (maintainer 2026-11-23: was green #22c55e): "the region a tool would add/affect"
 _THRESHOLD_LINE = "#ef4444"  # GuiTheme.accent_red
 _LOCAL_CONTRAST_CENTER = "#38bdf8"  # GuiTheme.accent_blue
-_MORPHOLOGY_SHAPE = "#b4bdc9"  # GuiTheme.text_muted
 _MORPHOLOGY_CLOSE = "#38bdf8"  # GuiTheme.accent_blue - maintainer's own spec: "performed closing by blue color"
 
 
@@ -92,7 +116,7 @@ def _draw_baseline(painter: QPainter, color: str) -> None:
     painter.drawLine(2, int(_BASELINE_Y), 22, int(_BASELINE_Y))
 
 
-@functools.lru_cache(maxsize=None)
+@_per_theme_cache
 def histogram_selection_icon(active: bool = True) -> QIcon:
     """Chart-histogram's own 5-bar shape with the top curve removed (per
     spec: "removing the top smooth curve... adding one more bar"). When
@@ -105,17 +129,17 @@ def histogram_selection_icon(active: bool = True) -> QIcon:
     the module docstring's note on why this one icon takes a parameter."""
     pixmap = QPixmap(_RENDER_SIZE, _RENDER_SIZE)
     painter = _new_painter(pixmap)
-    _draw_baseline(painter, _MUTED)
+    _draw_baseline(painter, _muted())
     painter.setPen(Qt.PenStyle.NoPen)
     for index, (x, height) in enumerate(zip(_BAR_X, _BAR_HEIGHTS)):
-        color = _SELECTED if (active and index in (1, 2, 3)) else _MUTED
+        color = _SELECTED if (active and index in (1, 2, 3)) else _muted()
         painter.setBrush(QColor(color))
         painter.drawRoundedRect(QRectF(x, _BASELINE_Y - height, _BAR_WIDTH, height), 0.8, 0.8)
     painter.end()
     return QIcon(pixmap)
 
 
-@functools.lru_cache(maxsize=None)
+@_per_theme_cache
 def histogram_reset_icon() -> QIcon:
     """The Histogram plot's "reset the highlight range" button (2026-11-23): the highlight-range icon (`histogram_selection_icon`, the bars
     with the blue middle) with a small circular-arrows badge in the top-right corner, where the outer bars leave room. The badge is a
@@ -132,7 +156,7 @@ def histogram_reset_icon() -> QIcon:
     return QIcon(pixmap)
 
 
-@functools.lru_cache(maxsize=None)
+@_per_theme_cache
 def threshold_icon(darker: bool = False) -> QIcon:
     """Same 5-bar base as `histogram_selection_icon`, but the "selection" is
     a threshold *line* rather than a range: everything above the red
@@ -147,11 +171,11 @@ def threshold_icon(darker: bool = False) -> QIcon:
     threshold_y = 11.0
     pixmap = QPixmap(_RENDER_SIZE, _RENDER_SIZE)
     painter = _new_painter(pixmap)
-    _draw_baseline(painter, _MUTED)
+    _draw_baseline(painter, _muted())
     painter.setPen(Qt.PenStyle.NoPen)
     for x, height in zip(_BAR_X, _BAR_HEIGHTS):
         top_y = _BASELINE_Y - height
-        painter.setBrush(QColor(_MUTED))
+        painter.setBrush(QColor(_muted()))
         painter.drawRoundedRect(QRectF(x, top_y, _BAR_WIDTH, height), 0.8, 0.8)
         painter.setBrush(QColor(_SELECTED))
         if darker:
@@ -166,7 +190,7 @@ def threshold_icon(darker: bool = False) -> QIcon:
     return QIcon(pixmap)
 
 
-@functools.lru_cache(maxsize=None)
+@_per_theme_cache
 def local_contrast_icon() -> QIcon:
     """A 3x3 patch of cells (a local neighborhood) with the center cell
     colored - "this pixel, compared against its own local surroundings" is
@@ -176,7 +200,7 @@ def local_contrast_icon() -> QIcon:
     itself."""
     pixmap = QPixmap(_RENDER_SIZE, _RENDER_SIZE)
     painter = _new_painter(pixmap)
-    pen = QPen(QColor(_MUTED), 1.4)
+    pen = QPen(QColor(_muted()), 1.4)
     pen.setStyle(Qt.PenStyle.DashLine)
     painter.setPen(pen)
     painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -187,7 +211,7 @@ def local_contrast_icon() -> QIcon:
     origin = (_DESIGN_SIZE - (2 * pitch + cell)) / 2.0
     for row in range(3):
         for col in range(3):
-            color = _LOCAL_CONTRAST_CENTER if row == 1 and col == 1 else _MUTED
+            color = _LOCAL_CONTRAST_CENTER if row == 1 and col == 1 else _muted()
             painter.setBrush(QColor(color))
             x = origin + col * pitch
             y = origin + row * pitch
@@ -196,7 +220,7 @@ def local_contrast_icon() -> QIcon:
     return QIcon(pixmap)
 
 
-@functools.lru_cache(maxsize=None)
+@_per_theme_cache
 def morphology_icon() -> QIcon:
     """A crescent-moon-like shape (chunky/roundish, not a thin sliver) with
     a blue circle filling its concave bite, the two together reading as
@@ -212,7 +236,7 @@ def morphology_icon() -> QIcon:
     pixmap = QPixmap(_RENDER_SIZE, _RENDER_SIZE)
     painter = _new_painter(pixmap)
     painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(QColor(_MORPHOLOGY_SHAPE))
+    painter.setBrush(QColor(_morphology_shape()))
     painter.drawEllipse(QRectF(3.0, 4.5, 15.0, 15.0))
     bite = QRectF(9.5, 1.0, 13.0, 13.0)
     painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
@@ -224,9 +248,9 @@ def morphology_icon() -> QIcon:
     return QIcon(pixmap)
 
 
-@functools.lru_cache(maxsize=None)
+@_per_theme_cache
 def draw_icon() -> QIcon:
     """Plain pencil - the one tool kind with an obvious, already-vendored
     Tabler equivalent (`icon_assets/pencil.svg`), so this wraps
     `load_tabler_icon` instead of hand-painting, unlike the other four."""
-    return load_tabler_icon("pencil", color=_MUTED, size=_RENDER_SIZE, stroke_width=2.0)
+    return load_tabler_icon("pencil", color=_muted(), size=_RENDER_SIZE, stroke_width=2.0)

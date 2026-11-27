@@ -34,6 +34,12 @@ _SLIDER_WIDTH = 18  # the same narrow, steep wedge as the Mask tab's
 
 SAMPLE_ON_COLOR = "#c957e8"  # toggle icon while shown: pink-purple
 REFERENCE_ON_COLOR = "#e6f2ff"  # toggle icon while shown: white with a slight glassy blue
+_REFERENCE_ON_COLOR_BRIGHT = "#5f7fa3"  # the same glassy blue, darkened: the white above is invisible on the Bright theme's white ribbon
+
+
+def themed_on_color(color: str) -> str:
+    """The colour an "on" toggle icon is drawn in under the active theme: only the reference's near-white needs a darker twin on Bright."""
+    return _REFERENCE_ON_COLOR_BRIGHT if color == REFERENCE_ON_COLOR and get_active_theme().is_light else color
 
 OverlaySpec = tuple[Callable[[bool, str, str], QIcon], str, str, str, str, str]
 """(icon, on colour, toggle tip, colour tip, transparency tip, colour dialog title). A caller outside the Image panel (the Sensorgram's baseline
@@ -146,7 +152,7 @@ class RoiOverlayControls(QWidget):
 
     def _refresh_toggle_icon(self) -> None:
         self._toggle_button.setIcon(
-            self._icon_for(self._toggle_button.isChecked(), get_active_theme().text_dim, self._on_color)
+            self._icon_for(self._toggle_button.isChecked(), get_active_theme().text_dim, themed_on_color(self._on_color))
         )
 
     def _refresh_swatch(self) -> None:

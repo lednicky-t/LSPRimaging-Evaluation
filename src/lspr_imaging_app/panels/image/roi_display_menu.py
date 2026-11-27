@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QMenu, QToolButton
 from lspr_ui import GuiTheme, get_active_theme
 
 from .general_group import style_general_icon_button
-from .roi_overlay_controls import REFERENCE_ON_COLOR, SAMPLE_ON_COLOR
+from .roi_overlay_controls import REFERENCE_ON_COLOR, SAMPLE_ON_COLOR, themed_on_color
 from .roi_icons import display_icon
 
 
@@ -70,4 +70,4 @@ class RoiDisplayMenu(QToolButton):
 
     def refresh_theme(self, _theme: GuiTheme) -> None:
         style_general_icon_button(self)
-        self.setIcon(display_icon(SAMPLE_ON_COLOR, REFERENCE_ON_COLOR))
+        self.setIcon(display_icon(SAMPLE_ON_COLOR, themed_on_color(REFERENCE_ON_COLOR)))

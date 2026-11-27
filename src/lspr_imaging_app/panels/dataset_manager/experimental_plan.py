@@ -198,6 +198,7 @@ class ExperimentalPlanSection(QWidget):
         theme = get_active_theme()
 
         self.header_stats_label = QLabel("", self)  # a line of this page since the Workflow panel was retired (it was a section title)
+        self._stats_incomplete = False  # the stats line is amber while the import looks incomplete
         self.header_stats_label.setStyleSheet(f"color: {theme.text_dim};")
 
         self._path_edit = QLineEdit(self)
@@ -296,8 +297,8 @@ class ExperimentalPlanSection(QWidget):
             )
 
             self.header_stats_label.setText(" · ".join(stat_parts))
-            theme = get_active_theme()
-            self.header_stats_label.setStyleSheet(f"color: {theme.text_dim if complete else theme.accent_gold};")
+            self._stats_incomplete = not complete
+            self._style_labels()
             self.header_stats_label.setToolTip(" ".join(tooltip_parts))
 
             # Computed last, deliberately - `cube_interval_stats()` goes
@@ -316,11 +317,22 @@ class ExperimentalPlanSection(QWidget):
             self._status_label.setText(description)
         self._refresh_current_frame_preview()
 
+    def _style_labels(self) -> None:
+        theme = get_active_theme()
+        self.header_stats_label.setStyleSheet(f"color: {theme.accent_gold if self._stats_incomplete else theme.text_dim};")
+        self._current_frame_label.setStyleSheet(f"color: {theme.text_dim};")
+
+    def refresh_theme(self) -> None:
+        """The two grey / amber lines take the active theme's colours (set once when the text last changed otherwise)."""
+        self._style_labels()
+
     def _on_dataset_cleared(self) -> None:
         self._status_label.setText("No dataset loaded.")
         self._status_label.setToolTip("")
         self._current_frame_label.setText("")
         self.header_stats_label.setText("")
+        self._stats_incomplete = False
+        self._style_labels()
 
     def _refresh_current_frame_preview(self, *_args: object) -> None:
         # Runs on EVERY cube / wavelength change, also while Play steps through the dataset. It used to

@@ -102,7 +102,7 @@ from PyQt6.QtWidgets import QHBoxLayout, QMenu, QToolButton, QWidget
 from lspr_ui import get_active_theme, load_tabler_icon, tabler_icon_svg, transparent_icon_button_stylesheet
 
 from ...image_tools import ActiveToolModule, GeometryModule, ImageTool
-from ..ribbon_group import labeled_icon_group, ribbon_separator
+from ..ribbon_group import group_label_style, labeled_icon_group, ribbon_separator
 from ..ribbon_icon_size import CAPTIONED_GROUP_HEIGHT as _CALIBRATE_GROUP_HEIGHT
 from .general_group import BUTTON_SIZE as _BUTTON_SIZE  # the ribbon's one icon-button size
 from .general_group import ICON_SIZE as _ICON_SIZE
@@ -340,12 +340,13 @@ class TransformsSection(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(_GROUP_GAP)
+        self._separators = [ribbon_separator(self) for _ in range(3)]
         layout.addWidget(rotation_group)
-        layout.addWidget(ribbon_separator(self))
+        layout.addWidget(self._separators[0])
         layout.addWidget(flip_group)
-        layout.addWidget(ribbon_separator(self))
+        layout.addWidget(self._separators[1])
         layout.addWidget(crop_group)
-        layout.addWidget(ribbon_separator(self))
+        layout.addWidget(self._separators[2])
         layout.addWidget(calibrate_group)
         layout.addStretch(1)
 
@@ -356,6 +357,21 @@ class TransformsSection(QWidget):
         self._geometry_module.geometry_changed.connect(self._refresh_from_settings)
         self._active_tool.active_tool_changed.connect(self._sync_tool_buttons)
         self._sync_tool_buttons(self._active_tool.active())
+
+    def refresh_theme(self) -> None:
+        """Redraws every icon in the active theme's colours. The icons are drawn once, in the colour of the theme active at that moment, so
+        a live theme switch has to call this (`ImagePanel.refresh_theme`). The captions and dividers are restyled here too."""
+        theme = get_active_theme()
+        for label in (self._rotation_label, self._flip_label, self._crop_label, self._calibrate_label):
+            label.setStyleSheet(group_label_style())
+        for separator in self._separators:
+            separator.setStyleSheet(f"color: {theme.control_border};")
+        self._auto_rotate_button.setIcon(_auto_rotate_icon(get_active_theme().text_primary))
+        self._refresh_rotate_icon()
+        self._refresh_crop_icon()
+        self._refresh_measure_icon()
+        self._refresh_auto_crop()
+        self._refresh_from_settings()
 
     def _on_rotate_toggled(self, checked: bool) -> None:
         self._refresh_rotate_icon()

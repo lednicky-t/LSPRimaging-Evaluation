@@ -52,11 +52,10 @@ from ...image_tools.mask.transient_masks import group_by_frame, maskable
 from ...image_tools.mask.transient_scan import ScanParams
 from ...image_tools.mask_auto_task import AutoMaskSummary, MaskAutoTask
 from ...image_tools.mask_scan_task import ScanSummary, TransientScanTask
-from ..mask_edit_common import action_button, disabled_safe_icon, plan_mask_edit_base
+from ..mask_edit_common import action_button, disabled_safe_icon, plain_icon_color, plan_mask_edit_base
 from ..ribbon_fields import style_ribbon_number_field
 from .mask_rows import EVENT_COLOR, MASK_COLOR
 
-_ICON_PLAIN = "#f8fafc"  # GuiTheme.text_primary, like the other real, active actions of this ribbon
 _DEFAULT_SIGMA = DetectionParams().sigma_factor
 _DEFAULT_STRIDE = ScanParams().stride
 
@@ -146,7 +145,7 @@ class MaskScanControls(QWidget):
         self._settings_button.setFixedSize(self._scan_button.size())
         self._settings_button.setIconSize(self._scan_button.iconSize())
         self._settings_button.setStyleSheet(self._scan_button.styleSheet())
-        self._settings_button.setIcon(disabled_safe_icon("settings", _ICON_PLAIN))
+        self._settings_button.setIcon(disabled_safe_icon("settings", plain_icon_color()))
         self._settings_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         menu = QMenu(self._settings_button)
         action = QWidgetAction(menu)
@@ -157,7 +156,7 @@ class MaskScanControls(QWidget):
         self._pop.changed.connect(self._refresh_summary)
         self._refresh_summary()
 
-        self._clear_button = action_button(self, "trash", _ICON_PLAIN, "Clear all pointers of the scan (it changes no mask).")
+        self._clear_button = action_button(self, "trash", plain_icon_color(), "Clear all pointers of the scan (it changes no mask).")
         self._clear_button.clicked.connect(self._on_clear)
 
         layout = QHBoxLayout(self)
@@ -176,6 +175,11 @@ class MaskScanControls(QWidget):
         dataset.dataset_loaded.connect(lambda _ds: self._refresh_enabled())
         dataset.dataset_cleared.connect(self._refresh_enabled)
         self._refresh_enabled()
+
+    def refresh_theme(self) -> None:
+        """The plain icons (Settings, Clear) take the active theme's text colour."""
+        self._settings_button.setIcon(disabled_safe_icon("settings", plain_icon_color()))
+        self._clear_button.setIcon(disabled_safe_icon("trash", plain_icon_color()))
 
     # -- remembered state ---------------------------------------------------------------------------------
 

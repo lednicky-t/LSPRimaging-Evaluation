@@ -111,7 +111,8 @@ def dock_separator_stylesheet(theme: GuiTheme | None = None) -> str:
 def popup_menu_stylesheet(theme: GuiTheme | None = None) -> str:
     """Every menu pop-up (ribbon menus, context menus) in the colour of the panels' interior (`toolbar_bg`), not the lighter window colour this app gives `window_bg`
     (2026-11-26, maintainer: a menu should be as dark as a panel). The base `QWidget` rule fills every widget with `window_bg`, so a menu's panel and its labels would show as a
-    lighter box inside the menu: they are made transparent here, and only the entry fields (spin box, line edit, combo box) keep the window colour. The Array / Find* pop-outs
+    lighter box inside the menu: they are made transparent here, and only the entry fields (spin box, line edit, combo box) keep the window colour. A **submenu** (View -> Panel Presets, Theme) is itself a `QWidget` inside a `QMenu`, so the transparent rule hit it too and it showed black
+    (2026-11-27): `QMenu QMenu` gives it its fill back (it comes after, same specificity, so it wins). The Array / Find* pop-outs
     are drawn in the same colour (`image/array.py` `PopupFrame`)."""
     theme = theme or get_active_theme()
     return f"""
@@ -120,6 +121,9 @@ def popup_menu_stylesheet(theme: GuiTheme | None = None) -> str:
     }}
     QMenu QWidget {{
         background: transparent;
+    }}
+    QMenu QMenu {{
+        background: {theme.toolbar_bg};
     }}
     QMenu QAbstractSpinBox, QMenu QLineEdit, QMenu QComboBox {{
         background-color: {theme.window_bg};
@@ -156,6 +160,21 @@ def menu_bar_no_border_stylesheet() -> str:
     return "QMenuBar { border-bottom: none; }"
 
 
+def tab_bar_stylesheet(theme: GuiTheme | None = None) -> str:
+    """The look of every ``QTabWidget`` (the Dataset Manager's pages, the Log panel's Log / Timings), in the theme's own colours.
+
+    Without a rule of its own the tab strip is drawn by the platform style, which follows the *system* light / dark setting, not the
+    app's theme: on the Bright theme the titles and tabs came out unreadable (2026-11-27). Colours only; the shape stays a plain tab."""
+    theme = theme or get_active_theme()
+    return (
+        f"QTabWidget::pane {{ border: 1px solid {theme.toolbar_border}; top: -1px; }} "
+        f"QTabBar::tab {{ background: {theme.control_bg}; color: {theme.text_muted}; border: 1px solid {theme.toolbar_border}; "
+        f"border-bottom: none; border-top-left-radius: 5px; border-top-right-radius: 5px; padding: 5px 14px; margin-right: 2px; }} "
+        f"QTabBar::tab:hover {{ background: {theme.control_bg_hover}; color: {theme.text_primary}; }} "
+        f"QTabBar::tab:selected {{ background: {theme.window_bg}; color: {theme.text_primary}; font-weight: 600; }}"
+    )
+
+
 def apply_active_palette(app: QApplication, theme: GuiTheme | None = None) -> None:
     """The full QPalette this app actually needs - apply_base_app_theme
     (packages/lspr_ui) sets a starter palette but leaves out WindowText/
@@ -188,5 +207,6 @@ def apply_app_theme(app: QApplication, theme: GuiTheme | None = None) -> None:
         + combo_box_no_arrow_stylesheet()
         + dock_separator_stylesheet(theme)
         + menu_bar_no_border_stylesheet()
+        + tab_bar_stylesheet(theme)
         + popup_menu_stylesheet(theme)
     )

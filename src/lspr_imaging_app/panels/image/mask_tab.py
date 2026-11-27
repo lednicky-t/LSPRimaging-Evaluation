@@ -184,6 +184,8 @@ class MaskTab(QWidget):
         self._overlay_controls.refresh_theme(theme)
         self._scope_toggle.refresh_theme(theme)
         self._features_panel.refresh_theme()
+        self._selection_actions.refresh_theme()
+        self._scan_controls.refresh_theme()
         for separator in self._separators:
             separator.setStyleSheet(f"color: {theme.control_border};")
         for label in (

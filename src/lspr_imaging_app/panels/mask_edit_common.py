@@ -38,7 +38,7 @@ from PyQt6.QtCore import QSize
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QToolButton, QWidget
 
-from lspr_ui import load_tabler_icon, transparent_icon_button_stylesheet
+from lspr_ui import get_active_theme, load_tabler_icon, transparent_icon_button_stylesheet
 
 from ..image_tools import ChromaticModule, MaskModule
 from ..image_tools.mask.transient_masks import BaseMask
@@ -53,6 +53,14 @@ SUBTRACT_COLOR = "#f97316"
 # BUTTON_SIZE / ICON_SIZE: the ribbon's one icon-button size, `panels/ribbon_icon_size.py`.
 _RENDER_SIZE = ICON_SIZE * 2  # rendered at 2x, scaled down - crisper than a native bitmap
 _STROKE_WIDTH = 2.1
+
+
+def plain_icon_color() -> str:
+    """The colour of a "plain" (no accent colour) ribbon action icon: the active theme's text colour, read when the icon is drawn.
+
+    These were a literal ``#f8fafc`` (the *dark* theme's text colour), which is near-white: invisible on the Bright theme's white
+    ribbon. A widget that draws a plain icon re-reads this in its ``refresh_theme`` so a live theme switch recolours it."""
+    return get_active_theme().text_primary
 
 
 def action_button(

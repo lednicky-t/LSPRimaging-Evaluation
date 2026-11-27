@@ -124,6 +124,18 @@ def _widest_text_width(label: QLabel, widest: str) -> int:
     return metrics.horizontalAdvance(re.sub(r"\d", digit, widest)) + _SUBTITLE_COLUMN_SLACK_PX
 
 
+def own_style(widget: QWidget, declarations: str) -> None:
+    """Style `widget` itself and nothing else: ``declarations`` are applied through a property selector that only this widget carries.
+
+    Why not ``widget.setStyleSheet("background: transparent;")``: a bare declaration applies to the widget *and everything under it*, and Qt
+    treats a tooltip as a child of the widget it belongs to (it even matches selectors through that parent), so every tooltip of a title row
+    inherited the row's ``background: transparent`` / stale ``color`` and came out dark on the Bright theme (2026-11-27). The tooltip has no
+    such property, so it does not match. (An application-wide event filter that fixed the tooltip itself was tried and dropped: a Python
+    callback on every Qt event slowed the app and crashed tests.)"""
+    widget.setProperty("lsprOwnStyle", "1")
+    widget.setStyleSheet(f'QWidget[lsprOwnStyle="1"] {{ {declarations} }}')
+
+
 class _ElidedLabel(QLabel):
     """A label that never asks for more room than it is given: text that does not fit is cut with
     "..." at the right (the full text stays in `full_text()`, and is the tooltip if none is set)."""
@@ -493,12 +505,13 @@ class PanelContainer(QDockWidget):
         # instead, which is what actually closes the loop - not a
         # difference in what color gets painted, since both were window_bg,
         # just which widget paints it and in what order.
-        bar.setStyleSheet("background: transparent;")
+        own_style(bar, "background: transparent;")
         outer = QVBoxLayout(bar)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
         row = QWidget(bar)
+        own_style(row, "background: transparent;")  # the bar's transparency no longer reaches its children by inheritance
         layout = QHBoxLayout(row)
         layout.setContentsMargins(8, 4, 4, 4)
         layout.setSpacing(2)
@@ -510,7 +523,7 @@ class PanelContainer(QDockWidget):
         # semi-bold; the heavier weight was part of what made this read as
         # a generic app chrome rather than VS Code's specific look.
         if isinstance(label, QLabel):
-            label.setStyleSheet(f"color: {theme.text_primary}; font-weight: 400; background: transparent;")
+            own_style(label, f"color: {theme.text_primary}; font-weight: 400; background: transparent;")
         layout.addWidget(label)
 
         # Centered between the title and the button row (2026-09-30,
@@ -520,12 +533,13 @@ class PanelContainer(QDockWidget):
         # crowding it right up against the title the way a single trailing
         # stretch would.
         centered = QWidget(row)
+        own_style(centered, "background: transparent;")
         centered_layout = QHBoxLayout(centered)
         centered_layout.setContentsMargins(0, 0, 0, 0)
         centered_layout.setSpacing(0)
         centered_layout.addStretch(1)
         subtitle_label = QLabel(self._subtitle_text, centered)
-        subtitle_label.setStyleSheet(f"color: {theme.text_muted}; font-weight: 400; background: transparent;")
+        own_style(subtitle_label, f"color: {theme.text_muted}; font-weight: 400; background: transparent;")
         subtitle_label.setToolTip(self._subtitle_tooltip)
         subtitle_label.setVisible(bool(self._subtitle_text))
         centered_layout.addWidget(subtitle_label)
@@ -537,6 +551,7 @@ class PanelContainer(QDockWidget):
         # Status fields (`set_subtitle_columns`): left-aligned right after the title, each at a
         # fixed place; the last, unsized one (the comment) takes all the room that is left.
         columns_host = _ColumnsHost(row, self._fit_subtitle_columns)
+        own_style(columns_host, "background: transparent;")
         columns_layout = QHBoxLayout(columns_host)
         columns_layout.setContentsMargins(_SUBTITLE_TITLE_GAP_PX, 0, 0, 0)
         columns_layout.setSpacing(_SUBTITLE_COLUMN_GAP_PX)
@@ -635,6 +650,7 @@ class PanelContainer(QDockWidget):
         if not self._title_choices:
             return QLabel(title, parent)
         host = QWidget(parent)
+        own_style(host, "background: transparent;")
         layout = QHBoxLayout(host)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
@@ -656,11 +672,11 @@ class PanelContainer(QDockWidget):
     def _style_title_words(self, theme) -> None:
         for index, word in enumerate(self._title_words):
             on = index == self._title_current
-            word.setStyleSheet(
-                f"color: {theme.accent_blue if on else theme.text_dim}; font-weight: {600 if on else 400}; background: transparent;"
+            own_style(
+                word, f"color: {theme.accent_blue if on else theme.text_dim}; font-weight: {600 if on else 400}; background: transparent;"
             )
         for separator in self._title_separators:
-            separator.setStyleSheet(f"color: {theme.text_dim}; font-weight: 400; background: transparent;")
+            own_style(separator, f"color: {theme.text_dim}; font-weight: 400; background: transparent;")
 
     def set_title_choices(self, choices: Sequence[TitleChoice], current: int = 0) -> None:
         """Turn the title into a switch of words (e.g. ``ROI / Groups``): ``current`` is highlighted, a click (or, for a choice with
@@ -732,9 +748,7 @@ class PanelContainer(QDockWidget):
             key = (column.widest, column.color, self._muted_color)
             if self._subtitle_column_keys[index] != key:
                 self._subtitle_column_keys[index] = key
-                label.setStyleSheet(
-                    f"color: {column.color or self._muted_color}; font-weight: 400; background: transparent;"
-                )
+                own_style(label, f"color: {column.color or self._muted_color}; font-weight: 400; background: transparent;")
                 if column.widest:
                     label.setFixedWidth(_widest_text_width(label, column.widest))
                     # Width AND height fixed: Qt then skips the layout request a new text sends. With only the width fixed,

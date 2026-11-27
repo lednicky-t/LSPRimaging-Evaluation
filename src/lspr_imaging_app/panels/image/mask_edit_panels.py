@@ -54,7 +54,7 @@ from ...image_tools.preprocess import resolve_external_mask
 from ...selection import AreaSelectionModule
 from ...selection.area_selection_module import REPLACE
 from ..feature_map_task import DEFAULT_CUBES, FeatureMapResult, FeatureMapSummary, FeatureMapTask, choose_cubes
-from ..mask_edit_common import action_button, disabled_safe_icon
+from ..mask_edit_common import action_button, disabled_safe_icon, plain_icon_color
 from ..ribbon_fields import style_ribbon_number_field
 
 SELECTION_LABEL = "Select feature map"  # the undo step's name
@@ -64,7 +64,6 @@ if TYPE_CHECKING:
     # close a real import cycle.
     from .panel import ImagePanel
 
-_PLAIN_ICON_COLOR = "#f8fafc"  # GuiTheme.text_primary, like the other real, active actions of this ribbon
 _STOP_COLOR = "#ef4444"  # the red stop of the Analysis, Tuning and Export tabs' Run / Stop buttons
 
 
@@ -265,6 +264,7 @@ class FeatureMapEditPanel(QWidget):
         self._shows_stop: bool | None = None  # which icon the button shows (set by `_refresh_state`)
 
         # The search settings and the kinds are in popups: the Mask ribbon row is already ~800 px wide.
+        self._popup_icons: list[tuple[QToolButton, str]] = []  # (button, icon name): redrawn when the theme changes
         self._pop = _FeatureMapPopover(self)
         self._settings_button = self._popup_button("settings", self._pop)
         self._pop.numbers_changed.connect(self._refresh_state)
@@ -317,7 +317,8 @@ class FeatureMapEditPanel(QWidget):
         button.setFixedSize(self._process_button.size())
         button.setIconSize(self._process_button.iconSize())
         button.setStyleSheet(self._process_button.styleSheet())
-        button.setIcon(disabled_safe_icon(icon_name, _PLAIN_ICON_COLOR))
+        button.setIcon(disabled_safe_icon(icon_name, plain_icon_color()))
+        self._popup_icons.append((button, icon_name))
         button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         menu = QMenu(button)
         action = QWidgetAction(menu)
@@ -344,6 +345,8 @@ class FeatureMapEditPanel(QWidget):
         self._features.set_margin(self._margin_spin.value())
 
     def refresh_theme(self) -> None:
+        for button, icon_name in self._popup_icons:  # the plain icons take the theme's text colour
+            button.setIcon(disabled_safe_icon(icon_name, plain_icon_color()))
         self._shows_stop = None  # the play icon takes the theme's green: redraw it
         self._refresh_state()
 

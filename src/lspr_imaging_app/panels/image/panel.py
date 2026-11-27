@@ -843,6 +843,10 @@ class ImagePanel(QWidget):
                 getattr(self, tab).refresh_theme()
         if hasattr(self, "_tool_ribbon"):
             self._tool_ribbon.refresh_theme(get_active_theme())
+        if hasattr(self, "_transforms_section"):
+            self._transforms_section.refresh_theme()
+        if hasattr(self, "_chromatic_tab"):
+            self._chromatic_tab.refresh_theme(get_active_theme())
         if hasattr(self, "_top_drawer"):
             self._top_drawer.refresh_theme()
         if hasattr(self, "_selection_tools"):

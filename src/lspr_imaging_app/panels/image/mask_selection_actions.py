@@ -10,12 +10,9 @@ from __future__ import annotations
 from PyQt6.QtWidgets import QHBoxLayout, QToolButton, QWidget
 
 from ...selection import AreaSelectionModule
-from ..mask_edit_common import ADD_COLOR, SUBTRACT_COLOR, action_button
+from ..mask_edit_common import ADD_COLOR, SUBTRACT_COLOR, action_button, plain_icon_color
 from ..mask_selection_editor import MaskSelectionEditor
 from .mask_selection_icons import mask_to_selection_icon, selection_to_mask_icon
-
-_PLAIN_COLOR = "#f8fafc"  # GuiTheme.text_primary, like the other real, active actions of this ribbon
-
 
 class MaskSelectionActions(QWidget):
     def __init__(self, editor: MaskSelectionEditor, selection: AreaSelectionModule, parent: QWidget | None = None) -> None:
@@ -31,16 +28,15 @@ class MaskSelectionActions(QWidget):
             "Take the selection out of the mask (at the State group's Persistent / Individual scope; Ctrl+Z undoes it).",
         )
         self.replace_button: QToolButton = action_button(
-            self, "replace", _PLAIN_COLOR,
+            self, "replace", plain_icon_color(),
             "Replace the mask at this frame by the selection (at the State group's scope; Ctrl+Z undoes it). With nothing selected nothing happens.",
         )
         self.from_mask_button: QToolButton = action_button(
-            self, "arrow-bar-up", _PLAIN_COLOR,
+            self, "arrow-bar-up", plain_icon_color(),
             "Selection from mask: the mask at this frame becomes the selection (the mode button, or Shift / Alt, say how it combines with "
             "the current one). Then Modify selection, then Replace.",
         )
-        self.replace_button.setIcon(selection_to_mask_icon(_PLAIN_COLOR))  # source first: selection -> mask
-        self.from_mask_button.setIcon(mask_to_selection_icon(_PLAIN_COLOR))  # mask -> selection
+        self._draw_plain_icons()
         self.replace_button.clicked.connect(lambda _checked=False: self._editor.replace())
         self.from_mask_button.clicked.connect(lambda _checked=False: self._editor.from_mask())
         self.add_button.clicked.connect(lambda _checked=False: self._editor.apply(subtract=False))
@@ -54,6 +50,15 @@ class MaskSelectionActions(QWidget):
         layout.addWidget(self.from_mask_button)
         selection.selection_changed.connect(self._refresh)
         self._refresh()
+
+    def _draw_plain_icons(self) -> None:
+        color = plain_icon_color()
+        self.replace_button.setIcon(selection_to_mask_icon(color))  # source first: selection -> mask
+        self.from_mask_button.setIcon(mask_to_selection_icon(color))  # mask -> selection
+
+    def refresh_theme(self) -> None:
+        """The two plain icons take the active theme's text colour (Add / Subtract keep their accent colours)."""
+        self._draw_plain_icons()
 
     def _refresh(self) -> None:
         on = self._selection.has_selection()

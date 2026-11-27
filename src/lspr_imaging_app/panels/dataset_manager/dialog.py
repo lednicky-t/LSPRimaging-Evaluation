@@ -100,6 +100,12 @@ class DatasetManagerDialog(QDialog):
         self.raise_()
         self.activateWindow()
 
+    def refresh_theme(self) -> None:
+        """A live theme switch: the pages that colour their own text re-read the theme (the tab strip and the rest follow the app stylesheet)."""
+        self.plan.refresh_theme()
+        if self.refractive is not None:
+            self.refractive.refresh_theme()
+
     def show_page(self, page: str) -> None:
         if page in _PAGES:
             self.tabs.setCurrentIndex(_PAGES.index(page))

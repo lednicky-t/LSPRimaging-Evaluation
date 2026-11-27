@@ -85,7 +85,7 @@ from .image_tools import (
     MaskModule,
     MaskScopeModule,
 )
-from .panels.dataset_info_bar import attach_to_menu_bar
+from .panels.dataset_info_bar import DatasetInfoBar, attach_to_menu_bar
 from .panels.dock_container import PanelContainer, TitleChoice
 from .panels.histogram import HistogramPanel
 from .panels.log import LogPanel
@@ -369,6 +369,10 @@ def _wire_theme_menu(
             sensorgram.refresh_theme()
         for dock in window.findChildren(PanelContainer):
             dock.refresh_theme()
+        for manager in window.findChildren(DatasetManagerDialog):
+            manager.refresh_theme()
+        for info_bar in window.findChildren(DatasetInfoBar):
+            info_bar.refresh()
         bulk_plot = getattr(window, "bulk_plot", None)  # the floating S_bulk plot (2026-11-12)
         if bulk_plot is not None:
             bulk_plot.refresh_theme()
