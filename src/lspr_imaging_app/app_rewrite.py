@@ -44,10 +44,12 @@ from .selection.signal_map_module import SignalMapModule
 from .selection.step_table_module import StepTableModule
 from .analysis.trace_store import TraceStore
 from .storage.session_index import session_dir_for
-from .analysis.scan_store import FILE_NAME as SCAN_FILE_NAME, describe_file as describe_scan_file
+from .analysis.scan_file_line import ScanFileLine
+from .analysis.scan_store import FILE_NAME as SCAN_FILE_NAME
 from .analysis.scan_pool import MODE_NORMAL, MODES
 from .analysis.scan_task import TASK_ID as ANALYSIS_SCAN_TASK_ID, ScanTask
 from .applog import LogSystem, RingBufferHandler, configure_logging, log_event
+from .launch_wiring import start_gui_stall_watchdog, wire_file_stats_after_startup
 from .panels.image_first import ImageFirst
 from .quit_timing import QuitClock
 from .applog import current as current_log_system
@@ -1181,10 +1183,10 @@ def _wire_analysis_scan(m: _Modules, row: AnalysisTab, ui_state: UiStateStore, s
             return None
         return session_dir_for(home, session_id) / "analysis" / SCAN_FILE_NAME
 
+    scan_line = ScanFileLine(row.set_status, scan_file, parent=row)  # the scan file is read on a thread (analysis/scan_file_line.py)
+
     def show_saved_scan(*_args: object) -> None:
-        path = scan_file()
-        line = describe_scan_file(path) if path is not None else None
-        row.set_status(line or "No scan yet.")
+        scan_line.show(scan_file())
         refresh_file_button()
 
     def refresh_file_button(*_args: object) -> None:
@@ -2284,6 +2286,7 @@ def build_main_window(
     attach_to_menu_bar(window.menuBar(), m.dataset)  # dataset path, type / size / cubes, and the Time / Plan checks
     startup = _build_startup_tracker(m, image_panel, spectra_panel, sensorgram_panel)
     _wire_startup_calculation(startup, roi_table_panel, m.analysis_scan.start_pool)
+    wire_file_stats_after_startup(m.dataset, startup, ui_state)
     check_presenters = (
         _wire_data_checks(window, m, sensorgram_panel, ui_state),
         _wire_image_motion(window, m, image_panel.analysis_tab, ui_state),
@@ -2544,6 +2547,7 @@ def main(app: QApplication | None = None, splash: LaunchSplash | None = None) ->
     if splash is not None:
         splash.finish(window)
     quit_clock.connect_end(app)  # last slot: runs after the others connected so far
+    start_gui_stall_watchdog(app, system)  # one `gui.stall` record per GUI-thread block over 300 ms (applog/gui_stall.py)
     exit_code = app.exec()
     quit_clock.exec_returned()
     sys.exit(exit_code)

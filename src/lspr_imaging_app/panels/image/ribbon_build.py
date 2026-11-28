@@ -214,7 +214,7 @@ def build_chromatic_and_background_tabs(panel: ImagePanel) -> None:
     panel._tuning_tab.status_message.connect(panel._on_tool_status)
     panel._export_tab = ExportTab(
         panel._dataset, panel, geometry=panel._geometry, roi_toolbox=panel._roi_toolbox, chromatic=panel._chromatic,
-        status=panel._on_tool_status, session_carry=panel._session_carry,
+        status=panel._on_tool_status, session_carry=panel._session_carry, lazy_estimates=True,
     )
     panel._export_tab.info_changed.connect(panel._on_export_info_changed)
 

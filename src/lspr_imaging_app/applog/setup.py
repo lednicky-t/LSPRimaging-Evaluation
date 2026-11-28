@@ -41,6 +41,7 @@ from typing import Any, Callable
 
 from .entry import SCHEMA, set_session_id
 from .gc_trace import GcTrace
+from .gui_stall import GuiStallWatchdog
 from .handlers import CONSOLE_DATE_FORMAT, CONSOLE_FORMAT, RingBufferHandler, build_file_pipeline
 
 KEEP_SESSIONS = 20
@@ -64,6 +65,8 @@ class LogSystem:
     _closed: bool = False
     gc_trace: GcTrace | None = None
     """Where the cyclic garbage collector runs (`gc_trace.py`); the app calls `gc_trace.flush()` from a GUI timer."""
+    gui_stall: GuiStallWatchdog | None = None
+    """What the GUI thread does while it is blocked (`gui_stall.py`); the app calls `gui_stall.beat()` from a GUI timer and `start()` once."""
 
     @property
     def log_dir(self) -> Path:
@@ -291,6 +294,9 @@ def _install_hooks(system: LogSystem) -> None:
     system.gc_trace = GcTrace()
     system.gc_trace.install()
     system._restore.append(system.gc_trace.uninstall)
+
+    system.gui_stall = GuiStallWatchdog()  # idle until the app starts it (`app_rewrite.main`)
+    system._restore.append(system.gui_stall.stop)
 
     try:
         from PyQt6.QtCore import QtMsgType, qInstallMessageHandler

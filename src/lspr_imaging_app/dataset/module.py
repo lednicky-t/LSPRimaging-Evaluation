@@ -63,7 +63,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -172,6 +172,10 @@ class DatasetModule(QObject):
         self._source_chunk_grid_visible = False
         self._file_stats_cache: tuple[ImageDataset, tuple[int, float | None]] | None = None
         self._file_stats_wanted: ImageDataset | None = None  # the dataset whose count is running or finished; None after a clear
+        self._file_stats_started = False  # the count of `_file_stats_wanted` has been started (it may be held back, see `hold_file_stats_walk`)
+        self._file_stats_hold = False
+        # (recall(folder) -> stats | None, remember(folder, stats)): the last count of each dataset, kept by the app between launches
+        self._file_stats_memory: tuple[Callable[[str], tuple[int, float | None] | None], Callable[[str, tuple[int, float | None]], None]] | None = None
         self._file_stats_done.connect(self._on_file_stats_done)
         self._worker = AnalysisWorker()
         # Separate from `_worker` (load) rather than shared - a load and an
@@ -237,7 +241,12 @@ class DatasetModule(QObject):
 
         2026-10-24: this used to count on the calling (GUI) thread, 3.3-3.7 s for an OME-Zarr of 8905 files
         (`docs/startup_gui_thread_audit_2026-10-24.md`). Plain thread, not `QThreadPool`: the work is `os.scandir` only, but it
-        is dataset-adjacent (CLAUDE.md invariant)."""
+        is dataset-adjacent (CLAUDE.md invariant).
+
+        2026-11-28: the count of a big OME-Zarr takes ~21 s even alone (89 GB in 71,720 files in 146,042 folders: the file system
+        lists the folders one by one), so until it is in, the answer is **the count of the last time this dataset was opened**
+        (`set_file_stats_memory`), if there is one; the new count replaces it when it arrives. During start-up the count itself
+        is held back (`hold_file_stats_walk`) so it does not compete with the loading."""
         target = dataset if dataset is not None else self._dataset
         if target is None:
             return None
@@ -245,24 +254,52 @@ class DatasetModule(QObject):
             return self._file_stats_cache[1]
         if self._file_stats_wanted is not target:  # not counting it yet (a count of another dataset is dropped when it ends)
             self._file_stats_wanted = target
-
-            def count() -> None:
-                started = time.perf_counter()
-                try:
-                    stats: tuple[int, float | None] | None = dataset_file_stats(target)
-                except Exception:  # nothing may escape a thread silently; a size is only displayed
-                    logger.exception("Counting the dataset's files failed")
-                    stats = (0, None)
-                log_event(logger, "dataset.file_stats", logging.INFO, ms=round((time.perf_counter() - started) * 1000))
-                self._file_stats_done.emit(target, stats)
-
-            threading.Thread(target=count, name="dataset-file-stats", daemon=True).start()
+            self._file_stats_started = False
+        self._start_file_stats_walk()
+        if self._file_stats_memory is not None:
+            return self._file_stats_memory[0](str(target.folder))
         return None
+
+    def set_file_stats_memory(
+        self,
+        recall: Callable[[str], tuple[int, float | None] | None],
+        remember: Callable[[str, tuple[int, float | None]], None],
+    ) -> None:
+        """Where the last count of each dataset folder is kept between launches (the app's saved UI state; this module does not know
+        where). `recall(folder)` returns it or None; `remember(folder, stats)` is called with every finished count (GUI thread)."""
+        self._file_stats_memory = (recall, remember)
+
+    def hold_file_stats_walk(self, hold: bool) -> None:
+        """Hold the count back (True) while the app is starting up, or let it run (False; it starts now if one is waiting).
+        Asking for the size while held answers with the remembered count, or None."""
+        self._file_stats_hold = bool(hold)
+        if not hold:
+            self._start_file_stats_walk()
+
+    def _start_file_stats_walk(self) -> None:
+        target = self._file_stats_wanted
+        if target is None or self._file_stats_started or self._file_stats_hold:
+            return
+        self._file_stats_started = True
+
+        def count() -> None:
+            started = time.perf_counter()
+            try:
+                stats: tuple[int, float | None] | None = dataset_file_stats(target)
+            except Exception:  # nothing may escape a thread silently; a size is only displayed
+                logger.exception("Counting the dataset's files failed")
+                stats = (0, None)
+            log_event(logger, "dataset.file_stats", logging.INFO, ms=round((time.perf_counter() - started) * 1000))
+            self._file_stats_done.emit(target, stats)
+
+        threading.Thread(target=count, name="dataset-file-stats", daemon=True).start()
 
     def _on_file_stats_done(self, dataset: object, stats: object) -> None:
         if dataset is not self._file_stats_wanted or not isinstance(stats, tuple):
             return  # the dataset was cleared or replaced while counting
         self._file_stats_cache = (dataset, stats)  # type: ignore[assignment]
+        if self._file_stats_memory is not None and stats[0] > 0:  # a failed count (0 bytes) must not overwrite a good one
+            self._file_stats_memory[1](str(dataset.folder), stats)  # type: ignore[attr-defined]
         self.file_stats_ready.emit(dataset)
 
     def timed_image_count(self) -> int:
@@ -764,6 +801,7 @@ class DatasetModule(QObject):
         self._mean_interval_cache = None
         self._file_stats_cache = None
         self._file_stats_wanted = None
+        self._file_stats_started = False
         self.dataset_cleared.emit()
 
     # -- chunk-grid preview (Export section <-> Image panel) ----------------

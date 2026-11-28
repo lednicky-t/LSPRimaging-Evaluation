@@ -300,6 +300,10 @@ IMAGE_VIEW_RANGE = "image/view_range"
 `image_view_*` fields. Applied only when all four numbers are present."""
 
 HIGHLIGHT_RANGE = "histogram/highlight_range"
+# The last file count (bytes, oldest file time) of each dataset folder, ``{folder: {"bytes": int, "oldest": float | None}}``, newest last (2026-11-28):
+# counting a big OME-Zarr takes ~21 s, so the size is shown from here at once and replaced when the new count is in.
+FILE_STATS = "dataset/file_stats"
+FILE_STATS_KEPT = 12  # datasets remembered; the oldest entry is dropped first
 """``{"dataset": str, "min": float, "max": float}``: an intensity range means
 nothing on another dataset, so it carries the dataset folder it was set on
 (replaced `highlight_range_min/max/dataset`)."""
@@ -335,6 +339,26 @@ def read_view_range(store: _Getter) -> tuple[tuple[float, float], tuple[float, f
     if x_range is None or y_range is None:
         return None
     return (x_range[0], x_range[1]), (y_range[0], y_range[1])
+
+
+def read_file_stats(store: _Getter, folder: str) -> tuple[int, float | None] | None:
+    """``(bytes, oldest file time or None)`` remembered for `folder`, or `None` when nothing valid is saved for it."""
+    table = store.get(FILE_STATS)
+    entry = table.get(folder) if isinstance(table, dict) else None
+    if not isinstance(entry, dict):
+        return None
+    size, oldest = entry.get("bytes"), entry.get("oldest")
+    if not isinstance(size, int) or isinstance(size, bool) or size <= 0 or not (oldest is None or _number(oldest)):
+        return None
+    return size, (None if oldest is None else float(oldest))
+
+
+def with_file_stats(store: _Getter, folder: str, stats: tuple[int, float | None]) -> dict[str, object]:
+    """The table to save: the old entries (without `folder`), then this one last, cut to the newest ``FILE_STATS_KEPT``."""
+    table = store.get(FILE_STATS)
+    kept = {key: value for key, value in (table.items() if isinstance(table, dict) else ()) if key != folder}
+    kept[folder] = {"bytes": int(stats[0]), "oldest": None if stats[1] is None else float(stats[1])}
+    return dict(list(kept.items())[-FILE_STATS_KEPT:])
 
 
 def read_highlight_range(store: _Getter) -> tuple[str, float, float] | None:

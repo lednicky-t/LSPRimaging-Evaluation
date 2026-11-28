@@ -206,6 +206,36 @@ def roi_read_boxes(
     return out
 
 
+def hull_vertices(points: np.ndarray) -> np.ndarray:
+    """The corner points of the convex hull of ``points`` (``[n, 2]``), in their original order; all of them when the hull cannot be
+    taken (fewer than 3 points, any non-finite value).
+
+    Why (2026-11-28, `gui.stall` records): the displacement of a point under an affine map is a linear function of the point, and the
+    largest |linear function| over a set of points is always found at a corner of its convex hull. `affine_reach` asks for exactly that
+    maximum, so it can look at ~15 hull corners instead of all 160 ROI centres: 2.1 s -> 0.3 s for 71,685 fitted affines, on the GUI thread
+    at every launch. Andrew's monotone chain; points on a hull edge (not corners) are dropped; a corner given twice may come back twice (harmless: same place)."""
+    pts = np.asarray(points, dtype=np.float64).reshape(-1, 2)
+    if len(pts) < 3 or not np.isfinite(pts).all():
+        return pts
+    order = np.lexsort((pts[:, 1], pts[:, 0]))  # by x, then y
+
+    def half(indices: np.ndarray) -> list[int]:
+        chain: list[int] = []
+        for i in indices:
+            while len(chain) >= 2:
+                a, b = pts[chain[-2]], pts[chain[-1]]
+                if (b[0] - a[0]) * (pts[i, 1] - a[1]) - (b[1] - a[1]) * (pts[i, 0] - a[0]) <= 0.0:  # not a left turn: b is not a corner
+                    chain.pop()
+                else:
+                    break
+            chain.append(int(i))
+        return chain
+
+    lower, upper = half(order), half(order[::-1])
+    corners = sorted(set(lower[:-1] + upper[:-1]))
+    return pts[corners]
+
+
 def affine_reach(centers_xy: np.ndarray, affines: Sequence[np.ndarray] | None) -> tuple[float, float]:
     """``(shift_px, stretch)``: the worst centre displacement and the largest stretch over ``affines`` (the fitted
     chromatic models), as two numbers for all the ROIs together. ``(0.0, 1.0)`` for no affines.
@@ -220,6 +250,7 @@ def affine_reach(centers_xy: np.ndarray, affines: Sequence[np.ndarray] | None) -
     points = np.asarray(centers_xy, dtype=np.float64).reshape(-1, 2)
     if not len(mats) or not len(points):
         return 0.0, 1.0
+    points = hull_vertices(points)  # 2026-11-28: only these can hold the worst shift, see `hull_vertices`
     moved = np.einsum("kij,nj->kni", mats[:, :, :2], points) + mats[:, None, :, 2]
     shift = float(np.abs(moved - points[None, :, :]).max(initial=0.0))
     stretch = float(np.linalg.svd(mats[:, :, :2], compute_uv=False).max(initial=1.0))

@@ -30,6 +30,11 @@ def wavelength_decimal_precision(wavelengths_nm: list[float], max_decimals: int 
     acquisition hardware - confirmed with the maintainer 2026-09-22 - but
     this stays correct if two configured wavelengths ever round to the same
     whole nanometer."""
+    if len({float(wl) for wl in wavelengths_nm}) != len(wavelengths_nm):
+        # The same wavelength twice (a list with one entry per cube *and* wavelength: 71,685 values for 2,655 cubes x 27): rounding can only
+        # merge values further, so no precision ever makes them all different and the loop below would end at `max_decimals` after rounding the
+        # whole list `max_decimals + 1` times (0.5-0.65 s on the GUI thread at every launch, 2026-11-28). Same answer, found at once.
+        return max_decimals
     for decimals in range(max_decimals + 1):
         rounded = [round(float(wl), decimals) for wl in wavelengths_nm]
         if len(set(rounded)) == len(wavelengths_nm):

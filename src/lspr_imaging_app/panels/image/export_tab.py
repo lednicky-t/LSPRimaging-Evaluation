@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import html
 import logging
+import threading
 from collections.abc import Callable
 from pathlib import Path
 
@@ -150,6 +151,7 @@ class ExportTab(QWidget):
     info_changed = pyqtSignal()
     chunk_grid_icon_refreshed = pyqtSignal()
     """The grid button's icon was redrawn (on / off, theme): the View tab's copy of it (in the chunk icon's right-click menu) follows."""
+    _probed = pyqtSignal(object, object)  # (dataset, (height, width, dtype) | None): thread -> GUI thread hand-off of the shape probe
 
     def __init__(
         self,
@@ -161,8 +163,14 @@ class ExportTab(QWidget):
         chromatic: object | None = None,
         status: Callable[[str], None] | None = None,
         session_carry: SessionCarry | None = None,
+        lazy_estimates: bool = False,
     ) -> None:
         super().__init__(parent)
+        # The chunk estimates (counts, warnings, grid alignment) cost 0.3-0.8 s of the GUI thread for a big session (`affine_reach` over every
+        # fitted chromatic model, `gui.stall` 2026-11-28) and only show while this tab is open. With `lazy_estimates` (the app: `ribbon_build`)
+        # they are worked out when the tab is shown, not on every launch and ROI edit while it is hidden: a hidden panel does no work.
+        self._lazy_estimates = lazy_estimates
+        self._estimates_stale = False  # an estimate was skipped while hidden; `showEvent` fills it in
         self._dataset_module = dataset
         self._session_carry = session_carry  # moves the session into the exported pixels' coordinates (`storage/session_carry.py`)
         # Geometry: the calibration (um/px) written into the export's metadata, and the raw <-> processed map for the
@@ -177,6 +185,8 @@ class ExportTab(QWidget):
         self._image_dtype: np.dtype | None = None
         self._image_count = 0
         self._has_dataset = False
+        self._probe_for: object | None = None  # the dataset whose shape is being probed on a thread (a result for another one is dropped)
+        self._probed.connect(self._on_probed)
         self._roi_layout: ExportRoiLayout | None = None  # cached; dropped when ROIs/geometry/chromatic change
         # The chromatic `(shift, stretch)` the read boxes are widened by: measured from the fitted models, which
         # a ROI move does not touch, so it is kept until the correction itself changes (`_on_chromatic_changed`).
@@ -411,11 +421,12 @@ class ExportTab(QWidget):
         else:
             self._export_button.setIcon(self._icon("database-export", dim))
             self._export_button.setToolTip(
-                "Export the loaded dataset to OME-Zarr (choose a folder)." if self._has_dataset
+                ("Export the loaded dataset to OME-Zarr (choose a folder)." if self._probe_for is None
+                 else "Export: reading the dataset's image size...") if self._has_dataset
                 else "Export: load a dataset first."
             )
             self._export_caption.setText("Export")
-        self._export_button.setEnabled(self._exporting or self._has_dataset)
+        self._export_button.setEnabled(self._exporting or (self._has_dataset and self._probe_for is None))  # not while the plane is being read
         self.chunk_grid_icon_refreshed.emit()
 
     # -- dataset-driven state ---------------------------------------------------
@@ -433,15 +444,37 @@ class ExportTab(QWidget):
         self._image_count = sum(
             len(self._dataset_module.wavelengths_for_cube(cube)) for cube in self._dataset_module.spectral_cubes()
         )
-        try:
-            self._image_height, self._image_width, self._image_dtype = probe_ome_zarr_export_shape(dataset, None)
-        except Exception:
-            logger.exception("Could not probe the dataset for the export estimate")
+        # The probe reads one real plane (1.4 s on the GUI thread in the launch log of 2026-11-28, `gui.stall`: the CRC of the shard
+        # index), so it runs on a plain thread (a zarr read; never a QThreadPool) and the estimates fill in when it is done.
+        self._probe_for = dataset
+
+        def probe() -> None:
+            try:
+                result: tuple | None = probe_ome_zarr_export_shape(dataset, None)
+            except Exception:
+                logger.exception("Could not probe the dataset for the export estimate")
+                result = None
+            try:
+                self._probed.emit(dataset, result)
+            except RuntimeError:  # the tab was deleted (app closing) while the plane was being read
+                pass
+
+        threading.Thread(target=probe, name="export-shape-probe", daemon=True).start()
+        self._refresh_icons()
+        self._refresh_estimates()
+
+    def _on_probed(self, dataset: object, result: object) -> None:
+        if dataset is not self._probe_for:
+            return  # another dataset was loaded, or this one cleared, while the plane was being read
+        self._probe_for = None
+        if isinstance(result, tuple):
+            self._image_height, self._image_width, self._image_dtype = result
         self._refresh_icons()
         self._refresh_estimates()
 
     def _on_dataset_cleared(self) -> None:
         self._has_dataset = False
+        self._probe_for = None
         self._image_width = self._image_height = None
         self._image_dtype = None
         self._image_count = 0
@@ -545,7 +578,12 @@ class ExportTab(QWidget):
         )
         if raw_shape is None:
             self._estimate_text = self._layout_text = ""
+            self._estimates_stale = False
+        elif self._lazy_estimates and not self.isVisible() and not self._chunk_grid_button.isChecked():
+            self._estimate_text = self._layout_text = ""  # not shown anywhere meanwhile; worked out when the tab is shown
+            self._estimates_stale = True
         else:
+            self._estimates_stale = False
             frame = self._current_frame()
             if frame is None:
                 per_plane = -(-raw_shape[1] // w) * -(-raw_shape[0] // h)
@@ -561,6 +599,15 @@ class ExportTab(QWidget):
         self._refresh_icons()
         self._update_preview()
         self.info_changed.emit()
+
+    def showEvent(self, event) -> None:  # Qt override
+        super().showEvent(event)
+        if self._estimates_stale:
+            QTimer.singleShot(0, self._refresh_stale_estimates)  # after the tab has been drawn
+
+    def _refresh_stale_estimates(self) -> None:
+        if self._estimates_stale and self.isVisible():
+            self._refresh_estimates()
 
     def _refresh_fields(self) -> None:
         """Amber text while a warning applies; the counts, alignment and warnings in the fields' tooltip."""
