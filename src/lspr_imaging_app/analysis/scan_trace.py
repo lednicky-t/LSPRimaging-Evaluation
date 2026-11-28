@@ -35,6 +35,7 @@ from .statistics import aggregate_traces, apply_baseline_with_fit, filter_traces
 from .step_stats import LineStepValues, StepMembership, line_step_values, step_statistics
 from .query import formula_values
 from .response_shape import ResponseCalibration, ResponseError, calibrate, readout
+from .trace_disk_cache import fingerprint_arrays
 from .trace_fit import TraceInput, trace_from_input
 
 logger = logging.getLogger(__name__)
@@ -154,8 +155,25 @@ def response_traces(stored: StoredScan, formula_key: str, metric: MetricSettings
     return out
 
 
-def trace_input(stored: StoredScan, roi_id: int) -> TraceInput | None:
-    """The arrays the metric of one ROI is computed from (None: the ROI is not in the file)."""
+def scan_fingerprint(stored: StoredScan) -> str:
+    """A hash of every array `trace_input` reads from the scan, for the disk copy of the traces (`trace_disk_cache`). ~10 big calls, 0.3-0.4 s for 160 ROIs x 2655 cubes, made
+    once per scan object (kept on it: a new object, e.g. after a rescan, a new pairing or another spectral correction, is hashed again; the arrays are never changed in place)."""
+    cached = getattr(stored, "_trace_fingerprint", None)
+    if cached is not None:
+        return cached
+    method = _primary_method(stored)
+    fingerprint = fingerprint_arrays([
+        ("method", method), ("mean", stored.values[method]), ("n_valid", stored.n_valid), ("cell_hash", stored.cell_hash),
+        ("roi_ids", np.asarray(stored.roi_ids, dtype=np.int64)), ("cubes", np.asarray(stored.cube_indices, dtype=np.int64)),
+        ("abscissa", stored.abscissa_nm()), ("band", stored.band_widths()), ("passband", stored.passband_moments()),
+    ])
+    stored._trace_fingerprint = fingerprint  # type: ignore[attr-defined]
+    return fingerprint
+
+
+def trace_input(stored: StoredScan, roi_id: int, *, fingerprint: bool = False) -> TraceInput | None:
+    """The arrays the metric of one ROI is computed from (None: the ROI is not in the file). ``fingerprint``: also say which scan they come from (`scan_fingerprint`;
+    only for the runner, whose disk copy needs it: the first call hashes the whole scan)."""
     if roi_id not in stored.roi_ids:
         return None
     row = stored.roi_ids.index(roi_id)
@@ -165,6 +183,7 @@ def trace_input(stored: StoredScan, roi_id: int) -> TraceInput | None:
     return TraceInput(
         stored.abscissa_nm(), sample, reference, usable, stored.cell_hash[:, row] != 0,
         np.asarray(stored.cube_indices, dtype=np.int64), stored.band_widths(), stored.passband_moments(),
+        scan_fingerprint(stored) if fingerprint else None,
     )
 
 
@@ -208,7 +227,7 @@ def compute_traces(
         n_cube = len(stored.cube_indices)
         jobs: list[tuple[int, TraceInput]] = []
         for roi_id in missing:
-            data = trace_input(stored, roi_id)
+            data = trace_input(stored, roi_id, fingerprint=True)
             if data is None:
                 new[roi_id] = np.full(n_cube, np.nan)  # not in the file: no values, as metric_trace says
             else:

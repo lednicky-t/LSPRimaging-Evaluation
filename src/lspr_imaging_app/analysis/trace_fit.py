@@ -72,6 +72,8 @@ class TraceInput:
     passband: np.ndarray | None = None
     """``[wavelength, order + 1]`` central moments of each wavelength's measured LCTF band (``spectral_passband``), aligned with ``wavelengths``, for the full-profile
     spectral correction; None = no correction or the centroid one (``wavelengths`` then already are the bands' centres of gravity). Only the polynomial fit reads it."""
+    scan_digest: str | None = None
+    """Fingerprint of the stored scan these arrays were cut from (``scan_trace.scan_fingerprint``), for the disk copy of the traces (``trace_disk_cache``); the fits never read it. None = not from a stored scan."""
 
 
 BATCH_ROWS = 2000
