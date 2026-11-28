@@ -1333,6 +1333,10 @@ class ImagePanel(QWidget):
         drawn. Other panels use it to let the image come first (`panels/image_first.py`). Always False without a dataset."""
         return self._redraw_timer.isActive() or self._latest_serial != self._last_shown_serial
 
+    def image_work_pending(self) -> bool:
+        """`render_pending()`, or the planes next to the shown one are still being read ahead (the scan check waits for both: `ScanResultsModule.set_start_gate`)."""
+        return self.render_pending() or self._renderer.read_ahead_pending()
+
     def _show_held_frame(self) -> None:
         """The slideshow's next step is due: show the frame held for it (if any); its `frame_displayed()` steps right after."""
         held, self._held_result = self._held_result, None

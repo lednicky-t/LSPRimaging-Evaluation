@@ -240,6 +240,11 @@ class ImageRenderer(QObject):
                 thread.start()
             self._work.notify_all()
 
+    def read_ahead_pending(self) -> bool:
+        """True while planes are queued for the reader threads or being read by them (any thread may ask)."""
+        with self._lock:
+            return bool(self._prefetch_queue) or bool(self._reading)
+
     def clear_prefetch(self) -> None:
         """Forget the read-ahead list (the dataset was cleared or replaced)."""
         with self._lock:

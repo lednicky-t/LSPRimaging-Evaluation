@@ -303,10 +303,14 @@ class SessionAutosave(QObject):
         """Write now, if anything is pending, and **return once it is on disk**. Safe to call when nothing is
         loaded or nothing changed - both are no-ops, which is what makes it
         safe to hang off `aboutToQuit` unconditionally."""
+        started = time.perf_counter()
         self._timer.stop()
         self._hold_timer.stop()
         self._save_now()
         self.wait_until_written()
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        if elapsed_ms >= 50.0:  # at quit this is part of the close time (quit_timing.py); nothing is logged for the usual no-op
+            log_event(logger, "session.autosave_flush", logging.INFO, dur_ms=round(elapsed_ms, 1))
 
     def wait_until_written(self, root: Path | None = None, timeout_s: float = FLUSH_TIMEOUT_S) -> bool:
         """Block until every write already handed over is finished (those for *root* only, when given) and report any

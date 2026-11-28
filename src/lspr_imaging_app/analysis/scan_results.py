@@ -38,6 +38,7 @@ from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 from ..applog.events import log_event
 from ..domain.roi_links import is_reference
 from ..domain.roi_model import AreaRoi
+from .frame_cache_warmer import FrameCacheWarmer
 from .reference_pairing import PairedScan, pair_scan
 from .spectral_passband import Passbands, correction_axis
 from .scan_fingerprint import cell_hashes
@@ -46,6 +47,7 @@ from .scan_store import ScanFileError, StoredScan, read_scan, stale_cube_indices
 
 logger = logging.getLogger(__name__)
 
+GATE_RETRY_MS = 200  # how soon a check held back by the start gate asks again (`ScanResultsModule.set_start_gate`)
 CHECK_DELAY_MS = 1500  # after the last change: a drag of a ROI or a slider makes dozens of signals
 
 
@@ -96,6 +98,12 @@ class ScanResultsModule(QObject):
         self._timer.setSingleShot(True)
         self._timer.setInterval(CHECK_DELAY_MS)
         self._timer.timeout.connect(self._start_check)
+        self._start_gate: Callable[[], bool] | None = None  # `set_start_gate`
+        self._warmer: FrameCacheWarmer | None = None  # `set_frame_warmer`
+        self._gate_timer = QTimer(self)  # asks the gate again shortly (not `_timer`: its interval is the debounce)
+        self._gate_timer.setSingleShot(True)
+        self._gate_timer.setInterval(GATE_RETRY_MS)
+        self._gate_timer.timeout.connect(self._start_check)
         self._loaded.connect(self._on_loaded)
         self._checked.connect(self._on_checked)
         self._paired_ready.connect(self._on_paired)
@@ -217,6 +225,18 @@ class ScanResultsModule(QObject):
             self._check_wanted = True
             return
         self._timer.start()
+
+    def set_start_gate(self, should_wait: Callable[[], bool] | None) -> None:
+        """``should_wait()`` is asked just before a check starts (GUI thread); True postpones it by ``GATE_RETRY_MS`` and asks again. The app passes the
+        "image first" rule (`panels/image_first.py`, which caps the wait): the check's snapshot of the app's inputs runs on the GUI thread (1.9-8.2 s on
+        the 71,685-frame dataset) and its threads compete with the Image panel's reads of the planes next to the shown one (1.2-2 s each instead of 50 ms
+        in the launch log of 2026-11-27, `docs/startup_and_close_2026-11-28.md`). None: never wait (tests)."""
+        self._start_gate = should_wait
+
+    def set_frame_warmer(self, warmer: FrameCacheWarmer | None) -> None:
+        """Before a check's snapshot, fill the snapshot's frame-table cache in short steps (``frame_cache_warmer.py``) instead of reading 71,685 frames
+        in one 1.2-3.3 s freeze of the GUI thread. None: the snapshot reads everything at once (tests)."""
+        self._warmer = warmer
 
     def _held(self) -> bool:
         """No check may start now: the user paused the analysis displays, or none of the displays that show the answer is on screen."""
@@ -376,9 +396,16 @@ class ScanResultsModule(QObject):
             return
         if self._scan_running():
             return  # the scan reloads the file and asks again when it is done
+        if self._start_gate is not None and self._start_gate():
+            self._gate_timer.start()  # the image comes first; ask again shortly (a call meanwhile finds the timer running and does the same)
+            return
         t_start = time.perf_counter()
         try:
-            snapshot = snapshot_source(self._source_factory())  # GUI thread: reads the modules, ~1.9 s on the 71,685-frame dataset (4.1 s before 2026-11-23: docs/snapshot_source_cost_2026-11-23.md)
+            source = self._source_factory()
+            if self._warmer is not None and source.frame_cache is not None and not self._warmer.is_filled_for(source):
+                self._warmer.warm(self._start_check)  # the tables are read in short steps; this check starts again when they are there
+                return
+            snapshot = snapshot_source(source)  # GUI thread: reads the modules, ~1.9 s on the 71,685-frame dataset (4.1 s before 2026-11-23: docs/snapshot_source_cost_2026-11-23.md)
         except (ValueError, RuntimeError) as exc:  # no dataset, no ROIs...: nothing to compare
             self._stale, self._reason = None, ""
             self._message = str(exc)

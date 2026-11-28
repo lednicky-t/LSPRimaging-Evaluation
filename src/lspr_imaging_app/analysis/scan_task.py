@@ -190,7 +190,7 @@ class ScanTask(ThreadedTask):
         self._pool_generation += 1  # a start still going ends itself quietly (as after a switch-off)
         warm, self._warm = self._warm, None
         if warm is not None:
-            warm.shutdown()
+            warm.shutdown(kill=True)  # quitting: the idle workers hold nothing to save, so they are ended, not waited for
 
     def _after_run(self) -> None:
         if self._pending_mode is not None:

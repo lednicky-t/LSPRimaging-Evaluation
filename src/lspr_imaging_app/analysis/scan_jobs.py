@@ -28,6 +28,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import logging
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
@@ -49,6 +50,87 @@ WAVELENGTH_KEY_DECIMALS = 2  # two wavelengths closer than 0.01 nm are the same 
 IGNORE_MASK_WARN_BYTES = 2 * 1024**3  # a plan holding more ignore-mask arrays than this logs a warning (it still runs)
 
 Frame = tuple[int, float]
+
+
+@dataclass
+class _FrameDetail:
+    """What a snapshot reads for the **spectral frames of one cube**: record paths, chromatic affines (read-only), ignore-mask lookups, mask warps."""
+
+    paths: dict[Frame, str] = field(default_factory=dict)
+    affines: dict[Frame, np.ndarray] = field(default_factory=dict)
+    masks: dict[Frame, MaskRef | None] = field(default_factory=dict)
+    warps: dict[tuple[Frame, Frame], np.ndarray] = field(default_factory=dict)
+
+
+@dataclass
+class _CubeTable:
+    """What a snapshot reads for one cube: its wavelengths and which frames are spectral, and (once the cube has been chosen) the :class:`_FrameDetail`."""
+
+    wavelengths: tuple[float, ...]
+    spectral: dict[Frame, bool]
+    detail: _FrameDetail | None = None
+
+
+class FrameTableCache:
+    """The per-frame tables of :func:`snapshot_source`, kept from one snapshot to the next (2026-11-28).
+
+    **Why.** The snapshot reads five things for each of 71,685 frames on the GUI thread (record path, spectral or not, chromatic affine, ignore mask,
+    mask warp): 1.7-2 s on a quiet machine, 3-8 s while the app starts up (log of 2026-11-27; `docs/startup_and_close_2026-11-28.md`), and it runs at
+    every launch and after every edit that can change a stored number. Most edits change none of these tables (a ROI moved, the background changed),
+    so they are kept and only read again after a change that can alter them.
+
+    **What may change them, and so must call :meth:`invalidate`** (all wired in ``app_rewrite._build_modules``, the same signals that start the
+    staleness check, plus the ones that replace the dataset or the session): a dataset loaded or cleared (paths, wavelengths), a change of the frame
+    roles or the reference frame (spectral or not), of the chromatic models or the Apply-correction switch (affines, warps), of the masks (mask lookups,
+    warps). A new input of the tables needs its signal added there; ``tests/unit/test_lspri_scan_jobs_frame_cache.py`` pins the wiring.
+
+    GUI thread only (like the snapshot itself). Everything inside is plain data; the arrays are read-only, so a consumer cannot change what the next
+    snapshot hands out."""
+
+    def __init__(self) -> None:
+        self._cubes: dict[int, _CubeTable] = {}
+        self.hits = 0  # cubes whose tables were reused / read again, since the last invalidate (diagnostics and tests)
+        self.misses = 0
+        self.generation = 0  # counts the invalidations: whoever fills the cache in several steps (`warm_frame_tables`) starts over when it changes
+
+    def invalidate(self, *_args: object) -> None:
+        """Forget everything (slot-friendly: takes and ignores a signal's arguments)."""
+        self._cubes = {}
+        self.hits = self.misses = 0
+        self.generation += 1
+
+    def invalidate_on(self, *signals) -> None:
+        """Forget everything whenever one of these Qt signals is emitted (any arguments)."""
+        for signal in signals:
+            signal.connect(self.invalidate)
+
+    def table(self, cube: int) -> _CubeTable | None:
+        found = self._cubes.get(cube)
+        if found is None:
+            self.misses += 1
+        else:
+            self.hits += 1
+        return found
+
+    def peek(self, cube: int) -> _CubeTable | None:
+        """The tables of ``cube`` if they are here (does not count a hit or a miss)."""
+        return self._cubes.get(cube)
+
+    def keep(self, cube: int, table: _CubeTable) -> None:
+        self._cubes[cube] = table
+
+    def is_filled_for(self, source: ScanSource) -> bool:
+        """Every cube of the dataset has its tables here, and every cube ``source`` would scan has its frame details too: a snapshot of ``source`` would
+        read nothing from the app's modules. O(cubes), no module read beyond the two cube lists."""
+        chosen = set(source.cube_indices())
+        for cube in _dataset_cubes(source):
+            table = self._cubes.get(cube)
+            if table is None or (cube in chosen and table.detail is None):
+                return False
+        return True
+
+    def __len__(self) -> int:
+        return len(self._cubes)
 
 
 @dataclass(frozen=True)
@@ -85,6 +167,8 @@ class ScanSource:
     # so the result file's cube and wavelength axes are the whole dataset's and a partial run fits the same file as a full one.
     all_cube_indices: Callable[[], Sequence[int]] | None = None
     frame_times_ms: Callable[[], Mapping[Frame, int]] | None = None  # (cube, wavelength) -> acquisition time, unix ms; missing = unknown
+    # Optional. The app's :class:`FrameTableCache`: ``snapshot_source`` reuses the per-frame tables it holds. None = read everything (tests, tools).
+    frame_cache: FrameTableCache | None = None
 
 
 @dataclass(frozen=True)
@@ -323,6 +407,7 @@ def source_from_modules(
     chromatic,
     mask,
     records: dict,
+    frame_cache: FrameTableCache | None = None,
 ) -> ScanSource:
     """The :class:`ScanSource` of the live app modules (the same reads ``tools/reference_inputs.py`` makes for the golden reference).
 
@@ -346,6 +431,7 @@ def source_from_modules(
         detection=roi_toolbox.detection_settings,
         default_border=lambda: roi_toolbox.detection_settings().default_border(),
         frame_times_ms=dataset.frame_times_unix_ms,
+        frame_cache=frame_cache,
     )
 
 
@@ -354,6 +440,58 @@ def _mask_ref(change) -> MaskRef | None:
     if change is None:
         return None
     return MaskRef((int(change.frame[0]), float(change.frame[1])), str(change.scope), lambda: change.mask, change.content_digest)
+
+
+def _read_cube_table(source: ScanSource, cube: int) -> _CubeTable:
+    """The wavelengths of ``cube`` and whether each frame is spectral, read from the live modules."""
+    wavelengths = tuple(float(w) for w in source.wavelengths_for_cube(cube))
+    return _CubeTable(wavelengths, {(cube, wl): bool(source.is_spectral(cube, wl)) for wl in wavelengths})
+
+
+def _read_frame_detail(source: ScanSource, cube: int, table: _CubeTable) -> _FrameDetail:
+    """Path, chromatic affine, ignore-mask lookup and mask warp of every spectral frame of ``cube``, read from the live modules. The affines and
+    warps are copies that are made read-only: they may be kept (:class:`FrameTableCache`) and shared between snapshots."""
+    detail = _FrameDetail()
+    for wl in table.wavelengths:
+        if not table.spectral[(cube, wl)]:
+            continue
+        detail.paths[(cube, wl)] = str(source.record_path(cube, wl))
+        matrix = np.array(source.chromatic_affine(cube, wl), dtype=np.float64, copy=True)
+        matrix.flags.writeable = False
+        detail.affines[(cube, wl)] = matrix
+        ref = source.resolve_mask(cube, wl)
+        detail.masks[(cube, wl)] = ref
+        if ref is not None:
+            authored = (int(ref.authored_frame[0]), float(ref.authored_frame[1]))
+            if authored != (cube, wl):
+                warp = np.array(source.chromatic_affine_between(authored, (cube, wl)), dtype=np.float64, copy=True)
+                warp.flags.writeable = False
+                detail.warps[(authored, (cube, wl))] = warp
+    return detail
+
+
+def warm_frame_tables(source: ScanSource, budget_s: float) -> bool:
+    """Read the per-frame tables of ``source`` into its :class:`FrameTableCache` for about ``budget_s`` seconds and say whether they are all there now.
+
+    The same reads as :func:`snapshot_source` makes, cube by cube, so that the one thing that must happen on the GUI thread can be spread over many short
+    steps (``frame_cache_warmer.py``) instead of freezing the window for 1.2-3.3 s; the snapshot that follows then reads nothing from the modules. Call on
+    the GUI thread, with a source made after the cache's latest invalidation (``cache.generation`` unchanged since)."""
+    cache = source.frame_cache
+    if cache is None:
+        return True
+    started = time.perf_counter()
+    chosen = set(source.cube_indices())
+    for cube in _dataset_cubes(source):
+        table = cache.peek(cube)
+        read_something = table is None or (cube in chosen and table.detail is None)
+        if table is None:
+            table = _read_cube_table(source, cube)
+            cache.keep(cube, table)
+        if cube in chosen and table.detail is None:
+            table.detail = _read_frame_detail(source, cube, table)
+        if read_something and time.perf_counter() - started >= budget_s:  # (a cube that was already there costs nothing: no reason to stop at it)
+            return cache.is_filled_for(source)
+    return True
 
 
 def snapshot_source(source: ScanSource, cubes: Sequence[int] | None = None) -> ScanSource:
@@ -376,21 +514,23 @@ def snapshot_source(source: ScanSource, cubes: Sequence[int] | None = None) -> S
     warps: dict[tuple[Frame, Frame], np.ndarray] = {}
     dataset_cubes = _dataset_cubes(source)
     chosen_set = set(chosen)
+    cache = source.frame_cache
     for cube in dataset_cubes:  # the wavelength axis of the result covers every cube; the details below only the chosen ones
-        wavelengths[cube] = tuple(float(w) for w in source.wavelengths_for_cube(cube))
-        for wl in wavelengths[cube]:
-            is_spectral = bool(source.is_spectral(cube, wl))
-            spectral[(cube, wl)] = is_spectral
-            if not is_spectral or cube not in chosen_set:
-                continue
-            paths[(cube, wl)] = str(source.record_path(cube, wl))
-            affines[(cube, wl)] = np.array(source.chromatic_affine(cube, wl), dtype=np.float64, copy=True)
-            ref = source.resolve_mask(cube, wl)
-            masks[(cube, wl)] = ref
-            if ref is not None:
-                authored = (int(ref.authored_frame[0]), float(ref.authored_frame[1]))
-                if authored != (cube, wl):
-                    warps[(authored, (cube, wl))] = np.array(source.chromatic_affine_between(authored, (cube, wl)), dtype=np.float64, copy=True)
+        table = None if cache is None else cache.table(cube)
+        if table is None:
+            table = _read_cube_table(source, cube)
+            if cache is not None:
+                cache.keep(cube, table)
+        wavelengths[cube] = table.wavelengths
+        spectral.update(table.spectral)
+        if cube not in chosen_set:
+            continue
+        if table.detail is None:
+            table.detail = _read_frame_detail(source, cube, table)
+        paths.update(table.detail.paths)
+        affines.update(table.detail.affines)
+        masks.update(table.detail.masks)
+        warps.update(table.detail.warps)
 
     # One copy per live ROI object (rois_at hands out the same stored ROI for many cubes). The dict keeps the original alive next to its
     # copy: a temporary ROI that was freed could otherwise lend its id() to a different ROI and get the wrong copy.

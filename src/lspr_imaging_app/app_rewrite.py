@@ -31,7 +31,8 @@ from lspr_core.perf import get_runtime
 from lspr_ui import APP_ID_LSPRI_EVALUATION, app_icon, set_active_theme, set_windows_app_user_model_id, show_about_dialog
 
 from .analysis import AnalysisSettingsModule
-from .analysis.scan_jobs import ScanSource, source_from_modules
+from .analysis.frame_cache_warmer import FrameCacheWarmer
+from .analysis.scan_jobs import FrameTableCache, ScanSource, source_from_modules
 from .analysis.live_state import AnalysisLiveModule
 from .analysis.roi_tuning_module import RoiTuningModule, TuningView
 from .analysis.roi_tuning_task import TASK_ID as ROI_TUNING_TASK_ID
@@ -47,6 +48,8 @@ from .analysis.scan_store import FILE_NAME as SCAN_FILE_NAME, describe_file as d
 from .analysis.scan_pool import MODE_NORMAL, MODES
 from .analysis.scan_task import TASK_ID as ANALYSIS_SCAN_TASK_ID, ScanTask
 from .applog import LogSystem, RingBufferHandler, configure_logging, log_event
+from .panels.image_first import ImageFirst
+from .quit_timing import QuitClock
 from .applog import current as current_log_system
 from .frame_naming import FrameNamingScheme
 from .dataset import DatasetModule
@@ -409,7 +412,7 @@ def analysis_scan_source(m: _Modules) -> ScanSource:
     ``m.analysis_scan.start(...)``, which snapshots it before the task thread starts."""
     return source_from_modules(
         dataset=m.dataset, frame_roles=m.frame_roles, roi_toolbox=m.roi_toolbox, geometry=m.geometry, background=m.background,
-        chromatic=m.chromatic, mask=m.mask, records=m.dataset.record_map(),
+        chromatic=m.chromatic, mask=m.mask, records=m.dataset.record_map(), frame_cache=m.frame_cache,
     )
 
 
@@ -810,6 +813,7 @@ class _Modules:
     data_checks: DataChecksModule  # the Sensorgram's data-quality checks (report, run, whether it is current)
     image_motion: ImageMotionModule  # the Image panel's image-motion check
     signal_map: SignalMapModule  # the Image panel's signal map (ROIs coloured by the step table's numbers)
+    frame_cache: FrameTableCache | None = None  # the snapshot's per-frame tables, kept between snapshots (analysis/scan_jobs.py)
 
 
 class _SettingsWriter:
@@ -955,6 +959,12 @@ def _build_modules() -> _Modules:
         app.aboutToQuit.connect(step_table.shutdown)
         app.aboutToQuit.connect(data_checks.shutdown)
         app.aboutToQuit.connect(image_motion.shutdown)
+    # What may change the snapshot's per-frame tables (FrameTableCache): the dataset or session replaced, frame roles / reference, chromatic models, masks.
+    frame_cache = FrameTableCache()
+    frame_cache.invalidate_on(
+        dataset.dataset_loaded, dataset.dataset_cleared, session_coordinator.active_session_changed, frame_roles.roles_changed,
+        reference_frame.reference_frame_changed, chromatic.chromatic_model_changed, mask.mask_changed,
+    )
     modules = _Modules(
         dataset=dataset, geometry=geometry, active_tool=active_tool, mask=mask, mask_scope=mask_scope,
         chromatic=chromatic, background=background, roi_toolbox=roi_toolbox,
@@ -973,8 +983,10 @@ def _build_modules() -> _Modules:
         cube_display=cube_display,
         trace_store=trace_store, sensorgram_axis=sensorgram_axis, step_table=step_table, data_checks=data_checks, image_motion=image_motion,
         signal_map=SignalMapModule(step_table, roi_toolbox, experiment_plan),
+        frame_cache=frame_cache,
     )
     modules_holder.append(modules)
+    scan_results.set_frame_warmer(FrameCacheWarmer(frame_cache, lambda: analysis_scan_source(modules), parent=scan_results))  # the check's snapshot, read in short steps
     return modules
 
 
@@ -2189,6 +2201,7 @@ def build_main_window(
     image_panel = _build_image_panel(m, ui_state, theme_obj)
     _wire_highlight_range_persistence(m, ui_state, settings)
     _wire_display_range_persistence(m, ui_state, settings, image_panel)
+    m.scan_results.set_start_gate(ImageFirst(image_panel.image_work_pending).should_wait)  # the out-of-date check starts after the image and its neighbour planes
     stages.done("Image panel", "Building the panels...")
     histogram_panel = _build_histogram_panel(m, image_panel, ui_state)
     image_panel.restore_ui_state(ui_state)
@@ -2510,7 +2523,8 @@ def main(app: QApplication | None = None, splash: LaunchSplash | None = None) ->
         version=version_string(), log_file=str(system.log_path),
         screens=len(app.screens()), platform=sys.platform,
     )
-    app.aboutToQuit.connect(lambda: log_event(logger, "app.quit", logging.INFO))
+    quit_clock = QuitClock()  # the marks of the close (quit_timing.py); its first slot is the first aboutToQuit slot
+    quit_clock.connect_start(app)
     if system.gc_trace is not None:  # one `gc.summary` DEBUG record per 5 s of garbage-collector activity (applog/gc_trace.py)
         gc_timer = QTimer(app)
         gc_timer.setInterval(_GC_SUMMARY_MS)
@@ -2529,7 +2543,10 @@ def main(app: QApplication | None = None, splash: LaunchSplash | None = None) ->
     window.show()
     if splash is not None:
         splash.finish(window)
-    sys.exit(app.exec())
+    quit_clock.connect_end(app)  # last slot: runs after the others connected so far
+    exit_code = app.exec()
+    quit_clock.exec_returned()
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

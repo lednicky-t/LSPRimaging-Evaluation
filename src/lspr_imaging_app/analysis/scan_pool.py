@@ -138,15 +138,22 @@ class WarmPool:
         if executor is not None:
             self._close(executor, wait_for_workers=False)
 
-    def shutdown(self) -> None:
-        """Close the pool and wait for the workers to end. Safe to call twice; the pool cannot be used afterwards."""
+    def shutdown(self, *, kill: bool = False) -> None:
+        """Close the pool and wait for the workers to end. Safe to call twice; the pool cannot be used afterwards.
+
+        ``kill=True`` (the application is quitting) ends the worker processes at once instead of asking them to leave. A worker holds nothing that
+        must be saved (results are written by this process), so waiting only costs time: 0.2 s for an idle pool on a quiet machine, and 4-12 s in 4 of
+        20 real closes (logs of 2026-11-26/27, `docs/startup_and_close_2026-11-28.md`)."""
         with self._lock:
             self._closed = True
             executor, self._executor, self._size = self._executor, None, 0
         if executor is not None:
             started = time.perf_counter()
-            self._close(executor, wait_for_workers=True)
-            logger.info("warm worker pool closed in %.1f s", time.perf_counter() - started)
+            if kill:
+                self._end_now(executor)
+            else:
+                self._close(executor, wait_for_workers=True)
+            logger.info("warm worker pool closed in %.1f s%s", time.perf_counter() - started, " (workers ended at once)" if kill else "")
         try:
             atexit.unregister(self.shutdown)
         except Exception:  # noqa: BLE001
@@ -158,3 +165,23 @@ class WarmPool:
             executor.shutdown(wait=wait_for_workers, cancel_futures=True)
         except Exception:  # noqa: BLE001 - closing must never raise into a scan or the quit path
             logger.debug("warm pool shutdown raised", exc_info=True)
+
+    @staticmethod
+    def _end_now(executor: ProcessPoolExecutor) -> None:
+        """Quit path: stop the executor without waiting, then kill its worker processes and reap them. ``executor._processes`` is a private
+        attribute of the standard library (the trace pool reads it the same way); when it is not there the workers are waited for as before."""
+        processes = list((getattr(executor, "_processes", None) or {}).values())
+        if not processes and getattr(executor, "_processes", None) is None:
+            WarmPool._close(executor, wait_for_workers=True)
+            return
+        WarmPool._close(executor, wait_for_workers=False)
+        for process in processes:
+            try:
+                process.kill()
+            except Exception:  # noqa: BLE001 - one that is already gone is fine
+                logger.debug("could not kill a warm pool worker", exc_info=True)
+        for process in processes:
+            try:
+                process.join(timeout=2.0)  # reaped, so none is left half-ended when the interpreter exits
+            except Exception:  # noqa: BLE001
+                pass

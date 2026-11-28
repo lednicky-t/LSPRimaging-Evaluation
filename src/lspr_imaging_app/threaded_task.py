@@ -20,11 +20,15 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections.abc import Callable
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from .progress import Cancelled
+
+
+_SLOW_QUIT_MS = 50.0  # a task that needs longer than this to stop at quit is logged
 
 
 class TaskRefused(Exception):
@@ -77,7 +81,11 @@ class ThreadedTask(QObject):
         self._cancel_event.set()
         thread = self._thread
         if thread is not None:
+            started = time.perf_counter()
             thread.join(timeout=5.0)
+            waited_ms = (time.perf_counter() - started) * 1000
+            if waited_ms >= _SLOW_QUIT_MS:  # the close is timed in `quit_timing.py`; a slow join says which task held it up
+                self._log.info("%s took %.0f ms to stop at quit%s", self.task_label, waited_ms, " (still running)" if thread.is_alive() else "")
 
     # -- for subclasses ------------------------------------------------------------------------------------------------------
 
